@@ -187,12 +187,12 @@ describe('engine status', () => {
 
     // A later attempt, on another account, gets the speed after all.
     const confirmed = {
-      ...event('status', { speed: { requested: 'priority', applied: 'priority' } }),
+      ...event('status', { speed: { requested: 'priority', confirmed: true } }),
       text: 'Codex now offers the selected speed for this model here.',
     }
     expect(notices([fallback, confirmed]).map(notice => notice.title)).toEqual([
       'This turn runs at Standard speed',
-      'This turn runs at the selected speed',
+      'Selected speed requested for this turn',
     ])
   })
 

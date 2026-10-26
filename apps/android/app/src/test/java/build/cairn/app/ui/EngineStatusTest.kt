@@ -281,7 +281,7 @@ class EngineStatusTest {
                         "speed",
                         buildJsonObject {
                             put("requested", "priority")
-                            put("applied", "priority")
+                            put("confirmed", true)
                         },
                     )
                 }
@@ -291,7 +291,7 @@ class EngineStatusTest {
             notices(listOf(fallback, confirmed)).map { it.id },
         )
         assertEquals(
-            "Ce tour passe à la vitesse choisie",
+            "Vitesse choisie demandée pour ce tour",
             presentActivity(confirmed).title,
         )
     }

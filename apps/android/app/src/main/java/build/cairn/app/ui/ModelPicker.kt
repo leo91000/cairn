@@ -204,8 +204,13 @@ fun ModelPicker(
     // A speed the model lacks runs at standard speed, so the trigger never claims it.
     val appliedSpeed =
         if (speedShown && offersSpeed(selected, currentSpeed)) currentSpeed else STANDARD_SPEED
+    // A speed not every account confirms, or a model whose speeds are unknown, is only requested.
+    val speedUncertain = selected?.serviceTiers?.any { it.id == appliedSpeed && it.limited } ?: true
     val speedTag =
-        appliedSpeed.takeIf { it != STANDARD_SPEED }?.let { speedLabel(it, knownTiers) }.orEmpty()
+        appliedSpeed
+            .takeIf { it != STANDARD_SPEED }
+            ?.let { speedLabel(it, knownTiers) + if (speedUncertain) " demandée" else "" }
+            .orEmpty()
     val modelLabel =
         listOfNotNull(
                 selected?.displayName?.ifBlank { selected.model }

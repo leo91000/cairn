@@ -1153,6 +1153,23 @@ async fn queued_speed_is_kept_and_planned_as_asked() {
     ] {
         assert_eq!(configure(model, speed).await["serviceTier"], tier);
     }
+    // The account's cached catalog goes with the plan, so a fallback list in the Codex process
+    // cannot confirm a tier the account lacks.
+    service.models.list(&service).await.unwrap();
+    assert_eq!(
+        configure("fixture-deep", "priority").await["accountTier"],
+        "lacking"
+    );
+    assert_eq!(
+        configure("fixture-fast", "priority").await["accountTier"],
+        "offered"
+    );
+    assert!(
+        configure("custom-alias", "priority")
+            .await
+            .get("accountTier")
+            .is_none()
+    );
 
     // An edit from an editor predating speeds keeps the queued speed, unless it moves the
     // message to another coding agent.

@@ -98,10 +98,14 @@ const speedOffered = computed(() => offersSpeed(selected.value, currentSpeed.val
 // A speed the model lacks runs at standard speed, so the trigger never claims it.
 const appliedSpeed = computed(() => speedShown.value && speedOffered.value ? currentSpeed.value : STANDARD_SPEED)
 const appliedTier = computed(() => speedTier(selected.value, appliedSpeed.value))
+// A speed not every account confirms, or a model whose speeds are unknown, is only requested.
+const speedTag = computed(() => appliedSpeed.value === STANDARD_SPEED
+  ? ''
+  : `${speedLabel(appliedSpeed.value, knownTiers.value)}${appliedTier.value?.limited || !selected.value?.serviceTiers ? ' requested' : ''}`)
 const speedDefault = computed(() => inheritedSpeed.value ? props.defaultSource === 'conversation' ? 'Conversation default' : 'Agent default' : 'Default')
 const defaultSpeedLabel = computed(() => speedLabel(effectiveSpeed('', inheritedSpeed.value), knownTiers.value))
 const unsupportedSpeed = computed(() => !!speed.value && speed.value !== STANDARD_SPEED && !tiers.value.some(tier => tier.id === speed.value))
-const summary = computed(() => [current.value.label, modelLabel.value, effectiveEffort.value && `${effortLabel(effectiveEffort.value)} reasoning`, appliedSpeed.value !== STANDARD_SPEED && `${speedLabel(appliedSpeed.value, knownTiers.value)} speed`].filter(Boolean).join(' · '))
+const summary = computed(() => [current.value.label, modelLabel.value, effectiveEffort.value && `${effortLabel(effectiveEffort.value)} reasoning`, speedTag.value && `${speedTag.value.replace(/( requested)?$/, ' speed$1')}`].filter(Boolean).join(' · '))
 // Claude lists its own "default" alias. When the default row already resolves to it,
 // show one row instead of two equivalent choices.
 const alias = computed(() => !props.inherit || !props.defaultModel ? catalog.value.models.find(item => item.model === 'default') : undefined)
@@ -263,14 +267,14 @@ onBeforeUnmount(() => removeEventListener('resize', place))
         <span class="truncate text-sm font-semibold text-ink">{{ modelLabel }}</span>
         <span v-if="effectiveEffort || appliedSpeed !== STANDARD_SPEED" class="flex items-center gap-1 text-2xs text-muted">
           <template v-if="effectiveEffort">{{ effortLabel(effectiveEffort) }} reasoning</template>
-          <template v-if="appliedSpeed !== STANDARD_SPEED"><span v-if="effectiveEffort" aria-hidden="true">·</span><Icon :name="Gauge" :size="11" />{{ speedLabel(appliedSpeed, knownTiers) }}</template>
+          <template v-if="appliedSpeed !== STANDARD_SPEED"><span v-if="effectiveEffort" aria-hidden="true">·</span><Icon :name="Gauge" :size="11" />{{ speedTag }}</template>
         </span>
       </span>
     </template>
     <template v-else>
       <span class="min-w-0 truncate font-semibold text-ink">{{ modelLabel }}</span>
       <span v-if="effectiveEffort" class="flex shrink-0 items-center gap-1.5 text-muted phone:hidden"><span class="size-[3px] rounded-full bg-current" />{{ effortLabel(effectiveEffort) }}</span>
-      <span v-if="appliedSpeed !== STANDARD_SPEED" class="flex shrink-0 items-center gap-0.5 text-accent" :title="`${speedLabel(appliedSpeed, knownTiers)} speed`"><Icon :name="Gauge" :size="12" /><span class="phone:hidden">{{ speedLabel(appliedSpeed, knownTiers) }}</span></span>
+      <span v-if="appliedSpeed !== STANDARD_SPEED" class="flex shrink-0 items-center gap-0.5 text-accent" :title="`${speedTag.replace(/( requested)?$/, ' speed$1')}`"><Icon :name="Gauge" :size="12" /><span class="phone:hidden">{{ speedTag }}</span></span>
     </template>
     <Icon
       :name="ChevronDown"

@@ -114,8 +114,16 @@ impl ExecutionAdapter for Codex {
             plan["reasoning"] = effort.into();
         }
 
-        // The turn checks a faster tier with the Codex process that runs it, and says so.
-        plan["serviceTier"] = crate::models::service_tier(text(plan, "speed")).into();
+        // The turn checks a faster tier with the Codex process that runs it, and says so. The
+        // account's own cached catalog keeps a fallback list in that process from confirming it.
+        let tier = crate::models::service_tier(text(plan, "speed")).to_owned();
+        if tier != crate::models::CODEX_STANDARD_TIER
+            && let Some(verdict) =
+                crate::models::account_tier(s, source, text(plan, "model"), &tier).await?
+        {
+            plan["accountTier"] = verdict.into();
+        }
+        plan["serviceTier"] = tier.into();
         Ok(())
     }
 

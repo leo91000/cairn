@@ -448,12 +448,12 @@ async fn apply_event(
 /// and a later attempt that gets the speed after all says so.
 async fn speed_notice(s: &Service, id: &str, event: &Value) -> Result<Option<&'static str>> {
     let speed = &event["speed"];
-    let outcome = if speed["unconfirmed"] == true {
-        "unconfirmed"
+    let outcome = if speed["confirmed"] == true {
+        "confirmed"
     } else if text(speed, "applied") == crate::models::STANDARD_SPEED {
         "standard"
     } else {
-        "applied"
+        "unconfirmed"
     };
     let key = format!("turn-speed:{id}");
     let earlier = s
@@ -469,12 +469,12 @@ async fn speed_notice(s: &Service, id: &str, event: &Value) -> Result<Option<&'s
 
     Ok(match (outcome, earlier.as_deref()) {
         (outcome, Some(earlier)) if outcome == earlier => None,
-        ("applied", None) => {
-            Some("Codex lists the selected speed for this model here. This turn runs at it.")
+        ("confirmed", None) => {
+            Some("Codex lists the selected speed for this model here, so this turn asks for it.")
         }
-        ("applied", Some(_)) => {
-            Some("Codex now lists the selected speed for this model here. This turn runs at it.")
-        }
+        ("confirmed", Some(_)) => Some(
+            "Codex now lists the selected speed for this model here, so this turn asks for it.",
+        ),
         ("standard", _) => Some(
             "Codex doesn’t list the selected speed for this model here, so this turn runs at Standard speed.",
         ),

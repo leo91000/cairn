@@ -477,6 +477,24 @@ async fn account_offers_speed(
     Ok(true)
 }
 
+/// What `account`'s cached catalog says about `tier` for `model`: `offered`, `lacking`, or `None`
+/// when it cannot tell. The turn compares it with the model list of the Codex process running it.
+pub async fn account_tier(
+    s: &Service,
+    account: &str,
+    model: &str,
+    tier: &str,
+) -> Result<Option<&'static str>> {
+    let cached = s.store.kv(&format!("codex-models:{account}")).await?;
+    Ok(
+        match cached.and_then(|cached| offers_tier(&cached, model, tier)) {
+            Some(true) => Some("offered"),
+            Some(false) => Some("lacking"),
+            None => None,
+        },
+    )
+}
+
 /// Codex's own name for Standard is not a speed choice: `standard` asks for it.
 pub fn validate_speed(speed: &str) -> Result<()> {
     if speed == CODEX_STANDARD_TIER {

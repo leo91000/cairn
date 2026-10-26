@@ -528,6 +528,15 @@ async fn a_faster_tier_is_checked_against_codex_own_model_list_before_the_turn()
         // Without a chosen model, Codex runs the one its configuration sets, not the catalog's
         // default: fixture-deep lists no Fast.
         ("", "priority", false, "default", Some("applied")),
+        // The process lists Fast, but the account's own catalog lacks it: Codex may have fallen
+        // back to its built-in list, so the speed stays unconfirmed.
+        (
+            "fixture-fast",
+            "priority",
+            false,
+            "priority",
+            Some("unconfirmed"),
+        ),
     ];
     for (index, (model, tier, list_fails, sent, notice)) in cases.into_iter().enumerate() {
         let configured = home.join("fixture-config-model");
@@ -543,6 +552,9 @@ async fn a_faster_tier_is_checked_against_codex_own_model_list_before_the_turn()
         let mut plan = plan(&root, "Check the speed");
         plan["model"] = model.into();
         plan["serviceTier"] = tier.into();
+        if index == 9 {
+            plan["accountTier"] = "lacking".into();
+        }
         plan["execution"]["messageId"] = format!("speed-{index}").into();
         if index > 0 {
             plan["sessionId"] = "fixture-chat".into();
@@ -570,7 +582,10 @@ async fn a_faster_tier_is_checked_against_codex_own_model_list_before_the_turn()
                 assert_eq!(speed[0]["speed"]["requested"], tier);
                 assert_eq!(speed[0]["messageId"], format!("speed-{index}"));
                 match kind {
-                    "offered" => assert_eq!(speed[0]["speed"]["applied"], tier),
+                    "offered" => {
+                        assert_eq!(speed[0]["speed"]["confirmed"], true);
+                        assert!(speed[0]["speed"].get("applied").is_none());
+                    }
                     "applied" => assert_eq!(speed[0]["speed"]["applied"], "standard"),
                     _ => assert_eq!(speed[0]["speed"]["unconfirmed"], true),
                 }
