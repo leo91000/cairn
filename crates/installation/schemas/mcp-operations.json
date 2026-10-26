@@ -24,7 +24,7 @@
   },
   {
     "name": "run_task",
-    "description": "Queue a task using its agent\u2019s resource access and execution mode. YOLO is the default inside a private agent VM. Unattended runs never prompt for approval. May modify allowed code and external services as instructed.",
+    "description": "Queue a task using its agent’s resource access and execution mode. YOLO is the default inside a private agent VM. Unattended runs never prompt for approval. May modify allowed code and external services as instructed.",
     "scope": "run",
     "destructive": false,
     "inputSchema": {
