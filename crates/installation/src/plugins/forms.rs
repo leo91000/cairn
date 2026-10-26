@@ -241,12 +241,12 @@ pub(crate) async fn form_managed(
         false,
     )
     .await?;
-    form_result(result)
+    form_result(&result)
 }
 
 /// Normalize the manifest's optional nulls at the package boundary. Nested
 /// setting values remain untouched; null can be meaningful inside their JSON.
-fn form_result(result: Value) -> Result<cairn_contracts::PluginFormResult> {
+fn form_result(result: &Value) -> Result<cairn_contracts::PluginFormResult> {
     let field = |key: &str, empty: Value| {
         result
             .get(key)
@@ -334,7 +334,7 @@ mod tests {
         ] {
             validate_form_result(&manifest, &result).unwrap();
             assert_eq!(
-                form_result(result).unwrap(),
+                form_result(&result).unwrap(),
                 cairn_contracts::PluginFormResult::default()
             );
         }
@@ -344,7 +344,7 @@ mod tests {
         });
         validate_form_result(&manifest, &result).unwrap();
         assert_eq!(
-            serde_json::to_value(form_result(result).unwrap()).unwrap(),
+            serde_json::to_value(form_result(&result).unwrap()).unwrap(),
             json!({
                 "options": { "choice": [{ "value": "one", "label": "One", "description": "", "disabled": false }] },
                 "values": { "choice": null }, "errors": {}, "view": []
