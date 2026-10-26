@@ -572,6 +572,7 @@ impl Service {
             for key in ["process", "settled", "controllerRecoveries"] { checkpoint[key] = Value::Null; }
             db.set(&key, &checkpoint, None)?;
             let mut patch = crate::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(proposed["snapshot"].clone())?),
                 session_id : Some(None),
                 resume_available : Some(false),
                 status : Some(RunStatus::Succeeded),
@@ -579,7 +580,6 @@ impl Service {
                 cancel_requested_at : Some(None),
                 recovery_pending : Some(false),
                 boundary: Some(serde_json::json!({
-                    "snapshot": proposed["snapshot"],
                     "nodeId": node["id"],
                     "resources": placement["resources"],
                     "requiredRuntime": node["runtimeId"],
