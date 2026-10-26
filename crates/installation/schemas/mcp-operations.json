@@ -687,7 +687,7 @@
   },
   {
     "name": "get_run",
-    "description": "Get a run, including retry attempt, limit, nextAttemptAt, deadlineAt and cause when recovering, and a byte-bounded page of its event log. Continue with nextAfter while hasMore is true, even when a page has fewer than 100 events. A run or event marked truncated remains available in full through read_run_content. Claude Code runs also record engine.retry (the engine retrying an API request itself; the turn continues), provider.limit (usage-limit warnings, a limit that stops requests with resetsAt, and its end) and engine.notice (the engine's warnings); their subagent items carry task_id, run_id, parent_task_id and resumed.",
+    "description": "Get a run, including retry attempt, limit, nextAttemptAt, deadlineAt and cause when recovering, and a byte-bounded page of its event log. Continue with nextAfter while hasMore is true, even when a page has fewer than 100 events. A run or event marked truncated remains available in full through read_run_content. Claude Code runs also record engine.retry (the engine retrying an API request itself; the turn continues), provider.limit (usage-limit warnings, a limit that stops requests with resetsAt, and its end) and engine.notice (the engine's warnings); their subagent items carry task_id, run_id, parent_task_id and resumed. Codex runs record a status event whose payload.speed states how a faster speed runs for a message (applied: standard, confirmed or unconfirmed; see list_models).",
     "scope": "read",
     "destructive": false,
     "inputSchema": {

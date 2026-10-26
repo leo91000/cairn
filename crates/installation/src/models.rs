@@ -282,9 +282,11 @@ fn mark_unconfirmed(model: &mut Value, catalogs: &[Value]) {
     };
     for tier in tiers {
         let id = text(tier, "id").to_owned();
-        let unconfirmed = catalogs.iter().any(|catalog| {
-            !runs_elsewhere(catalog) && offers_tier(catalog, &name, &id) != Some(true)
-        });
+        // Without an account a run can land on, nothing confirms the speed.
+        let unconfirmed = catalogs.is_empty()
+            || catalogs.iter().any(|catalog| {
+                !runs_elsewhere(catalog) && offers_tier(catalog, &name, &id) != Some(true)
+            });
         if unconfirmed {
             tier["limited"] = true.into();
         }
@@ -521,7 +523,8 @@ pub fn validate_speed(speed: &str) -> Result<()> {
 }
 
 /// The `serviceTier` a run asks Codex for. A faster tier is then checked by the turn itself,
-/// against the Codex process that runs it ([`check_tier`]), which alone decides and reports it.
+/// against the Codex process that runs it ([`check_tier`]) and the account's recent cached
+/// catalog ([`account_tiers`]), which together decide and report it.
 pub fn service_tier(speed: &str) -> &str {
     match speed {
         // Codex's app server applies no model default and keeps a thread's earlier tier:
@@ -737,6 +740,8 @@ mod tests {
         // Once that catalog is past routing's freshness, the other account can take the run, so
         // the speed it cannot confirm is limited.
         assert!(limited(&[confirming(TTL + 60_000), without_model]));
+        // Without a signed-in account, nothing confirms it.
+        assert!(limited(&[]));
     }
 
     #[test]
