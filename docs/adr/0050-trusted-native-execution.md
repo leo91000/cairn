@@ -15,3 +15,14 @@ People and explicit node ceilings propagate from authenticated requests through
 bounded, revocable agent delegation. Shared installation membership alone never
 grants native execution. Unknown historical/plugin provenance fails closed. The
 manager requires fresh Beacon membership evidence before extending host leases.
+
+Update, 2026-10-23: protected native conversations use distinct host accounts and disjoint
+subordinate UID/GID ranges. A RootlessKit enclave separates their network, PID and
+user namespaces; its immutable supervisor starts rootless Docker on demand.
+Only the outer identity-mapping bootstrap permits the mapping helpers' privilege
+transition. The enclave sets NoNewPrivileges before starting the engine/daemon;
+the engine has an empty capability bounding set. Existing managed mounts, device
+filters, shared budgets, leases, guardians and cgroup fencing remain. Docker's
+mandatory authorization plugin preserves restricted filesystem rights. The host
+Docker daemon and desktop sockets remain unavailable. See [native Docker](../NATIVE-DOCKER.md)
+for storage, conversion, networking and compatibility limits.

@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 use std::io::Write;
 
 const USAGE: &str = "Use cairn plugin <plugin> <command> [arguments], for example cairn plugin onepassword accounts.";
-/// The run channel's origin when it differs from the VM relay: native nodes
-/// share the host loopback, so each attempt listens on its own port.
+/// The run channel's origin. VM and native enclaves use private loopback;
+/// the override also supports legacy native transports and qualification.
 pub(crate) const ORIGIN_ENV: &str = "CAIRN_MCP_ORIGIN";
 
 pub fn arguments(args: &[String]) -> Result<Value> {

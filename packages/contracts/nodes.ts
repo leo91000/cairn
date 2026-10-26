@@ -139,10 +139,6 @@ export function formatBytes(bytes: number) {
   return formatMiB(bytes / 1048576)
 }
 
-export function formatResources(value: NodeResources) {
-  return `${value.cpu} CPU · ${formatMiB(value.memoryMiB)} RAM · ${formatMiB(value.diskMiB)} disk`
-}
-
 export function relativeAge(since: number, now = Date.now()) {
   const seconds = Math.max(0, Math.floor((now - since) / 1000))
   if (seconds < 60)

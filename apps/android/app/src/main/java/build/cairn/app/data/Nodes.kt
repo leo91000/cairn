@@ -234,9 +234,6 @@ fun formatMiB(value: Long): String {
     else "${"%.1f".format(java.util.Locale.FRANCE, gib)} Gio"
 }
 
-fun formatResources(value: NodeResources) =
-    "${value.cpu} CPU · ${formatMiB(value.memoryMiB)} RAM · ${formatMiB(value.diskMiB)} disque"
-
 fun relativeAge(since: Long, now: Long = System.currentTimeMillis()): String {
     val seconds = ((now - since) / 1000).coerceAtLeast(0)
     if (seconds < 60) return "il y a moins d’une minute"

@@ -158,17 +158,6 @@
   margin: 7px 0 0;
 }
 
-.mcp-agent-tools summary {
-  cursor: pointer;
-  color: var(--color-accent);
-  margin-bottom: 10px;
-}
-
-.mcp-agent-tools label {
-  margin-top: 8px;
-  overflow-wrap: anywhere;
-}
-
 @media (max-width: 640px) {
   .mcp-card h2 {
     font-size: 16px;

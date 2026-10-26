@@ -234,6 +234,16 @@ pub(crate) async fn convert(
         super::layout::validate(&manifest)?;
         let system = filesystem(&image, 0, size)?;
         let native_source = manifest["kind"] == "native-ext4-v1";
+        if native_source && system.exists("/docker").map_err(Error::internal)? {
+            for entry in system.read_dir("/docker").map_err(Error::internal)? {
+                let entry = entry.map_err(Error::internal)?;
+                if entry.file_name() != "." && entry.file_name() != ".." {
+                    return Err(Error::conflict(
+                        "Native rootless Docker state cannot be converted to the VM's rootful daemon. Export needed images and volume data into the workspace and clear Docker state before migrating; the source environment is retained.",
+                    ));
+                }
+            }
+        }
         let mut copy = Copy {
             root: copy_root.clone(),
             remaining: size,

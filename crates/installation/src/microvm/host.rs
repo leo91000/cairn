@@ -390,12 +390,6 @@ pub async fn pause_attempt(state: &Path, attempt: &str) -> Result<()> {
         .map(|_| ())
 }
 
-pub async fn resume_attempt(state: &Path, attempt: &str) -> Result<()> {
-    super::suspension::set_reason(state, attempt, &super::suspension::Reason::Storage, false)
-        .await
-        .map(|_| ())
-}
-
 pub(super) async fn set_vm_state(socket: &Path, status: &str) -> Result<()> {
     let request = async {
         let transport = |_| Error::timeout("VM state response was lost; retry confirmation.");
@@ -426,26 +420,6 @@ pub(super) async fn set_vm_state(socket: &Path, status: &str) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(1), request)
         .await
         .map_err(|_| Error::timeout("VM state transition is not yet confirmed."))?
-}
-
-/// Checkpoint transitions must settle before sealing/thawing. Repeat the same
-/// idempotent desired state after a lost response; cancellation still fences
-/// lease loss and shutdown. The monitor uses one bounded request per tick.
-pub async fn settle_attempt(
-    state: &Path,
-    attempt: &str,
-    paused: bool,
-    stop: &tokio_util::sync::CancellationToken,
-) -> Result<()> {
-    super::suspension::settle_reason(
-        state,
-        attempt,
-        &super::suspension::Reason::Storage,
-        paused,
-        stop,
-    )
-    .await
-    .map(|_| ())
 }
 
 #[cfg(test)]

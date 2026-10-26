@@ -406,7 +406,7 @@ impl Bases {
         );
         let runtime = json!({
             "backend": "native",
-            "storage": "ublk",
+            "storage": super::block::STORAGE,
             "os": "linux",
             "arch": "x86_64",
             "runtimeId": plan["runtimeId"]
