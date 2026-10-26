@@ -1,3 +1,4 @@
+import type { ExecutionNode } from '../../packages/contracts/nodes'
 import { randomUUID } from 'node:crypto'
 import { MAIN_AGENT_ID } from '../../packages/contracts/constants'
 import {
@@ -7,6 +8,53 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+
+test('shows reclaimable and unpublished disk data on desktop and phone', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const node: ExecutionNode = {
+    id: randomUUID(),
+    name: 'Disk capacity fixture',
+    local: false,
+    accepting: true,
+    revoked: false,
+    status: 'online',
+    tags: [],
+    capabilities: {
+      cpu: 8,
+      memoryMiB: 16384,
+      diskMiB: 92160,
+      os: 'linux',
+      arch: 'x86_64',
+      kvm: true,
+    },
+    limits: { cpu: 4, memoryMiB: 8192, diskMiB: 102400 },
+    slots: 4,
+    runtimeId: 'development',
+    lastSeen: Date.now(),
+  }
+  node.diskAccounting = {
+    capturedAt: Date.now(),
+    localBytes: 80 * 1024 ** 3,
+    unusedGrantedBytes: 12 * 1024 ** 3,
+    hostFreeBytes: 90 * 1024 ** 3,
+    hostReserveBytes: 20 * 1024 ** 3,
+    poolReserveBytes: 5 * 1024 ** 3,
+    reclaimableBytes: 16 * 1024 ** 3,
+    unsynchronizedBytes: 8 * 1024 ** 3,
+  }
+  await page.route('**/api/nodes', route => route.fulfill({ json: [node] }))
+  await page.goto(workspacePath('/nodes'))
+  await workspace.signIn(page)
+  const details = page.getByRole('region', { name: 'Disk capacity details' })
+  await expect(details).toContainText('80 GiB stored locally')
+  await expect(details).toContainText('16 GiB reclaimable')
+  await expect(details).toContainText('8 GiB of unpublished journal data')
+  await expect(details).toContainText('without the one-hour delay')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(details).toBeVisible()
+  expect(await details.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
+  await page.screenshot({ path: 'test-results/nodes-disk-accounting-phone.png', fullPage: true })
+})
 
 test('registers, configures and revokes a node through the owner interface', async ({ page, workspace }) => {
   test.setTimeout(60000)

@@ -478,6 +478,60 @@ fn request_reclamation(db: &Db<'_>, run: &Value, configured: bool) -> Result<()>
     Ok(())
 }
 
+/// Growth leaves enough capacity for the oldest eligible queued conversation.
+/// This is a transaction-local ceiling, not an allocation or an authority grant.
+pub(super) fn waiting_disk_bytes(db: &Db<'_>, node: &Value, attempts: &[Value]) -> Result<u64> {
+    let runs = db.json_rows(
+        "SELECT data FROM runs WHERE status='queued' AND json_extract(data,'$.isolated')=1 ORDER BY created_at,id",
+        [],
+    )?;
+    for run in runs {
+        if !run["cancelRequestedAt"].is_null()
+            || run["backendMigration"].is_object()
+            || attempts
+                .iter()
+                .any(|a| a["runId"] == run["id"] && super::is_active_attempt(a))
+            || crate::run_retry::Retry::waiting(&run, crate::config::now())
+            || crate::conversation_lifecycle::require_active_run(db, text(&run, "id")).is_err()
+        {
+            continue;
+        }
+        let agent = db
+            .agent_snapshot(super::run_agent(&run))?
+            .unwrap_or_default();
+        if !crate::native::policy::allows(db, &run, node)? {
+            continue;
+        }
+        let access = policy(&agent);
+        let checkpoint = super::db_checkpoint(db, text(&run, "id"))?;
+        if checkpoint["capacityRetryAt"]
+            .as_i64()
+            .is_some_and(|at| at > crate::config::now())
+        {
+            continue;
+        }
+        let request = Request::new(&run, &access, &checkpoint);
+        let fleet = Fleet {
+            attempts,
+            volumes: &[],
+        };
+        if !request.eligible(node, true) || fleet.free_slots(&request, node) == 0 {
+            continue;
+        }
+        let Some(resources) = request.resources_for(node) else {
+            continue;
+        };
+        return Ok(super::disk_capacity::admission_bytes(
+            node,
+            attempts,
+            request.run_id(),
+            resources.disk_mi_b.saturating_mul(1_048_576),
+            !request.replacing(text(node, "id")),
+        ));
+    }
+    Ok(0)
+}
+
 /// Fails like [`reserve`] without holding capacity; disk pressure can schedule
 /// verification and reclamation of synchronized inactive local caches.
 pub async fn check(s: &Service, run: &Value) -> Result<()> {

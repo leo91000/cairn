@@ -6,6 +6,13 @@ It does not assert pixel equality between a browser and Material components.
 
 ## Feature map
 
+Native disk capacity: web and Android show the same `list_nodes` disk-accounting
+breakdown (local usage, unused grants, host free space and reserves, reclaimable
+acknowledged backing, and last-reported unpublished journal bytes). Android uses
+French Material text; web uses an English capacity section. Both explain overlapping
+figures and immediate safe reclamation under pressure. Older runtimes may omit it.
+The public MCP and built-in installation tool return the same inventory fields.
+
 | Area | Native Android implementation | Validation |
 | --- | --- | --- |
 | Beacon account actions | Sessions, sign-in methods, invitations, members, MCP authorizations and notification devices stay in web and Android with their existing account proofs and native presentation. Per the owner arbitration (#395), they are outside public MCP / `cairn_installation` parity. Both apps retain generated account method calls and models; the response now contains only `methods`. Account reads stay at Beacon independently of installation transport. See `docs/BEACON-CAPABILITIES.md`. | Shared Rust/TS/Kotlin contract corpus, Beacon account/security tests, both tool catalogue exclusion tests, browser account/provider journeys, `NativeAccountCases` on JVM/device |

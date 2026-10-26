@@ -6,6 +6,17 @@ export interface NodeResources {
   diskMiB: number
 }
 
+export interface NodeDiskAccounting {
+  capturedAt: number
+  localBytes: number
+  unusedGrantedBytes: number
+  hostFreeBytes: number
+  hostReserveBytes: number
+  poolReserveBytes: number
+  reclaimableBytes: number
+  unsynchronizedBytes: number
+}
+
 export function diskCapacity(node: ExecutionNode): number {
   const total = node.capabilities.diskTotalMiB
   if (total !== undefined && total > 0)
@@ -69,6 +80,7 @@ export interface ExecutionNode {
   occupiedSlots?: number
   availableSlots?: number
   usage?: { memoryMiB: number, diskMiB: number }
+  diskAccounting?: NodeDiskAccounting | null
   budgetError?: string | null
   pressure?: string | null
   executionReady?: boolean

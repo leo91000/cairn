@@ -1514,6 +1514,96 @@ async fn native_disk_growth_is_idempotent_and_competes_atomically_with_admission
 }
 
 #[tokio::test]
+async fn storage_pressure_reserves_waiting_admission_before_another_growth_increment() {
+    let f = Fixture::new().await;
+    let gib = 1024 * 1024 * 1024u64;
+    let mut node = f.node.clone();
+    node["slots"] = 4.into();
+    node["limits"]["diskMiB"] = (80 * 1024).into();
+    node["capabilities"]["diskTotalMiB"] = (1024 * 1024).into();
+    node["capabilities"]["diskMiB"] = (900 * 1024).into();
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    let token = auth::token();
+    f.service
+        .store
+        .set(
+            &format!("node-token:{}", auth::digest(&token)),
+            node["id"].clone(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let mut running = f.run();
+    running["status"] = "running".into();
+    running["isolated"] = true.into();
+    common::add_run(&f.service.store, &running).await;
+    let attempt = id();
+    placement::reserve(&f.service, &running, &attempt)
+        .await
+        .unwrap();
+    common::set_checkpoint(
+        &f.service.store,
+        text(&running, "id"),
+        json!({
+            "nodeId": node["id"], "runnerId": attempt
+        }),
+    )
+    .await;
+    let mut waiting = f.run();
+    waiting["isolated"] = true.into();
+    common::add_run(&f.service.store, &waiting).await;
+
+    for (current, expected, retrying) in [
+        (32768, 40960, false),
+        (40960, 40960, false),
+        (40960, 49152, true),
+    ] {
+        if retrying {
+            common::set_checkpoint(
+                &f.service.store,
+                text(&waiting, "id"),
+                json!({
+                    "nodeId": node["id"], "capacityRetryAt": now() + 30_000
+                }),
+            )
+            .await;
+        }
+        let body = json!({
+            "backend": "native", "nodeProtocol": 2, "executionReady": true,
+            "dataRoot": "/fixture", "runtimeId": "development",
+            "capabilities": node["capabilities"], "pool": { "capacity": 4 },
+            "sharedResources": true, "budget": { "slots": 4, "limits": node["limits"] },
+            "nativeMode": { "mode": "protected", "generation": null, "status": "applied" },
+            "usage": { "diskMiB": 8192 },
+            "diskGrowth": {
+                "protocol": 1, "capturedAt": now(), "usedBytes": 8 * gib,
+                "freeBytes": 900 * gib, "ownedBytes": { &attempt: 8 * gib },
+                "requests": [{ "attemptId": attempt, "currentMiB": current }]
+            }
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/internal/nodes/heartbeat")
+            .header("host", common::HOST)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = common::send(&f.router, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let reply = read_json(response).await;
+        assert_eq!(
+            reply["diskGrowth"]["grants"][0]["allowanceMiB"], expected,
+            "Growth must leave room for the queued conversation: {reply}"
+        );
+        if current == 40960 && !retrying {
+            assert!(placement::check(&f.service, &waiting).await.is_ok());
+        }
+    }
+}
+
+#[tokio::test]
 async fn wildcard_node_access_still_requires_trusted_contributors() {
     let f = Fixture::new().await;
     let mut agent = f.agent.clone();

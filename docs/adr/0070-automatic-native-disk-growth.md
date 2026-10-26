@@ -76,6 +76,25 @@ is reclaimed before remeasurement. Conversation history and unpublished work are
 never removed. If reclamation cannot establish safety or recover sufficient space,
 the new conversation remains queued; active workloads retain their recorded allowance.
 
+Queued conversations with a free authorized slot take priority over further
+growth. Each heartbeat leaves enough unused capacity for the oldest eligible
+queued conversation, including its retained-backing credit; grants remain atomic
+with admission. The existing allowance of a running conversation is never reduced.
+Cancelled requests, migrations, deleted conversations, retry delays and workloads
+that already own an attempt do not reserve another admission allowance.
+
+Dirty terminal runs remain synchronization candidates after restart, even without
+an outstanding publication revision. Publication headers have a separate five-minute
+startup window through both ends of the node relay: opening a large stopped journal
+can exceed the ordinary 25–30 second control deadline. The streamed data keeps its
+existing idle deadlines and 32 MiB remote batches.
+
+Node inventory exposes fresh disk accounting through the existing UI and agent
+interfaces: local usage, unused grants, host free space and reserves, a conservative
+lower bound of reclaimable acknowledged backing, and last-reported unpublished
+journal bytes. Web and Android explain that these measurements overlap. Stale
+capacity observations omit the breakdown rather than presenting old headroom as current.
+
 Qualification extends the disposable native runtime fixture with live growth,
 unchanged workload PID, writes beyond the former device boundary, and rejected
 shrink replies. Existing reference/native read/write/CPU and encoded S3 measurements

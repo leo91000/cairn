@@ -361,7 +361,9 @@ fn is_retry(call: &Call, sequence: u64) -> Result<bool> {
 
 /// How long a node may take to start answering, by operation.
 fn head_timeout(method: &str, path: &str, native: bool) -> Duration {
-    Duration::from_secs(if path.starts_with("/exclusive/") {
+    Duration::from_secs(if method == "POST" && path.ends_with("/publication") {
+        super::snapshots::PUBLICATION_STARTUP.as_secs()
+    } else if path.starts_with("/exclusive/") {
         150
     } else if path.ends_with("/restore") {
         120
@@ -475,6 +477,37 @@ pub async fn url(s: &Service, run: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn storage_pressure_publication_accepts_a_slow_cold_journal_header() {
+        let hub = Arc::new(Transport::default());
+        let node = crate::config::id();
+        let path = format!("/snapshots/{}/publication", crate::config::id());
+        let timeout = head_timeout("POST", &path, true);
+        let (request_hub, request_node) = (hub.clone(), node.clone());
+        let request = tokio::spawn(async move {
+            request_hub
+                .request_before(&request_node, "POST", &path, vec![], timeout)
+                .await
+        });
+        let command = hub.poll(&node).await.unwrap();
+        tokio::time::advance(Duration::from_secs(90)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !request.is_finished(),
+            "A cold publication must outlive the ordinary control deadline"
+        );
+        hub.reply(
+            &node,
+            json!({
+                "id": command["id"], "sequence": 0, "status": 200,
+                "length": 0, "done": true
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(request.await.unwrap().unwrap().status().is_success());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn native_stop_accepts_a_checkpoint_header_after_the_normal_transport_deadline() {
