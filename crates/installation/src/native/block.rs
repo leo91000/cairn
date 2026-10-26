@@ -17,6 +17,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 pub(crate) const KIND: &str = "native-ext4-v1";
+pub(crate) const STORAGE: &str = "ublk-rootless-v1";
 
 pub(crate) const DISK_BUSY: &str = "Native disk is active.";
 
@@ -39,7 +40,7 @@ fn preparation_size(directory: &Path, requested: u64) -> Result<u64> {
 async fn record_runtime(directory: &Path, plan: &Value) -> Result<()> {
     let runtime = json!({
         "backend": "native",
-        "storage": "ublk",
+        "storage": STORAGE,
         "os": "linux",
         "arch": "x86_64",
         "runtimeId": plan["runtimeId"],
@@ -47,13 +48,16 @@ async fn record_runtime(directory: &Path, plan: &Value) -> Result<()> {
     if directory.join("runtime.json").exists() {
         let previous: Value =
             serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
-        if ["backend", "storage", "os", "arch"]
+        if ["backend", "os", "arch"]
             .iter()
             .any(|field| previous[*field] != runtime[*field])
+            || !matches!(previous["storage"].as_str(), Some("ublk") | Some(STORAGE))
         {
             return Err(Error::conflict("Native disk platform changed."));
         }
     }
+    // Older controllers require storage="ublk" before mounting/reconciling.
+    // Commit the isolation fence while preserving current tool-bundle updates.
     atomic_write(
         &directory.join("runtime.json"),
         &serde_json::to_vec(&runtime)?,
@@ -185,7 +189,9 @@ pub async fn recover_host_mounts(state: &Path) -> Result<()> {
         verify_host_mount(state, &mounted)?;
         let identity: Value =
             serde_json::from_slice(&tokio::fs::read(owner.directory.join("runtime.json")).await?)?;
-        if identity["backend"] != "native" || identity["storage"] != "ublk" {
+        if identity["backend"] != "native"
+            || !matches!(identity["storage"].as_str(), Some("ublk") | Some(STORAGE))
+        {
             return Err(Error::conflict("Mounted disk is not a native journal."));
         }
         let attempt = tokio::fs::read_to_string(root.join("attempt")).await?;
@@ -821,7 +827,10 @@ pub async fn restore(state: &Path, run: &str, request: Value) -> Result<Value> {
     let manifest = &request["manifest"];
     if manifest["kind"] != KIND
         || manifest["runtime"]["backend"] != "native"
-        || manifest["runtime"]["storage"] != "ublk"
+        || !matches!(
+            manifest["runtime"]["storage"].as_str(),
+            Some("ublk") | Some(STORAGE)
+        )
         || manifest["runtime"]["os"] != "linux"
         || manifest["runtime"]["arch"] != "x86_64"
     {
@@ -1064,12 +1073,28 @@ mod tests {
         let current: Value =
             serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
         assert_eq!(current["runtimeId"], "current-release");
-        assert_eq!(current["storage"], "ublk");
+        assert_eq!(current["storage"], STORAGE);
         assert_eq!(
             tokio::fs::read(root.path().join("workspace"))
                 .await
                 .unwrap(),
             b"retained"
+        );
+        // A future isolation/storage implementation must never be downgraded
+        // by rewriting its marker or touching the retained payload.
+        let mut future = current.clone();
+        future["storage"] = "ublk-rootless-v2".into();
+        atomic_write(&path, &serde_json::to_vec(&future).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            record_runtime(root.path(), &json!({ "runtimeId": "next-release" }))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&tokio::fs::read(&path).await.unwrap()).unwrap(),
+            future
         );
         let mut incompatible = current.clone();
         incompatible["arch"] = "aarch64".into();

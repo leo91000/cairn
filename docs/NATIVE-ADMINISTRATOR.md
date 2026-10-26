@@ -127,3 +127,10 @@ retained files and host changes, idempotent generation retry and effective healt
 state. CI supplies the disposable VM; never run that fixture on the owner's node.
 Backend tests cover unknown modes, old supervisors, unapproved users, snapshot
 races, pending/failed/stale generation admission and future wildcard grants.
+
+Protected conversations provide a private lazy rootless Docker daemon; administrator
+execution keeps this document's host/sudo behavior and does not receive that daemon
+or socket. Mode changes preserve Docker state: the journal translates the agent's
+file owner while retaining container users, volume permissions and reserved ranges.
+Services stop with the protected turn and can restart after returning to protected.
+See [native Docker](NATIVE-DOCKER.md).
