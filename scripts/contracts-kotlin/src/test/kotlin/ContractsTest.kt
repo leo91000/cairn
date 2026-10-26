@@ -220,6 +220,7 @@ class ContractsTest {
                 .runId,
         )
     }
+
     @Test
     fun pluginsPreserveTheirTypedEnvelopeAndManifestJson() {
         val root = File(System.getProperty("cairn.contractWire")).parentFile
@@ -249,5 +250,4 @@ class ContractsTest {
             assertFails(value.toString()) { json.decodeFromJsonElement<ManagePluginInput>(value) }
         }
     }
-
 }
