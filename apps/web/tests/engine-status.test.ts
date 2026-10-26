@@ -172,9 +172,28 @@ describe('engine status', () => {
       text: 'Codex doesn’t offer the selected speed for this model here. This turn runs at Standard speed.',
     }
     expect(notices([fallback, step()]).map(notice => [notice.title, notice.subtitle])).toEqual([
-      ['This turn runs at Standard speed', 'Codex doesn’t offer the selected speed for this model here'],
+      ['This turn runs at Standard speed', 'Codex doesn’t list the selected speed for this model here, so Cairn asks for Standard'],
     ])
     expect(runLog([fallback])).toHaveLength(1)
+
+    // Codex could not confirm the speed for this model: the turn may run at Standard.
+    const unconfirmed = {
+      ...event('status', { speed: { requested: 'priority', unconfirmed: true } }),
+      text: 'The selected speed couldn’t be confirmed for this account and model.',
+    }
+    expect(notices([unconfirmed, step()]).map(notice => [notice.title, notice.subtitle])).toEqual([
+      ['Speed not confirmed for this turn', 'It couldn’t be confirmed for this account and model; this turn may run at Standard'],
+    ])
+
+    // A later attempt, on another account, gets the speed after all.
+    const confirmed = {
+      ...event('status', { speed: { requested: 'priority', confirmed: true } }),
+      text: 'Codex now offers the selected speed for this model here.',
+    }
+    expect(notices([fallback, confirmed]).map(notice => notice.title)).toEqual([
+      'This turn runs at Standard speed',
+      'Selected speed requested for this turn',
+    ])
   })
 
   it('gives the usage banner the reset the engine reported', () => {

@@ -1,7 +1,7 @@
 [
   {
     "name": "list_models",
-    "description": "List the models a coding agent offers on its enabled accounts: reasoning levels and, for Codex, the speeds (service tiers) each model offers with Codex's own description of their usage. Use a serviceTiers id, or \"standard\", as an agent or message speed. A tier marked limited is missing from some accounts; runs that ask for it prefer an account that offers it and otherwise run at Standard with a notice.",
+    "description": "List the models a coding agent offers on its enabled accounts: reasoning levels and, for Codex, the speeds (service tiers) each model offers with Codex's own description of their usage. Use a serviceTiers id, or \"standard\", as an agent or message speed. A tier marked limited is not confirmed by every account able to run the model; runs that ask for it prefer an account that confirms it. Before each turn attempt the run checks the tier against its Codex process model list and records a status event when the outcome changes: speed.applied is standard when the turn runs at Standard, speed.confirmed when the Codex process and the account's recent catalog both list the tier and the turn asks for it, speed.unconfirmed when it cannot be confirmed for the account and model (a model list could not be read or does not name the model exactly, or the account's catalog is unknown or older than 30 minutes).",
     "scope": "read",
     "destructive": false,
     "inputSchema": {
@@ -444,7 +444,7 @@
   },
   {
     "name": "get_run",
-    "description": "Get a run, including retry attempt, limit, nextAttemptAt, deadlineAt and cause when recovering, and a byte-bounded page of its event log. Continue with nextAfter while hasMore is true, even when a page has fewer than 100 events. A run or event marked truncated remains available in full through read_run_content. Claude Code runs also record engine.retry (the engine retrying an API request itself; the turn continues), provider.limit (usage-limit warnings, a limit that stops requests with resetsAt, and its end) and engine.notice (the engine's warnings); their subagent items carry task_id, run_id, parent_task_id and resumed.",
+    "description": "Get a run, including retry attempt, limit, nextAttemptAt, deadlineAt and cause when recovering, and a byte-bounded page of its event log. Continue with nextAfter while hasMore is true, even when a page has fewer than 100 events. A run or event marked truncated remains available in full through read_run_content. Claude Code runs also record engine.retry (the engine retrying an API request itself; the turn continues), provider.limit (usage-limit warnings, a limit that stops requests with resetsAt, and its end) and engine.notice (the engine's warnings); their subagent items carry task_id, run_id, parent_task_id and resumed. Codex runs record a status event whose payload.speed states how a faster speed runs for a message (applied: standard, confirmed or unconfirmed; see list_models).",
     "scope": "read",
     "destructive": false,
     "inputSchema": {

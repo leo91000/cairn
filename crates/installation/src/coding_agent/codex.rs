@@ -8,7 +8,6 @@ use crate::{
     config::Config,
     error::{Error, Result},
     execution,
-    models::ServiceTierChoice,
     process::Environment,
     rpc::Session,
     service::Service,
@@ -115,29 +114,15 @@ impl ExecutionAdapter for Codex {
             plan["reasoning"] = effort.into();
         }
 
-        let speed = text(plan, "speed").to_owned();
-        let tier = crate::models::service_tier(s, source, text(plan, "model"), &speed).await?;
-        match tier {
-            ServiceTierChoice::Send(tier) => plan["serviceTier"] = tier.into(),
-            ServiceTierChoice::Unavailable => {
-                // Codex would silently omit the tier; say so instead of implying a faster run.
-                plan["serviceTier"] = crate::models::CODEX_STANDARD_TIER.into();
-                let payload = json!({
-                    "speed": {
-                        "requested": speed,
-                        "applied": crate::models::STANDARD_SPEED,
-                    },
-                });
-                s.store
-                    .event(
-                        text(plan, "runId"),
-                        "status",
-                        "Codex doesn’t offer the selected speed for this model here. This turn runs at Standard speed.",
-                        Some(payload),
-                    )
-                    .await?;
-            }
+        // The turn checks a faster tier with the Codex process that runs it, and says so. Only the
+        // account's own recent catalog lets it confirm the tier, whichever model the turn runs.
+        let tier = crate::models::service_tier(text(plan, "speed")).to_owned();
+        if tier != crate::models::CODEX_STANDARD_TIER
+            && let Some(tiers) = crate::models::account_tiers(s, source).await?
+        {
+            plan["accountTiers"] = tiers;
         }
+        plan["serviceTier"] = tier.into();
         Ok(())
     }
 

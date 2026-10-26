@@ -8,7 +8,7 @@ use cairn_installation::{
     },
     chat_process,
     config::{Config, id, now},
-    models::{ServiceTierChoice, cached_defaults, service_tier},
+    models::cached_defaults,
     provider::Provider,
     rpc::Session,
     service::Service,
@@ -768,7 +768,15 @@ async fn models_are_paginated_cached_and_keep_last_known_options_when_codex_is_d
         .await
         .unwrap();
     let stale = service.models.list(&service).await.unwrap();
-    assert_eq!(stale["models"], catalog["models"]);
+    // The last known options stay, but an outdated catalog no longer confirms their speeds.
+    let mut unconfirmed = stale["models"].clone();
+    for model in unconfirmed.as_array_mut().unwrap() {
+        for tier in model["serviceTiers"].as_array_mut().unwrap() {
+            assert_eq!(tier["limited"], true, "{tier}");
+            tier.as_object_mut().unwrap().remove("limited");
+        }
+    }
+    assert_eq!(unconfirmed, catalog["models"]);
     assert_eq!(stale["stale"], true);
     assert!(!stale["error"].as_str().unwrap().is_empty());
 }
@@ -974,36 +982,101 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
         service.store.set(&key, catalog, None).await.unwrap();
     }
 
-    let tier = async |account: &str, model: &str, speed: &str| {
-        service_tier(&service, account, model, speed).await.unwrap()
-    };
-    assert_eq!(
-        tier(&ids[0], "fixture-fast", "ultrafast").await,
-        ServiceTierChoice::Unavailable
-    );
-    assert_eq!(
-        tier(&ids[1], "fixture-fast", "ultrafast").await,
-        ServiceTierChoice::Send("ultrafast".into())
-    );
-    assert_eq!(
-        tier(&ids[0], "", "priority").await,
-        ServiceTierChoice::Send("priority".into())
-    );
-    assert_eq!(
-        tier(&ids[1], "fixture-deep", "priority").await,
-        ServiceTierChoice::Unavailable
-    );
-    assert_eq!(
-        tier(&ids[1], "fixture-deep", "standard").await,
-        ServiceTierChoice::Send("default".into())
-    );
-    assert_eq!(
-        tier(&ids[1], "fixture-deep", "").await,
-        ServiceTierChoice::Send("default".into())
-    );
+    // The combined catalog offers Fast, but the account a run lands on cannot confirm it: the
+    // picker marks it limited, and the turn itself checks Codex's own list before starting.
+    let key = format!("codex-models:{}", ids[0]);
+    let catalog = service.store.kv(&key).await.unwrap().unwrap();
+    let mut unknown = catalog.clone();
+    unknown["checkedAt"] = (now() - 3_600_000).into();
+    unknown["attemptedAt"] = now().into();
+    service.store.set(&key, unknown, None).await.unwrap();
+    let listed = service.models.list(&service).await.unwrap();
+    let fast = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == "fixture-fast")
+        .unwrap();
+    assert_eq!(fast["serviceTiers"][0]["id"], "priority");
+    assert_eq!(fast["serviceTiers"][0]["limited"], true, "{fast}");
+    let confirming = service
+        .accounts
+        .acquire_for(
+            &service,
+            FIRST_RUN,
+            Provider::Codex,
+            "fixture-fast",
+            "ultrafast",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(confirming.account_id, ids[1]);
+    let landed = service
+        .accounts
+        .acquire_for(
+            &service,
+            SECOND_RUN,
+            Provider::Codex,
+            "fixture-fast",
+            "priority",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(landed.account_id, ids[0]);
+    service.accounts.release(&confirming).await.unwrap();
+    service.accounts.release(&landed).await.unwrap();
+    // An account that needs reconnecting takes no run, so its unknown catalog confirms nothing.
+    let record = service
+        .store
+        .get("agentAccounts", &ids[0])
+        .await
+        .unwrap()
+        .unwrap();
+    let mut reconnect = record.clone();
+    reconnect["state"] = "error".into();
+    service.store.put("agentAccounts", reconnect).await.unwrap();
+    let listed = service.models.list(&service).await.unwrap();
+    let fast = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == "fixture-fast")
+        .unwrap();
+    assert!(fast["serviceTiers"][0].get("limited").is_none(), "{fast}");
+    // Nor does a signed-out account lacking a speed make it limited: Ultrafast, which only
+    // the other account lists, is then confirmed by every account a run can land on.
+    let mut restored = record.clone();
+    restored["state"] = "error".into();
+    service
+        .store
+        .set(&key, catalog.clone(), None)
+        .await
+        .unwrap();
+    service.store.put("agentAccounts", restored).await.unwrap();
+    let listed = service.models.list(&service).await.unwrap();
+    let fast = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == "fixture-fast")
+        .unwrap();
+    assert_eq!(fast["serviceTiers"][1]["id"], "ultrafast");
+    assert!(fast["serviceTiers"][1].get("limited").is_none(), "{fast}");
+    service.store.put("agentAccounts", record).await.unwrap();
+    service.store.set(&key, catalog, None).await.unwrap();
+    let listed = service.models.list(&service).await.unwrap();
+    let fast = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == "fixture-fast")
+        .unwrap();
+    assert!(fast["serviceTiers"][0].get("limited").is_none(), "{fast}");
 
-    // Without an enabled account offering it, the run is not held back: it runs at
-    // standard speed on an available account and says so.
+    // Without an enabled account offering it, the run is not held back: it goes to an
+    // available account, and the turn's own check says how it runs there.
     service
         .accounts
         .update(&service, &ids[1], &json!({ "enabled": false }))
@@ -1026,7 +1099,7 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
 }
 
 #[tokio::test]
-async fn queued_speed_is_kept_and_an_unavailable_one_runs_at_standard_with_a_notice() {
+async fn queued_speed_is_kept_and_planned_as_asked() {
     let root = TempDir::new().unwrap();
     std::fs::create_dir(root.path().join("home")).unwrap();
     let service = Service::new(config(&root)).await.unwrap();
@@ -1072,8 +1145,9 @@ async fn queued_speed_is_kept_and_an_unavailable_one_runs_at_standard_with_a_not
         409
     );
 
-    // Fast is not offered for this model, so the turn asks Codex for its standard speed.
-    service.models.list(&service).await.unwrap();
+    // Planning asks for the chosen tier; the turn checks it with the Codex process that runs
+    // it. Without a chosen speed the turn asks for Standard: Codex's app server neither applies
+    // the model's catalog default nor resets a thread that ran at another speed.
     let run_id = run["id"].as_str().unwrap().to_owned();
     let configure = async |model: &str, speed: &str| {
         let mut plan = json!({
@@ -1089,40 +1163,33 @@ async fn queued_speed_is_kept_and_an_unavailable_one_runs_at_standard_with_a_not
             .unwrap();
         plan
     };
-    assert_eq!(
-        configure("fixture-deep", "priority").await["serviceTier"],
-        "default"
-    );
-    let reads = run_id.clone();
-    let events: Value = service
-        .store
-        .read(move |db| Ok(db.events(&reads, 0, 500)?.into()))
-        .await
-        .unwrap();
-    let notice = events
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|event| {
-            event["type"] == "status" && event["text"].as_str().unwrap().contains("Standard speed")
-        })
-        .unwrap_or_else(|| panic!("{events:#}"));
-    assert_eq!(notice["payload"]["speed"]["requested"], "priority");
-    assert_eq!(notice["payload"]["speed"]["applied"], "standard");
-
-    assert_eq!(
-        configure("fixture-fast", "priority").await["serviceTier"],
-        "priority"
-    );
-    assert_eq!(
-        configure("fixture-deep", "standard").await["serviceTier"],
-        "default"
-    );
-    // Without a chosen speed the turn asks for Standard: Codex's app server neither applies
-    // the model's catalog default nor resets a thread that ran at another speed.
-    for model in ["fixture-deep", "fixture-fast"] {
-        assert_eq!(configure(model, "").await["serviceTier"], "default");
+    for (model, speed, tier) in [
+        ("fixture-deep", "priority", "priority"),
+        ("fixture-fast", "priority", "priority"),
+        ("fixture-deep", "standard", "default"),
+        ("fixture-deep", "", "default"),
+        ("fixture-fast", "", "default"),
+    ] {
+        assert_eq!(configure(model, speed).await["serviceTier"], tier);
     }
+    // The account's recent catalog goes with a faster plan, so a fallback list in the Codex
+    // process cannot confirm a tier on its own, whichever model the turn runs.
+    assert!(
+        configure("fixture-fast", "priority")
+            .await
+            .get("accountTiers")
+            .is_none()
+    );
+    service.models.list(&service).await.unwrap();
+    let planned = configure("", "priority").await;
+    assert_eq!(planned["accountTiers"]["fixture-fast"], json!(["priority"]));
+    assert_eq!(planned["accountTiers"]["fixture-deep"], json!([]));
+    assert!(
+        configure("fixture-fast", "standard")
+            .await
+            .get("accountTiers")
+            .is_none()
+    );
 
     // An edit from an editor predating speeds keeps the queued speed, unless it moves the
     // message to another coding agent.

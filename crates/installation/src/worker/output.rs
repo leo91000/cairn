@@ -1,6 +1,6 @@
 use super::checkpoint::{Checkpoint, RunCheckpoint};
-use crate::{error::Result, run_output, service::Service, validation::text};
-use serde_json::Value;
+use crate::{config::now, error::Result, run_output, service::Service, validation::text};
+use serde_json::{Value, json};
 use std::sync::LazyLock;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -261,6 +261,22 @@ pub(super) async fn record(
         s.store.event(id, "status", &message, Some(event)).await?;
         return Ok(false);
     }
+    if event["type"] == "turn.speed" {
+        let event = run_output::payload(&event, secrets);
+        let (message, outcome) = speed_notice(s, id, &event).await?;
+        if let Some(message) = message {
+            s.store.event(id, "status", message, Some(event)).await?;
+        }
+        // Recorded once its notice is stored, so a retry after a failure still shows it.
+        s.store
+            .set(
+                &format!("turn-speed:{id}"),
+                outcome,
+                Some(now() + 30 * 86_400_000),
+            )
+            .await?;
+        return Ok(false);
+    }
     if event["type"] == "runner.start_rejected" {
         let run = s.store.run(id).await?;
         let first_rejected = !previously_launched
@@ -433,6 +449,50 @@ async fn apply_event(
         }
     }
     Ok(())
+}
+
+/// The notice a turn's speed check needs: every faster turn states how it runs, since the picker
+/// and queue judge from cached catalogs. Each attempt of a turn checks again, on whichever account
+/// it runs: only a change of outcome for the message is shown, so retries do not repeat a notice
+/// and a later attempt that gets the speed after all says so.
+async fn speed_notice(
+    s: &Service,
+    id: &str,
+    event: &Value,
+) -> Result<(Option<&'static str>, Value)> {
+    let speed = &event["speed"];
+    let outcome = if speed["confirmed"] == true {
+        "confirmed"
+    } else if text(speed, "applied") == crate::models::STANDARD_SPEED {
+        "standard"
+    } else {
+        "unconfirmed"
+    };
+    let key = format!("turn-speed:{id}");
+    let earlier = s
+        .store
+        .kv(&key)
+        .await?
+        .filter(|earlier| earlier["messageId"] == event["messageId"])
+        .map(|earlier| text(&earlier, "outcome").to_owned());
+    let record = json!({ "messageId": event["messageId"], "outcome": outcome });
+
+    let message = match (outcome, earlier.as_deref()) {
+        (outcome, Some(earlier)) if outcome == earlier => None,
+        ("confirmed", None) => Some(
+            "Codex lists the selected speed for this model here, so this turn asks for it. The account’s plan decides whether it applies.",
+        ),
+        ("confirmed", Some(_)) => Some(
+            "Codex now lists the selected speed for this model here, so this turn asks for it. The account’s plan decides whether it applies.",
+        ),
+        ("standard", _) => Some(
+            "Codex doesn’t list the selected speed for this model here, so this turn runs at Standard speed.",
+        ),
+        _ => Some(
+            "The selected speed couldn’t be confirmed for this account and model. This turn asks for it but may run at Standard speed.",
+        ),
+    };
+    Ok((message, record))
 }
 
 async fn store_event(s: &Service, id: &str, raw: &str, event: &Value) -> Result<()> {

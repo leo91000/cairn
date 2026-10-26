@@ -875,9 +875,26 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     }
 
     // A speed Codex does not offer for the run's model runs at Standard: the conversation says so.
-    if (event.type === 'status' && text(record(data.speed).applied)) {
+    const applied = text(record(data.speed).applied)
+    if (event.type === 'status' && applied === 'standard') {
       artifact.title = 'This turn runs at Standard speed'
-      artifact.subtitle = 'Codex doesn’t offer the selected speed for this model here'
+      artifact.subtitle = 'Codex doesn’t list the selected speed for this model here, so Cairn asks for Standard'
+      artifact.status = 'info'
+      artifact.attention = true
+    }
+
+    // Codex lists the selected speed for the turn's model, possibly after an earlier attempt did not.
+    if (event.type === 'status' && record(data.speed).confirmed === true) {
+      artifact.title = 'Selected speed requested for this turn'
+      artifact.subtitle = 'Codex lists it for this model here; the account’s plan decides whether it applies'
+      artifact.status = 'info'
+      artifact.attention = true
+    }
+
+    // Codex could not confirm the speed: the turn asks for it, but may run at Standard.
+    if (event.type === 'status' && record(data.speed).unconfirmed === true) {
+      artifact.title = 'Speed not confirmed for this turn'
+      artifact.subtitle = 'It couldn’t be confirmed for this account and model; this turn may run at Standard'
       artifact.status = 'info'
       artifact.attention = true
     }

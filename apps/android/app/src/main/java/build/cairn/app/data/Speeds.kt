@@ -17,8 +17,8 @@ fun effectiveSpeed(speed: String, inherited: String): String =
     speed.ifBlank { inherited }.ifBlank { STANDARD_SPEED }
 
 /**
- * Whether the model offers [speed]. A catalog without speeds, cached before they were listed or
- * from an older Codex, cannot tell: the run then leaves the check to Codex.
+ * Whether the model offers [speed]. A catalog without speeds, cached before they were listed,
+ * cannot tell: the turn then checks with Codex.
  */
 fun offersSpeed(model: CodingAgentModel?, speed: String): Boolean {
     val tiers = model?.serviceTiers
@@ -31,9 +31,9 @@ fun showsSpeed(provider: String, model: CodingAgentModel?, speed: String) =
     provider == "codex" && (!model?.serviceTiers.isNullOrEmpty() || speed.isNotBlank())
 
 /**
- * A queued or saved speed as it runs: one its model lacks runs at Standard. An empty model is the
- * catalog's default. Without the model's speeds, such as before the catalog loads, the speed is
- * only requested: Codex decides.
+ * A queued or saved faster speed is a request, which each turn reports on, since Codex may answer
+ * with its built-in list and an account's plan decides; one the model's catalog lacks says so. An
+ * empty model is the catalog's default.
  */
 fun speedNote(speed: String, model: String, models: List<CodingAgentModel>): String? {
     if (speed.isBlank()) return null
@@ -41,11 +41,9 @@ fun speedNote(speed: String, model: String, models: List<CodingAgentModel>): Str
     val label = speedLabel(speed, models.flatMap { it.serviceTiers.orEmpty() })
     if (speed == STANDARD_SPEED) return "vitesse $label"
     val row = models.find { if (model.isEmpty()) it.isDefault else it.model == model }
-    return when {
-        row?.serviceTiers == null -> "vitesse $label demandée"
-        offersSpeed(row, speed) -> "vitesse $label"
-        else -> "vitesse Standard ($label non proposée)"
-    }
+    return if (row?.serviceTiers != null && !offersSpeed(row, speed))
+        "vitesse $label demandée (non listée pour ce modèle)"
+    else "vitesse $label demandée"
 }
 
 /** Codex's own name for a speed, in its catalog; a readable id otherwise. */

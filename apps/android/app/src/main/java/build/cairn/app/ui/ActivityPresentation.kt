@@ -369,6 +369,8 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                         when {
                             account != null -> "Compte ${account.first} sélectionné"
                             speedFallback(data) -> "Ce tour passe en vitesse Standard"
+                            speedUnconfirmed(data) -> "Vitesse non confirmée pour ce tour"
+                            speedConfirmed(data) -> "Vitesse choisie demandée pour ce tour"
                             event.text.lowercase() in
                                 listOf(
                                     "succeeded",
@@ -398,7 +400,11 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
             val subtitle =
                 if (account != null) account.second
                 else if (event.type == "status" && speedFallback(data))
-                    "Codex ne propose pas la vitesse choisie pour ce modèle ici"
+                    "Codex ne liste pas la vitesse choisie pour ce modèle ici : Cairn demande Standard"
+                else if (event.type == "status" && speedConfirmed(data))
+                    "Codex la liste pour ce modèle ici ; l’offre du compte décide si elle s’applique"
+                else if (event.type == "status" && speedUnconfirmed(data))
+                    "Elle n’a pas pu être confirmée pour ce compte et ce modèle ; ce tour peut passer en Standard"
                 else if (event.type == "engine.retry") engineRetryDetail(data)
                 else if (event.type == "provider.limit") usageLimitDetail(data)
                 else if (backgroundTasks.isNotEmpty()) backgroundTasks.joinToString(" · ")
@@ -549,4 +555,14 @@ private fun accountUsed(text: String): Pair<String, String>? =
 
 /** A turn whose selected speed Codex does not offer for its model runs at Standard. */
 internal fun speedFallback(data: JsonObject?): Boolean =
-    data?.get("speed").asObject().string("applied").isNotEmpty()
+    data?.get("speed").asObject().string("applied") == STANDARD_SPEED
+
+/**
+ * Codex lists the selected speed for the turn's model, possibly after an earlier attempt did not.
+ */
+internal fun speedConfirmed(data: JsonObject?): Boolean =
+    data?.get("speed").asObject()?.get("confirmed") == JsonPrimitive(true)
+
+/** A turn asking for a speed Codex could not confirm for its model may run at Standard. */
+internal fun speedUnconfirmed(data: JsonObject?): Boolean =
+    data?.get("speed").asObject()?.get("unconfirmed") == JsonPrimitive(true)

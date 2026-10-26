@@ -22,14 +22,15 @@ class SpeedsTest {
     fun namesAQueuedSpeedAsItsModelRunsIt() {
         val fast = astra.copy(model = "fast")
         val deep = astra.copy(model = "deep", serviceTiers = emptyList())
-        assertEquals("vitesse Fast", speedNote("priority", "fast", listOf(fast, deep)))
+        // A faster speed is a request: each turn says how it runs.
+        assertEquals("vitesse Fast demandée", speedNote("priority", "fast", listOf(fast, deep)))
         assertEquals(
-            "vitesse Standard (Fast non proposée)",
+            "vitesse Fast demandée (non listée pour ce modèle)",
             speedNote("priority", "deep", listOf(fast, deep)),
         )
         // An empty model is the catalog's default.
         assertEquals(
-            "vitesse Standard (Fast non proposée)",
+            "vitesse Fast demandée (non listée pour ce modèle)",
             speedNote("priority", "", listOf(fast, deep.copy(isDefault = true))),
         )
         // Without the model's speeds, the speed is only requested.
@@ -37,6 +38,9 @@ class SpeedsTest {
         assertEquals("vitesse Priority demandée", speedNote("priority", "fast", emptyList()))
         assertEquals("vitesse Standard", speedNote(STANDARD_SPEED, "deep", listOf(fast, deep)))
         assertNull(speedNote("", "deep", listOf(fast, deep)))
+        // A speed some account cannot confirm is only requested.
+        val limited = fast.copy(serviceTiers = listOf(this.fast.copy(limited = true)))
+        assertEquals("vitesse Fast demandée", speedNote("priority", "fast", listOf(limited)))
     }
 
     @Test

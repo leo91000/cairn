@@ -204,8 +204,13 @@ fun ModelPicker(
     // A speed the model lacks runs at standard speed, so the trigger never claims it.
     val appliedSpeed =
         if (speedShown && offersSpeed(selected, currentSpeed)) currentSpeed else STANDARD_SPEED
+    // A speed not every account confirms, or a model whose speeds are unknown, is only requested.
+    val speedUncertain = selected?.serviceTiers?.any { it.id == appliedSpeed && it.limited } ?: true
     val speedTag =
-        appliedSpeed.takeIf { it != STANDARD_SPEED }?.let { speedLabel(it, knownTiers) }.orEmpty()
+        appliedSpeed
+            .takeIf { it != STANDARD_SPEED }
+            ?.let { speedLabel(it, knownTiers) + if (speedUncertain) " demandée" else "" }
+            .orEmpty()
     val modelLabel =
         listOfNotNull(
                 selected?.displayName?.ifBlank { selected.model }
@@ -1084,7 +1089,7 @@ private fun SpeedControl(
     }
     if (!offered)
         Text(
-            "Ce modèle ne propose pas la vitesse ${speedLabel(current, knownTiers)}. Ses exécutions utilisent la vitesse Standard tant que vous ne choisissez pas un modèle qui la propose.",
+            "Le catalogue de Codex ne liste pas la vitesse ${speedLabel(current, knownTiers)} pour ce modèle : ses tours passeront sans doute en Standard ; chaque tour l’indique.",
             style = MaterialTheme.typography.bodySmall,
             color = colors.tertiary,
         )
@@ -1093,7 +1098,7 @@ private fun SpeedControl(
             listOfNotNull(
                     tier.description.ifBlank { "Vitesse ${tier.name}" },
                     if (tier.limited)
-                        "Tous vos comptes Codex ne la proposent pas ; les exécutions privilégient un compte qui la propose, sinon elles passent en Standard."
+                        "Tous vos comptes Codex ne la confirment pas ; les exécutions privilégient un compte qui la confirme. Chaque tour indique s’il passe en Standard ou si Codex ne peut pas confirmer la vitesse."
                     else null,
                 )
                 .joinToString(" · "),
