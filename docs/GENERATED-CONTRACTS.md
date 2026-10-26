@@ -414,7 +414,9 @@ checks without invalidating other people's native delegation.
 Owner-approved native bot authority and provenance from #450 stay at the native
 run boundary, serialized from a named Rust snapshot; their existing node ceiling,
 external author, connection revision and owner binding remain live. An agent cannot
-submit initial plugin grants, approve external people or mint native authority.
+submit initial plugin grants or mint native authority. The dedicated people
+approval/removal command requires the authenticated owner; non-native delegation
+configuration replacement retains its existing management authorization.
 Neither installation access nor a public manage scope is owner confirmation.
 Public and installation tools advertise the same commands and explicit refusals.
 

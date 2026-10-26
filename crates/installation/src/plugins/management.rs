@@ -58,7 +58,7 @@ pub(crate) async fn invoke(
     }
     if matches!(&input, Command::People { .. }) && !owner {
         return Err(Error::forbidden(
-            "Only the installation owner can approve or remove external people.",
+            "Only the installation owner can use this command to approve or remove external people.",
         ));
     }
     let (plugin, instance, shared) = match &input {
