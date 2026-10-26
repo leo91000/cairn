@@ -3,6 +3,8 @@ package build.cairn.app.data
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.encodeToJsonElement
 
 @Serializable
 data class Session(
@@ -43,27 +45,30 @@ typealias Agent = build.cairn.contracts.Agent
 
 typealias Project = build.cairn.contracts.Project
 
-@Serializable
-data class Task(
-    val id: String = "",
-    val name: String = "",
-    val prompt: String = "",
-    val agentId: String = "",
-    val projectId: String? = null,
-    val skills: List<String>? = null,
-    val tags: List<String> = emptyList(),
-    val cron: String? = null,
-    val timezone: String = "Europe/Paris",
-    val enabled: Boolean = true,
-    val archived: Boolean = false,
-    val worktree: Boolean = true,
-    val nextRun: Long? = null,
-    /** The latest scheduled occurrence that could not start; read-only. */
-    val scheduleFailure: ScheduleFailure? = null,
-)
+typealias Task = build.cairn.contracts.Mission
 
-@Serializable
-data class ScheduleFailure(val message: String = "", val scheduledFor: Long = 0, val at: Long = 0)
+typealias ScheduleFailure = build.cairn.contracts.ScheduleFailure
+
+fun Task.settings(): build.cairn.contracts.MissionSettings =
+    build.cairn.contracts.MissionSettings(
+        name = name,
+        prompt = prompt,
+        agentId = agentId,
+        projectId = projectId,
+        skills = skills,
+        tags = tags,
+        cron = cron,
+        timezone = timezone,
+        enabled = enabled,
+        archived = archived,
+        worktree = worktree,
+    )
+
+fun Task.runTaskSnapshot(): build.cairn.contracts.RunTaskSnapshot =
+    wireJson.decodeFromJsonElement(
+        build.cairn.contracts.RunTaskSnapshot.serializer(),
+        wireJson.encodeToJsonElement(build.cairn.contracts.Mission.serializer(), this),
+    )
 
 @Serializable
 data class Skill(
@@ -91,7 +96,14 @@ data class SnapshotSkill(
 
 @Serializable
 data class Snapshot(
-    val task: Task = Task(),
+    val task: build.cairn.contracts.RunTaskSnapshot =
+        build.cairn.contracts.RunTaskSnapshot(
+            id = "00000000-0000-4000-8000-000000000000",
+            name = "",
+            prompt = "",
+            agentId = MAIN_AGENT_ID,
+            skills = null,
+        ),
     val agent: Agent =
         Agent(
             exclusiveNodes = emptyList(),
@@ -241,7 +253,7 @@ data class Audit(
     val detail: String = "",
 )
 
-@Serializable data class Occurrences(val occurrences: List<Long>)
+typealias Occurrences = build.cairn.contracts.SchedulePreviewOutput
 
 @Serializable data class FileContent(val content: String)
 

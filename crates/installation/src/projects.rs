@@ -192,7 +192,9 @@ impl Service {
                     if let Some(project) = db.project(&creation_id.to_string())? {
                         return Ok(project);
                     }
-                    if db.agent(&creation_id.to_string())?.is_some() {
+                    if db.agent(&creation_id.to_string())?.is_some()
+                        || db.mission(&creation_id.to_string())?.is_some()
+                    {
                         return Err(Error::conflict(
                             "This creation identity belongs to a different resource.",
                         ));

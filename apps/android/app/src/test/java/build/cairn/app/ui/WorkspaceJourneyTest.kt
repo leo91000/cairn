@@ -59,9 +59,23 @@ class WorkspaceJourneyTest {
             var created = false
             var launched = false
             val existingTask =
-                """{"id":"older-task","name":"Mission précédente","prompt":"Ancienne mission","agentId":"agent"}"""
+                wireJson.encodeToString(
+                    Task(
+                        id = "00000000-0000-4000-8000-000000000098",
+                        name = "Mission précédente",
+                        prompt = "Ancienne mission",
+                        agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                    )
+                )
             val task =
-                """{"id":"task","name":"Nouvelle mission","prompt":"Vérifier le projet","agentId":"agent","projectId":null,"skills":null}"""
+                wireJson.encodeToString(
+                    Task(
+                        id = "00000000-0000-4000-8000-000000000099",
+                        name = "Nouvelle mission",
+                        prompt = "Vérifier le projet",
+                        agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                    )
+                )
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
@@ -82,7 +96,8 @@ class WorkspaceJourneyTest {
                         }
                         if (
                             request.method == "POST" &&
-                                path == "/api/installations/fixture/api/tasks/task/run"
+                                path ==
+                                    "/api/installations/fixture/api/tasks/00000000-0000-4000-8000-000000000099/run"
                         )
                             launched = true
                         val data =
@@ -109,11 +124,11 @@ class WorkspaceJourneyTest {
                                 "/api/installations/fixture/api/audit" -> "[]"
                                 "/api/installations/fixture/api/tasks/activity" ->
                                     if (launched)
-                                        "[{\"id\":\"run\",\"taskId\":\"task\",\"status\":\"running\"}]"
+                                        "[{\"id\":\"run\",\"taskId\":\"00000000-0000-4000-8000-000000000099\",\"status\":\"running\"}]"
                                     else "[]"
                                 "/api/installations/fixture/api/runs" ->
                                     if (launched)
-                                        "[{\"id\":\"run\",\"taskId\":\"task\",\"status\":\"running\"}]"
+                                        "[{\"id\":\"run\",\"taskId\":\"00000000-0000-4000-8000-000000000099\",\"status\":\"running\"}]"
                                     else "[]"
                                 "/api/installations/fixture/api/codex/models" -> "{\"models\":[]}"
                                 "/api/installations/fixture/api/chats/stream" ->
@@ -239,11 +254,11 @@ class WorkspaceJourneyTest {
                                     if (request.method == "POST") {
                                         created = true
                                         task
-                                    } else if (created) "[$existingTask,$task]"
-                                    else "[$existingTask]"
-                                "/api/installations/fixture/api/tasks/task/run",
+                                    } else if (created) """{"tasks":[$existingTask,$task]}"""
+                                    else """{"tasks":[$existingTask]}"""
+                                "/api/installations/fixture/api/tasks/00000000-0000-4000-8000-000000000099/run",
                                 "/api/installations/fixture/api/runs/run" ->
-                                    """{"id":"run","taskId":"task","status":"running","snapshot":{"task":$task,"agent":${wireJson.encodeToString(newAgent().copy(name = "Reviewer"))},"project":null,"projects":[{"id":"46d045dd-9bce-51e3-8a99-65aa9384efc9","name":"Cairn","path":"/fixtures/cairn","origin":"","revision":"fixture","createdAt":0}]}}"""
+                                    """{"id":"run","taskId":"00000000-0000-4000-8000-000000000099","status":"running","snapshot":{"task":$task,"agent":${wireJson.encodeToString(newAgent().copy(name = "Reviewer"))},"project":null,"projects":[{"id":"46d045dd-9bce-51e3-8a99-65aa9384efc9","name":"Cairn","path":"/fixtures/cairn","origin":"","revision":"fixture","createdAt":0}]}}"""
                                 "/api/installations/fixture/api/runs/run/events" ->
                                     """[{"id":1,"createdAt":1789315200000,"type":"run.started","text":"Le worker démarre la mission"}]"""
                                 else ->
@@ -310,7 +325,7 @@ class WorkspaceJourneyTest {
                     .fetchSemanticsNodes()
                     .isNotEmpty() &&
                     !vm.state.value.busy &&
-                    vm.state.value.tasks.any { it.id == "task" }
+                    vm.state.value.tasks.any { it.id == "00000000-0000-4000-8000-000000000099" }
             }
             val saved =
                 wireJson
@@ -319,8 +334,13 @@ class WorkspaceJourneyTest {
                             .first { it.first == "/api/installations/fixture/api/tasks" }
                             .second
                     )
+                    .jsonObject["settings"]!!
                     .jsonObject
             assertEquals("Nouvelle mission", saved["name"]?.jsonPrimitive?.content)
+            assertEquals(
+                java.time.ZoneId.systemDefault().id,
+                saved["timezone"]?.jsonPrimitive?.content,
+            )
             assertTrue(
                 saved["projectId"] == null ||
                     saved["projectId"] == kotlinx.serialization.json.JsonNull
@@ -351,7 +371,10 @@ class WorkspaceJourneyTest {
             }
             compose.onNodeWithTag("agent-actions").performClick()
             assertTrue(
-                mutations.any { it.first == "/api/installations/fixture/api/tasks/task/run" }
+                mutations.any {
+                    it.first ==
+                        "/api/installations/fixture/api/tasks/00000000-0000-4000-8000-000000000099/run"
+                }
             )
             screenshot("run")
             compose.onNodeWithContentDescription("Retour").performClick()

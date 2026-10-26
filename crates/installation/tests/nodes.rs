@@ -1036,7 +1036,9 @@ async fn a_task_cannot_use_the_local_runner_without_node_permission() {
         "agentId": MAIN_AGENT_ID,
         "enabled": false,
     });
-    let (status, task) = owner.send("POST", "/api/tasks", task).await;
+    let (status, task) = owner
+        .send("POST", "/api/tasks", json!({ "settings": task }))
+        .await;
     assert_eq!(status, StatusCode::OK, "{task}");
     let path = format!("/api/tasks/{}/run", task["id"].as_str().unwrap());
     let (status, error) = owner.send("POST", &path, json!({})).await;

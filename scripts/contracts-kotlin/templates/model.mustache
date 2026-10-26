@@ -9,8 +9,8 @@ value class {{&className}}(val value: Map<String, {{#additionalProperties}}{{>ty
 {{/constValue}}{{/properties}}){{#interfaces}}{{#first}} : {{/first}}{{^first}}, {{/first}}{{&className}}{{/interfaces}} {
     init {
 {{#properties}}{{^constValue}}{{#validations}}{{#type}}{{#PATTERN}}        {{#nullable}}{{&kotlinName}}?.let { require(Regex({{&value.value.kotlinString}}).containsMatchIn(it)) }{{/nullable}}{{^nullable}}require(Regex({{&value.value.kotlinString}}).containsMatchIn({{&kotlinName}})){{/nullable}}
-{{/PATTERN}}{{/type}}{{/validations}}{{#minimum}}        require({{&kotlinName}} >= {{&.}}{{#isLong}}L{{/isLong}})
-{{/minimum}}{{#maximum}}        require({{&kotlinName}} <= {{&.}}{{#isLong}}L{{/isLong}})
+{{/PATTERN}}{{/type}}{{/validations}}{{#minimum}}        {{#nullable}}{{&kotlinName}}?.let { require(it >= {{&minimum}}{{#isLong}}L{{/isLong}}) }{{/nullable}}{{^nullable}}require({{&kotlinName}} >= {{&minimum}}{{#isLong}}L{{/isLong}}){{/nullable}}
+{{/minimum}}{{#maximum}}        {{#nullable}}{{&kotlinName}}?.let { require(it <= {{&maximum}}{{#isLong}}L{{/isLong}}) }{{/nullable}}{{^nullable}}require({{&kotlinName}} <= {{&maximum}}{{#isLong}}L{{/isLong}}){{/nullable}}
 {{/maximum}}{{#isSystemClass}}{{#systemClass}}{{#UUID}}        {{#nullable}}{{&kotlinName}}?.let { java.util.UUID.fromString(it) }{{/nullable}}{{^nullable}}java.util.UUID.fromString({{&kotlinName}}){{/nullable}}
 {{/UUID}}{{/systemClass}}{{/isSystemClass}}{{/constValue}}{{/properties}}    }
 }

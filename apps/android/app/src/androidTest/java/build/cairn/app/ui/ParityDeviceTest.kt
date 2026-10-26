@@ -32,7 +32,7 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
     private val timestamp = System.currentTimeMillis()
     private val task =
         Task(
-            "task",
+            "85aac3c3-27f5-5b76-a34d-d59120d410eb",
             "Revue hebdomadaire du projet",
             "Examiner les changements, vérifier les tests et publier le compte rendu.",
             MAIN_AGENT_ID,
@@ -53,14 +53,14 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
     private val run =
         Run(
             "run",
-            taskId = "task",
+            taskId = "85aac3c3-27f5-5b76-a34d-d59120d410eb",
             status = "succeeded",
             taskName = task.name,
             summary =
                 "## Revue terminée\n\nLes changements sont prêts. La navigation est plus claire et la conversation reste au centre de l’écran.",
             snapshot =
                 Snapshot(
-                    task = task,
+                    task = task.runTaskSnapshot(),
                     agent =
                         Agent(
                             exclusiveNodes = emptyList(),
@@ -201,7 +201,9 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                                     )
                                 )
                             "/api/installations/fixture/api/tasks" ->
-                                wireJson.encodeToString(listOf(task))
+                                wireJson.encodeToString(
+                                    build.cairn.contracts.ListMissionsOutput(listOf(task))
+                                )
                             "/api/installations/fixture/api/tasks/activity" ->
                                 wireJson.encodeToString(listOf(run))
                             "/api/installations/fixture/api/runs" ->

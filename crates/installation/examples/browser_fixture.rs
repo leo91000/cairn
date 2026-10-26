@@ -1,4 +1,9 @@
 //! Test-only stdin/stdout bridge to the native fixture APIs. Never shipped in the image.
+#[path = "../tests/common/mission_fixture.rs"]
+mod mission_fixture;
+
+use mission_fixture::MissionFixture;
+
 #[path = "../tests/common/agent_fixture.rs"]
 mod agent_fixture;
 
@@ -65,7 +70,7 @@ async fn main() -> Result<()> {
                     };
                     serde_json::to_value(project)?
                 }
-                "task" => service.task(arg(0), existing).await?,
+                "task" => service.task_fixture(arg(0), existing).await?,
                 "enqueue" => service.enqueue(string(0), "manual", None).await?,
                 "skill" => service.skills.save(string(0), string(1), None).await?,
                 _ => service.chat_detail(string(0)).await?,
@@ -96,12 +101,18 @@ async fn main() -> Result<()> {
                 "get" if string(0) == "agents" => {
                     db.agent_snapshot(string(1))?.unwrap_or(Value::Null)
                 }
+                "get" if string(0) == "tasks" => serde_json::to_value(db.mission(string(1))?)?,
                 "get" => db.get(string(0), string(1))?.unwrap_or(Value::Null),
                 "list" if string(0) == "agents" => db.agent_snapshots()?.into(),
+                "list" if string(0) == "tasks" => serde_json::to_value(db.missions()?)?,
                 "list" => db.list(string(0))?.into(),
                 "projects" => serde_json::to_value(db.projects()?)?,
                 "put" if string(0) == "agents" => {
                     serde_json::to_value(db.save_agent(&serde_json::from_value(arg(1))?)?)?
+                }
+                "put" if string(0) == "tasks" => {
+                    db.save_mission(&serde_json::from_value(arg(1))?)?;
+                    arg(1)
                 }
                 "put" => db.put(string(0), &arg(1))?,
                 "run" => db.run(string(0))?.unwrap_or(Value::Null),

@@ -1,3 +1,5 @@
+use common::MissionFixture;
+
 mod common;
 
 use common::ProjectFixture;
@@ -414,7 +416,7 @@ async fn skill_bundle_storage_measurements() {
     }
     let task = api
         .service
-        .task(
+        .task_fixture(
             json!({
                 "name": "Storage measurement",
                 "agentId": MAIN_AGENT_ID,
@@ -846,7 +848,7 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
     )
     .await;
     let task = s
-        .task(
+        .task_fixture(
             json!({
                 "name": "Review",
                 "agentId": MAIN_AGENT_ID,
@@ -1010,7 +1012,7 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
         .await;
     let task = api
         .service
-        .task(
+        .task_fixture(
             json!({
                 "name": "Review",
                 "agentId": MAIN_AGENT_ID,

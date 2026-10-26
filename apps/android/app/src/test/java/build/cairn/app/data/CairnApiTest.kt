@@ -402,7 +402,7 @@ class CairnApiTest {
     fun `current server null project and skill selections preserve inherited access`() {
         val task =
             wireJson.decodeFromString<Task>(
-                """{"id":"task","name":"Review","projectId":null,"skills":null}"""
+                """{"id":"00000000-0000-4000-8000-000000000003","name":"Review","prompt":"Check","agentId":"00000000-0000-4000-8000-000000000001","projectId":null,"skills":null,"revision":"fixture","createdAt":0,"nextRun":null,"authorId":null,"authorAccessId":null,"authorRemoved":false,"scheduleFailure":null,"scheduleWaitReason":null,"nativePrincipals":[],"nativeAuthorityNodes":[],"nativeParentRunId":null,"nativeParentAccess":null,"nativeProvenanceUnknown":true}"""
             )
         assertNull(task.projectId)
         assertNull(task.skills)

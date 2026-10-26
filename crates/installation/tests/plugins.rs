@@ -1,4 +1,5 @@
 use common::AgentFixture;
+use common::MissionFixture;
 use common::ProjectFixture;
 
 mod common;
@@ -2615,7 +2616,7 @@ async fn plugin_management_is_owner_only_and_mcp_never_returns_secret_reads() {
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let task = s
-        .task(
+        .task_fixture(
             json!({ "name": "Inspect", "agentId": MAIN_AGENT_ID, "prompt": "Inspect" }),
             None,
         )

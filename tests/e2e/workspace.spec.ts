@@ -343,7 +343,7 @@ test('dark appearance settings, empty states and connection sign-in feedback', a
   await page.keyboard.press('Escape')
   await expect(page.locator('.theme-popover')).not.toBeVisible()
   await expect(page.getByRole('button', { name: 'Appearance: dark', exact: true })).toBeFocused()
-  await page.route('**/api/tasks', route => route.fulfill({ json: [] }))
+  await page.route('**/api/tasks', route => route.fulfill({ json: { tasks: [] } }))
   await page.goto(workspacePath('/tasks'))
   await expect(page.getByRole('heading', { name: 'No missions yet', exact: true })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('empty-tasks.png'), fullPage: true, animations: 'disabled' })

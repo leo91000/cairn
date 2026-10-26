@@ -1,3 +1,5 @@
+use common::MissionFixture;
+
 mod common;
 
 use common::relay_fixture::router;
@@ -37,7 +39,7 @@ impl Fixture {
         let service = Service::new(config).await.unwrap();
         let token = text(&common::relay_fixture::context(&service).await, "value").to_owned();
         let task = service
-            .task(
+            .task_fixture(
                 json!({ "name": "Live test", "prompt": "Test", "agentId": MAIN_AGENT_ID }),
                 None,
             )

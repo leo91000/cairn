@@ -96,7 +96,7 @@ class NativeUiTest {
                         tasks =
                             listOf(
                                 Task(
-                                    id = "a",
+                                    id = "8a025d72-4937-53c0-a41d-820414dc655d",
                                     name = "Revue quotidienne",
                                     agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
                                     projectId = "46d045dd-9bce-51e3-8a99-65aa9384efc9",
@@ -104,7 +104,7 @@ class NativeUiTest {
                                     nextRun = 1789405200000,
                                 ),
                                 Task(
-                                    id = "b",
+                                    id = "00eada4d-84f3-57cb-837e-3c023a643647",
                                     name = "Ancienne mission",
                                     agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
                                     projectId = "46d045dd-9bce-51e3-8a99-65aa9384efc9",

@@ -511,6 +511,11 @@ pub(crate) fn operations() -> Vec<Value> {
             .iter()
             .map(crate::capabilities::ProjectOperation::descriptor),
     );
+    operations.extend(
+        crate::capabilities::MISSION_OPERATIONS
+            .iter()
+            .map(crate::capabilities::MissionOperation::descriptor),
+    );
     operations
 }
 
@@ -541,6 +546,15 @@ pub(crate) async fn operation(
     name: &str,
     args: Value,
 ) -> Result<Value> {
+    if let Some(op) = crate::capabilities::mission_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(scopes.to_vec()),
+            )
+            .await;
+    }
     if let Some(op) = crate::capabilities::agent_operation(name) {
         return op
             .invoke(
@@ -757,9 +771,6 @@ pub(crate) async fn invoke(
                 .model_catalog(s)
                 .await
         }
-        "list_tasks" => Ok(s.store.list("tasks").await?.into()),
-        "create_task" => s.task(args, None).await,
-        "update_task" => s.task(args["task"].clone(), Some(text(&args, "id"))).await,
         "run_task" => s.enqueue(text(&args, "taskId"), "mcp", None).await,
         "convert_run_to_chat" => {
             s.chat_from_run_authorized(text(&args, "runId"), authorize)

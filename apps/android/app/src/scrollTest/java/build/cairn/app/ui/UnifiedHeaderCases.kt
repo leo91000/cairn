@@ -87,6 +87,7 @@ abstract class UnifiedHeaderCases {
                     }
                     val body =
                         when (path) {
+                            "/api/installations/fixture/api/tasks" -> """{"tasks":[]}"""
                             "/api/installations" -> installations
                             "/api/account/session" ->
                                 """{"authenticated":true,"csrf":"fixture","account":{"id":"fixture-account","email":"owner@example.test"},"installations":$installations}"""
@@ -123,7 +124,6 @@ abstract class UnifiedHeaderCases {
                                         )
                                     )
                                 )
-                            "/api/installations/fixture/api/tasks",
                             "/api/installations/fixture/api/tasks/activity",
                             "/api/installations/fixture/api/skills",
                             "/api/installations/fixture/api/mcps" -> "[]"

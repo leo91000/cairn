@@ -24,29 +24,11 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
-        if !input.confirm {
-            return Err(Error::bad("Confirm the merge."));
-        }
-        // A scheduled occurrence must finish admission before its profile can be
-        // removed. Otherwise a prepared snapshot could fail and skip that occurrence.
-        let _authors = self.task_author_lock.lock().await;
-        // A terminal DB status can precede the worker's final writes. Serialize with
-        // admission, cancellation and resume until the transfer is committed.
-        let active = self.worker.active.lock().await;
-        let executing = active.keys().cloned().collect::<Vec<_>>();
-        let result = self
-            .store
-            .transaction(move |db| {
-                authorize(db)?;
-                merge(db, &input, &executing)
-            })
-            .await?;
-        self.worker.notify();
-        Ok(result)
+        self.missions.merge_agents(self, input, authorize).await
     }
 }
 
-fn merge(
+pub(crate) fn merge(
     db: &Db<'_>,
     input: &cairn_contracts::MergeAgentsInput,
     executing: &[String],
@@ -119,18 +101,22 @@ fn merge(
 
     let mut tasks = 0;
     let mut chats = 0;
-    for (kind, count) in [("tasks", &mut tasks), ("chats", &mut chats)] {
-        for mut record in db.list(kind)? {
-            if record["agentId"] != source_id {
-                continue;
-            }
-            record["agentId"] = target_id.into();
-            if kind == "chats" {
-                record["agentName"] = target.settings.name.clone().into();
-            }
-            db.put(kind, &record)?;
-            *count += 1;
+    for mut mission in db.missions()? {
+        if mission.settings.agent_id == source.id {
+            mission.settings.agent_id = target.id;
+            mission.revision = crate::config::id();
+            db.save_mission(&mission)?;
+            tasks += 1;
         }
+    }
+    for mut record in db.list("chats")? {
+        if record["agentId"] != source_id {
+            continue;
+        }
+        record["agentId"] = target_id.into();
+        record["agentName"] = target.settings.name.clone().into();
+        db.put("chats", &record)?;
+        chats += 1;
     }
     // Keep each run's provider, model, instructions and access snapshot. Only its
     // profile identity changes so recovery and live authorization find the target.

@@ -1,3 +1,5 @@
+use common::MissionFixture;
+
 mod common;
 
 use common::relay_fixture::router;
@@ -128,7 +130,7 @@ fn guest_exports() -> Router {
 /// Starts a manual run of a new task and marks it running.
 async fn start_run(s: &Arc<Service>, name: &str, prompt: &str) -> Value {
     let task = s
-        .task(
+        .task_fixture(
             json!({ "name": name, "prompt": prompt, "agentId": MAIN_AGENT_ID }),
             None,
         )
@@ -391,7 +393,7 @@ async fn publication_checks_grants_and_downloads_require_authentication_and_corr
         );
     }
     let task = s
-        .task(
+        .task_fixture(
             json!({ "name": "Other", "prompt": "Other", "agentId": MAIN_AGENT_ID }),
             None,
         )

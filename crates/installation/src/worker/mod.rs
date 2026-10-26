@@ -245,6 +245,7 @@ async fn audit(store: &Store, action: &str, detail: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mission_fixture::MissionFixture;
 
     #[tokio::test]
     async fn committed_work_and_deployment_release_wake_the_scheduler() {
@@ -292,7 +293,7 @@ mod tests {
                 .is_err()
         );
         let task = s
-            .task(
+            .task_fixture(
                 json!({"name":"Wake test","prompt":"Hello","agentId":crate::config::MAIN_AGENT_ID}),
                 None,
             )

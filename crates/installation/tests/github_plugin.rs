@@ -3,6 +3,7 @@
 //! credentials, projects are imported through its project source, and data saved
 //! before the package exists moves into instances. GitHub is simulated locally.
 use common::AgentFixture;
+use common::MissionFixture;
 
 mod common;
 
@@ -45,7 +46,7 @@ fn restricted(name: &str) -> Value {
 
 async fn run(s: &Service, agent: &str) -> Value {
     let task = s
-        .task(
+        .task_fixture(
             json!({ "name": "Probe", "agentId": agent, "prompt": "Hello" }),
             None,
         )

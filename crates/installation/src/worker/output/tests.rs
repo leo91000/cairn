@@ -42,7 +42,7 @@ impl Fixture {
         .await
         .unwrap();
         let task = service
-            .task(
+            .task_fixture(
                 json!({
                     "name": "Tool activity test",
                     "prompt": "Fixture only",
@@ -1009,3 +1009,6 @@ async fn terminal_styling_and_utf8_survive_long_diagnostic_fragments() {
         assert_eq!(diagnostics, expected);
     }
 }
+
+#[cfg(test)]
+use crate::mission_fixture::MissionFixture;

@@ -4,7 +4,7 @@ use crate::{
     run_status::RunStatus,
     skills::Skills,
     store::{Db, Store, merge},
-    validation::{parse, text},
+    validation::text,
     vault::Vault,
 };
 use serde_json::{Value, json};
@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub struct Service {
-    pub task_author_lock: Arc<tokio::sync::Mutex<()>>,
+    pub missions: Arc<crate::missions::Missions>,
     pub node_maintenance_tasks: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     pub node_lease_deadlines:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::time::Instant>>>,
@@ -58,7 +58,7 @@ impl Service {
         let vault = Vault::new(store.clone(), &config.data_dir)?;
         crate::nodes::connector::record_manager_origin(&config).await?;
         let service = Arc::new(Self {
-            task_author_lock: Arc::default(),
+            missions: Arc::default(),
             node_maintenance_tasks: Arc::default(),
             node_lease_deadlines: Arc::default(),
             started: tokio::time::Instant::now(),
@@ -201,7 +201,7 @@ impl Service {
                     if creation_id.is_some() { return Ok((current.clone(), false)); }
                     return Err(Error::conflict("Agent already exists."));
                 }
-                if db.0.query_row("SELECT EXISTS(SELECT 1 FROM records WHERE id=? UNION ALL SELECT 1 FROM projects WHERE id=?)", rusqlite::params![agent.id.to_string(), agent.id.to_string()], |row| row.get::<_, bool>(0))? {
+                if db.0.query_row("SELECT EXISTS(SELECT 1 FROM records WHERE id=? UNION ALL SELECT 1 FROM projects WHERE id=? UNION ALL SELECT 1 FROM missions WHERE id=?)", rusqlite::params![agent.id.to_string(), agent.id.to_string(), agent.id.to_string()], |row| row.get::<_, bool>(0))? {
                     return Err(Error::conflict("This creation identity belongs to a different resource."));
                 }
             } else {
@@ -396,125 +396,6 @@ impl Service {
         Ok(())
     }
 
-    pub async fn task(&self, input: Value, existing: Option<&str>) -> Result<Value> {
-        self.task_as(input, existing, None).await
-    }
-
-    pub(crate) async fn save_task(
-        &self,
-        input: Value,
-        existing: Option<&str>,
-        author: Option<cairn_protocol::TaskAuthorGrant>,
-        bearer: Option<String>,
-        reduces_execution: bool,
-    ) -> Result<Value> {
-        let creation_id = creation_id(&input, existing)?;
-        let mut task = parse("task", input)?;
-        let agent = self.agent_snapshot(text(&task, "agentId")).await?;
-        let origin = crate::native::policy::origin();
-        if crate::native::policy::native(&agent) && !reduces_execution {
-            crate::native::policy::refresh(self).await?;
-        }
-        task_projects(&agent, &task, &self.store.projects().await?)?;
-        if let Some(cron) = task["cron"].as_str() {
-            next_occurrences(cron, text(&task, "timezone"), now(), 1)?;
-        }
-        task["id"] = existing
-            .map(str::to_owned)
-            .or(creation_id.clone())
-            .unwrap_or_else(id)
-            .into();
-        task["createdAt"] = if let Some(id) = existing {
-            let previous = self.get("tasks", id).await?;
-            task["authorId"] = previous["authorId"].clone();
-            task["authorAccessId"] = previous["authorAccessId"].clone();
-            task["authorRemoved"] = previous["authorRemoved"].clone();
-            previous["createdAt"].clone()
-        } else {
-            if let Some(author) = author {
-                task["authorId"] = author.account_id.into();
-                task["authorAccessId"] = author.access_id.into();
-            }
-            now().into()
-        };
-        let scheduled =
-            task["enabled"] == true && task["archived"] != true && task["cron"].is_string();
-        if scheduled && task["authorRemoved"] == true {
-            return Err(Error::conflict(
-                "This author's access ended. Duplicate the task to schedule it again.",
-            ));
-        }
-        task["nextRun"] = if scheduled {
-            next_occurrences(text(&task, "cron"), text(&task, "timezone"), now(), 1)?[0].into()
-        } else {
-            Value::Null
-        };
-        let existing = existing.map(str::to_owned);
-        self.store
-            .transaction(move |db| {
-                required(
-                    db.agent_snapshot(text(&task, "agentId"))?,
-                    "Agent no longer exists",
-                )?;
-                let previous = existing
-                    .as_deref()
-                    .map(|id| db.get("tasks", id))
-                    .transpose()?
-                    .flatten();
-                let grant = if reduces_execution {
-                    required(previous.clone(), "Task not found")?
-                } else {
-                    crate::native::policy::task_grant(db, &task, previous.as_ref(), &origin)?
-                };
-                crate::native::policy::apply(&mut task, &grant);
-                if let Some(bearer) = bearer {
-                    crate::installation_mcp::authorize_task_in(
-                        db,
-                        &bearer,
-                        &task,
-                        existing.as_deref(),
-                    )?;
-                }
-                if let Some(previous) = replayed_creation(db, "tasks", creation_id.as_deref())? {
-                    return Ok(previous);
-                }
-                let agent = required(
-                    db.agent_snapshot(text(&task, "agentId"))?,
-                    "Agent no longer exists",
-                )?;
-                task_projects(&agent, &task, &db.projects()?)?;
-                db.put("tasks", &task)?;
-                db.audit("task.saved", &json!({ "id": task["id"] }))?;
-                Ok(task)
-            })
-            .await
-    }
-
-    pub async fn remove(&self, kind: &str, id: &str) -> Result<()> {
-        self.remove_authorized(kind, id, |_| Ok(())).await
-    }
-
-    pub(crate) async fn remove_authorized<F>(
-        &self,
-        kind: &str,
-        id: &str,
-        authorize: F,
-    ) -> Result<()>
-    where
-        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
-    {
-        let (kind, id) = (kind.to_owned(), id.to_owned());
-        self.store
-            .transaction(move |db| {
-                authorize(db)?;
-                required(db.get(&kind, &id)?, "Record not found")?;
-                ensure_removable(db, &kind, &id)?;
-                db.remove(&kind, &id)?;
-                db.audit(&format!("{kind}.deleted"), &json!({ "id": id }))
-            })
-            .await
-    }
-
     pub async fn agent_skills(&self, agent: &Value) -> Result<Vec<Value>> {
         let access = policy(agent);
         let mut available = self.skills.list("global", None).await?;
@@ -623,9 +504,7 @@ impl Service {
     ) -> Result<Value> {
         let run = self.prepare_run(task_id, trigger).await?;
         if trigger == "schedule" {
-            let _guard = self.task_author_lock.lock().await;
-            self.require_task_author(&run["snapshot"]["task"]).await?;
-            return self.queue_run(run, dedupe, None).await;
+            return self.missions.enqueue_scheduled(self, run, dedupe).await;
         }
         self.queue_run(run, dedupe, None).await
     }
@@ -635,32 +514,21 @@ impl Service {
         self.queue_run(run, None, Some(bearer.to_owned())).await
     }
 
-    async fn prepare_run(&self, task_id: &str, trigger: &str) -> Result<Value> {
+    pub(crate) async fn prepare_run(&self, task_id: &str, trigger: &str) -> Result<Value> {
         let run = self
-            .snapshot(self.get("tasks", task_id).await?, trigger)
+            .snapshot(
+                serde_json::to_value(required(
+                    self.store.mission(task_id).await?,
+                    "Mission not found",
+                )?)?,
+                trigger,
+            )
             .await?;
         crate::nodes::require_node(&run["snapshot"]["agent"])?;
         Ok(run)
     }
 
-    /// Call under the author lock, after every potentially slow preparation step.
-    async fn require_task_author(&self, task: &Value) -> Result<()> {
-        let Some(policy) = self.synchronize_task_authors_locked().await? else {
-            return Err(Error::unauthorized(
-                "Installation is not claimed. Run cairn claim before scheduling work.",
-            ));
-        };
-        let eligible = policy
-            .grant(text(task, "authorId"))
-            .is_some_and(|grant| task["authorAccessId"] == grant.access_id);
-
-        if !eligible {
-            return Err(Error::conflict("The task author's access ended."));
-        }
-        Ok(())
-    }
-
-    async fn queue_run(
+    pub(crate) async fn queue_run(
         &self,
         run: Value,
         dedupe: Option<String>,
@@ -711,132 +579,6 @@ impl Service {
         self.worker.notify();
         Ok(result)
     }
-
-    pub async fn schedule(&self) -> Result<()> {
-        let _guard = self.task_author_lock.lock().await;
-        if !self.store.list("tasks").await?.iter().any(schedule_due) {
-            return Ok(());
-        }
-
-        // No new scheduled work is admitted without the current beacon authority.
-        // Already admitted work continues through a temporary beacon outage.
-        let authority_wait_reason = match self.synchronize_task_authors_locked().await {
-            Ok(Some(_)) => None,
-            Ok(None) => Some(
-                "Installation is not claimed. Run cairn claim before scheduling work.".to_owned(),
-            ),
-            Err(error) => Some(error.message),
-        };
-
-        if let Some(reason) = authority_wait_reason {
-            for task in self
-                .store
-                .list("tasks")
-                .await?
-                .iter()
-                .filter(|task| schedule_due(task))
-            {
-                self.schedule_wait(task, Some(&reason)).await?;
-            }
-            return Ok(());
-        }
-
-        for task in self.store.list("tasks").await? {
-            if !schedule_due(&task) {
-                continue;
-            }
-
-            let prepared = self.prepare_run(text(&task, "id"), "schedule").await;
-            let admission = match prepared {
-                Ok(run) => {
-                    if let Err(error) = self.require_task_author(&run["snapshot"]["task"]).await {
-                        if error.status != 409 {
-                            self.schedule_wait(&task, Some(&error.message)).await?;
-                        }
-                        continue;
-                    }
-
-                    self.schedule_wait(&task, None).await?;
-                    let dedupe = Some(format!("{}:{}", text(&task, "id"), task["nextRun"]));
-                    self.queue_run(run, dedupe, None).await
-                }
-                Err(error) => {
-                    // The authority recovered; this task's preparation is now the failure.
-                    self.schedule_wait(&task, None).await?;
-                    Err(error)
-                }
-            };
-
-            // A skipped occurrence stays on the task until a later one is admitted or the task
-            // is saved, so a mission never looks healthy while its schedule silently fails.
-            let failure = match &admission {
-                Ok(_) => Some(Value::Null),
-                Err(error) if error.status != 409 => Some(json!({
-                    "message": error.message,
-                    "scheduledFor": task["nextRun"],
-                    "at": now(),
-                })),
-                Err(_) => None,
-            };
-
-            if let Err(error) = &admission
-                && error.status != 409
-            {
-                let detail = json!({
-                    "taskId": task["id"],
-                    "error": error.message,
-                });
-                self.store.audit("schedule.failed", detail).await?;
-            }
-
-            let next = next_occurrences(text(&task, "cron"), text(&task, "timezone"), now(), 1)?[0];
-            self.store
-                .write(move |db| {
-                    if let Some(mut current) = db.get("tasks", text(&task, "id"))?
-                        && current["nextRun"] == task["nextRun"]
-                    {
-                        current["nextRun"] = next.into();
-                        if let Some(failure) = failure {
-                            current["scheduleFailure"] = failure;
-                        }
-                        db.put("tasks", &current)?;
-                    }
-                    Ok(())
-                })
-                .await?;
-        }
-        Ok(())
-    }
-
-    async fn schedule_wait(&self, task: &Value, reason: Option<&str>) -> Result<()> {
-        let task_id = text(task, "id").to_owned();
-        let reason = reason.map_or(Value::Null, Into::into);
-        self.store
-            .transaction(move |db| {
-                let Some(mut current) = db.get("tasks", &task_id)? else {
-                    return Ok(());
-                };
-                if current["scheduleWaitReason"] == reason {
-                    return Ok(());
-                }
-
-                current["scheduleWaitReason"] = reason.clone();
-                db.put("tasks", &current)?;
-                let action = if reason.is_null() {
-                    "schedule.resumed"
-                } else {
-                    "schedule.deferred"
-                };
-                db.audit(
-                    action,
-                    &json!({
-                        "taskId": task_id,
-                        "reason": reason,
-                    }),
-                )
-            })
-            .await
-    }
 }
 
 /// The conversation or mission whose agent started a run. A conversation's runs carry its id as
@@ -853,13 +595,6 @@ fn requester(caller: &Value) -> Value {
             "taskId": caller["taskId"],
         })
     }
-}
-
-fn schedule_due(task: &Value) -> bool {
-    task["enabled"] == true
-        && task["archived"] != true
-        && !task["cron"].is_null()
-        && task["nextRun"].as_i64().is_some_and(|time| time <= now())
 }
 
 fn skill_key(skill: &Value) -> String {
@@ -915,7 +650,15 @@ pub(crate) fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> 
     } else {
         "projectId"
     };
-    if kind != "tasks" && db.list("tasks")?.iter().any(|t| t[task_field] == id) {
+    if kind != "tasks"
+        && db.missions()?.iter().any(|t| {
+            if task_field == "agentId" {
+                t.settings.agent_id.to_string() == id
+            } else {
+                t.settings.project_id.is_some_and(|p| p.to_string() == id)
+            }
+        })
+    {
         return Err(Error::conflict(
             "This item is used by a task. Update or remove that task first.",
         ));
@@ -1102,57 +845,4 @@ pub(crate) fn normalize_origin(remote: &str) -> String {
         }
     }
     String::new()
-}
-
-/// A form keeps this identity across an uncertain POST response. It is the normal
-/// record UUID, so replay needs no new persistent format or auxiliary key. Updates
-/// continue to use the URL identity and cannot change it through the request body.
-pub(crate) fn creation_id(input: &Value, existing: Option<&str>) -> Result<Option<String>> {
-    if existing.is_some() {
-        return Ok(None);
-    }
-    input
-        .get("creationId")
-        .map(|value| {
-            let value = value
-                .as_str()
-                .ok_or_else(|| Error::bad("creationId must be a UUID"))?;
-            let uuid = uuid::Uuid::parse_str(value)
-                .map_err(|_| Error::bad("creationId must be a UUID"))?;
-            if uuid.get_version() != Some(uuid::Version::Random) {
-                return Err(Error::bad("creationId must be a random UUID"));
-            }
-            Ok(uuid.to_string())
-        })
-        .transpose()
-}
-
-/// Record IDs share a namespace across kinds. A caller-selected identity must
-/// never turn a collision into an upsert of a different resource's JSON.
-pub(crate) fn replayed_creation(
-    db: &Db<'_>,
-    kind: &str,
-    creation_id: Option<&str>,
-) -> Result<Option<Value>> {
-    let Some(id) = creation_id else {
-        return Ok(None);
-    };
-    if db.project(id)?.is_some() || db.agent(id)?.is_some() {
-        return Err(Error::conflict(
-            "This creation identity belongs to a different resource.",
-        ));
-    }
-    let rows = db.json_rows(
-        "SELECT json_object('kind',kind,'record',json(data)) FROM records WHERE id=?",
-        [id],
-    )?;
-    let Some(row) = rows.first() else {
-        return Ok(None);
-    };
-    if row["kind"] != kind {
-        return Err(Error::conflict(
-            "This creation identity belongs to a different resource.",
-        ));
-    }
-    Ok(Some(row["record"].clone()))
 }
