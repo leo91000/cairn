@@ -362,7 +362,13 @@ impl Models {
             }
         }
         let mut models = models.into_values().collect::<Vec<_>>();
+        // Only accounts a run can land on decide which speeds are limited.
         for model in &mut models {
+            for tier in model["serviceTiers"].as_array_mut().into_iter().flatten() {
+                if let Some(tier) = tier.as_object_mut() {
+                    tier.remove("limited");
+                }
+            }
             mark_unconfirmed(model, &catalogs);
         }
         let error = if sources.is_empty() {

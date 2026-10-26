@@ -29,9 +29,9 @@ export function showsSpeed(provider: Provider, model: CodingAgentModel | undefin
 }
 
 /**
- * A queued or saved speed: one its model lacks runs at Standard. Any other faster speed is a
- * request, which each turn reports on, since Codex may answer with its built-in list and an
- * account's plan decides. An empty model is the catalog's default.
+ * A queued or saved faster speed is a request, which each turn reports on, since Codex may answer
+ * with its built-in list and an account's plan decides; one the model's catalog lacks says so. An
+ * empty model is the catalog's default.
  */
 export function speedNote(speed: string, model: string, models: CodingAgentModel[]) {
   if (!speed)

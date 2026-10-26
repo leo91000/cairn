@@ -1045,6 +1045,25 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
         .find(|m| m["model"] == "fixture-fast")
         .unwrap();
     assert!(fast["serviceTiers"][0].get("limited").is_none(), "{fast}");
+    // Nor does a signed-out account lacking a speed make it limited: Ultrafast, which only
+    // the other account lists, is then confirmed by every account a run can land on.
+    let mut restored = record.clone();
+    restored["state"] = "error".into();
+    service
+        .store
+        .set(&key, catalog.clone(), None)
+        .await
+        .unwrap();
+    service.store.put("agentAccounts", restored).await.unwrap();
+    let listed = service.models.list(&service).await.unwrap();
+    let fast = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == "fixture-fast")
+        .unwrap();
+    assert_eq!(fast["serviceTiers"][1]["id"], "ultrafast");
+    assert!(fast["serviceTiers"][1].get("limited").is_none(), "{fast}");
     service.store.put("agentAccounts", record).await.unwrap();
     service.store.set(&key, catalog, None).await.unwrap();
     let listed = service.models.list(&service).await.unwrap();

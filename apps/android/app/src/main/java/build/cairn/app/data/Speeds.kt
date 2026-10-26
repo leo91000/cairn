@@ -31,9 +31,9 @@ fun showsSpeed(provider: String, model: CodingAgentModel?, speed: String) =
     provider == "codex" && (!model?.serviceTiers.isNullOrEmpty() || speed.isNotBlank())
 
 /**
- * A queued or saved speed: one its model lacks runs at Standard. Any other faster speed is a
- * request, which each turn reports on, since Codex may answer with its built-in list and an
- * account's plan decides. An empty model is the catalog's default.
+ * A queued or saved faster speed is a request, which each turn reports on, since Codex may answer
+ * with its built-in list and an account's plan decides; one the model's catalog lacks says so. An
+ * empty model is the catalog's default.
  */
 fun speedNote(speed: String, model: String, models: List<CodingAgentModel>): String? {
     if (speed.isBlank()) return null
