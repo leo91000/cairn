@@ -41,7 +41,7 @@ export function speedNote(speed: string, model: string, models: CodingAgentModel
     return `${label} speed`
   const row = models.find(item => model ? item.model === model : item.isDefault)
   if (row?.serviceTiers && !offersSpeed(row, speed))
-    return `Standard speed (${label} not offered)`
+    return `${label} speed requested (not listed for this model)`
   return `${label} speed requested`
 }
 

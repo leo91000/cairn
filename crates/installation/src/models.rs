@@ -270,7 +270,13 @@ fn merge_tiers(existing: &mut Value, model: &Value) {
 /// without knowing whether Codex applies it.
 fn mark_unconfirmed(model: &mut Value, catalogs: &[Value]) {
     let name = text(model, "model").to_owned();
-    let runs_elsewhere = |catalog: &Value| fresh(catalog) && catalog_row(catalog, &name).is_none();
+    // As routing: an account whose fresh catalog lacks the model runs it only when no other
+    // fresh catalog lists the model.
+    let listed_fresh = catalogs
+        .iter()
+        .any(|catalog| fresh(catalog) && catalog_row(catalog, &name).is_some());
+    let runs_elsewhere =
+        |catalog: &Value| listed_fresh && fresh(catalog) && catalog_row(catalog, &name).is_none();
     let Some(tiers) = model["serviceTiers"].as_array_mut() else {
         return;
     };
@@ -706,6 +712,25 @@ mod tests {
             &json!({ "serviceTiers": [tier("priority")], "defaultServiceTier": null }),
         );
         assert_eq!(unknown["serviceTiers"], json!([tier("priority")]));
+    }
+
+    #[test]
+    fn limited_speeds_follow_the_accounts_routing_can_use() {
+        let fast = json!({ "model": "fast", "serviceTiers": [{ "id": "priority" }] });
+        let confirming = |age: i64| json!({ "checkedAt": now() - age, "models": [fast.clone()] });
+        let without_model =
+            json!({ "checkedAt": now(), "models": [{ "model": "other", "serviceTiers": [] }] });
+        let limited = |catalogs: &[Value]| {
+            let mut model = fast.clone();
+            mark_unconfirmed(&mut model, catalogs);
+            model["serviceTiers"][0]["limited"] == true
+        };
+
+        // A fresh catalog listing the model keeps the run off an account that lacks it.
+        assert!(!limited(&[confirming(0), without_model.clone()]));
+        // Once that catalog is past routing's freshness, the other account can take the run, so
+        // the speed it cannot confirm is limited.
+        assert!(limited(&[confirming(TTL + 60_000), without_model]));
     }
 
     #[test]

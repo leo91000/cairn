@@ -557,7 +557,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
                       </button>
                     </div>
                     <p v-if="!speedOffered" class="text-2xs text-warning" role="status">
-                      This model doesn’t offer {{ speedLabel(currentSpeed, knownTiers) }}. Its runs use Standard speed until you choose a model that does.
+                      Codex’s catalog doesn’t list {{ speedLabel(currentSpeed, knownTiers) }} for this model, so its turns will likely run at Standard; each turn says how it runs.
                     </p>
                     <p v-else-if="appliedTier" class="text-2xs text-muted">
                       {{ appliedTier.description || `${appliedTier.name} speed` }}<template v-if="appliedTier.limited">

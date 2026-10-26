@@ -42,7 +42,7 @@ fun speedNote(speed: String, model: String, models: List<CodingAgentModel>): Str
     if (speed == STANDARD_SPEED) return "vitesse $label"
     val row = models.find { if (model.isEmpty()) it.isDefault else it.model == model }
     return if (row?.serviceTiers != null && !offersSpeed(row, speed))
-        "vitesse Standard ($label non proposée)"
+        "vitesse $label demandée (non listée pour ce modèle)"
     else "vitesse $label demandée"
 }
 

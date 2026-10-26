@@ -124,7 +124,7 @@ test('keeps the Codex speed across models, for agents and queued chat turns', as
   await expect(speed('Agent default · Fast')).toHaveAttribute('aria-checked', 'true')
   // Another model keeps the speed but never claims one it does not offer.
   await menu.getByRole('radio', { name: 'Deep thinker', exact: true }).click()
-  await expect(menu.getByText('This model doesn’t offer Fast.', { exact: false })).toBeVisible()
+  await expect(menu.getByText('Codex’s catalog doesn’t list Fast for this model', { exact: false })).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(picker).toHaveAccessibleName('Agent, model, reasoning and speed: Codex · Deep thinker · Medium reasoning')
   await picker.click()
@@ -162,6 +162,8 @@ test('keeps the Codex speed across models, for agents and queued chat turns', as
   await workspace.api(`/api/chats/${chatId}/messages`, 'POST', { id: crypto.randomUUID(), text: 'finish now', mode: 'steer' })
   await expect.poll(() => workspace.service.chats.detail(chatId).run?.summary, { timeout: 30000 }).toContain('Then go faster')
   expect(workspace.service.chats.detail(chatId).run?.snapshot.agent).toMatchObject({ model: 'fixture-fast', speed: 'priority' })
+  // Codex and the cached catalog both list Fast: the turn says it asks for it.
+  await expect(page.getByText('Selected speed requested for this turn')).toBeVisible({ timeout: 30000 })
 
   // Codex's own list has no Fast for Deep thinker: the turn asks for Standard and says so.
   await expect.poll(() => workspace.service.chats.detail(chatId).run?.status, { timeout: 30000 }).toBe('succeeded')

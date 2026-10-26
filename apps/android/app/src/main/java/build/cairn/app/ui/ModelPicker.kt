@@ -1089,7 +1089,7 @@ private fun SpeedControl(
     }
     if (!offered)
         Text(
-            "Ce modèle ne propose pas la vitesse ${speedLabel(current, knownTiers)}. Ses exécutions utilisent la vitesse Standard tant que vous ne choisissez pas un modèle qui la propose.",
+            "Le catalogue de Codex ne liste pas la vitesse ${speedLabel(current, knownTiers)} pour ce modèle : ses tours passeront sans doute en Standard ; chaque tour l’indique.",
             style = MaterialTheme.typography.bodySmall,
             color = colors.tertiary,
         )

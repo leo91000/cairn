@@ -257,9 +257,7 @@ class ModelPickerTest : ModelPickerCases() {
         compose.onNodeWithText("GPT-6 Luna").performClick()
         compose.waitForIdle()
         assert(chosen == Triple("gpt-6-luna", "", "ultrafast")) { chosen.toString() }
-        compose
-            .onNodeWithText("Ce modèle ne propose pas la vitesse Ultrafast", substring = true)
-            .assertExists()
+        compose.onNodeWithText("ne liste pas la vitesse Ultrafast", substring = true).assertExists()
         capture("speed-unavailable")
         compose
             .onNode(hasText("Standard") and hasAnyAncestor(hasTestTag("speed-options")))

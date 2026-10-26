@@ -232,6 +232,7 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
     }
     for key in [
         format!("run-checkpoint:{run}"),
+        format!("turn-speed:{run}"),
         format!("chat-error:{cid}"),
         format!("chat-title-pending:{cid}"),
         format!("chat-title-checked:{cid}"),
@@ -265,4 +266,29 @@ pub async fn purge(s: &Service, chat: Value) -> Result<()> {
     crate::nodes::publication::purge(s, &run).await?;
     files(s, &chat).await?;
     s.store.transaction(move |db| forget(db, &cid, &run)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn forgetting_a_conversation_removes_its_run_records() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.put("chats", &json!({ "id": "chat", "runId": "run" }))?;
+                for key in ["run-checkpoint:run", "turn-speed:run", "chat-error:chat"] {
+                    db.set(key, &json!({ "messageId": "message" }), None)?;
+                }
+                forget(db, "chat", "run")?;
+                for key in ["run-checkpoint:run", "turn-speed:run", "chat-error:chat"] {
+                    assert!(db.kv(key)?.is_none(), "{key}");
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 }

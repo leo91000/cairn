@@ -25,12 +25,12 @@ class SpeedsTest {
         // A faster speed is a request: each turn says how it runs.
         assertEquals("vitesse Fast demandée", speedNote("priority", "fast", listOf(fast, deep)))
         assertEquals(
-            "vitesse Standard (Fast non proposée)",
+            "vitesse Fast demandée (non listée pour ce modèle)",
             speedNote("priority", "deep", listOf(fast, deep)),
         )
         // An empty model is the catalog's default.
         assertEquals(
-            "vitesse Standard (Fast non proposée)",
+            "vitesse Fast demandée (non listée pour ce modèle)",
             speedNote("priority", "", listOf(fast, deep.copy(isDefault = true))),
         )
         // Without the model's speeds, the speed is only requested.
