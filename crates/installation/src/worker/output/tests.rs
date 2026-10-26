@@ -158,12 +158,20 @@ async fn runtime_disk_notice_preserves_publication_metadata_and_redacts_all_payl
 #[tokio::test]
 async fn speed_checks_before_a_turn_become_conversation_notices() {
     let mut fixture = Fixture::new().await;
-    for speed in [
-        json!({ "requested": "priority", "applied": "standard" }),
-        json!({ "requested": "priority", "unconfirmed": true }),
+    let standard = json!({ "requested": "priority", "applied": "standard" });
+    let fast = json!({ "requested": "priority", "applied": "priority" });
+    let unconfirmed = json!({ "requested": "priority", "unconfirmed": true });
+    // A confirmed speed says nothing; a retry repeating an outcome adds nothing; a later attempt
+    // getting the speed after all says so; another message starts over.
+    for (message, speed) in [
+        ("first", &fast),
+        ("second", &standard),
+        ("second", &standard),
+        ("second", &fast),
+        ("third", &unconfirmed),
     ] {
         fixture
-            .event(json!({ "type": "turn.speed", "speed": speed }))
+            .event(json!({ "type": "turn.speed", "messageId": message, "speed": speed }))
             .await;
     }
     let id = fixture.id.clone();
@@ -176,22 +184,20 @@ async fn speed_checks_before_a_turn_become_conversation_notices() {
     let notices = events
         .iter()
         .filter(|event| event["type"] == "status" && event["payload"]["speed"].is_object())
+        .map(|event| {
+            (
+                event["payload"]["messageId"].clone(),
+                event["text"].as_str().unwrap().to_owned(),
+            )
+        })
         .collect::<Vec<_>>();
-    assert_eq!(notices.len(), 2, "{events:#?}");
-    assert_eq!(notices[0]["payload"]["speed"]["applied"], "standard");
-    assert!(
-        notices[0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("runs at Standard speed")
-    );
-    assert_eq!(notices[1]["payload"]["speed"]["unconfirmed"], true);
-    assert!(
-        notices[1]["text"]
-            .as_str()
-            .unwrap()
-            .contains("may run at Standard speed")
-    );
+    assert_eq!(notices.len(), 3, "{events:#?}");
+    assert_eq!(notices[0].0, "second");
+    assert!(notices[0].1.contains("runs at Standard speed"));
+    assert_eq!(notices[1].0, "second");
+    assert!(notices[1].1.contains("now offers the selected speed"));
+    assert_eq!(notices[2].0, "third");
+    assert!(notices[2].1.contains("may run at Standard speed"));
 }
 
 #[tokio::test]

@@ -967,8 +967,9 @@ impl Chat<'_> {
     }
 
     /// The tier sent with the turn. Codex silently runs Standard for a tier its own catalog lacks,
-    /// so a faster tier is checked against this process's model list first, and the conversation
-    /// is told when the turn runs at Standard or when Codex cannot confirm the tier.
+    /// so a faster tier is checked against this process's model list first. Each attempt reports
+    /// its outcome for the message; the conversation shows when it runs at Standard, when Codex
+    /// cannot confirm the tier, and when a later attempt gets it after all.
     async fn service_tier(&mut self, plan: &Value) -> Result<String> {
         let tier = text(plan, "serviceTier").to_owned();
         if tier.is_empty() || tier == crate::models::CODEX_STANDARD_TIER {
@@ -986,7 +987,10 @@ impl Chat<'_> {
             check = crate::models::check_tier(self.session, &model, &tier) => check,
         };
         let speed = match check {
-            crate::models::TierCheck::Offered => return Ok(tier),
+            crate::models::TierCheck::Offered => json!({
+                "requested": tier,
+                "applied": tier,
+            }),
             crate::models::TierCheck::Lacking => json!({
                 "requested": tier,
                 "applied": crate::models::STANDARD_SPEED,
@@ -996,8 +1000,12 @@ impl Chat<'_> {
                 "unconfirmed": true,
             }),
         };
-        self.emit(json!({ "type": "turn.speed", "speed": speed }))
-            .await?;
+        self.emit(json!({
+            "type": "turn.speed",
+            "messageId": plan["execution"]["messageId"],
+            "speed": speed,
+        }))
+        .await?;
         Ok(if check == crate::models::TierCheck::Lacking {
             crate::models::CODEX_STANDARD_TIER.to_owned()
         } else {

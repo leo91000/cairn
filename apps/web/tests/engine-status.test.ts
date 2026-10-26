@@ -184,6 +184,16 @@ describe('engine status', () => {
     expect(notices([unconfirmed, step()]).map(notice => [notice.title, notice.subtitle])).toEqual([
       ['Speed not confirmed for this turn', 'Codex couldn’t confirm it offers the selected speed for this model here; this turn may run at Standard'],
     ])
+
+    // A later attempt, on another account, gets the speed after all.
+    const confirmed = {
+      ...event('status', { speed: { requested: 'priority', applied: 'priority' } }),
+      text: 'Codex now offers the selected speed for this model here.',
+    }
+    expect(notices([fallback, confirmed]).map(notice => notice.title)).toEqual([
+      'This turn runs at Standard speed',
+      'This turn now runs at the selected speed',
+    ])
   })
 
   it('gives the usage banner the reset the engine reported', () => {

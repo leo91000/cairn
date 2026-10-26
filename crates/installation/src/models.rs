@@ -487,35 +487,14 @@ pub fn validate_speed(speed: &str) -> Result<()> {
     Ok(())
 }
 
-/// The `serviceTier` sent to Codex for a run's speed.
-#[derive(Debug, PartialEq, Eq)]
-pub enum ServiceTierChoice {
-    /// The account's fresh catalog does not offer the chosen speed for this model.
-    Unavailable,
-    /// Sent as is; Codex itself omits a tier its own catalog does not offer.
-    Send(String),
-}
-
-/// Resolves a run's speed with this account's fresh capabilities; cache misses keep it.
-pub async fn service_tier(
-    s: &Service,
-    account: &str,
-    model: &str,
-    speed: &str,
-) -> Result<ServiceTierChoice> {
-    let cached = s.store.kv(&format!("codex-models:{account}")).await?;
-    Ok(resolve_tier(cached.as_ref(), model, speed))
-}
-
-fn resolve_tier(cached: Option<&Value>, model: &str, speed: &str) -> ServiceTierChoice {
+/// The `serviceTier` a run asks Codex for. A faster tier is then checked by the turn itself,
+/// against the Codex process that runs it ([`check_tier`]), which alone decides and reports it.
+pub fn service_tier(speed: &str) -> &str {
     match speed {
         // Codex's app server applies no model default and keeps a thread's earlier tier:
         // a turn without a chosen speed asks for Standard, as it runs.
-        "" | STANDARD_SPEED => ServiceTierChoice::Send(CODEX_STANDARD_TIER.to_owned()),
-        tier if cached.and_then(|cached| offers_tier(cached, model, tier)) == Some(false) => {
-            ServiceTierChoice::Unavailable
-        }
-        tier => ServiceTierChoice::Send(tier.to_owned()),
+        "" | STANDARD_SPEED => CODEX_STANDARD_TIER,
+        tier => tier,
     }
 }
 
@@ -709,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn speeds_resolve_with_fresh_account_capabilities_and_keep_unknown_ones() {
+    fn speeds_map_to_tiers_and_only_known_catalogs_route_them() {
         let cached = json!({
             "checkedAt": now(),
             "models": [
@@ -722,48 +701,31 @@ mod tests {
                 { "model": "gpt-5.5" },
             ],
         });
-        let send = |tier: &str| ServiceTierChoice::Send(tier.to_owned());
-        let resolve = |model: &str, speed: &str| resolve_tier(Some(&cached), model, speed);
-
         // Without a chosen speed, including older messages and agents, a turn runs at Standard
         // even after one at another speed, and whatever the model's catalog default.
-        assert_eq!(resolve("gpt-6-astra", ""), send("default"));
-        assert_eq!(resolve("custom-alias", ""), send("default"));
-        assert_eq!(resolve("gpt-6-luna", "standard"), send("default"));
-        assert_eq!(resolve("gpt-6-astra", "priority"), send("priority"));
-        assert_eq!(resolve("", "priority"), send("priority"));
-        // Without a model, Codex may run another one than the catalog default: the turn checks.
-        assert_eq!(resolve("", "ultrafast"), send("ultrafast"));
-        assert_eq!(
-            resolve("gpt-6-astra", "ultrafast"),
-            ServiceTierChoice::Unavailable
-        );
-        assert_eq!(
-            resolve("gpt-6-luna", "priority"),
-            ServiceTierChoice::Unavailable
-        );
+        assert_eq!(service_tier(""), "default");
+        assert_eq!(service_tier("standard"), "default");
+        assert_eq!(service_tier("priority"), "priority");
 
+        // Routing prefers accounts whose recent catalog confirms a tier.
+        assert_eq!(offers_tier(&cached, "gpt-6-astra", "priority"), Some(true));
+        assert_eq!(
+            offers_tier(&cached, "gpt-6-astra", "ultrafast"),
+            Some(false)
+        );
+        assert_eq!(offers_tier(&cached, "gpt-6-luna", "priority"), Some(false));
         // A catalog past the picker's freshness still knows its speeds between usage polls.
         let mut lapsed = cached.clone();
         lapsed["checkedAt"] = (now() - TTL - 60_000).into();
-        assert_eq!(
-            resolve_tier(Some(&lapsed), "gpt-6-luna", "priority"),
-            ServiceTierChoice::Unavailable
-        );
+        assert_eq!(offers_tier(&lapsed, "gpt-6-luna", "priority"), Some(false));
 
-        // Unknown capabilities are left to Codex: a model or speed list it did not report,
-        // an outdated catalog, or none at all.
-        assert_eq!(resolve("gpt-5.5", "priority"), send("priority"));
-        assert_eq!(resolve("custom-alias", "priority"), send("priority"));
+        // Unknown capabilities: a model or speeds the catalog does not list, no model (Codex
+        // runs the one its configuration sets), or an outdated catalog.
+        assert_eq!(offers_tier(&cached, "gpt-5.5", "priority"), None);
+        assert_eq!(offers_tier(&cached, "custom-alias", "priority"), None);
+        assert_eq!(offers_tier(&cached, "", "ultrafast"), None);
         let mut stale = cached.clone();
         stale["checkedAt"] = (now() - SPEEDS_TTL - 1).into();
-        assert_eq!(
-            resolve_tier(Some(&stale), "gpt-6-luna", "priority"),
-            send("priority")
-        );
-        assert_eq!(
-            resolve_tier(None, "gpt-6-luna", "priority"),
-            send("priority")
-        );
+        assert_eq!(offers_tier(&stale, "gpt-6-luna", "priority"), None);
     }
 }

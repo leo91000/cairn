@@ -1070,7 +1070,8 @@ internal fun timelineEntries(
                     val speed =
                         event.type == "status" &&
                             (speedFallback(presentation.data) ||
-                                speedUnconfirmed(presentation.data))
+                                speedUnconfirmed(presentation.data) ||
+                                speedConfirmed(presentation.data))
                     if (
                         event.id !in recovered &&
                             (presentation.failed || interrupted || connection || engine || speed)

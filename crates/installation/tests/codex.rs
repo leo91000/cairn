@@ -8,7 +8,7 @@ use cairn_installation::{
     },
     chat_process,
     config::{Config, id, now},
-    models::{ServiceTierChoice, cached_defaults, service_tier},
+    models::cached_defaults,
     provider::Provider,
     rpc::Session,
     service::Service,
@@ -1025,12 +1025,6 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
         .unwrap()
         .unwrap();
     assert_eq!(landed.account_id, ids[0]);
-    assert_eq!(
-        service_tier(&service, &ids[0], "fixture-fast", "priority")
-            .await
-            .unwrap(),
-        ServiceTierChoice::Send("priority".into())
-    );
     service.accounts.release(&confirming).await.unwrap();
     service.accounts.release(&landed).await.unwrap();
     // An account that needs reconnecting takes no run, so its unknown catalog confirms nothing.
@@ -1062,34 +1056,6 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
         .unwrap();
     assert!(fast["serviceTiers"][0].get("limited").is_none(), "{fast}");
 
-    let tier = async |account: &str, model: &str, speed: &str| {
-        service_tier(&service, account, model, speed).await.unwrap()
-    };
-    assert_eq!(
-        tier(&ids[0], "fixture-fast", "ultrafast").await,
-        ServiceTierChoice::Unavailable
-    );
-    assert_eq!(
-        tier(&ids[1], "fixture-fast", "ultrafast").await,
-        ServiceTierChoice::Send("ultrafast".into())
-    );
-    assert_eq!(
-        tier(&ids[0], "", "priority").await,
-        ServiceTierChoice::Send("priority".into())
-    );
-    assert_eq!(
-        tier(&ids[1], "fixture-deep", "priority").await,
-        ServiceTierChoice::Unavailable
-    );
-    assert_eq!(
-        tier(&ids[1], "fixture-deep", "standard").await,
-        ServiceTierChoice::Send("default".into())
-    );
-    assert_eq!(
-        tier(&ids[1], "fixture-deep", "").await,
-        ServiceTierChoice::Send("default".into())
-    );
-
     // Without an enabled account offering it, the run is not held back: it runs at
     // standard speed on an available account and says so.
     service
@@ -1114,7 +1080,7 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
 }
 
 #[tokio::test]
-async fn queued_speed_is_kept_and_an_unavailable_one_runs_at_standard_with_a_notice() {
+async fn queued_speed_is_kept_and_planned_as_asked() {
     let root = TempDir::new().unwrap();
     std::fs::create_dir(root.path().join("home")).unwrap();
     let service = Service::new(config(&root)).await.unwrap();
@@ -1160,8 +1126,9 @@ async fn queued_speed_is_kept_and_an_unavailable_one_runs_at_standard_with_a_not
         409
     );
 
-    // Fast is not offered for this model, so the turn asks Codex for its standard speed.
-    service.models.list(&service).await.unwrap();
+    // Planning asks for the chosen tier; the turn checks it with the Codex process that runs
+    // it. Without a chosen speed the turn asks for Standard: Codex's app server neither applies
+    // the model's catalog default nor resets a thread that ran at another speed.
     let run_id = run["id"].as_str().unwrap().to_owned();
     let configure = async |model: &str, speed: &str| {
         let mut plan = json!({
@@ -1177,39 +1144,14 @@ async fn queued_speed_is_kept_and_an_unavailable_one_runs_at_standard_with_a_not
             .unwrap();
         plan
     };
-    assert_eq!(
-        configure("fixture-deep", "priority").await["serviceTier"],
-        "default"
-    );
-    let reads = run_id.clone();
-    let events: Value = service
-        .store
-        .read(move |db| Ok(db.events(&reads, 0, 500)?.into()))
-        .await
-        .unwrap();
-    let notice = events
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|event| {
-            event["type"] == "status" && event["text"].as_str().unwrap().contains("Standard speed")
-        })
-        .unwrap_or_else(|| panic!("{events:#}"));
-    assert_eq!(notice["payload"]["speed"]["requested"], "priority");
-    assert_eq!(notice["payload"]["speed"]["applied"], "standard");
-
-    assert_eq!(
-        configure("fixture-fast", "priority").await["serviceTier"],
-        "priority"
-    );
-    assert_eq!(
-        configure("fixture-deep", "standard").await["serviceTier"],
-        "default"
-    );
-    // Without a chosen speed the turn asks for Standard: Codex's app server neither applies
-    // the model's catalog default nor resets a thread that ran at another speed.
-    for model in ["fixture-deep", "fixture-fast"] {
-        assert_eq!(configure(model, "").await["serviceTier"], "default");
+    for (model, speed, tier) in [
+        ("fixture-deep", "priority", "priority"),
+        ("fixture-fast", "priority", "priority"),
+        ("fixture-deep", "standard", "default"),
+        ("fixture-deep", "", "default"),
+        ("fixture-fast", "", "default"),
+    ] {
+        assert_eq!(configure(model, speed).await["serviceTier"], tier);
     }
 
     // An edit from an editor predating speeds keeps the queued speed, unless it moves the

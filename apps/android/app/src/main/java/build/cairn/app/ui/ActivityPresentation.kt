@@ -370,6 +370,7 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                             account != null -> "Compte ${account.first} sélectionné"
                             speedFallback(data) -> "Ce tour passe en vitesse Standard"
                             speedUnconfirmed(data) -> "Vitesse non confirmée pour ce tour"
+                            speedConfirmed(data) -> "Ce tour passe désormais à la vitesse choisie"
                             event.text.lowercase() in
                                 listOf(
                                     "succeeded",
@@ -400,6 +401,8 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                 if (account != null) account.second
                 else if (event.type == "status" && speedFallback(data))
                     "Codex ne propose pas la vitesse choisie pour ce modèle ici"
+                else if (event.type == "status" && speedConfirmed(data))
+                    "Codex propose désormais la vitesse choisie pour ce modèle ici"
                 else if (event.type == "status" && speedUnconfirmed(data))
                     "Codex ne peut pas confirmer qu’il propose la vitesse choisie pour ce modèle ici ; ce tour peut passer en Standard"
                 else if (event.type == "engine.retry") engineRetryDetail(data)
@@ -552,7 +555,11 @@ private fun accountUsed(text: String): Pair<String, String>? =
 
 /** A turn whose selected speed Codex does not offer for its model runs at Standard. */
 internal fun speedFallback(data: JsonObject?): Boolean =
-    data?.get("speed").asObject().string("applied").isNotEmpty()
+    data?.get("speed").asObject().string("applied") == STANDARD_SPEED
+
+/** A later attempt of the turn, on another account, gets the selected speed after all. */
+internal fun speedConfirmed(data: JsonObject?): Boolean =
+    data?.get("speed").asObject().string("applied").let { it.isNotEmpty() && it != STANDARD_SPEED }
 
 /** A turn asking for a speed Codex could not confirm for its model may run at Standard. */
 internal fun speedUnconfirmed(data: JsonObject?): Boolean =

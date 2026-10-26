@@ -13,7 +13,7 @@
   },
   {
     "name": "list_models",
-    "description": "List the models a coding agent offers on its enabled accounts: reasoning levels and, for Codex, the speeds (service tiers) each model offers with Codex's own description of their usage. Use a serviceTiers id, or \"standard\", as an agent or message speed. A tier marked limited is not confirmed by every account able to run the model; runs that ask for it prefer an account that confirms it. Before each turn the run checks the tier against its Codex process model list and records a status event: speed.applied when the turn runs at Standard, speed.unconfirmed when Codex cannot confirm it (its model list could not be read or does not name the model exactly).",
+    "description": "List the models a coding agent offers on its enabled accounts: reasoning levels and, for Codex, the speeds (service tiers) each model offers with Codex's own description of their usage. Use a serviceTiers id, or \"standard\", as an agent or message speed. A tier marked limited is not confirmed by every account able to run the model; runs that ask for it prefer an account that confirms it. Before each turn attempt the run checks the tier against its Codex process model list and records a status event when the outcome changes: speed.applied is standard when the turn runs at Standard or the tier when a later attempt gets it, speed.unconfirmed when Codex cannot confirm it (its model list could not be read or does not name the model exactly).",
     "scope": "read",
     "destructive": false,
     "inputSchema": {

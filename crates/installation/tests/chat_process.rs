@@ -480,8 +480,14 @@ async fn a_faster_tier_is_checked_against_codex_own_model_list_before_the_turn()
     let config = config(&root);
     // Codex's own catalog lists Fast (`priority`) for fixture-fast only; Ultrafast for none here.
     let cases = [
-        ("fixture-fast", "priority", false, "priority", None),
-        ("", "priority", false, "priority", None),
+        (
+            "fixture-fast",
+            "priority",
+            false,
+            "priority",
+            Some("offered"),
+        ),
+        ("", "priority", false, "priority", Some("offered")),
         (
             "fixture-deep",
             "priority",
@@ -562,10 +568,11 @@ async fn a_faster_tier_is_checked_against_codex_own_model_list_before_the_turn()
             Some(kind) => {
                 assert_eq!(speed.len(), 1, "case {index}: {speed:?}");
                 assert_eq!(speed[0]["speed"]["requested"], tier);
-                if kind == "applied" {
-                    assert_eq!(speed[0]["speed"]["applied"], "standard");
-                } else {
-                    assert_eq!(speed[0]["speed"]["unconfirmed"], true);
+                assert_eq!(speed[0]["messageId"], format!("speed-{index}"));
+                match kind {
+                    "offered" => assert_eq!(speed[0]["speed"]["applied"], tier),
+                    "applied" => assert_eq!(speed[0]["speed"]["applied"], "standard"),
+                    _ => assert_eq!(speed[0]["speed"]["unconfirmed"], true),
                 }
             }
         }

@@ -270,6 +270,27 @@ class EngineStatusTest {
                 .copy(text = "Codex couldn’t confirm it offers the selected speed.")
         assertEquals(listOf(unconfirmed.id), notices(listOf(unconfirmed, step())).map { it.id })
         assertEquals("Vitesse non confirmée pour ce tour", presentActivity(unconfirmed).title)
+
+        // A later attempt, on another account, gets the speed after all.
+        val confirmed =
+            event("status") {
+                    put(
+                        "speed",
+                        buildJsonObject {
+                            put("requested", "priority")
+                            put("applied", "priority")
+                        },
+                    )
+                }
+                .copy(text = "Codex now offers the selected speed.")
+        assertEquals(
+            listOf(fallback.id, confirmed.id),
+            notices(listOf(fallback, confirmed)).map { it.id },
+        )
+        assertEquals(
+            "Ce tour passe désormais à la vitesse choisie",
+            presentActivity(confirmed).title,
+        )
     }
 
     @Test
