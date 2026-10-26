@@ -35,6 +35,7 @@ class BlockedMissionJourneyTest {
 
     private val calls = CopyOnWriteArrayList<Triple<String, String, String>>()
     private val activityReads = CopyOnWriteArrayList<List<Run>>()
+    private val savedMissions = ConcurrentHashMap<String, Task>()
     private val now = System.currentTimeMillis()
     private val claude =
         Agent(
@@ -204,10 +205,34 @@ class BlockedMissionJourneyTest {
                                 json(
                                     wireJson.encodeToString(
                                         build.cairn.contracts.ListMissionsOutput(
-                                            listOf(proof, notes, checks, deploy)
+                                            listOf(proof, notes, checks, deploy).map {
+                                                savedMissions[it.id] ?: it
+                                            }
                                         )
                                     )
                                 )
+                            path.startsWith("$api/tasks/") &&
+                                path.endsWith("/state") &&
+                                request.method == "POST" -> {
+                                val command =
+                                    wireJson.decodeFromString<
+                                        build.cairn.contracts.MissionStateInput
+                                    >(
+                                        text
+                                    )
+                                val current =
+                                    listOf(proof, notes, checks, deploy).single {
+                                        it.id == command.taskId
+                                    }
+                                val saved =
+                                    current.copy(
+                                        enabled = command.enabled,
+                                        archived = command.archived,
+                                        revision = "saved-state",
+                                    )
+                                savedMissions[current.id] = saved
+                                json(wireJson.encodeToString(saved))
+                            }
                             path == "$api/tasks/activity" -> {
                                 val snapshot = activity()
                                 activityReads += snapshot
@@ -325,6 +350,30 @@ class BlockedMissionJourneyTest {
             assertTrue(dismissals.containsKey("2db836ee-ce2e-552d-b9fa-2fef2030546c"))
             capture("android-blocked-set-aside")
         }
+
+    @Test
+    fun `archiving from the Fil uses the current mission revision`() = journey { vm ->
+        waitText("Preuve appareil F8")
+        compose
+            .onNodeWithContentDescription("Autres actions pour Preuve appareil F8")
+            .performScrollTo()
+            .performClick()
+        waitText("Archiver la mission")
+        compose.onNodeWithText("Archiver la mission").performClick()
+        val statePath = "/api/installations/fixture/api/tasks/${proof.id}/state"
+        waitCall("POST", statePath)
+        val command =
+            wireJson.decodeFromString<build.cairn.contracts.MissionStateInput>(
+                calls.last { it.second == statePath }.third
+            )
+        assertEquals(proof.id, command.taskId)
+        assertEquals(proof.revision, command.revision)
+        assertEquals(false, command.enabled)
+        assertEquals(true, command.archived)
+        waitText("Modifications enregistrées")
+        assertEquals("Archive refresh failed", null, vm.state.value.error)
+        assertTrue(vm.state.value.tasks.any { it.id == proof.id && it.archived && !it.enabled })
+    }
 
     @Test
     fun `a blocked run says who it waits on and can be set aside from its outcome`() = journey {

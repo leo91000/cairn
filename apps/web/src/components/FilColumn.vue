@@ -9,6 +9,7 @@ import {
   watch,
 } from 'vue'
 import { useRouter } from 'vue-router'
+import { setMissionState } from '../../../../packages/contracts/generated/setMissionState'
 import {
   api,
   notify,
@@ -198,7 +199,12 @@ async function archive(item: FilItem) {
   if (!task)
     return
   try {
-    await api(`/tasks/${task.id}`, { method: 'PUT', body: JSON.stringify({ ...task, archived: true, enabled: false }) })
+    await setMissionState(api, {
+      taskId: task.id,
+      revision: task.revision,
+      archived: true,
+      enabled: false,
+    })
     await refresh()
     notify(`${item.title} archived`)
   }
