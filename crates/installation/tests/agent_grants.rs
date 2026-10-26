@@ -1,6 +1,5 @@
-//! Exclusive node reservations and plugin grants (such as 1Password) are edited on
-//! the agent. Nodes and plugin instances keep a synchronized copy that enforcement
-//! and older releases read.
+//! Permissions are edited on typed profiles. Resource lists are projections of
+//! the same relations used by enforcement; no resource JSON is authoritative.
 use common::StoreAgentFixture;
 
 mod common;
@@ -305,7 +304,7 @@ async fn a_stale_editor_cannot_overwrite_newer_access() {
 }
 
 #[tokio::test]
-async fn older_clients_editing_resources_update_the_agent() {
+async fn resource_configuration_cannot_write_exclusivity_and_keeps_projected_grants() {
     let owner = Owner::new().await;
     owner.add_node().await;
     let agent = owner.create_agent("Android QA").await;
@@ -347,11 +346,13 @@ async fn older_clients_editing_resources_update_the_agent() {
     let (status, node) = owner
         .send("PUT", &format!("/api/nodes/{NODE}"), configuration.clone())
         .await;
-    assert_eq!(status, StatusCode::OK, "{node}");
-    assert_eq!(
-        owner.stored("agents", &id).await["exclusiveNodes"],
-        json!([NODE])
-    );
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{node}");
+    let mut runs_here = owner.stored("agents", &id).await;
+    runs_here["exclusiveNodes"] = json!([NODE]);
+    let (status, _) = owner
+        .send("PUT", &path(&runs_here), runs_here.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK);
 
     // A configuration without the list keeps the grants.
     let mut without = configuration.clone();
@@ -413,7 +414,6 @@ async fn deleting_an_agent_or_revoking_a_node_removes_its_live_grants() {
         "tags": [],
         "limits": node["limits"],
         "accepting": true,
-        "exclusiveAgents": node["exclusiveAgents"],
     });
     let (status, error) = owner
         .send("PUT", &format!("/api/nodes/{NODE}"), configuration)
@@ -424,9 +424,11 @@ async fn deleting_an_agent_or_revoking_a_node_removes_its_live_grants() {
     kept["access"]["nodes"] = json!([LOCAL_NODE_ID, NODE]);
     kept["exclusiveNodes"] = json!([NODE]);
     let (_, kept) = owner.send("PUT", &path(&kept), kept).await;
-    owner
+    let (status, revoked) = owner
         .send("POST", &format!("/api/nodes/{NODE}/revoke"), json!({}))
         .await;
+    assert_eq!(status, StatusCode::OK, "{revoked}");
+    assert_eq!(revoked["exclusiveAgents"], json!([]));
     assert_eq!(
         owner.stored("agents", text(&kept, "id")).await["exclusiveNodes"],
         json!([])
@@ -584,7 +586,7 @@ async fn a_held_grant_on_an_instance_awaiting_review_does_not_block_other_edits(
         .store
         .put(
             connections::KIND,
-            json!({ "id": GHOST, "pluginId": "third-party", "name": "Pending", "agentIds": [id] }),
+            json!({ "id": GHOST, "pluginId": "third-party", "name": "Pending" }),
         )
         .await
         .unwrap();
@@ -713,7 +715,7 @@ async fn grants_follow_the_agent_execution_backend() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         owner.stored("nodes", native).await["exclusiveAgents"],
-        Value::Null
+        json!([])
     );
 
     // A node held before (for example from before the backend check) still saves.
@@ -825,4 +827,83 @@ async fn native_agents_cannot_newly_get_the_current_runner_and_drop_reservations
     local["access"]["nodes"] = json!([LOCAL_NODE_ID]);
     let (status, _) = owner.send("PUT", &path(&fresh), local).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn selected_permissions_and_empty_tool_selections_survive_reopening() {
+    let owner = Owner::new().await;
+    owner.add_node().await;
+    let account = owner.add_service_account(json!([])).await;
+    let connection = owner
+        .service
+        .mcps
+        .save(
+            &owner.service,
+            json!({
+                "name": "Tools", "transport": "http", "url": "https://example.test/mcp",
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let project_path = owner._root.path().join("project");
+    std::fs::create_dir(&project_path).unwrap();
+    let (status, project) = owner
+        .send(
+            "POST",
+            "/api/projects",
+            json!({
+                "settings": { "name": "App", "path": project_path, "sourceMode": "local" },
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{project}");
+    let mut agent = owner.create_agent("Selections").await;
+    agent["access"]["projects"] = json!([project["id"]]);
+    agent["access"]["skills"] = json!(["global/review", "global/review"]);
+    agent["access"]["mcps"] = json!([connection["id"]]);
+    agent["access"]["mcpTools"] = json!({ text(&connection,"id"): [] });
+    agent["access"]["nodes"] = json!([LOCAL_NODE_ID, NODE, NODE]);
+    agent["exclusiveNodes"] = json!([NODE]);
+    agent["plugins"] = json!([account]);
+    let (status, saved) = owner.send("PUT", &path(&agent), agent).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["access"]["skills"], json!(["global/review"]));
+    assert_eq!(saved["access"]["nodes"], json!([LOCAL_NODE_ID, NODE]));
+    let mut other = owner.create_agent("Selected tools").await;
+    other["access"]["mcpTools"] = json!({ text(&connection,"id"): ["read", "read", "search"] });
+    let (status, other) = owner.send("PUT", &path(&other), other).await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    assert_eq!(
+        other["access"]["mcpTools"][text(&connection, "id")],
+        json!(["read", "search"])
+    );
+    let reopened = start(owner._root.path()).await;
+    assert_eq!(
+        reopened.agent_snapshot(text(&saved, "id")).await.unwrap(),
+        saved
+    );
+
+    let listed = reopened.store.agents().await.unwrap();
+    assert_eq!(listed.len(), 3);
+    for profile in listed {
+        assert_eq!(
+            Some(profile.clone()),
+            reopened.store.agent(&profile.id.to_string()).await.unwrap()
+        );
+    }
+
+    // An instance editor cannot restore a revoked grant from a stale resource list.
+    let rejected = connections::save(
+        &owner.service,
+        "onepassword",
+        &json!({
+            "name": "Stale instance editor", "enabled": true, "agentIds": [],
+        }),
+        Some(&account),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(rejected.status, 400);
+    assert_eq!(owner.stored("agents", text(&saved, "id")).await, saved);
 }

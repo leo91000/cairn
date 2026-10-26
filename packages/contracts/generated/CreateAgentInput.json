@@ -4,7 +4,7 @@
   "definitions": {
     "AccessPolicy": {
       "additionalProperties": false,
-      "description": "Permission relations remain owned by A3. Their typed wire view preserves null (all)\nseparately from an empty selection. No authority is supplied by this DTO.",
+      "description": "Relational permission view: null is the explicit wildcard, distinct from an\nempty selection. These generated wire models confer no actor authority.",
       "properties": {
         "backend": {
           "default": "firecracker",

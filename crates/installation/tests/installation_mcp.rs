@@ -1161,11 +1161,18 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
                 db.put(
                     "plugin-connections",
                     &json!({
-                        "id": "fixture-account",
+                        "id": "00000000-0000-4000-8000-000000000099",
                         "pluginId": "onepassword",
-                        "agentIds": [id, MAIN_AGENT_ID],
                     }),
                 )?;
+                for agent_id in [id.as_str(), MAIN_AGENT_ID] {
+                    let mut agent = db.agent(agent_id)?.unwrap();
+                    agent
+                        .settings
+                        .plugins
+                        .push("00000000-0000-4000-8000-000000000099".into());
+                    db.save_agent(&agent)?;
+                }
                 Ok(())
             }
         })
@@ -1184,7 +1191,7 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
     );
     assert_eq!(
         s.store
-            .get("plugin-connections", "fixture-account")
+            .get("plugin-connections", "00000000-0000-4000-8000-000000000099")
             .await
             .unwrap()
             .unwrap()["agentIds"],

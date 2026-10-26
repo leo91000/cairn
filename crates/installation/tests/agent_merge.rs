@@ -370,9 +370,9 @@ async fn merge_keeps_preapproved_live_grants_and_rolls_back_a_failed_delete() {
             let mut target = db.agent_snapshot(MAIN_AGENT_ID)?.unwrap();
             source["plugins"] = json!([instance]);
             target["plugins"] = json!([instance]);
-            db.save_agent_permissions(&source)?;
-            db.save_agent_permissions(&target)?;
-            db.put("plugin-connections", &json!({ "id": instance, "agentIds": [source["id"], MAIN_AGENT_ID] }))?;
+            db.save_agent(&serde_json::from_value(source.clone())?)?;
+            db.save_agent(&serde_json::from_value(target.clone())?)?;
+            db.put("plugin-connections", &json!({ "id": instance }))?;
             db.0.execute_batch("CREATE TRIGGER reject_merge BEFORE DELETE ON agents BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;")?;
             Ok(())
         }
@@ -384,7 +384,7 @@ async fn merge_keeps_preapproved_live_grants_and_rolls_back_a_failed_delete() {
     );
     assert_eq!(
         s.get("plugin-connections", &instance).await.unwrap()["agentIds"],
-        json!([source["id"], MAIN_AGENT_ID])
+        json!([MAIN_AGENT_ID, source["id"]])
     );
     s.store
         .write(|db| {

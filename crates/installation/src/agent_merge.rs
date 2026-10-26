@@ -102,17 +102,6 @@ fn merge(
                 "Reassign the source's plugin delegations before merging.",
             ));
         }
-        let granted = instance["agentIds"]
-            .as_array()
-            .is_some_and(|ids| ids.iter().any(|id| id == source_id));
-        let target_granted = instance["agentIds"]
-            .as_array()
-            .is_some_and(|ids| ids.iter().any(|id| id == target_id));
-        if granted && !target_granted {
-            return Err(Error::conflict(
-                "Grant the source's plugin access to the destination before merging.",
-            ));
-        }
     }
     let runs = db.json_rows(
         "SELECT data FROM runs WHERE json_extract(data,'$.snapshot.agent.id')=?",

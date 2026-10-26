@@ -442,7 +442,7 @@ async fn uploads_work_without_provider_configuration_and_restart_never_rebills()
     let mut interrupted = uploaded.clone();
     interrupted["avatar"]["status"] = "generating".into();
     f.s.store
-        .transaction(move |db| db.save_agent_permissions(&interrupted))
+        .transaction(move |db| db.save_agent(&serde_json::from_value(interrupted.clone())?))
         .await
         .unwrap();
     let restarted = Service::new(f.s.config.clone()).await.unwrap();

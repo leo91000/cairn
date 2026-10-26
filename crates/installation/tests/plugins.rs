@@ -1931,6 +1931,7 @@ async fn revoked_and_deleted_deliveries_do_not_stop_other_people() {
     let (_root, s, connection) = fixture().await;
     let (mock, server) = mock(&s).await;
     let mut saved = serde_json::to_value(&connection).unwrap();
+    saved.as_object_mut().unwrap().remove("agentIds");
     saved["userIds"] = json!(["300", "301"]);
     saved["maxMessagesPerHour"] = json!(10);
     let connection: Connection = serde_json::from_value(
@@ -1986,6 +1987,7 @@ async fn public_question_partial_answers_require_the_starters_authority() {
         "access": { "projects": [], "skills": [], "mcps": [], "installation": false, "sandbox": "read-only" },
     }), None).await.unwrap();
     let mut saved = serde_json::to_value(&connection).unwrap();
+    saved.as_object_mut().unwrap().remove("agentIds");
     saved["agentId"] = agent["id"].clone();
     saved["accessMode"] = json!("everyone");
     let connection: Connection = serde_json::from_value(
@@ -2354,14 +2356,11 @@ async fn reviewed_reduced_agent_grants_start_a_fresh_conversation() {
     s.agent_fixture(agent, Some(&connection.agent_id))
         .await
         .unwrap();
-    let saved = connections::save(
-        &s,
-        "discord",
-        &serde_json::to_value(&connection).unwrap(),
-        Some(&connection.id),
-    )
-    .await
-    .unwrap();
+    let mut settings = serde_json::to_value(&connection).unwrap();
+    settings.as_object_mut().unwrap().remove("agentIds");
+    let saved = connections::save(&s, "discord", &settings, Some(&connection.id))
+        .await
+        .unwrap();
     let new_connection: Connection = serde_json::from_value(saved).unwrap();
     let mut next = event("561");
     next["revision"] = json!(new_connection.revision);

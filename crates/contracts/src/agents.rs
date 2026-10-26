@@ -21,8 +21,8 @@ pub enum AgentProvider {
     Opencode,
 }
 
-/// Permission relations remain owned by A3. Their typed wire view preserves null (all)
-/// separately from an empty selection. No authority is supplied by this DTO.
+/// Relational permission view: null is the explicit wildcard, distinct from an
+/// empty selection. These generated wire models confer no actor authority.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccessPolicy {
@@ -192,6 +192,22 @@ impl AgentSettings {
             {
                 return Err("Select valid MCP tools.");
             }
+        }
+        for selection in [
+            &mut self.access.projects,
+            &mut self.access.skills,
+            &mut self.access.nodes,
+            &mut self.access.mcps,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let mut seen = std::collections::HashSet::new();
+            selection.retain(|id| seen.insert(id.clone()));
+        }
+        for tools in self.access.mcp_tools.values_mut() {
+            let mut seen = std::collections::HashSet::new();
+            tools.retain(|tool| seen.insert(tool.clone()));
         }
         let mut seen_plugins = std::collections::HashSet::new();
         self.plugins.retain(|id| seen_plugins.insert(id.clone()));
