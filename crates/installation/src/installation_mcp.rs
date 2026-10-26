@@ -164,8 +164,12 @@ pub(crate) async fn operation(
         return Err(Error::not_found("Unknown operation"));
     }
     if let Some(op) = crate::capabilities::mission_operation(name) {
-        if name == "create_task" && let Some(settings) = args.get_mut("settings").and_then(Value::as_object_mut) {
-            settings.entry("agentId").or_insert_with(||run["snapshot"]["agent"]["id"].clone());
+        if name == "create_task"
+            && let Some(settings) = args.get_mut("settings").and_then(Value::as_object_mut)
+        {
+            settings
+                .entry("agentId")
+                .or_insert_with(|| run["snapshot"]["agent"]["id"].clone());
         }
         let origin = crate::validation::text(&run, "id").to_owned();
         return crate::native::policy::PARENT

@@ -54,8 +54,19 @@ class FilUnreadJourneyTest {
             name = "Rédacteur",
         )
     private val notes =
-        Task("348988cc-0279-5ed4-801b-ac44d6987c6e", "Notes de version hebdomadaires", "Résumer la semaine.", MAIN_AGENT_ID)
-    private val audit = Task("b7ec3b50-62dd-530b-8060-bd5700fb7eb6", "Audit de sécurité nocturne", "Auditer.", MAIN_AGENT_ID)
+        Task(
+            "348988cc-0279-5ed4-801b-ac44d6987c6e",
+            "Notes de version hebdomadaires",
+            "Résumer la semaine.",
+            MAIN_AGENT_ID,
+        )
+    private val audit =
+        Task(
+            "b7ec3b50-62dd-530b-8060-bd5700fb7eb6",
+            "Audit de sécurité nocturne",
+            "Auditer.",
+            MAIN_AGENT_ID,
+        )
     private val activity =
         listOf(
             Run(
@@ -176,7 +187,13 @@ class FilUnreadJourneyTest {
                                     )
                                 )
                             path == "/api/installations/fixture/api/tasks" ->
-                                json(wireJson.encodeToString(build.cairn.contracts.ListMissionsOutput(listOf(notes, audit))))
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListMissionsOutput(
+                                            listOf(notes, audit)
+                                        )
+                                    )
+                                )
                             path == "/api/installations/fixture/api/tasks/activity" ->
                                 json(wireJson.encodeToString(activity))
                             path == "/api/installations/fixture/api/chats/stream" ->
@@ -201,7 +218,12 @@ class FilUnreadJourneyTest {
                                             true
                                     )
                                         """{"agents":[]}"""
-                                    else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else "[]"
                                 )
                         }
                     }
@@ -278,7 +300,7 @@ class FilUnreadJourneyTest {
                     reads.size == 2
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"task:notes\",\"finishedAt\":${activity.first().finishedAt}}]}",
+                    "{\"items\":[{\"key\":\"task:348988cc-0279-5ed4-801b-ac44d6987c6e\",\"finishedAt\":${activity.first().finishedAt}}]}",
                     reads[1],
                 )
                 compose.waitUntil(10000) {
@@ -328,7 +350,12 @@ class FilUnreadJourneyTest {
                                             true
                                     )
                                         """{"agents":[]}"""
-                                    else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -425,7 +452,12 @@ class FilUnreadJourneyTest {
                                             true
                                     )
                                         """{"agents":[]}"""
-                                    else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -533,7 +565,12 @@ class FilUnreadJourneyTest {
                                             true
                                     )
                                         """{"agents":[]}"""
-                                    else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -576,7 +613,7 @@ class FilUnreadJourneyTest {
                     reads.isNotEmpty()
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"task:notes\",\"finishedAt\":${finished.finishedAt}}]}",
+                    "{\"items\":[{\"key\":\"task:348988cc-0279-5ed4-801b-ac44d6987c6e\",\"finishedAt\":${finished.finishedAt}}]}",
                     reads.single(),
                 )
             } finally {

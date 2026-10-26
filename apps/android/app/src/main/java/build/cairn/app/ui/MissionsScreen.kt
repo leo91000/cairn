@@ -504,6 +504,7 @@ private fun MissionDetail(
     actions: MissionActions,
     sheet: Boolean,
 ) {
+    val canEdit = state.isOwner || task.authorId == state.session.account?.id
     var history by remember(task.id) { mutableStateOf<List<Run>?>(null) }
     var occurrences by
         remember(task.id, task.cron, task.timezone, task.enabled) {
@@ -595,7 +596,7 @@ private fun MissionDetail(
                 )
                 DropdownMenuItem(
                     text = { Text(if (task.archived) "Restaurer (en pause)" else "Archiver") },
-                    enabled = !state.busy,
+                    enabled = !state.busy && (!task.archived || canEdit),
                     onClick = {
                         menu = false
                         toggle(task.copy(archived = !task.archived, enabled = false))
@@ -609,13 +610,14 @@ private fun MissionDetail(
                             actions.openRun(run.id)
                         },
                     )
-                DropdownMenuItem(
-                    text = { Text("Supprimer", color = MaterialTheme.colorScheme.error) },
-                    onClick = {
-                        menu = false
-                        actions.delete(task)
-                    },
-                )
+                if (state.isOwner)
+                    DropdownMenuItem(
+                        text = { Text("Supprimer", color = MaterialTheme.colorScheme.error) },
+                        onClick = {
+                            menu = false
+                            actions.delete(task)
+                        },
+                    )
             }
         }
         if (sheet)
@@ -693,6 +695,24 @@ private fun MissionDetail(
                 }
         }
     }
+    if (!canEdit)
+        Text(
+            "Seuls l’auteur ou le propriétaire peuvent modifier ou reprendre cette mission. Dupliquez-la pour prendre votre propre engagement.",
+            Modifier.padding(top = 12.dp),
+            style = MaterialTheme.typography.bodySmall,
+        )
+    if (task.authorRemoved && task.cron != null)
+        Text(
+            "L’accès de cet auteur a pris fin. Dupliquez la mission pour la planifier à nouveau.",
+            Modifier.padding(top = 12.dp),
+            style = MaterialTheme.typography.bodySmall,
+        )
+    if (task.scheduleWaitReason != null && task.cron != null && task.enabled && !task.archived)
+        Text(
+            "Planification en attente : ${task.scheduleWaitReason}",
+            Modifier.padding(top = 12.dp),
+            style = MaterialTheme.typography.bodySmall,
+        )
     task.scheduleFailure
         ?.takeIf { task.enabled && !task.archived && task.cron != null }
         ?.let {
@@ -764,7 +784,12 @@ private fun MissionDetail(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        RoundAction("Modifier la mission", CairnIcons.Pencil, size = 52.dp, enabled = !state.busy) {
+        RoundAction(
+            "Modifier la mission",
+            CairnIcons.Pencil,
+            size = 52.dp,
+            enabled = !state.busy && canEdit,
+        ) {
             actions.edit(task)
         }
         if (!task.archived && task.cron != null)
@@ -772,7 +797,7 @@ private fun MissionDetail(
                 if (task.enabled) "Mettre en pause" else "Reprendre la planification",
                 if (task.enabled) CairnIcons.Pause else CairnIcons.Clock,
                 size = 52.dp,
-                enabled = !state.busy,
+                enabled = !state.busy && !task.authorRemoved && (task.enabled || canEdit),
             ) {
                 toggle(task.copy(enabled = !task.enabled))
             }

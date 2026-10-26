@@ -265,10 +265,12 @@ test('a durable condition wait follows a dependency across restart and queue pau
   workspace.service.store.set('deployment-lease', 'condition-wait-fixture', Date.now() + 120000)
   try {
     const task = await workspace.api('/api/tasks', 'POST', {
-      name: 'Condition dependency',
-      prompt: 'Other work',
-      agentId: agent.id,
-      worktree: false,
+      settings: {
+        name: 'Condition dependency',
+        prompt: 'Other work',
+        agentId: agent.id,
+        worktree: false,
+      },
     })
     const target = await workspace.api(`/api/tasks/${task.id}/run`, 'POST', {})
     const wakeup = {
@@ -322,10 +324,12 @@ test('a large grouped wait pages through every condition and resumes once all ar
   try {
     const targets = await Promise.all(Array.from({ length: 23 }, (_, index) => `Grouped dependency ${index + 1}`).map(async (name) => {
       const task = await workspace.api('/api/tasks', 'POST', {
-        name,
-        prompt: 'Other work',
-        agentId: agent.id,
-        worktree: false,
+        settings: {
+          name,
+          prompt: 'Other work',
+          agentId: agent.id,
+          worktree: false,
+        },
       })
       return workspace.api(`/api/tasks/${task.id}/run`, 'POST', {})
     }))

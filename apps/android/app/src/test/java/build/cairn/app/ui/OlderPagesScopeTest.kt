@@ -114,7 +114,8 @@ class OlderPagesScopeTest {
 
                                     val body =
                                         when (path) {
-                                            "/api/installations/fixture/api/tasks" -> """{"tasks":[]}"""
+                                            "/api/installations/fixture/api/tasks" ->
+                                                """{"tasks":[]}"""
                                             "/api/account/session" -> beaconAccountFixture()
                                             "/api/installations" -> beaconInstallationsFixture()
                                             "/api/installations/fixture/api/projects" ->

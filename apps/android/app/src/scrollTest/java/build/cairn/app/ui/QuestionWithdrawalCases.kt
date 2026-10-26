@@ -59,7 +59,12 @@ abstract class QuestionWithdrawalCases {
                                             true
                                     )
                                         """{"agents":[]}"""
-                                    else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")

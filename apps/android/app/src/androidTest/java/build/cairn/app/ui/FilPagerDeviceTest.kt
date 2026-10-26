@@ -138,7 +138,11 @@ class FilPagerDeviceTest {
                                     )
                                 )
                             path == "/api/installations/fixture/api/tasks" ->
-                                json(wireJson.encodeToString(build.cairn.contracts.ListMissionsOutput(listOf(daily))))
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListMissionsOutput(listOf(daily))
+                                    )
+                                )
                             path == "/api/installations/fixture/api/tasks/activity" ->
                                 json(wireJson.encodeToString(listOf(failed)))
                             path == "/api/installations/fixture/api/runs" ->
@@ -175,7 +179,12 @@ class FilPagerDeviceTest {
                                             true
                                     )
                                         """{"agents":[]}"""
-                                    else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else "[]"
                                 )
                         }
                     }

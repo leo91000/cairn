@@ -42,7 +42,12 @@ it('uses generated commands for complete edits, restrictive state, deletion and 
   const revision = wire.views[0].revision
   await createMission(request, { settings })
   await replaceMission(request, { taskId, revision, settings })
-  await setMissionState(request, { taskId, revision, enabled: false, archived: true })
+  await setMissionState(request, {
+    taskId,
+    revision,
+    enabled: false,
+    archived: true,
+  })
   await getMission(request, { taskId })
   await listMissions(request, {})
   await deleteMission(request, { taskId })
@@ -50,7 +55,15 @@ it('uses generated commands for complete edits, restrictive state, deletion and 
   expect(calls).toEqual([
     ['/tasks', { method: 'POST', body: JSON.stringify({ settings }) }],
     [`/tasks/${taskId}`, { method: 'PUT', body: JSON.stringify({ taskId, revision, settings }) }],
-    [`/tasks/${taskId}/state`, { method: 'POST', body: JSON.stringify({ taskId, revision, enabled: false, archived: true }) }],
+    [`/tasks/${taskId}/state`, {
+      method: 'POST',
+      body: JSON.stringify({
+        taskId,
+        revision,
+        enabled: false,
+        archived: true,
+      }),
+    }],
     [`/tasks/${taskId}`, { method: 'GET' }],
     ['/tasks', { method: 'GET' }],
     [`/tasks/${taskId}`, { method: 'DELETE' }],

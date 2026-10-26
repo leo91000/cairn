@@ -1027,7 +1027,14 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "delete_agent",
         "get_agent_avatar_configuration",
         "generate_agent_avatar",
-        "list_tasks", "get_task", "create_task", "replace_task", "set_task_state", "delete_task", "preview_schedule", "list_task_activity",
+        "list_tasks",
+        "get_task",
+        "create_task",
+        "replace_task",
+        "set_task_state",
+        "delete_task",
+        "preview_schedule",
+        "list_task_activity",
         "list_projects",
         "get_project",
         "save_project",
@@ -3662,8 +3669,23 @@ async fn typed_agent_profiles_preview_and_avatars_match_on_both_tools() {
     }
 }
 
-fn mission_settings(mission:&Value) -> Value {
-    let mut settings=mission.clone();
-    settings.as_object_mut().unwrap().retain(|key,_| ["name","prompt","agentId","projectId","skills","tags","cron","timezone","enabled","archived","worktree"].contains(&key.as_str()));
+fn mission_settings(mission: &Value) -> Value {
+    let mut settings = mission.clone();
+    settings.as_object_mut().unwrap().retain(|key, _| {
+        [
+            "name",
+            "prompt",
+            "agentId",
+            "projectId",
+            "skills",
+            "tags",
+            "cron",
+            "timezone",
+            "enabled",
+            "archived",
+            "worktree",
+        ]
+        .contains(&key.as_str())
+    });
     settings
 }

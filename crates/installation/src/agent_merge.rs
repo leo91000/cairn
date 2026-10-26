@@ -26,35 +26,9 @@ impl Service {
     {
         self.missions.merge_agents(self, input, authorize).await
     }
-
-    pub(crate) async fn transfer_agents<F>(
-        &self,
-        input: cairn_contracts::MergeAgentsInput,
-        authorize: F,
-    ) -> Result<cairn_contracts::MergeAgentsOutput>
-    where
-        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
-    {
-        if !input.confirm {
-            return Err(Error::bad("Confirm the merge."));
-        }
-        // A terminal DB status can precede the worker's final writes. Serialize with
-        // admission, cancellation and resume until the transfer is committed.
-        let active = self.worker.active.lock().await;
-        let executing = active.keys().cloned().collect::<Vec<_>>();
-        let result = self
-            .store
-            .transaction(move |db| {
-                authorize(db)?;
-                merge(db, &input, &executing)
-            })
-            .await?;
-        self.worker.notify();
-        Ok(result)
-    }
 }
 
-fn merge(
+pub(crate) fn merge(
     db: &Db<'_>,
     input: &cairn_contracts::MergeAgentsInput,
     executing: &[String],

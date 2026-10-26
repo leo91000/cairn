@@ -111,7 +111,8 @@ class NativeParityPreviewTest {
                     taskId = task.id,
                     status = "succeeded",
                     taskName = task.name,
-                    snapshot = Snapshot(task = task.runTaskSnapshot(), agent = agent, project = project),
+                    snapshot =
+                        Snapshot(task = task.runTaskSnapshot(), agent = agent, project = project),
                     outcome = outcome,
                 )
             val chat =
@@ -251,17 +252,19 @@ class NativeParityPreviewTest {
                                         build.cairn.contracts.ListProjectsOutput(listOf(project))
                                     )
                                 "/api/installations/fixture/api/tasks" ->
-                                    wireJson.encodeToString(build.cairn.contracts.ListMissionsOutput(
-                                        listOf(
-                                            task,
-                                            task.copy(
-                                                id = "00000000-0000-4000-8000-000000000099",
-                                                name = "Préparer la prochaine version",
-                                                cron = null,
-                                                nextRun = null,
-                                            ),
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListMissionsOutput(
+                                            listOf(
+                                                task,
+                                                task.copy(
+                                                    id = "00000000-0000-4000-8000-000000000099",
+                                                    name = "Préparer la prochaine version",
+                                                    cron = null,
+                                                    nextRun = null,
+                                                ),
+                                            )
                                         )
-                                    ))
+                                    )
                                 "/api/installations/fixture/api/tasks/activity" ->
                                     wireJson.encodeToString(listOf(run))
                                 "/api/installations/fixture/api/runs" ->

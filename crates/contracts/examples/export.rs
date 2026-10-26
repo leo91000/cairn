@@ -57,7 +57,57 @@ fn main() {
     export::<Mission>(root, &mut generator, Contract::Serialize);
     export::<SchedulePreviewInput>(root, &mut generator, Contract::Deserialize);
     export::<SchedulePreviewOutput>(root, &mut generator, Contract::Serialize);
-    let clients = serde_json::json!([{"name": "listMissions", "input": "ListMissionsInput", "output": "ListMissionsOutput", "method": "GET", "path": "/tasks"}, {"name": "getMission", "input": "MissionInput", "output": "Mission", "method": "GET", "path": "/tasks/{taskId}"}, {"name": "createMission", "input": "CreateMissionInput", "output": "Mission", "method": "POST", "path": "/tasks"}, {"name": "replaceMission", "input": "ReplaceMissionInput", "output": "Mission", "method": "PUT", "path": "/tasks/{taskId}"}, {"name": "setMissionState", "input": "MissionStateInput", "output": "Mission", "method": "POST", "path": "/tasks/{taskId}/state"}, {"name": "deleteMission", "input": "MissionInput", "output": "DeleteMissionOutput", "method": "DELETE", "path": "/tasks/{taskId}"}, {"name": "previewSchedule", "input": "SchedulePreviewInput", "output": "SchedulePreviewOutput", "method": "POST", "path": "/schedule/preview"}]);
+    let clients = serde_json::json!([
+        {
+            "name": "listMissions",
+            "input": "ListMissionsInput",
+            "output": "ListMissionsOutput",
+            "method": "GET",
+            "path": "/tasks"
+        },
+        {
+            "name": "getMission",
+            "input": "MissionInput",
+            "output": "Mission",
+            "method": "GET",
+            "path": "/tasks/{taskId}"
+        },
+        {
+            "name": "createMission",
+            "input": "CreateMissionInput",
+            "output": "Mission",
+            "method": "POST",
+            "path": "/tasks"
+        },
+        {
+            "name": "replaceMission",
+            "input": "ReplaceMissionInput",
+            "output": "Mission",
+            "method": "PUT",
+            "path": "/tasks/{taskId}"
+        },
+        {
+            "name": "setMissionState",
+            "input": "MissionStateInput",
+            "output": "Mission",
+            "method": "POST",
+            "path": "/tasks/{taskId}/state"
+        },
+        {
+            "name": "deleteMission",
+            "input": "MissionInput",
+            "output": "DeleteMissionOutput",
+            "method": "DELETE",
+            "path": "/tasks/{taskId}"
+        },
+        {
+            "name": "previewSchedule",
+            "input": "SchedulePreviewInput",
+            "output": "SchedulePreviewOutput",
+            "method": "POST",
+            "path": "/schedule/preview"
+        }
+    ]);
     fs::write(
         root.join("mission-clients.json"),
         serde_json::to_string_pretty(&clients).unwrap() + "\n",

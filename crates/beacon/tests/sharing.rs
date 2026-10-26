@@ -1486,10 +1486,7 @@ async fn offline_removal_and_reinvitation_do_not_revive_old_task_commitments() {
     for (actor_cookie, actor_session) in [(&cookie, &session), (&relay.cookie, &relay.session)] {
         assert_eq!(
             request(&relay, actor_cookie, actor_session, Method::PUT, &task_path)
-                .json(&mission_replacement(&task, &{
-                    let mut edited = input.clone();
-                    edited
-                }))
+                .json(&mission_replacement(&task, &input))
                 .send()
                 .await
                 .unwrap()

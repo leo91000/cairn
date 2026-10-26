@@ -60,7 +60,7 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                 "## Revue terminée\n\nLes changements sont prêts. La navigation est plus claire et la conversation reste au centre de l’écran.",
             snapshot =
                 Snapshot(
-                    task = task,
+                    task = task.runTaskSnapshot(),
                     agent =
                         Agent(
                             exclusiveNodes = emptyList(),
@@ -201,7 +201,9 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                                     )
                                 )
                             "/api/installations/fixture/api/tasks" ->
-                                wireJson.encodeToString(build.cairn.contracts.ListMissionsOutput(listOf(task)))
+                                wireJson.encodeToString(
+                                    build.cairn.contracts.ListMissionsOutput(listOf(task))
+                                )
                             "/api/installations/fixture/api/tasks/activity" ->
                                 wireJson.encodeToString(listOf(run))
                             "/api/installations/fixture/api/runs" ->

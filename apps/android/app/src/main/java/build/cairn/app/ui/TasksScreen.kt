@@ -34,12 +34,14 @@ internal fun TaskEditor(
     vm: CairnViewModel,
     state: Workspace,
     initial: Task?,
+    draft: MissionSettings? = null,
     onSaved: (Task) -> Unit = {},
     close: () -> Unit,
 ) {
     var form by
         rememberForm(
             initial?.settings()
+                ?: draft
                 ?: MissionSettings(name = "", prompt = "", agentId = MAIN_AGENT_ID, skills = null)
         )
     var revision by rememberSaveable { mutableStateOf(initial?.revision.orEmpty()) }

@@ -1,7 +1,7 @@
-use common::StoreMissionFixture;
 use common::AgentFixture;
 use common::MissionFixture;
 use common::StoreAgentFixture;
+use common::StoreMissionFixture;
 
 mod common;
 
@@ -490,7 +490,7 @@ async fn merge_waits_for_scheduled_admission_instead_of_dropping_a_due_occurrenc
             if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
                 entered.add_permits(1); release.acquire().await.unwrap().forget();
             }
-            axum::Json(json!({"owner":{"accountId":"fixture-owner","accessId":"fixture-owner"},"members":[]}))
+            axum::Json(json!({"owner":{"account_id":"fixture-owner","access_id":"fixture-owner"},"members":[]}))
         } }
     }));
     let server = tokio::spawn(async move {

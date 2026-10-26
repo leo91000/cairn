@@ -106,8 +106,8 @@ impl MissionFixture for Service {
                 method: if existing.is_some() { "PUT" } else { "POST" }.into(),
                 path: existing.map_or_else(|| "/api/tasks".into(), |id| format!("/api/tasks/{id}")),
                 body,
-                query: Default::default(),
-                headers: Default::default(),
+                query: std::collections::HashMap::default(),
+                headers: axum::http::HeaderMap::default(),
                 identity: Some(identity),
             },
         ))

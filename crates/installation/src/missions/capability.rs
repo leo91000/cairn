@@ -75,9 +75,18 @@ impl MissionOperation {
             _ => schema_for::<Mission>(Contract::Serialize),
         };
         json!({
-         "name":self.name,"description":self.description,"inputSchema":input,"outputSchema":output,
-         "_meta":{"securitySchemes":[{"type":"oauth2","scopes":[self.scope]}]},
-         "annotations":{"readOnlyHint":self.scope=="read","destructiveHint":self.scope!="read","openWorldHint":self.scope!="read"},
+            "name": self.name,
+            "description": self.description,
+            "inputSchema": input,
+            "outputSchema": output,
+            "_meta": {
+                "securitySchemes": [{ "type": "oauth2", "scopes": [self.scope] }],
+            },
+            "annotations": {
+                "readOnlyHint": self.scope == "read",
+                "destructiveHint": self.scope != "read",
+                "openWorldHint": self.scope != "read",
+            },
         })
     }
 
@@ -159,16 +168,31 @@ impl MissionOperation {
                             .account_id
                     }
                 };
-                crate::reads::begin(s, &account).await?;
-                s.store.read(move |db| {
-     let tx=rusqlite::Transaction::new_unchecked(db.0,rusqlite::TransactionBehavior::Deferred)?;
-     let db=Db(&tx);
-     actor.authorize(&db)?;
-     let mut runs=db.json_rows(&format!("SELECT {} FROM runs WHERE id IN (SELECT (SELECT id FROM runs WHERE task_id=missions.id ORDER BY created_at DESC,id DESC LIMIT 1) FROM missions) ORDER BY created_at DESC,id DESC",crate::store::RUN_SUMMARY),[])?;
-     crate::reads::Reads::load(&db,&account)?.runs(&db,&mut runs)?;
-     tx.commit()?;
-     Ok(runs.into())
-    }).await
+                if matches!(actor, Actor::Human(_)) {
+                    crate::reads::begin(s, &account).await?;
+                }
+                s.store
+                    .read(move |db| {
+                        let transaction = rusqlite::Transaction::new_unchecked(
+                            db.0,
+                            rusqlite::TransactionBehavior::Deferred,
+                        )?;
+                        let db = Db(&transaction);
+                        actor.authorize(&db)?;
+
+                        let query = format!(
+                            "SELECT {} FROM runs WHERE id IN (
+                            SELECT (SELECT id FROM runs WHERE task_id=missions.id
+                                ORDER BY created_at DESC,id DESC LIMIT 1) FROM missions
+                        ) ORDER BY created_at DESC,id DESC",
+                            crate::store::RUN_SUMMARY,
+                        );
+                        let mut runs = db.json_rows(&query, [])?;
+                        crate::reads::Reads::load(&db, &account)?.runs(&db, &mut runs)?;
+                        transaction.commit()?;
+                        Ok(runs.into())
+                    })
+                    .await
             }
             "list_tasks" => {
                 let _: ListMissionsInput = decode(input)?;

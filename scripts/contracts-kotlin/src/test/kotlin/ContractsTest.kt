@@ -10,23 +10,36 @@ class ContractsTest {
     @Test
     fun missionsMatchRustWireAndKeepNullSeparateFromEmptySkills() {
         val root = File(System.getProperty("cairn.contractWire")).parentFile
-        val corpus = json.parseToJsonElement(File(root.parentFile.parentFile.parentFile, "tests/fixtures/mission-contracts.json").readText()).jsonObject
+        val corpus =
+            json
+                .parseToJsonElement(
+                    File(
+                            root.parentFile.parentFile.parentFile,
+                            "tests/fixtures/mission-contracts.json",
+                        )
+                        .readText()
+                )
+                .jsonObject
         val wire = json.parseToJsonElement(File(root, "mission-wire.json").readText()).jsonObject
         val decoder = Json(json) { explicitNulls = false }
-        for ((index,input) in corpus.getValue("creates").jsonArray.withIndex()) {
+        for ((index, input) in corpus.getValue("creates").jsonArray.withIndex()) {
             val model = decoder.decodeFromJsonElement<CreateMissionInput>(input)
             assertEquals(wire.getValue("creates").jsonArray[index], json.encodeToJsonElement(model))
         }
         for (value in wire.getValue("views").jsonArray) {
             val model = json.decodeFromJsonElement<Mission>(value)
             assertEquals(value, json.encodeToJsonElement(model))
-            assertEquals(model,json.decodeFromString<Mission>(json.encodeToString(model)))
+            assertEquals(model, json.decodeFromString<Mission>(json.encodeToString(model)))
         }
         val first = json.decodeFromJsonElement<Mission>(wire.getValue("views").jsonArray[0])
         val second = json.decodeFromJsonElement<Mission>(wire.getValue("views").jsonArray[1])
         assertNull(first.skills)
-        assertEquals(emptyList(),second.skills)
-        val overflow = JsonObject(wire.getValue("views").jsonArray[0].jsonObject + ("nextRun" to JsonPrimitive(9007199254740992L)))
+        assertEquals(emptyList(), second.skills)
+        val overflow =
+            JsonObject(
+                wire.getValue("views").jsonArray[0].jsonObject +
+                    ("nextRun" to JsonPrimitive(9007199254740992L))
+            )
         assertFails { json.decodeFromJsonElement<Mission>(overflow) }
     }
 

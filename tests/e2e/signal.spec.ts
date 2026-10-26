@@ -411,10 +411,12 @@ test('blocked missions ask only when they wait on the user, and can be set aside
 
 test('a waiting mission sits in Waiting, shows its wait and can be stopped', async ({ page, workspace }) => {
   const task = await workspace.api('/api/tasks', 'POST', {
-    agentId: MAIN_AGENT_ID,
-    name: 'Mission waiting for CI',
-    prompt: 'Watch CI',
-    worktree: false,
+    settings: {
+      agentId: MAIN_AGENT_ID,
+      name: 'Mission waiting for CI',
+      prompt: 'Watch CI',
+      worktree: false,
+    },
   })
   const run = await workspace.api(`/api/tasks/${task.id}/run`, 'POST')
   await expect.poll(() => workspace.service.store.run(run.id)?.status).toBe('succeeded')

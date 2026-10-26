@@ -202,7 +202,18 @@ impl StorageEntity for cairn_contracts::Mission {
 
     fn deadlines(db: &Db<'_>, reference: bool) -> Option<usize> {
         Some(if reference {
-            db.json_rows("SELECT data FROM records WHERE kind='tasks' AND json_extract(data,'$.enabled')=1 AND json_extract(data,'$.archived')=0 AND json_extract(data,'$.cron') IS NOT NULL AND json_extract(data,'$.nextRun')<=? ORDER BY json_extract(data,'$.nextRun'),id",[1700000000000_i64]).unwrap().into_iter().map(|v|serde_json::from_value::<cairn_contracts::Mission>(v).unwrap()).count()
+            db.list("tasks")
+                .unwrap()
+                .into_iter()
+                .filter(|mission| {
+                    mission["enabled"] == true
+                        && mission["archived"] != true
+                        && !mission["cron"].is_null()
+                        && mission["nextRun"]
+                            .as_i64()
+                            .is_some_and(|at| at <= 1700000000000)
+                })
+                .count()
         } else {
             db.due_missions(1700000000000).unwrap().len()
         })

@@ -135,7 +135,12 @@ class SignalPresentationTest {
                                 )
                         ),
                 ),
-                Run("t2", taskId = "456fb838-d909-52a8-8fd7-8e95f2792cad", status = "failed", trigger = "manual"),
+                Run(
+                    "t2",
+                    taskId = "456fb838-d909-52a8-8fd7-8e95f2792cad",
+                    status = "failed",
+                    trigger = "manual",
+                ),
                 Run("t3", taskId = "chat-task", status = "failed", trigger = "chat"),
             )
         val feed = buildFeed(chats, activity, tasks)
@@ -179,7 +184,12 @@ class SignalPresentationTest {
                     Chat("new"),
                 ),
                 listOf(
-                    Run("audit-run", taskId = "b7ec3b50-62dd-530b-8060-bd5700fb7eb6", status = "running", provider = "opencode")
+                    Run(
+                        "audit-run",
+                        taskId = "b7ec3b50-62dd-530b-8060-bd5700fb7eb6",
+                        status = "running",
+                        provider = "opencode",
+                    )
                 ),
                 listOf(Task("b7ec3b50-62dd-530b-8060-bd5700fb7eb6", "Audit")),
             )
@@ -196,7 +206,11 @@ class SignalPresentationTest {
 
     @Test
     fun `missions that need review and running missions are surfaced`() {
-        val tasks = listOf(Task("8a025d72-4937-53c0-a41d-820414dc655d", "Audit"), Task("00eada4d-84f3-57cb-837e-3c023a643647", "Veille"))
+        val tasks =
+            listOf(
+                Task("8a025d72-4937-53c0-a41d-820414dc655d", "Audit"),
+                Task("00eada4d-84f3-57cb-837e-3c023a643647", "Veille"),
+            )
         val activity =
             listOf(
                 Run(
@@ -205,7 +219,12 @@ class SignalPresentationTest {
                     status = "succeeded",
                     outcome = TaskOutcome("blocked", "Accès manquant"),
                 ),
-                Run("r2", taskId = "00eada4d-84f3-57cb-837e-3c023a643647", status = "running", startedAt = 10),
+                Run(
+                    "r2",
+                    taskId = "00eada4d-84f3-57cb-837e-3c023a643647",
+                    status = "running",
+                    startedAt = 10,
+                ),
             )
         val feed = buildFeed(emptyList(), activity, tasks)
         assertEquals(FeedKind.REVIEW_TASK, feed.forYou.single().kind)
@@ -228,7 +247,12 @@ class SignalPresentationTest {
             TaskOutcome("blocked", "La CI revient au parent", waitingOn = waitingOn)
         val activity =
             listOf(
-                Run("proof-1", taskId = "2db836ee-ce2e-552d-b9fa-2fef2030546c", status = "succeeded", outcome = blocked("user")),
+                Run(
+                    "proof-1",
+                    taskId = "2db836ee-ce2e-552d-b9fa-2fef2030546c",
+                    status = "succeeded",
+                    outcome = blocked("user"),
+                ),
                 Run(
                     "ci-1",
                     taskId = "3c7c4abf-37d8-5123-814f-356a0797b145",
@@ -273,7 +297,11 @@ class SignalPresentationTest {
 
     @Test
     fun `a dismissed mission leaves For you and a snoozed one waits for its time`() {
-        val tasks = listOf(Task("8a025d72-4937-53c0-a41d-820414dc655d", "Preuve"), Task("00eada4d-84f3-57cb-837e-3c023a643647", "Notes"))
+        val tasks =
+            listOf(
+                Task("8a025d72-4937-53c0-a41d-820414dc655d", "Preuve"),
+                Task("00eada4d-84f3-57cb-837e-3c023a643647", "Notes"),
+            )
         val activity =
             listOf(
                 Run(
@@ -347,7 +375,12 @@ class SignalPresentationTest {
                     preview = "Trois sujets aujourd'hui.",
                 )
             )
-        val feed = buildFeed(chats, activity, listOf(Task("22db892f-1069-55df-8435-9b003528bdcf", "Veille")))
+        val feed =
+            buildFeed(
+                chats,
+                activity,
+                listOf(Task("22db892f-1069-55df-8435-9b003528bdcf", "Veille")),
+            )
         assertEquals(
             listOf(
                 FeedKind.QUESTION to "Choisir",
@@ -356,7 +389,10 @@ class SignalPresentationTest {
             ),
             feed.forYou.map { it.kind to it.title },
         )
-        assertEquals(listOf("task:d" to 60L, "chat:done" to 40L), feed.unread.map { it.read })
+        assertEquals(
+            listOf("task:22db892f-1069-55df-8435-9b003528bdcf" to 60L, "chat:done" to 40L),
+            feed.unread.map { it.read },
+        )
         assertEquals("J'ai publié les notes.", feed.forYou.last().preview)
         assertEquals(listOf("read"), feed.recent.map { it.chatId })
         assertEquals(
@@ -380,10 +416,29 @@ class SignalPresentationTest {
             )
         val activity =
             listOf(
-                Run("failed", taskId = "8a025d72-4937-53c0-a41d-820414dc655d", status = "failed", finishedAt = 6),
-                Run("running", taskId = "00eada4d-84f3-57cb-837e-3c023a643647", status = "running", startedAt = 1),
+                Run(
+                    "failed",
+                    taskId = "8a025d72-4937-53c0-a41d-820414dc655d",
+                    status = "failed",
+                    finishedAt = 6,
+                ),
+                Run(
+                    "running",
+                    taskId = "00eada4d-84f3-57cb-837e-3c023a643647",
+                    status = "running",
+                    startedAt = 1,
+                ),
             )
-        val fil = buildFeed(chats, activity, listOf(Task("8a025d72-4937-53c0-a41d-820414dc655d", "Audit"), Task("00eada4d-84f3-57cb-837e-3c023a643647", "Veille"))).keys()
+        val fil =
+            buildFeed(
+                    chats,
+                    activity,
+                    listOf(
+                        Task("8a025d72-4937-53c0-a41d-820414dc655d", "Audit"),
+                        Task("00eada4d-84f3-57cb-837e-3c023a643647", "Veille"),
+                    ),
+                )
+                .keys()
         assertEquals(
             listOf("chat:question", "run:failed", "run:running", "chat:live", "chat:idle"),
             fil,
@@ -400,14 +455,14 @@ class SignalPresentationTest {
     fun `read acknowledgement keeps the open conversation before the next unread page`() {
         val chats =
             listOf(
-                Chat("8a025d72-4937-53c0-a41d-820414dc655d", "First result", unread = true, finishedAt = 30, updatedAt = 30),
-                Chat("00eada4d-84f3-57cb-837e-3c023a643647", "Second result", unread = true, finishedAt = 20, updatedAt = 20),
+                Chat("a", "First result", unread = true, finishedAt = 30, updatedAt = 30),
+                Chat("b", "Second result", unread = true, finishedAt = 20, updatedAt = 20),
                 Chat("c", "Recent", updatedAt = 10),
             )
         val before = buildFeed(chats, emptyList(), emptyList()).keys()
         val after =
             buildFeed(
-                    chats.map { if (it.id == "8a025d72-4937-53c0-a41d-820414dc655d") it.copy(unread = false) else it },
+                    chats.map { if (it.id == "a") it.copy(unread = false) else it },
                     emptyList(),
                     emptyList(),
                 )
@@ -422,8 +477,8 @@ class SignalPresentationTest {
     fun `navigation badge distinguishes action from reading and clears optimistic reads`() {
         val chats =
             listOf(
-                Chat("8a025d72-4937-53c0-a41d-820414dc655d", "Result", unread = true, finishedAt = 30),
-                Chat("00eada4d-84f3-57cb-837e-3c023a643647", "Question", pendingQuestions = 1),
+                Chat("a", "Result", unread = true, finishedAt = 30),
+                Chat("b", "Question", pendingQuestions = 1),
             )
         assertEquals(FilAttention(1, 1), filAttention(buildFeed(chats, emptyList(), emptyList())))
         assertEquals(1, FilAttention(1, 4).count)
@@ -437,7 +492,7 @@ class SignalPresentationTest {
     @Test
     fun `summary and greeting describe the feed`() {
         assertEquals("Tout est calme.", feedSummary(Feed(emptyList(), emptyList(), emptyList())))
-        val item = FeedItem("k", FeedKind.CHAT, "7525d1be-5613-5715-96b1-145b0f8b9c78", "e186f830-3e88-53ba-943f-b926bb27f37f", "8a025d72-4937-53c0-a41d-820414dc655d", "8a025d72-4937-53c0-a41d-820414dc655d")
+        val item = FeedItem("k", FeedKind.CHAT, "t", "s", "a", "a")
         assertEquals(
             "1 agent au travail · 2 éléments pour vous",
             feedSummary(Feed(listOf(item, item), listOf(item), emptyList())),
@@ -475,8 +530,20 @@ class SignalPresentationTest {
 
     @Test
     fun `mission filters and ordering keep running and failing missions on top`() {
-        val scheduled = Task("e186f830-3e88-53ba-943f-b926bb27f37f", "B planifiée", cron = "0 9 * * *", nextRun = 200)
-        val soon = Task("fd0107f8-a9c6-5b5e-ba66-5d3baf41211f", "C planifiée", cron = "0 8 * * *", nextRun = 100)
+        val scheduled =
+            Task(
+                "e186f830-3e88-53ba-943f-b926bb27f37f",
+                "B planifiée",
+                cron = "0 9 * * *",
+                nextRun = 200,
+            )
+        val soon =
+            Task(
+                "fd0107f8-a9c6-5b5e-ba66-5d3baf41211f",
+                "C planifiée",
+                cron = "0 8 * * *",
+                nextRun = 100,
+            )
         val once = Task("87d969a4-be62-5c7e-bacd-4917b8604bed", "A ponctuelle")
         val paused =
             Task(
@@ -485,27 +552,53 @@ class SignalPresentationTest {
                 cron = "0 9 * * *",
                 enabled = false,
             )
-        val archived = Task("a8498a70-9bbc-557a-aa09-574c5d35021a", "Archivée", archived = true, enabled = false)
+        val archived =
+            Task(
+                "a8498a70-9bbc-557a-aa09-574c5d35021a",
+                "Archivée",
+                archived = true,
+                enabled = false,
+            )
         val all = listOf(scheduled, soon, once, paused, archived)
         assertEquals(
-            listOf("e186f830-3e88-53ba-943f-b926bb27f37f", "fd0107f8-a9c6-5b5e-ba66-5d3baf41211f", "87d969a4-be62-5c7e-bacd-4917b8604bed", "5bfed223-205d-577b-a9eb-2561157d92ff"),
+            listOf(
+                "e186f830-3e88-53ba-943f-b926bb27f37f",
+                "fd0107f8-a9c6-5b5e-ba66-5d3baf41211f",
+                "87d969a4-be62-5c7e-bacd-4917b8604bed",
+                "5bfed223-205d-577b-a9eb-2561157d92ff",
+            ),
             all.filter { missionFilter(it, "all") }.map { it.id },
         )
-        assertEquals(listOf("e186f830-3e88-53ba-943f-b926bb27f37f", "fd0107f8-a9c6-5b5e-ba66-5d3baf41211f"), all.filter { missionFilter(it, "scheduled") }.map { it.id })
-        assertEquals(listOf("87d969a4-be62-5c7e-bacd-4917b8604bed"), all.filter { missionFilter(it, "once") }.map { it.id })
+        assertEquals(
+            listOf("e186f830-3e88-53ba-943f-b926bb27f37f", "fd0107f8-a9c6-5b5e-ba66-5d3baf41211f"),
+            all.filter { missionFilter(it, "scheduled") }.map { it.id },
+        )
+        assertEquals(
+            listOf("87d969a4-be62-5c7e-bacd-4917b8604bed"),
+            all.filter { missionFilter(it, "once") }.map { it.id },
+        )
         assertEquals(
             listOf("5bfed223-205d-577b-a9eb-2561157d92ff"),
             all.filter { missionFilter(it, "paused") }.map { it.id },
         )
-        assertEquals(listOf("a8498a70-9bbc-557a-aa09-574c5d35021a"), all.filter { missionFilter(it, "archived") }.map { it.id })
+        assertEquals(
+            listOf("a8498a70-9bbc-557a-aa09-574c5d35021a"),
+            all.filter { missionFilter(it, "archived") }.map { it.id },
+        )
         val latest =
             mapOf(
-                "87d969a4-be62-5c7e-bacd-4917b8604bed" to Run("r1", taskId = "87d969a4-be62-5c7e-bacd-4917b8604bed", status = "failed"),
+                "87d969a4-be62-5c7e-bacd-4917b8604bed" to
+                    Run("r1", taskId = "87d969a4-be62-5c7e-bacd-4917b8604bed", status = "failed"),
                 "5bfed223-205d-577b-a9eb-2561157d92ff" to
                     Run("r2", taskId = "5bfed223-205d-577b-a9eb-2561157d92ff", status = "running"),
             )
         assertEquals(
-            listOf("5bfed223-205d-577b-a9eb-2561157d92ff", "87d969a4-be62-5c7e-bacd-4917b8604bed", "fd0107f8-a9c6-5b5e-ba66-5d3baf41211f", "e186f830-3e88-53ba-943f-b926bb27f37f"),
+            listOf(
+                "5bfed223-205d-577b-a9eb-2561157d92ff",
+                "87d969a4-be62-5c7e-bacd-4917b8604bed",
+                "fd0107f8-a9c6-5b5e-ba66-5d3baf41211f",
+                "e186f830-3e88-53ba-943f-b926bb27f37f",
+            ),
             missionOrder(listOf(scheduled, soon, once, paused), latest).map { it.id },
         )
     }
@@ -559,8 +652,16 @@ class SignalPresentationTest {
                     ),
                 tasks =
                     listOf(
-                        Task("7525d1be-5613-5715-96b1-145b0f8b9c78", "Revue hebdomadaire", cron = "0 9 * * 1"),
-                        Task("d2de3a5c-f8c6-5276-b029-b4e459546f28", "Revue archivée", archived = true),
+                        Task(
+                            "7525d1be-5613-5715-96b1-145b0f8b9c78",
+                            "Revue hebdomadaire",
+                            cron = "0 9 * * 1",
+                        ),
+                        Task(
+                            "d2de3a5c-f8c6-5276-b029-b4e459546f28",
+                            "Revue archivée",
+                            archived = true,
+                        ),
                     ),
                 skills = listOf(Skill("revue", "Guide de revue")),
             )
@@ -585,7 +686,12 @@ class SignalPresentationTest {
             ),
             hits.map { it.kind }.toSet(),
         )
-        assertTrue(hits.none { it.id == "d2de3a5c-f8c6-5276-b029-b4e459546f28" || it.id == "22db892f-1069-55df-8435-9b003528bdcf" })
+        assertTrue(
+            hits.none {
+                it.id == "d2de3a5c-f8c6-5276-b029-b4e459546f28" ||
+                    it.id == "22db892f-1069-55df-8435-9b003528bdcf"
+            }
+        )
         // Title matches first: the agent named "Revue de code" before "Ops" (description only).
         assertTrue(
             hits.indexOfFirst { it.id == "5ca9d6c5-caa1-5234-8069-c22f7aa2da85" } <
@@ -644,8 +750,8 @@ class SignalPresentationTest {
     fun `connection summary reports coding agents without a usable account and the best capacity`() {
         val codex =
             listOf(
-                Account("8a025d72-4937-53c0-a41d-820414dc655d", "codex", "Perso", state = "ready", remainingPercent = 40.0),
-                Account("00eada4d-84f3-57cb-837e-3c023a643647", "codex", "Pro", state = "ready", remainingPercent = 70.0),
+                Account("a", "codex", "Perso", state = "ready", remainingPercent = 40.0),
+                Account("b", "codex", "Pro", state = "ready", remainingPercent = 70.0),
                 Account(
                     "c",
                     "codex",
@@ -677,12 +783,12 @@ class SignalPresentationTest {
     @Test
     fun `account statuses, windows and resets read naturally in French`() {
         val now = 1_790_000_000_000
-        assertEquals("Prochain", accountStatusLabel(Account("8a025d72-4937-53c0-a41d-820414dc655d", name = "A", status = "next")))
-        assertNull(accountStatusLabel(Account("8a025d72-4937-53c0-a41d-820414dc655d", name = "A", status = "ready")))
+        assertEquals("Prochain", accountStatusLabel(Account("a", name = "A", status = "next")))
+        assertNull(accountStatusLabel(Account("a", name = "A", status = "ready")))
         assertEquals(
             "Reprise dans 48 min",
             accountStatusLabel(
-                Account("8a025d72-4937-53c0-a41d-820414dc655d", name = "A", status = "waiting", resetsAt = now / 1000 + 48 * 60),
+                Account("a", name = "A", status = "waiting", resetsAt = now / 1000 + 48 * 60),
                 now,
             ),
         )

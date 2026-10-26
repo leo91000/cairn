@@ -143,22 +143,18 @@ impl Missions {
         } else {
             self.observe(s).await?
         };
-        let author = if expected.is_none() {
-            policy
-                .as_ref()
-                .map(|policy| {
-                    let account = match &actor {
-                        Actor::Human(identity) => &identity.account_id,
-                        _ => &policy.owner.account_id,
-                    };
-                    policy.grant(account).cloned().ok_or_else(|| {
-                        Error::forbidden("This account no longer has access to the installation.")
-                    })
+        let author = policy
+            .as_ref()
+            .map(|policy| {
+                let account = match &actor {
+                    Actor::Human(identity) => &identity.account_id,
+                    _ => &policy.owner.account_id,
+                };
+                policy.grant(account).cloned().ok_or_else(|| {
+                    Error::forbidden("This account no longer has access to the installation.")
                 })
-                .transpose()?
-        } else {
-            None
-        };
+            })
+            .transpose()?;
         settings.validate().map_err(Error::bad)?;
         if let Some(cron) = &settings.cron {
             next_occurrences(cron, &settings.timezone, now(), 1)?;
@@ -360,7 +356,23 @@ impl Missions {
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
         let _authors = self.authors.lock().await;
-        s.transfer_agents(input, authorize).await
+        if !input.confirm {
+            return Err(Error::bad("Confirm the merge."));
+        }
+
+        // An active worker can still be settling a terminal run. Keep the same
+        // worker/admission ordering as the profile merge while commitments are held.
+        let active = s.worker.active.lock().await;
+        let executing = active.keys().cloned().collect::<Vec<_>>();
+        let result = s
+            .store
+            .transaction(move |db| {
+                authorize(db)?;
+                crate::agent_merge::merge(db, &input, &executing)
+            })
+            .await?;
+        s.worker.notify();
+        Ok(result)
     }
 }
 

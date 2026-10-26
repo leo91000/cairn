@@ -42,6 +42,7 @@ CREATE TABLE missions(
 );
 CREATE TRIGGER missions_author_immutable BEFORE UPDATE ON missions
  WHEN OLD.author_id IS NOT NEW.author_id OR OLD.author_access_id IS NOT NEW.author_access_id
+   OR (OLD.author_removed=1 AND NEW.author_removed=0)
  BEGIN SELECT RAISE(ABORT,'Mission authorship is immutable'); END;
 CREATE INDEX missions_updated ON missions(updated_at DESC,id);
 CREATE INDEX missions_due ON missions(next_run,id) WHERE enabled=1 AND archived=0 AND cron IS NOT NULL;
@@ -168,7 +169,7 @@ impl Db<'_> {
     }
 
     pub fn due_missions(&self, at: i64) -> Result<Vec<Mission>> {
-        self.query_missions("WHERE enabled=1 AND archived=0 AND cron IS NOT NULL AND next_run<=? ORDER BY next_run,id", Some(at))
+        self.query_missions("WHERE enabled=1 AND archived=0 AND cron IS NOT NULL AND next_run<=? ORDER BY updated_at DESC,id", Some(at))
     }
 
     fn query_missions(&self, suffix: &str, at: Option<i64>) -> Result<Vec<Mission>> {

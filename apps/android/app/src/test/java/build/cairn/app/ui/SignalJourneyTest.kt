@@ -184,20 +184,30 @@ class SignalJourneyTest {
                                 )
                             path == "/api/installations/fixture/api/tasks" &&
                                 request.method == "GET" ->
-                                json(wireJson.encodeToString(build.cairn.contracts.ListMissionsOutput(listOf(daily))))
-                            path == "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110" &&
-                                request.method == "PUT" ->
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListMissionsOutput(listOf(daily))
+                                    )
+                                )
+                            path ==
+                                "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/state" &&
+                                request.method == "POST" ->
                                 json(wireJson.encodeToString(daily.copy(enabled = false)))
                             path == "/api/installations/fixture/api/tasks/activity" ->
                                 json(wireJson.encodeToString(listOf(failed)))
-                            path == "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/run" ->
+                            path ==
+                                "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/run" ->
                                 json(
                                     wireJson.encodeToString(
                                         Run(
                                             "new-run",
                                             taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
                                             status = "running",
-                                            snapshot = Snapshot(task = daily.runTaskSnapshot(), agent = main),
+                                            snapshot =
+                                                Snapshot(
+                                                    task = daily.runTaskSnapshot(),
+                                                    agent = main,
+                                                ),
                                         )
                                     )
                                 )
@@ -266,7 +276,11 @@ class SignalJourneyTest {
                                                 taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
                                                 status = "running",
                                                 trigger = "schedule",
-                                                snapshot = Snapshot(task = daily.runTaskSnapshot(), agent = main),
+                                                snapshot =
+                                                    Snapshot(
+                                                        task = daily.runTaskSnapshot(),
+                                                        agent = main,
+                                                    ),
                                             )
                                     )
                                 )
@@ -386,7 +400,10 @@ class SignalJourneyTest {
         capture("fil-light")
         // A failed mission is retried in place and its new run opens.
         compose.onNodeWithContentDescription("Relancer Revue quotidienne").performClick()
-        waitCall("POST", "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/run")
+        waitCall(
+            "POST",
+            "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/run",
+        )
         waitDescription("Retour")
         compose.onNodeWithContentDescription("Retour").performClick()
         // A running conversation shows the live working indicator.
@@ -500,7 +517,10 @@ class SignalJourneyTest {
         compose.onNodeWithText("Lancer « Revue quotidienne »").assertDoesNotExist()
         compose.onNodeWithTag("search-field").performTextReplacement("revue")
         compose.onNodeWithText("Lancer « Revue quotidienne »").performClick()
-        waitCall("POST", "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/run")
+        waitCall(
+            "POST",
+            "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/run",
+        )
     }
 
     @Test
@@ -572,14 +592,18 @@ class SignalJourneyTest {
             .assertExists()
         capture("mission-sheet-light")
         compose.onNodeWithContentDescription("Mettre en pause").performScrollTo().performClick()
-        waitCall("PUT", "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110")
+        waitCall(
+            "POST",
+            "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/state",
+        )
         val saved =
             wireJson
                 .parseToJsonElement(
                     calls
                         .first {
-                            it.first == "PUT" &&
-                                it.second == "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110"
+                            it.first == "POST" &&
+                                it.second ==
+                                    "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/state"
                         }
                         .third
                 )
@@ -593,7 +617,10 @@ class SignalJourneyTest {
                 .isNotEmpty() && !vm.state.value.busy
         }
         compose.onNodeWithText("Lancer maintenant").performScrollTo().performClick()
-        waitCall("POST", "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/run")
+        waitCall(
+            "POST",
+            "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/run",
+        )
         waitDescription("Retour")
     }
 

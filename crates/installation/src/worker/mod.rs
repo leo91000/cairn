@@ -245,6 +245,7 @@ async fn audit(store: &Store, action: &str, detail: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mission_fixture::MissionFixture;
 
     #[tokio::test]
     async fn committed_work_and_deployment_release_wake_the_scheduler() {
@@ -343,6 +344,3 @@ mod tests {
             .unwrap();
     }
 }
-
-#[cfg(test)]
-use crate::mission_fixture::MissionFixture;
