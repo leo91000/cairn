@@ -161,8 +161,8 @@ async fn speed_checks_before_a_turn_become_conversation_notices() {
     let standard = json!({ "requested": "priority", "applied": "standard" });
     let fast = json!({ "requested": "priority", "applied": "priority" });
     let unconfirmed = json!({ "requested": "priority", "unconfirmed": true });
-    // A confirmed speed says nothing; a retry repeating an outcome adds nothing; a later attempt
-    // getting the speed after all says so; another message starts over.
+    // Every outcome is stated once per message: a retry repeating it adds nothing, a later
+    // attempt getting the speed after all says so, and another message starts over.
     for (message, speed) in [
         ("first", &fast),
         ("second", &standard),
@@ -191,13 +191,15 @@ async fn speed_checks_before_a_turn_become_conversation_notices() {
             )
         })
         .collect::<Vec<_>>();
-    assert_eq!(notices.len(), 3, "{events:#?}");
-    assert_eq!(notices[0].0, "second");
-    assert!(notices[0].1.contains("runs at Standard speed"));
+    assert_eq!(notices.len(), 4, "{events:#?}");
+    assert_eq!(notices[0].0, "first");
+    assert!(notices[0].1.contains("Codex lists the selected speed"));
     assert_eq!(notices[1].0, "second");
-    assert!(notices[1].1.contains("now offers the selected speed"));
-    assert_eq!(notices[2].0, "third");
-    assert!(notices[2].1.contains("may run at Standard speed"));
+    assert!(notices[1].1.contains("runs at Standard speed"));
+    assert_eq!(notices[2].0, "second");
+    assert!(notices[2].1.contains("now lists the selected speed"));
+    assert_eq!(notices[3].0, "third");
+    assert!(notices[3].1.contains("may run at Standard speed"));
 }
 
 #[tokio::test]

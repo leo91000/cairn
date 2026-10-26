@@ -370,7 +370,7 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                             account != null -> "Compte ${account.first} sélectionné"
                             speedFallback(data) -> "Ce tour passe en vitesse Standard"
                             speedUnconfirmed(data) -> "Vitesse non confirmée pour ce tour"
-                            speedConfirmed(data) -> "Ce tour passe désormais à la vitesse choisie"
+                            speedConfirmed(data) -> "Ce tour passe à la vitesse choisie"
                             event.text.lowercase() in
                                 listOf(
                                     "succeeded",
@@ -402,7 +402,7 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                 else if (event.type == "status" && speedFallback(data))
                     "Codex ne liste pas la vitesse choisie pour ce modèle ici : Cairn demande Standard"
                 else if (event.type == "status" && speedConfirmed(data))
-                    "Codex propose désormais la vitesse choisie pour ce modèle ici"
+                    "Codex liste la vitesse choisie pour ce modèle ici"
                 else if (event.type == "status" && speedUnconfirmed(data))
                     "Codex ne peut pas confirmer qu’il propose la vitesse choisie pour ce modèle ici ; ce tour peut passer en Standard"
                 else if (event.type == "engine.retry") engineRetryDetail(data)
@@ -557,7 +557,9 @@ private fun accountUsed(text: String): Pair<String, String>? =
 internal fun speedFallback(data: JsonObject?): Boolean =
     data?.get("speed").asObject().string("applied") == STANDARD_SPEED
 
-/** A later attempt of the turn, on another account, gets the selected speed after all. */
+/**
+ * Codex lists the selected speed for the turn's model, possibly after an earlier attempt did not.
+ */
 internal fun speedConfirmed(data: JsonObject?): Boolean =
     data?.get("speed").asObject().string("applied").let { it.isNotEmpty() && it != STANDARD_SPEED }
 

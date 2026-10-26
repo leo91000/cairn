@@ -442,9 +442,10 @@ async fn apply_event(
     Ok(())
 }
 
-/// The notice a turn's speed check needs. Each attempt of a turn checks again, on whichever
-/// account it runs: only a change of outcome for the message is shown, so retries do not repeat
-/// a notice and a later attempt that gets the speed after all says so.
+/// The notice a turn's speed check needs: every faster turn states how it runs, since the picker
+/// and queue judge from cached catalogs. Each attempt of a turn checks again, on whichever account
+/// it runs: only a change of outcome for the message is shown, so retries do not repeat a notice
+/// and a later attempt that gets the speed after all says so.
 async fn speed_notice(s: &Service, id: &str, event: &Value) -> Result<Option<&'static str>> {
     let speed = &event["speed"];
     let outcome = if speed["unconfirmed"] == true {
@@ -468,9 +469,11 @@ async fn speed_notice(s: &Service, id: &str, event: &Value) -> Result<Option<&'s
 
     Ok(match (outcome, earlier.as_deref()) {
         (outcome, Some(earlier)) if outcome == earlier => None,
-        ("applied", None) => None,
+        ("applied", None) => {
+            Some("Codex lists the selected speed for this model here. This turn runs at it.")
+        }
         ("applied", Some(_)) => {
-            Some("Codex now offers the selected speed for this model here. This turn runs at it.")
+            Some("Codex now lists the selected speed for this model here. This turn runs at it.")
         }
         ("standard", _) => Some(
             "Codex doesn’t list the selected speed for this model here, so this turn runs at Standard speed.",

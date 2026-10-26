@@ -883,10 +883,10 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       artifact.attention = true
     }
 
-    // A later attempt of the turn, on another account, gets the speed after all.
+    // Codex lists the selected speed for the turn's model, possibly after an earlier attempt did not.
     if (event.type === 'status' && applied && applied !== 'standard') {
-      artifact.title = 'This turn now runs at the selected speed'
-      artifact.subtitle = 'Codex now offers the selected speed for this model here'
+      artifact.title = 'This turn runs at the selected speed'
+      artifact.subtitle = 'Codex lists the selected speed for this model here'
       artifact.status = 'info'
       artifact.attention = true
     }

@@ -291,7 +291,7 @@ class EngineStatusTest {
             notices(listOf(fallback, confirmed)).map { it.id },
         )
         assertEquals(
-            "Ce tour passe désormais à la vitesse choisie",
+            "Ce tour passe à la vitesse choisie",
             presentActivity(confirmed).title,
         )
     }

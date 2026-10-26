@@ -1056,8 +1056,8 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
         .unwrap();
     assert!(fast["serviceTiers"][0].get("limited").is_none(), "{fast}");
 
-    // Without an enabled account offering it, the run is not held back: it runs at
-    // standard speed on an available account and says so.
+    // Without an enabled account offering it, the run is not held back: it goes to an
+    // available account, and the turn's own check says how it runs there.
     service
         .accounts
         .update(&service, &ids[1], &json!({ "enabled": false }))

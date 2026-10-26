@@ -192,7 +192,7 @@ describe('engine status', () => {
     }
     expect(notices([fallback, confirmed]).map(notice => notice.title)).toEqual([
       'This turn runs at Standard speed',
-      'This turn now runs at the selected speed',
+      'This turn runs at the selected speed',
     ])
   })
 
