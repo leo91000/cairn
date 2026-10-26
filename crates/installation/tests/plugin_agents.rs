@@ -12,7 +12,7 @@ mod common;
 use axum::{body::Body, http::StatusCode};
 use cairn_installation::{
     config::{MAIN_AGENT_ID, id},
-    plugins::{agents, connections, panels},
+    plugins::{agents, connections, panels, registry},
     run_output,
     service::Service,
     validation::text,
@@ -374,6 +374,85 @@ async fn manager_shutdown_interrupts_reads_and_refuses_later_commands() {
     assert!(!error.message.contains("never-release-this-secret"));
     assert_eq!(run(&f, read).await, Err(503));
     assert_eq!(daemons(&f).len(), 1);
+}
+
+#[tokio::test]
+async fn package_activation_interrupts_a_read_from_the_previous_approved_version() {
+    let f = fixture().await;
+    let started = f.root.path().join("package-read-started");
+    write_program(
+        &f.program,
+        &format!(
+            "#!/bin/sh\n/usr/bin/touch '{}'\n/bin/sleep 2\nprintf 'never-release-this-secret'\n",
+            started.display()
+        ),
+    );
+    let source = "return { command = function(input) local result = cairn.exec.run { program = 'op', instance = input.instances[1].id }; return result.stdout end }";
+    let mut next_digest = String::new();
+    for version in ["1.0.0", "1.0.1"] {
+        let package = registry::install(
+            &f.s,
+            &json!({
+                "manifest": {
+                    "id": "cacheprobe", "name": "Cache probe", "version": version,
+                    "apiVersion": 2, "capabilities": ["exec"],
+                    "agentAccess": { "description": "Fixture reads" },
+                    "programs": [{
+                        "name": "op", "path": f.program,
+                        "cache": { "daemonArgs": ["daemon"], "socketEnv": "OP_SOCK" },
+                    }],
+                    "commands": [{ "name": "read", "output": "secret" }],
+                },
+                "source": source,
+            }),
+        )
+        .await
+        .unwrap();
+        let digest = text(&package, "digest");
+        if version == "1.0.0" {
+            registry::approve(&f.s, "cacheprobe", version, digest)
+                .await
+                .unwrap();
+        } else {
+            next_digest = digest.to_owned();
+        }
+    }
+    common::save_plugin(
+        &f.s,
+        "cacheprobe",
+        &json!({
+            "name": "Fixture", "enabled": true, "agentIds": [MAIN_AGENT_ID],
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let activate = async {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        registry::approve(&f.s, "cacheprobe", "1.0.1", &next_digest)
+            .await
+            .unwrap();
+    };
+    let read = json!({ "plugin": "cacheprobe", "command": "read", "args": [] });
+    let (result, ()) = tokio::join!(f.s.plugins.command(&f.s, &f.bearer, &read), activate);
+    let error = result.unwrap_err();
+    assert_eq!(error.status, 409);
+    assert!(!error.message.contains("never-release-this-secret"));
+    assert_eq!(
+        registry::active(&f.s, "cacheprobe")
+            .await
+            .unwrap()
+            .manifest
+            .version,
+        "1.0.1"
+    );
+    assert!(!std::path::Path::new(daemons(&f)[0]["home"].as_str().unwrap()).exists());
 }
 
 #[tokio::test]

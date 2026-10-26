@@ -10,6 +10,7 @@ fn executable(root: &TempDir) -> PathBuf {
 
 fn identity(executable: PathBuf) -> Identity {
     Identity {
+        plugin: "onepassword".into(),
         connection: "first".into(),
         revision: "1".into(),
         package: "package".into(),

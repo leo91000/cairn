@@ -22,6 +22,7 @@ const RESIDENT: usize = 64;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Identity {
+    pub plugin: String,
     pub connection: String,
     pub revision: String,
     pub package: String,
@@ -62,11 +63,6 @@ impl Caches {
     /// Capture before reading authoritative state; verify under the pool lock.
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
-    }
-
-    pub fn changed(&self) {
-        let _entries = self.entries.lock().unwrap();
-        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     pub async fn acquire(
@@ -155,10 +151,18 @@ impl Caches {
     }
 
     pub fn forget(&self, connection: &str) {
+        self.invalidate(|identity| identity.connection == connection);
+    }
+
+    pub fn forget_plugin(&self, plugin: &str) {
+        self.invalidate(|identity| identity.plugin == plugin);
+    }
+
+    fn invalidate(&self, matches: impl Fn(&Identity) -> bool) {
         let mut entries = self.entries.lock().unwrap();
         self.generation.fetch_add(1, Ordering::AcqRel);
-        entries.retain(|(id, _), entry| {
-            if id != connection {
+        entries.retain(|_, entry| {
+            if !matches(&entry.identity) {
                 return true;
             }
             entry.stop();

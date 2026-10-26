@@ -133,6 +133,7 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
             return Err(Error::conflict("The plugin changed. Retry the command."));
         }
         let identity = super::program_cache::Identity {
+            plugin: manifest.id.clone(),
             connection: context.connection.id.clone(),
             revision: context.connection.revision.clone(),
             package: package.digest,
