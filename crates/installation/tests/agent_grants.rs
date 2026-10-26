@@ -1,7 +1,6 @@
 //! Permissions are edited on typed profiles. Resource lists are projections of
 //! the same relations used by enforcement; no resource JSON is authoritative.
 use common::MissionFixture;
-use common::StoreAgentFixture;
 use common::{McpFixture, StoreAgentFixture};
 
 mod common;
