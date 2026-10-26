@@ -25,6 +25,20 @@ fn main() {
     fs::create_dir_all(root).unwrap();
     let mut generator = SchemaSettings::draft07().for_serialize().into_generator();
     fs::write(root.join("run-clients.json"), serde_json::to_string_pretty(&serde_json::json!([{"name": "runMission", "input": "RunMissionInput", "output": "Run", "method": "POST", "path": "/tasks/{taskId}/run"}, {"name": "retryRun", "input": "RunInput", "output": "Run", "method": "POST", "path": "/runs/{runId}/retry"}, {"name": "cancelRun", "input": "RunInput", "output": "CancelRunOutput", "method": "POST", "path": "/runs/{runId}/cancel"}, {"name": "cleanupRun", "input": "RunInput", "output": "CleanupRunOutput", "method": "POST", "path": "/runs/{runId}/cleanup"}])).unwrap() + "\n").unwrap();
+    let corpus: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/run-contracts.json")).unwrap();
+    let states: Vec<RunState> = serde_json::from_value(corpus["states"].clone()).unwrap();
+    let retries: Vec<Retry> = serde_json::from_value(corpus["retries"].clone()).unwrap();
+    let lists: Vec<ListRunsInput> = serde_json::from_value(corpus["lists"].clone()).unwrap();
+    fs::write(
+        root.join("run-wire.json"),
+        serde_json::to_string_pretty(
+            &serde_json::json!({"states": states, "retries": retries, "lists": lists}),
+        )
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
     export::<ListRunsInput>(root, &mut generator, Contract::Deserialize);
     export::<GetRunInput>(root, &mut generator, Contract::Deserialize);
     export::<ReadRunContentInput>(root, &mut generator, Contract::Deserialize);
@@ -588,8 +602,18 @@ fn main() {
     let mut run_decoder = SchemaSettings::draft07().for_deserialize().into_generator();
     run_decoder.subschema_for::<Run>();
     for (name, schema) in run_decoder.take_definitions(true) {
-        if matches!(name.as_str(), "Run" | "RunState" | "RunSnapshot" | "RunSkill"
-            | "RunWorkspace" | "RunRequester" | "RunTaskSnapshot" | "Retry" | "Cause") {
+        if matches!(
+            name.as_str(),
+            "Run"
+                | "RunState"
+                | "RunSnapshot"
+                | "RunSkill"
+                | "RunWorkspace"
+                | "RunRequester"
+                | "RunTaskSnapshot"
+                | "Retry"
+                | "Cause"
+        ) {
             definitions.insert(name, schema);
         }
     }

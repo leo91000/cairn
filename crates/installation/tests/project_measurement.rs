@@ -766,3 +766,134 @@ fn mcp_storage_layouts() {
     }).collect();
     measure(&servers);
 }
+
+// A5 reuses the A1/A2 qualification loop, changing only the domain mapping.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+struct MeasuredRun(Value);
+
+impl MeasuredRun {
+    fn state(&self) -> cairn_contracts::RunState {
+        serde_json::from_value(self.0.clone()).unwrap()
+    }
+}
+
+impl StorageEntity for MeasuredRun {
+    const KIND: &'static str = "runs";
+    const SAVE: &'static str = "run.saved";
+
+    fn id(&self) -> String {
+        self.state().id
+    }
+
+    fn read(db: &Db<'_>, id: &str) -> Self {
+        Self(db.run(id).unwrap().unwrap())
+    }
+
+    fn list(db: &Db<'_>) -> usize {
+        db.runs(None, None, 1000, 0, false).unwrap().len()
+    }
+
+    fn write(&self, db: &Db<'_>, replacement: bool) {
+        let state = self.state();
+        if replacement {
+            db.change_run(
+                &state.id,
+                cairn_installation::runs::RunChanges {
+                    status: Some(state.status),
+                    summary: Some(state.summary),
+                    finished_at: Some(state.finished_at),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        } else {
+            let snapshot: cairn_contracts::RunSnapshot =
+                serde_json::from_value(self.0["snapshot"].clone()).unwrap();
+            let mut boundary = self.0.clone();
+            for field in cairn_installation::runs::RUN_FIELDS {
+                boundary.as_object_mut().unwrap().remove(*field);
+            }
+            db.admit_run(&state, Some(&snapshot), &boundary, None)
+                .unwrap();
+        }
+        db.audit(Self::SAVE, &json!({"id": state.id})).unwrap();
+    }
+
+    fn reference_schema(db: &Connection) {
+        // Exact pre-A5 seven-column runs layout and indexes at 7fecc082.
+        db.execute_batch("DROP TABLE runs;
+CREATE TABLE runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,project_id TEXT NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,data TEXT NOT NULL,dedupe TEXT UNIQUE);
+CREATE INDEX runs_status ON runs(status,created_at);
+CREATE INDEX runs_task ON runs(task_id,created_at DESC);
+CREATE INDEX runs_created ON runs(created_at DESC,id DESC);
+CREATE UNIQUE INDEX runs_active_task ON runs(task_id) WHERE status IN ('queued','running','waiting');").unwrap();
+    }
+
+    fn reference_read(db: &Db<'_>, id: &str) -> Self {
+        let data: String =
+            db.0.prepare_cached("SELECT data FROM runs WHERE id=?")
+                .unwrap()
+                .query_row([id], |r| r.get(0))
+                .unwrap();
+        Self(serde_json::from_str(&data).unwrap())
+    }
+
+    fn reference_list(db: &Db<'_>) -> usize {
+        let mut query = db.0.prepare_cached("SELECT json_set(json_remove(data,'$.snapshot','$.summary'),'$.taskName',json_extract(data,'$.snapshot.task.name'),'$.agentName',json_extract(data,'$.snapshot.agent.name'),'$.provider',json_extract(data,'$.snapshot.agent.provider')) FROM runs ORDER BY created_at DESC,id DESC LIMIT 1000 OFFSET 0").unwrap();
+        let rows: Vec<Value> = query
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| serde_json::from_str(&r.unwrap()).unwrap())
+            .collect();
+        rows.len()
+    }
+
+    fn reference_write(&self, db: &Db<'_>, replacement: bool) {
+        let state = self.state();
+        if replacement {
+            db.0.prepare_cached("UPDATE runs SET status=?,data=? WHERE id=?")
+                .unwrap()
+                .execute(params![state.status.as_str(), self.0.to_string(), state.id])
+                .unwrap();
+        } else {
+            db.0.prepare_cached("INSERT INTO runs(id,task_id,project_id,status,created_at,data,dedupe) VALUES(?,?,?,?,?,?,NULL)").unwrap().execute(params![state.id,state.task_id,state.project_id.unwrap_or_default(),state.status.as_str(),state.created_at,self.0.to_string()]).unwrap();
+        }
+    }
+
+    fn reference_delete(db: &Db<'_>, id: &str) {
+        db.0.prepare_cached("DELETE FROM runs WHERE id=?")
+            .unwrap()
+            .execute([id])
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "local measurement; run alone with --ignored --nocapture --test-threads=1"]
+async fn run_storage_layouts() {
+    let corpus: Vec<_> = (0..1000).map(|n| {
+        let id = uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | n).to_string();
+        let state: cairn_contracts::RunState = serde_json::from_value(json!({
+            "id": id, "taskId": id, "status": if n % 3 == 0 { "failed" } else { "succeeded" },
+            "projectId": "00000000-0000-4000-8000-000000000005", "trigger": "manual",
+            "createdAt": 1700000000000_i64 + n as i64, "startedAt": 1700000000001_i64 + n as i64,
+            "finishedAt": 1700000000100_i64 + n as i64, "sessionId": format!("session-{n}"),
+            "summary": "Completed local task with preserved conversation context. ".repeat(12),
+            "resumeAvailable": true,
+            "requestedBy": if n % 2 == 0 { json!({"runId":"parent","chatId":"chat"}) } else { Value::Null },
+        })).unwrap();
+        let snapshot: cairn_contracts::RunSnapshot = serde_json::from_value(json!({
+            "task": {"id":id,"agentId":"00000000-0000-4000-8000-000000000001", "name":format!("Mission {n}"), "prompt":"Inspect the repository and preserve authorization. ".repeat(20)},
+            "agent": {"id":"00000000-0000-4000-8000-000000000001", "name":"Agent", "revision":"fixture", "createdAt":0, "instructions":"Inspect callers and validate behavior. ".repeat(20),"access":cairn_contracts::AccessPolicy::default(),"exclusiveNodes":[],"plugins":[]},
+            "project":null, "skills":[{"name":"review","path":"global/review","content":"Review changes independently. ".repeat(30)}],
+        })).unwrap();
+        let mut document = serde_json::to_value(state).unwrap();
+        document["snapshot"] = serde_json::to_value(snapshot).unwrap();
+        document["isolated"] = true.into();
+        document["nodeId"] = format!("node-{}",n%3).into();
+        document["executionBackend"] = "native".into();
+        MeasuredRun(document)
+    }).collect();
+    measure(&corpus);
+}

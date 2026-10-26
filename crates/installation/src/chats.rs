@@ -1731,6 +1731,7 @@ mod tests {
                             "id": "chat",
                             "runId": "run",
                             "sessionRestartRequested": !checkpoint_restart,
+                            "agentId": crate::config::MAIN_AGENT_ID,
                         });
                         db.put("chats", &chat)?;
                         db.set(
@@ -1920,19 +1921,18 @@ mod tests {
     #[test]
     fn provider_changes_must_wait_for_the_next_turn_and_model_aliases_are_valid() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch("CREATE TABLE runs(id TEXT,data TEXT);")
-            .unwrap();
+        connection.execute_batch(crate::runs::SCHEMA).unwrap();
         let run = json!({
             "status": "running",
             "snapshot": {
                 "agent": { "provider": "codex", "model": "gpt-6-sol", "reasoning": "high" },
             },
         });
-        connection
-            .execute("INSERT INTO runs VALUES('run',?)", [run.to_string()])
-            .unwrap();
         let db = Db(&connection);
+        let mut run = run;
+        run["id"] = "run".into();
+        run["taskId"] = "chat".into();
+        db.add_run_fixture(&run, None).unwrap();
         let chat = json!({ "runId": "run" });
         let mut message = parse(
             "message",

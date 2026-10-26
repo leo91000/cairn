@@ -375,3 +375,60 @@ pub struct RunPreview {
     #[ts(type = "number | null")]
     pub finished_at: Option<i64>,
 }
+
+impl ListRunsInput {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(1..=100).contains(&self.limit) || self.offset < 0 {
+            return Err("Invalid run page.".into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_corpus_preserves_defaults_and_rejects_invalid_commands() {
+        let corpus: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/run-contracts.json"))
+                .unwrap();
+        for value in corpus["commands"].as_array().unwrap() {
+            assert!(serde_json::from_value::<RunInput>(value.clone()).is_ok());
+        }
+        for value in corpus["invalidCommands"].as_array().unwrap() {
+            assert!(
+                serde_json::from_value::<RunInput>(value.clone()).is_err(),
+                "{value}"
+            );
+        }
+        for value in corpus["lists"].as_array().unwrap() {
+            serde_json::from_value::<ListRunsInput>(value.clone())
+                .unwrap()
+                .validate()
+                .unwrap();
+        }
+        for value in corpus["invalidLists"].as_array().unwrap() {
+            assert!(
+                serde_json::from_value::<ListRunsInput>(value.clone())
+                    .map_or(true, |input| input.validate().is_err()),
+                "{value}"
+            );
+        }
+        for value in corpus["states"].as_array().unwrap() {
+            let state: RunState = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(
+                serde_json::from_value::<RunState>(serde_json::to_value(&state).unwrap()).unwrap(),
+                state
+            );
+        }
+        for value in corpus["retries"].as_array().unwrap() {
+            let retry: Retry = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(
+                serde_json::from_value::<Retry>(serde_json::to_value(&retry).unwrap()).unwrap(),
+                retry
+            );
+        }
+    }
+}

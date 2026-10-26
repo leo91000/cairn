@@ -2693,8 +2693,7 @@ async fn plugin_management_is_owner_only_and_mcp_never_returns_secret_reads() {
         .await
         .unwrap();
     let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
-    s
-        .store
+    s.store
         .change_run(
             text(&run, "id"),
             cairn_installation::runs::RunChanges {

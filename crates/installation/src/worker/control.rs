@@ -63,8 +63,8 @@ impl Worker {
                 let chat = crate::chats::pause_in(db, &id, true)?;
                 if let Some(run_id) = chat["runId"].as_str() {
                     crate::chats::continuation::cancel_for_run(db, run_id)?;
-                    let run = required(db.run(run_id)?, "Run not found")?;
-                    if RunStatus::of(&run).is_some_and(RunStatus::is_active) {
+                    let run = required(db.run_state(run_id)?, "Run not found")?;
+                    if run.status.is_active() {
                         request_cancel(db, run_id, executing.contains(run_id))?;
                     }
                 }
@@ -130,14 +130,15 @@ impl Worker {
             .store
             .read(move |db| {
                 proof(db)?;
-                required(db.run(&run_id)?, "Run not found")
+                required(db.run_record(&run_id)?, "Run not found")
             })
             .await?;
-        if RunStatus::of(&run).is_some_and(RunStatus::is_active) || active.contains_key(id) {
+        if run.state.status.is_active() || active.contains_key(id) {
             return Err(Error::conflict(
                 "Wait for this run to finish before cleaning up.",
             ));
         }
+        let run = run.wire()?;
         if run["isolated"] == true {
             return Err(Error::conflict(
                 "This workspace is retained on a private VM disk. Resume the run to review and preserve its work.",
@@ -439,8 +440,8 @@ async fn pause_chat(s: &Service, input: &crate::http::Input, id: &str) -> Result
     let chat = s.get("chats", id).await?;
     crate::conversation_lifecycle::require_active(&chat)?;
     if !paused && let Some(run_id) = chat["runId"].as_str() {
-        let run = s.store.run(run_id).await?;
-        if RunStatus::of(&run).is_some_and(RunStatus::is_resumable)
+        let run = s.store.run_state(run_id).await?;
+        if run.status.is_resumable()
             && chat["cancelledByDeletion"] != true
             && chat["sessionRestartRequested"] != true
         {
@@ -470,7 +471,7 @@ async fn stop_chat(s: &Service, id: &str) -> Result<Value> {
     s.chat_pause(id, true).await?;
     s.chat_cancel_wait(id).await?;
     if let Some(run_id) = chat["runId"].as_str()
-        && RunStatus::of(&s.store.run(run_id).await?).is_some_and(RunStatus::is_active)
+        && s.store.run_state(run_id).await?.status.is_active()
     {
         s.worker.cancel(s, run_id).await?;
     }

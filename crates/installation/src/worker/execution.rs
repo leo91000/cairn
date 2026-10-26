@@ -264,16 +264,12 @@ async fn release(
     s.mcps.revoke_run(s, run_id).await?;
     requeue_pending_move(s, checkpoint).await?;
     if fenced && saved.managed() {
-        let run = s.store.run(run_id).await?;
+        let run = s.store.run_record(run_id).await?;
         let native = saved
             .prepared()
             .is_some_and(|prepared| prepared["backend"] == "native");
-        if crate::nodes::publication::protected(&run)
-            && (native
-                || matches!(
-                    RunStatus::of(&run),
-                    Some(RunStatus::Succeeded | RunStatus::Waiting)
-                ))
+        if crate::nodes::publication::protected(&run.wire()?)
+            && (native || matches!(run.state.status, RunStatus::Succeeded | RunStatus::Waiting))
         {
             // Native work can only be captured after fencing, including failed,
             // cancelled and paused turns. Durable demand survives upload errors.

@@ -115,7 +115,13 @@ async fn relay_disconnect_replays_activity_and_does_not_stop_the_run() {
         .installation
         .store
         .transaction(move |db| {
-            db.patch_run(&active, &json!({ "status": "running" }))?;
+            db.change_run(
+                &active,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_installation::run_status::RunStatus::Running),
+                    ..Default::default()
+                },
+            )?;
             db.event(&active, "output", "before disconnect", None)?;
             Ok(())
         })

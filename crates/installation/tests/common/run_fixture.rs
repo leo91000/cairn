@@ -34,12 +34,20 @@ pub fn complete_snapshot_fixture(input: &Value) -> Value {
         delegation: None,
     };
     let mut snapshot = serde_json::to_value(snapshot).unwrap();
-    merge(&mut snapshot, input);
-    #[cfg(test)]
-    if std::env::var_os("A5_DIAGNOSE_FIXTURE").is_some() {
-        serde_json::from_value::<cairn_contracts::RunSnapshot>(snapshot.clone()).expect("complete fixture snapshot");
-    }
+    fill_snapshot(&mut snapshot, input);
     snapshot
+}
+
+fn fill_snapshot(target: &mut Value, input: &Value) {
+    if let (Some(target), Some(input)) = (target.as_object_mut(), input.as_object()) {
+        for (key, value) in input {
+            if value.is_object() && target.get(key).is_some_and(Value::is_object) {
+                fill_snapshot(target.get_mut(key).unwrap(), value);
+            } else {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+    }
 }
 
 pub trait DbRunFixture {
@@ -80,7 +88,11 @@ pub fn change_run_fixture(db: &Db<'_>, id: &str, input: &Value) -> Result<Value>
             current.as_object_mut().unwrap().remove(*key);
         }
     }
-    let snapshot = current.as_object_mut().unwrap().remove("snapshot");
+    let snapshot = current
+        .as_object_mut()
+        .unwrap()
+        .remove("snapshot")
+        .map(|value| complete_snapshot_fixture(&value));
     db.0.execute(
         "UPDATE runs SET snapshot=? WHERE id=?",
         rusqlite::params![snapshot.map(|s| s.to_string()), id],

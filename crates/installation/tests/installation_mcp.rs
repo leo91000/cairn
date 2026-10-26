@@ -39,8 +39,7 @@ async fn active_run(s: &Service, agent: &Value) -> (Value, Value) {
         .enqueue(task["id"].as_str().unwrap(), "manual", None)
         .await
         .unwrap();
-    let run = s
-        .store
+    s.store
         .change_run(
             run["id"].as_str().unwrap(),
             cairn_installation::runs::RunChanges {
@@ -50,6 +49,7 @@ async fn active_run(s: &Service, agent: &Value) -> (Value, Value) {
         )
         .await
         .unwrap();
+    let run = s.store.run(text(&run, "id")).await.unwrap();
     let configuration = s.mcps.run_configuration(s, &run).await.unwrap();
     (run, configuration)
 }
@@ -231,7 +231,7 @@ async fn pending_recovery_can_be_inspected_and_cancelled_through_both_tool_inter
                 .change_run(
                     run_id,
                     cairn_installation::runs::RunChanges {
-                        retry: Some(Some(retry.clone())),
+                        retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
                         ..Default::default()
                     },
                 )
@@ -2078,8 +2078,7 @@ async fn mission_conversion_matches_public_mcp_and_installation_tools() {
         let (caller, configuration) = active_run(&s, &main).await;
         let (target, _) = active_run(&s, &main).await;
         let run_id = target["id"].as_str().unwrap();
-        let original = s
-            .store
+        s.store
             .change_run(
                 run_id,
                 cairn_installation::runs::RunChanges {
@@ -2092,6 +2091,7 @@ async fn mission_conversion_matches_public_mcp_and_installation_tools() {
             )
             .await
             .unwrap();
+        let original = s.store.run(run_id).await.unwrap();
         s.store
             .set(
                 &format!("run-checkpoint:{run_id}"),
@@ -3434,13 +3434,14 @@ async fn saved_mission(s: &Service, agent: &Value) -> Value {
                 workspace: Some(Some("/saved/workspace".into())),
                 resume_available: Some(true),
                 retry: Some(Some(serde_json::from_value(
-                    serde_json::json!({ "attempt": 5 }),
-                )?)),
+                    serde_json::json!({ "attempt": 5, "limit": 5, "cause": {"kind":"timeout", "message":"Temporary timeout"} }),
+                ).unwrap())),
                 ..Default::default()
             },
         )
         .await
-        .unwrap()
+        .unwrap();
+    s.store.run(id).await.unwrap()
 }
 
 #[tokio::test]

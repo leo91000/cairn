@@ -417,8 +417,9 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
 async fn recover(s: &Service, run: &Value) -> Result<bool> {
     let run_id = text(run, "id");
     let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
-    let parked = run["status"] == RunStatus::Waiting
-        || (run["trigger"] != "chat"
+    let state = s.store.run_state(run_id).await?;
+    let parked = state.status == RunStatus::Waiting
+        || (state.trigger != "chat"
             && run["wakeup"].is_object()
             && checkpoint.as_ref().is_some_and(RunCheckpoint::completed));
     // A parked turn only needs fencing/release, including a completed turn

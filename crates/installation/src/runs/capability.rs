@@ -149,9 +149,7 @@ impl RunOperation {
             }
             "list_runs" => {
                 let input: ListRunsInput = decode(input)?;
-                if !(1..=100).contains(&input.limit) || input.offset < 0 {
-                    return Err(Error::bad("Invalid run page."));
-                }
+                input.validate().map_err(Error::bad)?;
                 s.store
                     .read(move |db| {
                         let tx = rusqlite::Transaction::new_unchecked(
@@ -161,15 +159,18 @@ impl RunOperation {
                         let db = Db(&tx);
                         authorize(&db)?;
                         let task = input.task_id.map(|id| id.to_string());
-                        Ok(db
-                            .runs(
-                                input.status.map(RunStatus::as_str),
-                                task.as_deref(),
-                                i64::from(input.limit),
-                                input.offset,
-                                false,
-                            )?
-                            .into())
+                        let runs = db.runs(
+                            input.status.map(RunStatus::as_str),
+                            task.as_deref(),
+                            i64::from(input.limit),
+                            input.offset,
+                            false,
+                        )?;
+                        let runs: Vec<Run> = runs
+                            .into_iter()
+                            .map(serde_json::from_value)
+                            .collect::<serde_json::Result<_>>()?;
+                        Ok(serde_json::to_value(runs)?)
                     })
                     .await
             }
@@ -229,6 +230,7 @@ impl RunOperation {
         bearer: Option<String>,
     ) -> Result<Value> {
         let run = s.prepare_run(task, trigger).await?;
-        s.queue_run(run, None, bearer).await
+        let run: Run = serde_json::from_value(s.queue_run(run, None, bearer).await?)?;
+        Ok(serde_json::to_value(run)?)
     }
 }
