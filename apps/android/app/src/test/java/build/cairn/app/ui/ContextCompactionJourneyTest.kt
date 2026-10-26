@@ -150,10 +150,31 @@ class ContextCompactionJourneyTest {
                                 "/api/account/session" -> beaconAccountFixture("csrf-fixture")
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
-                                        listOf(Agent(id = MAIN_AGENT_ID, name = "Cairn"))
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                Agent(
+                                                    exclusiveNodes = emptyList(),
+                                                    plugins = emptyList(),
+                                                    revision = "",
+                                                    createdAt = 0,
+                                                    access =
+                                                        AccessPolicy(
+                                                            mcpTools =
+                                                                build.cairn.contracts.McpTools(
+                                                                    emptyMap()
+                                                                ),
+                                                            projects = null,
+                                                            skills = null,
+                                                            mcps = null,
+                                                        ),
+                                                    id = MAIN_AGENT_ID,
+                                                    name = "Cairn",
+                                                )
+                                            )
+                                        )
                                     )
-                                "/api/installations/fixture/api/projects",
-                                "/api/installations/fixture/api/tasks",
+                                "/api/installations/fixture/api/projects" -> """{"projects":[]}"""
+                                "/api/installations/fixture/api/tasks" -> """{"tasks":[]}"""
                                 "/api/installations/fixture/api/tasks/activity",
                                 "/api/installations/fixture/api/skills",
                                 "/api/installations/fixture/api/mcps" -> "[]"
