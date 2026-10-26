@@ -1140,6 +1140,9 @@ impl Execution<'_> {
                 RunStatus::Waiting
             } else { status };
             patch["status"] = status.into();
+            if status == RunStatus::Succeeded {
+                crate::chats::keep_reply_after_compaction(&current, &mut patch);
+            }
             if status == RunStatus::Waiting {
                 patch["finishedAt"] = Value::Null;
                 patch["resumeAvailable"] = true.into();

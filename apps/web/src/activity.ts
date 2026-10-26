@@ -1,6 +1,7 @@
 import type { ChatWakeup } from '../../../packages/contracts/chats'
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import type { AgentPlan, PlanChange, PlanProgress } from './agent-plan'
+import type { CompactionEntry } from './context-usage'
 import { describeCommand, expectedCommandOutcome } from './activity-command'
 import {
   continuesPlan,
@@ -9,6 +10,7 @@ import {
   planSteps,
   samePlan,
 } from './agent-plan'
+import { compactionEnd } from './context-usage'
 import {
   engineAttention,
   engineNoticeTitle,
@@ -103,6 +105,8 @@ export type ActivityEntry
     time: number
     wait: ActivityWait
   }
+  /** The coding agent compacted its context; the history above stays as it was. */
+  | CompactionEntry
 
 /** A durable wait the agent scheduled with `sleep` or `wait_for`, then how it ended. */
 export interface ActivityWait {
@@ -290,9 +294,21 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     scheduled = undefined
   }
 
+  // By run and item: a compaction's start and end update one divider.
+  const compactions = new Map<string, CompactionEntry>()
   for (const [eventIndex, stored] of events.entries()) {
     const event = stored
-    if (event.type === 'artifact')
+    // A compaction still running when its turn or run ends did not complete.
+    const end = compactionEnd(event)
+    if (end) {
+      for (const [key, compaction] of compactions) {
+        if (compaction.state === 'running' && key.startsWith(`${event.runId}:`))
+          compaction.state = end
+      }
+    }
+
+    // Context usage is a measurement the conversation header shows, not an activity.
+    if (event.type === 'artifact' || event.type === 'context.usage')
       continue
     // A delegated task works like a subagent, in a conversation of its own.
     if (event.type === 'chat.delegated') {
@@ -476,6 +492,32 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
 
     const item = record(data.item)
     const type = text(item.type)
+    if (type === 'context_compaction' && event.type.startsWith('item.')) {
+      const key = `${event.runId}:${text(item.id) || event.id}`
+      const status = text(item.status)
+      const count = (value: unknown) => typeof value === 'number' && value > 0 ? value : null
+      const trigger = text(item.trigger)
+      const compaction = compactions.get(key) ?? {
+        kind: 'compaction' as const,
+        id: `compaction:${key}`,
+        time: event.createdAt,
+        state: 'running' as const,
+        trigger: null,
+        preTokens: null,
+        postTokens: null,
+      }
+      compaction.state = status === 'failed' ? 'failed' : status === 'completed' || event.type === 'item.completed' ? 'done' : 'running'
+      compaction.trigger = trigger === 'auto' || trigger === 'manual' ? trigger : compaction.trigger
+      compaction.preTokens = count(item.pre_tokens) ?? compaction.preTokens
+      compaction.postTokens = count(item.post_tokens) ?? compaction.postTokens
+      if (!compactions.has(key)) {
+        compactions.set(key, compaction)
+        entries.push(compaction)
+      }
+
+      continue
+    }
+
     // A run that ends without succeeding never resumes the wait it scheduled. Only its terminal
     // status says so: a failed turn may be retried, and the retry keeps the wakeup.
     if (openWait && !openWait.observation && event.type === 'status' && ['failed', 'cancelled', 'interrupted'].includes(event.text)) {

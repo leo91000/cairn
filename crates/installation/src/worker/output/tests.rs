@@ -1012,3 +1012,48 @@ async fn terminal_styling_and_utf8_survive_long_diagnostic_fragments() {
 
 #[cfg(test)]
 use crate::mission_fixture::MissionFixture;
+
+#[tokio::test]
+async fn context_usage_survives_log_budget_and_keeps_the_latest_snapshot_on_the_run() {
+    let mut fixture = Fixture::new().await;
+    fixture.log_total = LOG_BUDGET;
+    for (tokens, estimated) in [(42_202, false), (6_200, true)] {
+        fixture
+            .event(json!({
+                "type": "context.usage",
+                "usage": {
+                    "contextTokens": tokens,
+                    "contextWindow": 200_000,
+                    "cachedTokens": null,
+                    "estimated": estimated,
+                },
+            }))
+            .await;
+    }
+
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events(&id, 0, 1000))
+        .await
+        .unwrap();
+    let usage = events
+        .iter()
+        .filter(|event| event["type"] == "context.usage")
+        .map(|event| event["payload"]["usage"]["contextTokens"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(usage, [json!(42_202), json!(6_200)]);
+
+    let run = fixture.service.store.run(&fixture.id).await.unwrap();
+    assert_eq!(run["contextUsage"]["contextTokens"], 6_200);
+    assert_eq!(run["contextUsage"]["contextWindow"], 200_000);
+    assert_eq!(run["contextUsage"]["estimated"], true);
+
+    // A malformed report never replaces the last known occupancy.
+    fixture
+        .event(json!({ "type": "context.usage", "usage": { "contextTokens": "many" } }))
+        .await;
+    let run = fixture.service.store.run(&fixture.id).await.unwrap();
+    assert_eq!(run["contextUsage"]["contextTokens"], 6_200);
+}

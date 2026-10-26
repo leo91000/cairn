@@ -1484,6 +1484,7 @@ async fn engine_retries_limits_and_notices_are_reported_without_ending_the_turn(
     assert_eq!(notices[0]["message"], "Context is almost full.");
     let known = [
         "thread.started",
+        "context.usage",
         "chat.delivered",
         "engine.retry",
         "provider.limit",
@@ -2157,4 +2158,193 @@ async fn parallel_runs_are_validated_and_lowering_them_keeps_current_runs() {
         s.accounts.release(lease).await.unwrap();
     }
     assert!(!updated.to_string().contains("refreshToken"));
+}
+
+fn compaction_plan(root: &TempDir) -> Value {
+    let mut p = plan(root, "");
+    p["sessionId"] = RESUMED_SESSION.into();
+    p["execution"] = json!({
+        "messageId": "compact:fixture",
+        "text": "",
+        "attachments": [],
+        "recovery": false,
+        "operation": "compact",
+    });
+    p
+}
+
+fn context_usage(events: &[Value]) -> Vec<Value> {
+    events
+        .iter()
+        .filter(|e| e["type"] == "context.usage")
+        .map(|e| e["usage"].clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn context_usage_uses_the_native_report_and_each_response_prompt() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let (result, events) = run_to_end(&c, plan(&root, "Inspect the workspace")).await;
+    result.unwrap();
+
+    // The estimate before the first response, then the measured prompt of that response.
+    assert_eq!(
+        context_usage(&events),
+        [
+            json!({ "contextTokens": 18_000, "contextWindow": 200_000, "cachedTokens": null, "estimated": true }),
+            json!({ "contextTokens": 42_200, "contextWindow": 200_000, "cachedTokens": 40_000, "estimated": false }),
+        ]
+    );
+    let requests = std::fs::read_to_string(c.home.join(".claude/context-requests.jsonl")).unwrap();
+    assert_eq!(
+        requests.trim(),
+        json!({ "subtype": "get_context_usage", "detail": "summary" }).to_string()
+    );
+}
+
+#[tokio::test]
+async fn automatic_compaction_shows_without_rewriting_the_reply() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let (result, events) = run_to_end(&c, plan(&root, "fixture:autocompact")).await;
+    result.unwrap();
+
+    let compaction = events
+        .iter()
+        .filter(|e| e["item"]["type"] == "context_compaction")
+        .collect::<Vec<_>>();
+    assert_eq!(compaction.len(), 2);
+    assert_eq!(compaction[0]["type"], "item.started");
+    assert_eq!(compaction[0]["item"]["status"], "in_progress");
+    assert_eq!(
+        compaction[1]["item"],
+        json!({
+            "id": compaction[0]["item"]["id"],
+            "type": "context_compaction",
+            "status": "completed",
+            "trigger": "auto",
+            "pre_tokens": 167_500,
+            "post_tokens": 9_100,
+        })
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+        "Claude fixture completed"
+    );
+    // The response after the compaction measured the compacted context.
+    assert_eq!(context_usage(&events).last().unwrap()["estimated"], false);
+}
+
+#[tokio::test]
+async fn a_resumed_compaction_shows_as_its_own_divider() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    run_to_end(&c, plan(&root, "Inspect the workspace"))
+        .await
+        .0
+        .unwrap();
+
+    // The same execution, attempted again after a stop or failure, compacts again.
+    let mut attempts = Vec::new();
+    for _ in 0..2 {
+        let (result, events) = run_to_end(&c, compaction_plan(&root)).await;
+        result.unwrap();
+        let items = events
+            .iter()
+            .filter(|e| e["item"]["type"] == "context_compaction")
+            .map(|e| e["item"]["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        // Its start and end update one divider.
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], items[1]);
+        attempts.push(items[0].clone());
+    }
+    assert_ne!(attempts[0], attempts[1]);
+}
+
+#[tokio::test]
+async fn compaction_completes_when_its_context_report_never_answers() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    run_to_end(&c, plan(&root, "Inspect the workspace"))
+        .await
+        .0
+        .unwrap();
+
+    std::fs::write(c.home.join(".claude/fixture-context-unanswered"), "").unwrap();
+    let started = std::time::Instant::now();
+    let (result, events) = run_to_end(&c, compaction_plan(&root)).await;
+    result.unwrap();
+
+    // The wait is bounded, and the run keeps the last usage it knew.
+    assert!(started.elapsed() < Duration::from_secs(15));
+    assert!(completes(&events));
+    assert!(
+        context_usage(&events)
+            .iter()
+            .all(|usage| usage["contextTokens"] != 6_200)
+    );
+}
+
+#[tokio::test]
+async fn compaction_runs_the_native_command_without_a_user_turn() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    run_to_end(&c, plan(&root, "Inspect the workspace"))
+        .await
+        .0
+        .unwrap();
+
+    // A message written meanwhile is not sent into the compaction.
+    deliver(&root, &json!([{ "id": "later", "text": "Next request" }]));
+    let (result, events) = run_to_end(&c, compaction_plan(&root)).await;
+    result.unwrap();
+
+    let inputs = std::fs::read_to_string(c.home.join(".claude/user-messages.jsonl")).unwrap();
+    let last: Value = serde_json::from_str(inputs.lines().last().unwrap()).unwrap();
+    assert_eq!(last["message"]["content"][0]["text"], "/compact");
+    assert!(!inputs.contains("Next request"));
+    assert!(!inputs.contains("Continue the interrupted request"));
+
+    let completed = events
+        .iter()
+        .find(|e| e["type"] == "item.completed" && e["item"]["type"] == "context_compaction")
+        .unwrap();
+    assert_eq!(completed["item"]["trigger"], "manual");
+    assert_eq!(completed["item"]["status"], "completed");
+    assert!(!events.iter().any(|e| e["item"]["type"] == "agent_message"));
+    // Claude Code answers the boundary's context request after its result: the run still
+    // shows the compacted estimate rather than the usage before the compaction.
+    let usage = context_usage(&events);
+    assert_eq!(
+        usage.last().unwrap(),
+        &json!({ "contextTokens": 6_200, "contextWindow": 200_000, "cachedTokens": null, "estimated": true })
+    );
+    assert_eq!(events.last().unwrap()["type"], "turn.completed");
+    // No receipt: a restart compacts again instead of replaying an empty reply.
+    let receipt = root.path().join("result.claude-receipt.json");
+    let saved: Value = serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
+    assert_eq!(saved["messageId"], "original");
+}
+
+#[tokio::test]
+async fn compaction_with_nothing_to_compact_or_no_session_fails() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let mut sessionless = compaction_plan(&root);
+    sessionless.as_object_mut().unwrap().remove("sessionId");
+    let (result, events) = run_to_end(&c, sessionless).await;
+    assert!(
+        result
+            .unwrap_err()
+            .message
+            .contains("no saved Claude Code session")
+    );
+    assert!(events.is_empty());
+
+    std::fs::write(c.home.join(".claude/fixture-empty-session"), "").unwrap();
+    let (result, events) = run_to_end(&c, compaction_plan(&root)).await;
+    assert_eq!(result.unwrap_err().message, "Error: No messages to compact");
+    assert!(!completes(&events));
 }

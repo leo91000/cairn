@@ -35,6 +35,8 @@ fn summary(chat: &Value) -> Value {
         "pendingQuestions",
         "requestedBy",
         "requester",
+        "contextUsage",
+        "compaction",
     ] {
         result[key] = chat[key].clone();
     }
@@ -254,6 +256,12 @@ pub(super) async fn invoke(
                 args["confirm"] == true,
                 commit_authority,
             )
+            .await;
+    }
+    if name == "compact_chat" {
+        // Compaction starts model work: the conversation's own grant is checked when it commits.
+        return s
+            .chat_compact_authorized(text(&args, "chatId"), commit_authority)
             .await;
     }
     if name == "stop_chat" {

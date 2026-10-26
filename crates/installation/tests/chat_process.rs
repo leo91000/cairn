@@ -1224,6 +1224,159 @@ async fn images_and_files_reach_start_and_steer_as_readable_inputs() {
     );
 }
 
+/// Runs one execution and returns its events with its result.
+async fn collect(
+    config: &Config,
+    home: &Path,
+    plan: Value,
+) -> (Vec<Value>, cairn_installation::error::Result<()>) {
+    let (tx, mut rx) = mpsc::channel(256);
+    let output = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        events
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        chat_process::run(config, home, plan, tx, CancellationToken::new()),
+    )
+    .await
+    .unwrap();
+    (output.await.unwrap(), result)
+}
+
+fn compaction_plan(root: &TempDir) -> Value {
+    let mut plan = plan(root, "");
+    plan["sessionId"] = "fixture-chat".into();
+    plan["execution"] = json!({
+        "messageId": "compact:fixture",
+        "text": "",
+        "attachments": [],
+        "recovery": false,
+        "operation": "compact",
+    });
+    plan
+}
+
+#[tokio::test]
+async fn context_usage_is_the_latest_request_against_the_model_window() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let (events, result) = collect(&config(&root), &home, plan(&root, "Inspect usage")).await;
+    result.unwrap();
+
+    let usage = events
+        .iter()
+        .filter(|event| event["type"] == "context.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), 1);
+    // The thread total (93,000 tokens) is spend, not occupancy, and is never reported.
+    assert_eq!(
+        usage[0]["usage"],
+        json!({
+            "contextTokens": 40_900,
+            "contextWindow": 258_400,
+            "cachedTokens": 36_000,
+            "estimated": false,
+        })
+    );
+}
+
+#[tokio::test]
+async fn compaction_runs_natively_without_a_user_turn_or_steering() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    run_quietly(&config, &home, plan(&root, "First request")).await;
+
+    // A message written meanwhile is not steered into the compaction.
+    deliver(
+        &root,
+        &json!([{ "id": "later", "text": "Next request", "attachments": [] }]),
+    )
+    .await;
+    let (events, result) = collect(&config, &home, compaction_plan(&root)).await;
+    result.unwrap();
+
+    let saved = conversation(&home);
+    let turns = saved["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 2);
+    assert!(
+        turns[1]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["type"] == "contextCompaction")
+    );
+    let compactions = std::fs::read_to_string(home.join("fixture-compactions.jsonl")).unwrap();
+    assert_eq!(compactions.lines().count(), 1);
+
+    let compaction = events
+        .iter()
+        .filter(|event| event["item"]["type"] == "context_compaction")
+        .map(|event| (event["type"].clone(), event["item"]["status"].clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        compaction,
+        [
+            (json!("item.started"), json!("in_progress")),
+            (json!("item.completed"), json!("completed")),
+        ]
+    );
+    let usage = events
+        .iter()
+        .rfind(|event| event["type"] == "context.usage")
+        .unwrap();
+    assert_eq!(usage["usage"]["contextTokens"], 6_200);
+    assert_eq!(usage["usage"]["estimated"], true);
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "chat.delivered" && event["messageId"] == "later")
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["item"]["type"] == "agent_message")
+    );
+    assert_eq!(events.last().unwrap()["type"], "turn.completed");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+        ""
+    );
+}
+
+#[tokio::test]
+async fn failed_or_sessionless_compactions_fail_without_completing() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let mut sessionless = compaction_plan(&root);
+    sessionless.as_object_mut().unwrap().remove("sessionId");
+    let (events, result) = collect(&config, &home, sessionless).await;
+    assert!(
+        result
+            .unwrap_err()
+            .message
+            .contains("no saved Codex session")
+    );
+    assert!(events.is_empty());
+
+    run_quietly(&config, &home, plan(&root, "First request")).await;
+    std::fs::write(home.join("fixture-compaction-fails"), "").unwrap();
+    let (events, result) = collect(&config, &home, compaction_plan(&root)).await;
+    assert_eq!(result.unwrap_err().message, "Fixture compaction failed");
+    assert!(!events.iter().any(|event| event["type"] == "turn.completed"));
+    assert!(events.iter().any(|event| event["type"] == "turn.failed"));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["item"]["status"] == "completed")
+    );
+}
+
 #[test]
 fn structured_tool_payloads_redact_credentials_and_nested_output() {
     let event = json!({

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -24,6 +25,20 @@ export function chatFixture() {
   let asked = false
   let resumed = false
   let completionText
+  // Like Codex, `last` is the latest request (the active context) and `total` the whole thread.
+  const tokenUsage = (turnId, last, total) => notify('thread/tokenUsage/updated', {
+    threadId: thread.id,
+    turnId,
+    tokenUsage: { last, total, modelContextWindow: 258400 },
+  })
+  const usage = (input, cached, output) => ({
+    inputTokens: input,
+    cachedInputTokens: cached,
+    cacheWriteInputTokens: 0,
+    outputTokens: output,
+    reasoningOutputTokens: 0,
+    totalTokens: input + output,
+  })
   const save = () => {
     mkdirSync(process.env.CODEX_HOME, { recursive: true })
     writeFileSync(file, JSON.stringify(thread))
@@ -42,8 +57,40 @@ export function chatFixture() {
     active.status = 'completed'
     save()
     notify('item/completed', { threadId: thread.id, item })
+    const turns = thread.turns.length
+    tokenUsage(active.id, usage(40000 * turns, 36000 * turns, 900), usage(90000 * turns, 70000 * turns, 3000 * turns))
     notify('turn/completed', { threadId: thread.id, turn: active })
     active = null
+  }
+
+  // `thread/compact/start` replaces any running turn with a compaction turn.
+  const compact = (request) => {
+    if (active) {
+      active.status = 'interrupted'
+      notify('turn/completed', { threadId: thread.id, turn: active })
+    }
+
+    const turn = { id: `turn-${++counter}`, status: 'inProgress', items: [] }
+    thread.turns.push(turn)
+    emit({ id: request.id, result: {} })
+    notify('turn/started', { threadId: thread.id, turn })
+    const item = { id: `compaction-${turn.id}`, type: 'contextCompaction' }
+    notify('item/started', { threadId: thread.id, turnId: turn.id, item })
+    setTimeout(() => {
+      turn.items.push(item)
+      turn.status = existsSync(path.join(process.env.CODEX_HOME, 'fixture-compaction-fails')) ? 'failed' : 'completed'
+      if (turn.status === 'completed') {
+        notify('item/completed', { threadId: thread.id, turnId: turn.id, item })
+        tokenUsage(turn.id, usage(0, 0, 0), usage(90000, 70000, 3000))
+        tokenUsage(turn.id, { ...usage(0, 0, 0), totalTokens: 6200 }, usage(90000, 70000, 3000))
+      }
+      else {
+        turn.error = { message: 'Fixture compaction failed' }
+      }
+
+      save()
+      notify('turn/completed', { threadId: thread.id, turn })
+    }, 200)
   }
 
   const handle = (request) => {
@@ -69,6 +116,12 @@ export function chatFixture() {
         throw new Error('Cannot release an active thread')
       emit({ id: request.id, result: { status: 'unsubscribed' } })
       thread = undefined
+      return true
+    }
+
+    if (method === 'thread/compact/start') {
+      appendFileSync(path.join(process.env.CODEX_HOME, 'fixture-compactions.jsonl'), `${JSON.stringify(params)}\n`)
+      compact(request)
       return true
     }
 

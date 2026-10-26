@@ -313,6 +313,10 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
             )
             .await?
         }
+        ("POST", ["chats", id, "compact"]) => {
+            s.chat_compact_authorized(id, crate::native::policy::chat_authorization(id))
+                .await?
+        }
         ("POST", ["chats", id, "restore"]) => {
             s.chat_restore_authorized(id, crate::native::policy::chat_authorization(id))
                 .await?

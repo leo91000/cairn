@@ -87,9 +87,11 @@ const ERROR_LIMIT: usize = 10_000;
 const NOTICE_LIMIT: usize = 4_000;
 
 /// Event types that are always recorded. Clients use turn markers to scope reused message IDs,
-/// and show the engine's retries and usage limits in the conversation.
-const CONVERSATION_EVENTS: [&str; 9] = [
+/// show the latest context usage, and show the engine's retries and usage limits in the
+/// conversation.
+const CONVERSATION_EVENTS: [&str; 10] = [
     "thread.started",
+    "context.usage",
     "turn.started",
     "turn.completed",
     "turn.failed",
@@ -422,6 +424,11 @@ async fn apply_event(
     }
     if event["type"] == "thread.started" && event["thread_id"].is_string() {
         let patch = serde_json::json!({ "sessionId": event["thread_id"], "resumeAvailable": true });
+        s.store.patch_run(id, patch).await?;
+    }
+    // The latest occupancy of the native session, shown before its history loads.
+    if event["type"] == "context.usage" && event["usage"]["contextTokens"].is_u64() {
+        let patch = serde_json::json!({ "contextUsage": event["usage"] });
         s.store.patch_run(id, patch).await?;
     }
     if event["item"]["type"] == "agent_message" && event["item"]["text"].is_string() {

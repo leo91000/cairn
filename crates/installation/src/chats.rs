@@ -82,6 +82,34 @@ struct ChatExecution {
     /// Transcript handed to a fresh native session.
     #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<String>,
+    /// `compact`: the execution compacts the native context instead of delivering a message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation: Option<&'static str>,
+    /// What the conversation showed before a compaction, restored once it succeeds: a
+    /// compaction is not a reply and never marks the conversation as newly finished.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous: Option<Value>,
+}
+
+/// The `chatExecution.operation` of a context compaction.
+pub(crate) const COMPACT: &str = "compact";
+
+pub(crate) fn is_compaction(run: &Value) -> bool {
+    run["chatExecution"]["operation"] == COMPACT
+}
+
+/// A compaction is not a reply: once it succeeds, the conversation keeps its last reply and
+/// its outcome, and does not become newly finished. Resuming an interrupted compaction clears
+/// the run's outcome, so it comes from what the compaction saved. Failures and stops still show
+/// why it ended.
+pub(crate) fn keep_reply_after_compaction(run: &Value, patch: &mut Value) {
+    if !is_compaction(run) {
+        return;
+    }
+    let previous = &run["chatExecution"]["previous"];
+    patch["summary"] = previous["summary"].clone();
+    patch["finishedAt"] = previous["finishedAt"].clone();
+    patch["outcome"] = previous["outcome"].clone();
 }
 
 /// Payload of the `chat.user` event recorded when a message reaches the agent.
@@ -184,6 +212,11 @@ pub(crate) fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
         .as_ref()
         .and_then(|run| Provider::of_run(run).ok())
         .map_or(Value::Null, |provider| provider.as_str().into());
+    // How full the native session's context was at its latest report; absent when unknown.
+    chat["contextUsage"] = run
+        .as_ref()
+        .map_or(Value::Null, |run| run["contextUsage"].clone());
+    chat["compaction"] = compaction_state(db, &chat, run.as_ref())?;
     // When the agent's latest turn ended, for what the Fil shows as unread.
     chat["finishedAt"] = run.map_or(Value::Null, |run| run["finishedAt"].clone());
     // The delegating conversation, while it can still be opened.
@@ -195,6 +228,131 @@ pub(crate) fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
         None => Value::Null,
     };
     Ok(chat)
+}
+
+/// Whether the conversation's coding agent can compact its context, whether it is
+/// compacting now, and why a compaction cannot start when it cannot.
+fn compaction_state(db: &Db<'_>, chat: &Value, run: Option<&Value>) -> Result<Value> {
+    let provider = run.and_then(|run| Provider::of_run(run).ok());
+    let supported = provider.is_some_and(Provider::compacts_context);
+    let running = run.is_some_and(|run| run_is_active(run) && is_compaction(run));
+    let blocker = if running {
+        Some("The conversation is already compacting its context.".to_owned())
+    } else {
+        compaction_blocker(db, chat, run)?
+    };
+    Ok(json!({
+        "supported": supported,
+        "running": running,
+        "available": blocker.is_none(),
+        "reason": blocker,
+    }))
+}
+
+/// Why the conversation cannot compact its native context now, if it cannot.
+fn compaction_blocker(db: &Db<'_>, chat: &Value, run: Option<&Value>) -> Result<Option<String>> {
+    if !is_active(chat) {
+        return Ok(Some("This conversation has been deleted.".into()));
+    }
+    let Some(run) = run else {
+        return Ok(Some("Send a first message before compacting.".into()));
+    };
+    // The view of a run that names no coding agent still opens: it just cannot compact.
+    let Ok(provider) = Provider::of_run(run) else {
+        return Ok(Some(
+            "This conversation's coding agent does not support context compaction.".into(),
+        ));
+    };
+    if !provider.compacts_context() {
+        return Ok(Some(format!(
+            "{} does not support context compaction in Cairn.",
+            provider.label()
+        )));
+    }
+    // Codex replaces a running turn with its compaction, so compaction never overlaps a turn.
+    if run_is_active(run) || run["recoveryPending"] == true {
+        return Ok(Some(
+            "Wait for the current turn to finish before compacting.".into(),
+        ));
+    }
+    if run["status"] != RunStatus::Succeeded {
+        return Ok(Some(
+            "Resume or resolve the last turn before compacting.".into(),
+        ));
+    }
+    if !run["workspaceCleanedAt"].is_null() {
+        return Ok(Some(
+            "This workspace has been cleaned up. Start a new chat.".into(),
+        ));
+    }
+    let fresh_session = chat["sessionRestartRequested"] == true
+        || db
+            .kv(&format!("run-checkpoint:{}", text(run, "id")))?
+            .is_some_and(|checkpoint| checkpoint["freshSession"] == true);
+    if !run["sessionId"].is_string() || fresh_session {
+        return Ok(Some(
+            "This conversation has no saved native session to compact.".into(),
+        ));
+    }
+    if chat["wakeup"].is_object() {
+        return Ok(Some(
+            "Compact after the scheduled continuation resumes.".into(),
+        ));
+    }
+    let undelivered: bool = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE chat_id=?
+         AND json_extract(data,'$.status') IN ('queued','sending'))",
+        [text(chat, "id")],
+        |row| row.get(0),
+    )?;
+    if undelivered {
+        return Ok(Some(
+            "Wait for queued messages to be delivered before compacting.".into(),
+        ));
+    }
+    Ok(None)
+}
+
+/// Starts compacting the conversation's native context in its retained session. The
+/// compaction runs as its own execution of the conversation's run, never as a user message.
+fn compact(db: &Db<'_>, chat_id: &str, origin: &crate::native::policy::Origin) -> Result<Value> {
+    let mut chat = chat(db, chat_id)?;
+    crate::native::policy::authorize_chat(db, &mut chat, origin)?;
+    require_active(&chat)?;
+    let run = db.run(text(&chat, "runId"))?;
+    if run
+        .as_ref()
+        .is_some_and(|run| run_is_active(run) && is_compaction(run))
+    {
+        // A retried request after a lost response keeps the compaction already started.
+        return view(db, chat);
+    }
+    if let Some(reason) = compaction_blocker(db, &chat, run.as_ref())? {
+        return Err(Error::conflict(reason));
+    }
+    let run = run.unwrap();
+    let execution = ChatExecution {
+        message_id: format!("compact:{}", id()).into(),
+        text: String::new(),
+        attachments: json!([]),
+        recovery: false,
+        context: None,
+        operation: Some(COMPACT),
+        previous: Some(json!({
+            "summary": run["summary"],
+            "finishedAt": run["finishedAt"],
+            "outcome": run["outcome"],
+        })),
+    };
+    continue_run(db, &chat, &run, &run, execution)?;
+    db.event(
+        text(&run, "id"),
+        "status",
+        "Compacting the conversation context",
+        None,
+    )?;
+    db.put("chats", &chat)?;
+    view(db, chat)
 }
 
 /// Active conversations. Deleted ones are skipped before their view is built.
@@ -740,7 +898,9 @@ fn continue_run(
             run_id,
             &json!({
                 "sessionId": null,
-                "resumeAvailable": false
+                "resumeAvailable": false,
+                // The fresh session starts with an empty context.
+                "contextUsage": null,
             }),
         )?;
         let status = format!(
@@ -762,20 +922,22 @@ fn continue_run(
     checkpoint["remainingMs"] = crate::run_limits::budget_ms(agent).into();
     remove_keys(&mut checkpoint, &["lastMessage", "settled"]);
     db.set(&key, &checkpoint, None)?;
-    db.patch_run(
-        run_id,
-        &json!({
-            "snapshot": snapshot["snapshot"],
-            "status": RunStatus::Queued,
-            "summary": "",
-            "error": null,
-            "outcome": null,
-            "finishedAt": null,
-            "cancelRequestedAt": null,
-            "recoveryPending": true,
-            "chatExecution": serde_json::to_value(execution)?,
-        }),
-    )?;
+    let compaction = execution.operation == Some(COMPACT);
+    let mut patch = json!({
+        "snapshot": snapshot["snapshot"],
+        "status": RunStatus::Queued,
+        "error": null,
+        "finishedAt": null,
+        "cancelRequestedAt": null,
+        "recoveryPending": true,
+        "chatExecution": serde_json::to_value(execution)?,
+    });
+    // A compaction answers no message: the last reply and its outcome stay current.
+    if !compaction {
+        patch["summary"] = "".into();
+        patch["outcome"] = Value::Null;
+    }
+    db.patch_run(run_id, &patch)?;
     Ok(())
 }
 
@@ -831,6 +993,8 @@ fn launch_turn(
         attachments: message["attachments"].clone(),
         recovery: false,
         context: None,
+        operation: None,
+        previous: None,
     };
     if let Some(run) = run {
         continue_run(db, &chat, &run, &snapshot, execution)?;
@@ -1111,6 +1275,44 @@ impl Service {
         Ok(result)
     }
 
+    /// Compacts the conversation's native context while it is idle.
+    pub(crate) async fn chat_compact_authorized<F>(&self, id: &str, authorize: F) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
+        let origin = crate::native::policy::origin();
+        if origin.known() {
+            crate::native::policy::refresh_chat(self, id).await?;
+        }
+        let id = id.to_owned();
+
+        // A succeeded run's worker may still be saving its checkpoint: the compaction resets
+        // it, so it waits for that worker to release the run, like resuming does.
+        let active = self.worker.active.lock().await;
+        let run_id = self
+            .store
+            .read({
+                let id = id.clone();
+                move |db| Ok(text(&chat(db, &id)?, "runId").to_owned())
+            })
+            .await?;
+        if active.contains_key(&run_id) {
+            return Err(Error::conflict(
+                "Wait for the current turn to finish before compacting.",
+            ));
+        }
+        let result = self
+            .store
+            .transaction(move |db| {
+                authorize(db)?;
+                compact(db, &id, &origin)
+            })
+            .await?;
+        drop(active);
+        self.worker.notify();
+        Ok(result)
+    }
+
     pub async fn chat_pause(&self, id: &str, paused: bool) -> Result<Value> {
         let id = id.to_owned();
         let result = self
@@ -1138,7 +1340,10 @@ impl Service {
                 None => None,
             };
             if let Some(run) = run.as_ref().filter(|run| run_is_active(run)) {
-                self.publish_steering(&chat, run).await?;
+                // Messages sent while compacting wait for the next turn instead of steering.
+                if !is_compaction(run) {
+                    self.publish_steering(&chat, run).await?;
+                }
                 continue;
             }
             let busy = run.as_ref().is_some_and(|run| {
@@ -1338,6 +1543,167 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_runs_only_between_turns_and_keeps_the_last_reply() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let origin = crate::native::policy::Origin::default();
+                let outcome = json!({ "status": "completed", "reason": "Done", "messageId": "first" });
+                let run = json!({
+                    "id": "run",
+                    "taskId": "chat",
+                    "createdAt": 0,
+                    "status": "succeeded",
+                    "sessionId": "native-session",
+                    "summary": "Last reply",
+                    "finishedAt": 500,
+                    "outcome": outcome,
+                    "contextUsage": { "contextTokens": 150_000, "contextWindow": 200_000, "cachedTokens": 120_000, "estimated": false },
+                    "chatExecution": { "messageId": "first", "text": "First", "attachments": [], "recovery": false },
+                    "snapshot": { "agent": { "provider": "codex" } },
+                });
+                db.add_run(&run, None)?;
+                db.set("run-checkpoint:run", &json!({ "completed": true, "launched": true }), None)?;
+                db.put(
+                    "chats",
+                    &json!({
+                        "id": "chat",
+                        "runId": "run",
+                        "agentId": "agent",
+                        "nativeProvenanceUnknown": false,
+                    }),
+                )?;
+
+                let idle = view(db, chat(db, "chat")?)?;
+                assert_eq!(idle["contextUsage"]["contextTokens"], 150_000);
+                assert_eq!(idle["compaction"], json!({ "supported": true, "running": false, "available": true, "reason": null }));
+
+                // A queued follow-up is delivered first: compaction never reorders the queue.
+                let queued = json!({ "id": "queued", "chatId": "chat", "text": "Next", "status": "queued", "createdAt": 1 });
+                db.put_message(&queued)?;
+                let error = compact(db, "chat", &origin).unwrap_err();
+                assert!(error.message.contains("queued messages"), "{}", error.message);
+                withdraw(db, "chat", &queued)?;
+
+                let started = compact(db, "chat", &origin)?;
+                assert_eq!(started["compaction"]["running"], true);
+                assert_eq!(started["compaction"]["available"], false);
+                let compacting = db.run("run")?.unwrap();
+                assert_eq!(compacting["status"], "queued");
+                assert_eq!(compacting["recoveryPending"], true);
+                assert_eq!(compacting["chatExecution"]["operation"], COMPACT);
+                assert_eq!(
+                    compacting["chatExecution"]["previous"],
+                    json!({ "summary": "Last reply", "finishedAt": 500, "outcome": outcome })
+                );
+                // The previous reply and its outcome are not replaced by a compaction.
+                assert_eq!(compacting["summary"], "Last reply");
+                assert_eq!(compacting["outcome"], outcome);
+                assert!(db.messages("chat")?.is_empty());
+
+                // A retried request keeps the compaction already started.
+                let retried = compact(db, "chat", &origin)?;
+                assert_eq!(db.run("run")?.unwrap()["chatExecution"], compacting["chatExecution"]);
+                assert_eq!(retried["compaction"]["running"], true);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn compaction_explains_why_it_is_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let cases = [
+                    (
+                        "opencode",
+                        "succeeded",
+                        Some("session"),
+                        "OpenCode does not support",
+                    ),
+                    (
+                        "claude",
+                        "failed",
+                        Some("session"),
+                        "Resume or resolve the last turn",
+                    ),
+                    (
+                        "claude",
+                        "running",
+                        Some("session"),
+                        "Wait for the current turn",
+                    ),
+                    ("codex", "succeeded", None, "no saved native session"),
+                ];
+                for (index, (provider, status, session, reason)) in cases.into_iter().enumerate() {
+                    let id = format!("case-{index}");
+                    db.add_run(
+                        &json!({
+                            "id": id,
+                            "taskId": id,
+                            "createdAt": 0,
+                            "status": status,
+                            "sessionId": session,
+                            "snapshot": { "agent": { "provider": provider } },
+                        }),
+                        None,
+                    )?;
+                    db.put(
+                        "chats",
+                        &json!({
+                            "id": id,
+                            "runId": id,
+                            "agentId": "agent",
+                            "nativeProvenanceUnknown": false,
+                        }),
+                    )?;
+                    let state = view(db, chat(db, &id)?)?["compaction"].clone();
+                    assert_eq!(state["available"], false, "{provider} {status}");
+                    assert_eq!(state["supported"], provider != "opencode");
+                    assert!(text(&state, "reason").contains(reason), "{state}");
+                    assert!(view(db, chat(db, &id)?)?["contextUsage"].is_null());
+                    let error =
+                        compact(db, &id, &crate::native::policy::Origin::default()).unwrap_err();
+                    assert!(error.message.contains(reason), "{}", error.message);
+                }
+
+                db.put(
+                    "chats",
+                    &json!({ "id": "empty", "runId": null, "agentId": "agent" }),
+                )?;
+                let state = view(db, chat(db, "empty")?)?["compaction"].clone();
+                assert_eq!(state["supported"], false);
+                assert!(text(&state, "reason").contains("first message"));
+
+                // A run that names no coding agent still shows its conversation.
+                db.add_run(
+                    &json!({ "id": "unnamed", "taskId": "unnamed", "createdAt": 0, "status": "succeeded" }),
+                    None,
+                )?;
+                db.put(
+                    "chats",
+                    &json!({
+                        "id": "unnamed",
+                        "runId": "unnamed",
+                        "agentId": "agent",
+                        "nativeProvenanceUnknown": false,
+                    }),
+                )?;
+                let state = view(db, chat(db, "unnamed")?)?["compaction"].clone();
+                assert_eq!(state["supported"], false);
+                assert_eq!(state["available"], false);
+                assert!(text(&state, "reason").contains("does not support"));
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn continuation_consumes_chat_and_checkpoint_fresh_session_requests_once() {
         use crate::store::Store;
 
@@ -1433,6 +1799,8 @@ mod tests {
                                 attachments: json!([]),
                                 recovery: false,
                                 context: None,
+                                operation: None,
+                                previous: None,
                             },
                         )?;
                         let next = db.run("run")?.unwrap();
@@ -1484,6 +1852,8 @@ mod tests {
                             attachments: json!([]),
                             recovery: false,
                             context: None,
+                            operation: None,
+                            previous: None,
                         };
                         continue_run(db, &chat, &run, &run, execution)?;
                         let continued = db.run("run")?.unwrap();

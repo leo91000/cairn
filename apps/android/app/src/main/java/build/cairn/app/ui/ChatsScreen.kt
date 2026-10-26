@@ -393,6 +393,7 @@ internal fun ChatPage(
     var fullscreen by rememberSaveable(id) { mutableStateOf(false) }
     var queueExpanded by rememberSaveable(id) { mutableStateOf(false) }
     var newSession by remember(id) { mutableStateOf(false) }
+    var compacting by remember(id) { mutableStateOf(false) }
     var cancelledExpanded by rememberSaveable(id) { mutableStateOf(false) }
     BackHandler(selected && fullscreen) { fullscreen = false }
     var choosing by rememberSaveable(id) { mutableStateOf(false) }
@@ -1062,6 +1063,43 @@ internal fun ChatPage(
                         Text(
                             "${live.state?.artifacts?.size ?: 0} fichiers · ${questions.size} questions en attente"
                         )
+                        if (chat?.run != null) {
+                            val context = contextSummary(chat.contextUsage)
+                            Text("Contexte : ${context.label}", Modifier.testTag("context-usage"))
+                            context.details.forEach {
+                                Text(
+                                    it,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        chat
+                            ?.compaction
+                            ?.takeIf { it.supported && chat.lifecycle == "active" }
+                            ?.let { compaction ->
+                                TextButton(
+                                    {
+                                        details = false
+                                        compacting = true
+                                    },
+                                    enabled = compaction.available,
+                                ) {
+                                    Text(
+                                        if (compaction.running) "Compaction du contexte…"
+                                        else "Compacter le contexte"
+                                    )
+                                }
+                                compaction.reason
+                                    ?.takeIf { !compaction.running }
+                                    ?.let {
+                                        Text(
+                                            it,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                            }
                         chat?.run?.let {
                             if (state.isOwner) NodePlacement(vm, it)
                             Text(
@@ -1720,6 +1758,19 @@ internal fun ChatPage(
                             buildJsonObject { put("confirm", true) },
                         )
                         newSession = false
+                    }
+                }
+            if (compacting && chat != null)
+                Confirm(
+                    "Compacter le contexte de l’agent ?",
+                    "L’agent résume son contexte antérieur pour libérer de la place dans sa fenêtre, en utilisant son modèle comme pour un court tour. Tous les messages restent visibles ici ; ceux envoyés entre-temps attendent la fin de la compaction.",
+                    state.busy,
+                    state.error,
+                    { compacting = false },
+                ) {
+                    vm.perform {
+                        api.request("POST", "/chats/${segment(chat.id)}/compact")
+                        compacting = false
                     }
                 }
             if (stopping && chat != null)

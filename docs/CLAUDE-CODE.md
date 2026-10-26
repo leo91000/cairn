@@ -143,6 +143,13 @@ steps. The minimum supported CLI stays **2.1.280**: older frames without these f
 keep the earlier correlation, and the fixtures cover both shapes. The events reach the
 public MCP and `cairn_installation` through `get_run`.
 
+Léo asks Claude Code for its context usage with the stream-json control request
+`get_context_usage` (`detail: "summary"`, answered locally without a model call), then
+measures each main-thread response's prompt (`input`, cache creation and cache read
+tokens). Automatic compactions (`compact_boundary`) show as a divider in the conversation.
+An explicit compaction resumes the session and sends Claude Code's local `/compact`
+command; it is never a user message. See [context compaction](CONTEXT-COMPACTION.md).
+
 An explicit provider choice is saved with each queued message. Steering cannot
 change the running turn's provider. Messages that omit the provider continue
 with the chat's current provider. Completion receipts prevent finished requests
