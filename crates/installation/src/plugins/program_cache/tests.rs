@@ -163,6 +163,30 @@ async fn failed_startup_can_be_retried_and_shutdown_removes_the_home() {
 }
 
 #[tokio::test]
+async fn shutdown_cancels_transient_leases_and_permanently_refuses_acquisition() {
+    let root = TempDir::new().unwrap();
+    let caches = Caches::default();
+    let identity = identity(executable(&root));
+    let transient = caches
+        .acquire(identity.clone(), &config(), false)
+        .await
+        .unwrap();
+    let home = transient.home().to_owned();
+    caches.clear();
+    assert!(transient.stop().is_cancelled());
+    assert!(
+        caches
+            .acquire(identity.clone(), &config(), true)
+            .await
+            .is_err()
+    );
+    assert!(caches.acquire(identity, &config(), false).await.is_err());
+    assert!(caches.entries.lock().unwrap().is_empty());
+    drop(transient);
+    assert!(!home.exists());
+}
+
+#[tokio::test]
 #[ignore = "requires CAIRN_TEST_OP pointing to the official CLI; no credentials or network"]
 async fn real_cli_daemons_use_separate_sockets_and_are_reaped() {
     let executable = PathBuf::from(std::env::var("CAIRN_TEST_OP").unwrap());

@@ -51,6 +51,7 @@ impl Entry {
 #[derive(Default)]
 pub(crate) struct Caches {
     entries: Mutex<HashMap<(String, String), Arc<Entry>>>,
+    shutdown: CancellationToken,
 }
 
 impl Caches {
@@ -62,6 +63,9 @@ impl Caches {
     ) -> Result<Lease> {
         let entry = {
             let mut entries = self.entries.lock().unwrap();
+            if self.shutdown.is_cancelled() {
+                return Err(Error::unavailable("The installation is shutting down."));
+            }
             let key = (identity.connection.clone(), identity.program.clone());
             let current = reusable.then(|| entries.get(&key)).flatten();
             if let Some(entry) = current.filter(|e| e.identity == identity && e.available()) {
@@ -74,7 +78,7 @@ impl Caches {
                     identity,
                     daemon: OnceCell::new(),
                     used: Mutex::new(Instant::now()),
-                    stop: CancellationToken::new(),
+                    stop: self.shutdown.child_token(),
                 });
                 if reusable {
                     if entries.len() >= RESIDENT {
@@ -135,8 +139,10 @@ impl Caches {
         });
     }
 
+    /// Terminal shutdown: reject later acquisitions and cancel transient leases too.
     pub fn clear(&self) {
         let mut entries = self.entries.lock().unwrap();
+        self.shutdown.cancel();
         for entry in entries.values() {
             entry.stop();
         }

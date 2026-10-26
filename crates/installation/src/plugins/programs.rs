@@ -123,6 +123,9 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
         .unwrap_or(MAX_SECONDS)
         .clamp(1, MAX_SECONDS);
     capabilities::authorize_management(s, context).await?;
+    if s.shutdown.is_cancelled() {
+        return Err(Error::unavailable("The installation is shutting down."));
+    }
     let cache = if let Some(config) = &program.cache {
         let package = super::registry::active(s, &manifest.id).await?;
         if serde_json::to_value(&package.manifest)? != serde_json::to_value(manifest)? {
@@ -137,12 +140,11 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
             environment: hex::encode(Sha256::digest(serde_json::to_vec(&resolved_environment)?)),
         };
         let reusable = context.draft.is_none() && context.connection.enabled;
-        Some(
-            s.plugins
-                .program_caches
-                .acquire(identity, config, reusable)
-                .await?,
-        )
+        Some(tokio::select! {
+            biased;
+            () = s.shutdown.cancelled() => return Err(Error::unavailable("The installation is shutting down.")),
+            result = s.plugins.program_caches.acquire(identity, config, reusable) => result?,
+        })
     } else {
         None
     };
@@ -205,6 +207,8 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
         }
     };
     let completed = tokio::select! {
+        biased;
+        () = s.shutdown.cancelled() => return Err(Error::unavailable("The installation is shutting down.")),
         () = invalidated => return Err(Error::conflict("The program cache was invalidated. Retry the operation.")),
         result = tokio::time::timeout(Duration::from_secs(seconds),operation) => result,
     };

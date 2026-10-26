@@ -335,6 +335,48 @@ async fn disabling_a_connection_interrupts_cached_reads_without_delivering_the_s
 }
 
 #[tokio::test]
+async fn manager_shutdown_interrupts_reads_and_refuses_later_commands() {
+    let f = fixture().await;
+    let saved = save(
+        &f.s,
+        json!({
+            "name": "Production", "enabled": true,
+            "secrets": { "token": "ops_fixture" }, "agentIds": [MAIN_AGENT_ID],
+        }),
+        None,
+    )
+    .await;
+    let started = f.root.path().join("read-started");
+    write_program(
+        &f.program,
+        &format!(
+            "#!/bin/sh\n/usr/bin/touch '{}'\n/bin/sleep 2\nprintf 'never-release-this-secret'\n",
+            started.display()
+        ),
+    );
+    let read = command(
+        "read",
+        &["--account", text(&saved, "id"), "op://vault/item/password"],
+    );
+    let shutdown = async {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        f.s.shutdown.cancel();
+    };
+    let (result, ()) = tokio::join!(f.s.plugins.command(&f.s, &f.bearer, &read), shutdown);
+    let error = result.unwrap_err();
+    assert_eq!(error.status, 503);
+    assert!(!error.message.contains("never-release-this-secret"));
+    assert_eq!(run(&f, read).await, Err(503));
+    assert_eq!(daemons(&f).len(), 1);
+}
+
+#[tokio::test]
 async fn quota_failures_explain_the_account_limit_without_echoing_program_output() {
     let f = fixture().await;
     let saved = save(
