@@ -424,9 +424,11 @@ async fn deleting_an_agent_or_revoking_a_node_removes_its_live_grants() {
     kept["access"]["nodes"] = json!([LOCAL_NODE_ID, NODE]);
     kept["exclusiveNodes"] = json!([NODE]);
     let (_, kept) = owner.send("PUT", &path(&kept), kept).await;
-    owner
+    let (status, revoked) = owner
         .send("POST", &format!("/api/nodes/{NODE}/revoke"), json!({}))
         .await;
+    assert_eq!(status, StatusCode::OK, "{revoked}");
+    assert_eq!(revoked["exclusiveAgents"], json!([]));
     assert_eq!(
         owner.stored("agents", text(&kept, "id")).await["exclusiveNodes"],
         json!([])

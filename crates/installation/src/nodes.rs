@@ -1048,7 +1048,7 @@ pub(crate) async fn revoke(
                     db.save_agent(&agent)?;
                 }
             }
-            db.put("nodes", &record)?;
+            record = db.put("nodes", &record)?;
 
             let mut released = 0_u64;
             if request.release_placements {
