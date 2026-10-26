@@ -164,6 +164,7 @@ impl StorageEntity for Agent {
 mod a2;
 
 use a2::A2Mapping;
+
 impl StorageEntity for cairn_contracts::Mission {
     const KIND: &'static str = "tasks";
     const TABLE: &'static str = "missions";

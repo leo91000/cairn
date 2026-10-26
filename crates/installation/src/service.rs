@@ -846,4 +846,3 @@ pub(crate) fn normalize_origin(remote: &str) -> String {
     }
     String::new()
 }
-

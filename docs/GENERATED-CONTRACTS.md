@@ -136,7 +136,7 @@ JSON Schema's UUID format; clients never grant authority through validation.
 
 ### Development reset
 
-The fresh installation schema is now version 4. Earlier development databases
+The fresh installation schema is now version 5. Earlier development databases
 are rejected, without being rewritten. Stop the development processes, remove the
 **disposable development data directory** (SQLite, vault and related local state)
 and start with a newly empty data directory. Recreate projects/agents and rerun
@@ -230,7 +230,7 @@ prevent duplicate grants. Permission tables use WITHOUT ROWID so composite keys
 do not duplicate a separate rowid/primary-key index. Listing loads each relation
 once for the whole catalogue. Reads hydrate one SQLite snapshot, and profile/permission
 writes publish atomically. Revisions change on owner saves and resource revocation.
-There is no historical reader or migration: the initial schema is version 4.
+There is no historical reader or migration: the initial schema is version 5.
 
 The A2 mirror, resource reconciliation, Value permission writer and node
 configuration's `exclusiveAgents` input are removed. Resource wire lists are
@@ -276,7 +276,7 @@ agent. Scope checks remain `read`/`manage`; deletion remains owner-only in the a
 Members can edit their own commitments and pause/archive another author's mission,
 but cannot resume or restore it, change its content, or recover its creation identity.
 
-The initial SQLite schema v4 adds `missions` with named scalar columns, agent/project
+The initial SQLite schema v5 adds `missions` with named scalar columns, agent/project
 foreign keys, update/reference indexes and a partial due-time index. Ordered
 `mission_tags` and `mission_skills` preserve selections, duplicates and their order;
 `skills_inherited` distinguishes all allowed skills (`null`) from an empty selection.
