@@ -24,10 +24,13 @@ end
 
 -- Only known quota fields may leave the CLI. Never forward its stdout/stderr in errors.
 local function quota_usage(account)
-    local result = run_op(account, { "service-account", "ratelimit", "--format=json" })
+    local ran, result = pcall(run_op, account, { "service-account", "ratelimit", "--format=json" })
+    if not ran or result.status ~= 0 then
+        return nil
+    end
     local ok, rows = pcall(cairn.json.decode, result.stdout)
     local limits = cairn.array()
-    if result.status ~= 0 or not ok or type(rows) ~= "table" then
+    if not ok or type(rows) ~= "table" then
         return nil
     end
 

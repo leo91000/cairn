@@ -173,6 +173,8 @@ async fn rate_limit_diagnostics_fall_back_safely_and_choose_the_longest_exhauste
     for diagnostic in [
         "printf 'ops_fixture invalid-json'",
         "echo ops_fixture >&2; exit 1",
+        // A host-level stdout-limit error must not hide the original rate limit.
+        "/usr/bin/head -c 1048577 /dev/zero",
         "printf '[{\"type\":\"account\",\"action\":\"read_write\",\"limit\":\"ops_fixture\",\"used\":1000,\"remaining\":0,\"reset\":1}]'",
     ] {
         write_program(
