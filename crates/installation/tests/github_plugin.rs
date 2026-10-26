@@ -295,7 +295,7 @@ async fn each_agent_runs_with_one_account_and_tokens_are_masked() {
     f.s.agent_fixture(edited, Some(text(&agent, "id")))
         .await
         .unwrap();
-    // Granting from the instance side is refused the same way.
+    // Existing instance editors must use a revision-guarded profile command.
     let refused = connections::save(
         &f.s,
         "github",
@@ -304,7 +304,12 @@ async fn each_agent_runs_with_one_account_and_tokens_are_masked() {
     )
     .await
     .unwrap_err();
-    assert!(refused.message.contains("one GitHub instance per agent"));
+    assert_eq!(refused.status, 400);
+    assert!(refused.message.contains("current revision"));
+    assert_eq!(
+        f.s.agent_snapshot(text(&agent, "id")).await.unwrap()["plugins"],
+        json!([first])
+    );
 
     // Long display names are cut on character boundaries.
     f.github

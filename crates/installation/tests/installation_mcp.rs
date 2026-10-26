@@ -1163,7 +1163,6 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
                     &json!({
                         "id": "00000000-0000-4000-8000-000000000099",
                         "pluginId": "onepassword",
-                        "agentIds": [id, MAIN_AGENT_ID],
                     }),
                 )?;
                 for agent_id in [id.as_str(), MAIN_AGENT_ID] {

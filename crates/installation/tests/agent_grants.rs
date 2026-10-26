@@ -586,7 +586,7 @@ async fn a_held_grant_on_an_instance_awaiting_review_does_not_block_other_edits(
         .store
         .put(
             connections::KIND,
-            json!({ "id": GHOST, "pluginId": "third-party", "name": "Pending", "agentIds": [id] }),
+            json!({ "id": GHOST, "pluginId": "third-party", "name": "Pending" }),
         )
         .await
         .unwrap();

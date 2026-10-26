@@ -63,7 +63,6 @@ impl Fixture {
                 "nodes",
                 json!({
                     "id": LOCAL_NODE_ID,
-                    "exclusiveAgents": [MAIN_AGENT_ID],
                     "exclusiveReservations": true,
                     "limits": { "memoryMiB": 4096 },
                 }),

@@ -580,7 +580,6 @@ mod tests {
                     connections::KIND,
                     &json!({
                         "id": "00000000-0000-4000-8000-000000000012", "pluginId": "fixture", "enabled": true,
-                        "agentIds": ["00000000-0000-4000-8000-000000000011"],
                     }),
                 )?;
                 let captured_run = json!({
