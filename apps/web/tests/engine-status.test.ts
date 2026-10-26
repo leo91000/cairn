@@ -172,7 +172,7 @@ describe('engine status', () => {
       text: 'Codex doesn’t offer the selected speed for this model here. This turn runs at Standard speed.',
     }
     expect(notices([fallback, step()]).map(notice => [notice.title, notice.subtitle])).toEqual([
-      ['This turn runs at Standard speed', 'Codex doesn’t offer the selected speed for this model here'],
+      ['This turn runs at Standard speed', 'Codex doesn’t list the selected speed for this model here, so Cairn asks for Standard'],
     ])
     expect(runLog([fallback])).toHaveLength(1)
 

@@ -255,7 +255,10 @@ class EngineStatusTest {
         assertEquals(listOf(fallback.id), notices(listOf(fallback, step())).map { it.id })
         val shown = presentActivity(fallback)
         assertEquals("Ce tour passe en vitesse Standard", shown.title)
-        assertEquals("Codex ne propose pas la vitesse choisie pour ce modèle ici", shown.subtitle)
+        assertEquals(
+            "Codex ne liste pas la vitesse choisie pour ce modèle ici : Cairn demande Standard",
+            shown.subtitle,
+        )
 
         val unconfirmed =
             event("status") {

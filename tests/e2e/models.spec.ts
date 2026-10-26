@@ -146,6 +146,8 @@ test('keeps the Codex speed across models, for agents and queued chat turns', as
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Then go faster')
   await page.getByRole('button', { name: 'Queue', exact: true }).click()
   await expect(page.getByTestId('queued-message')).toContainText('Fast speed')
+  // Every account confirms Fast for this model, so the queue claims it rather than requesting it.
+  await expect(page.getByTestId('queued-message')).not.toContainText('requested')
   await expect.poll(() => workspace.service.chats.detail(chatId).messages.find(m => m.status === 'queued')).toMatchObject({ model: 'fixture-fast', speed: 'priority' })
   await page.getByRole('button', { name: /^Queued message options/ }).first().click()
   await page.getByRole('dialog', { name: 'Queued message' }).getByRole('button', { name: 'Edit', exact: true }).click()
@@ -161,4 +163,15 @@ test('keeps the Codex speed across models, for agents and queued chat turns', as
   await workspace.api(`/api/chats/${chatId}/messages`, 'POST', { id: crypto.randomUUID(), text: 'finish now', mode: 'steer' })
   await expect.poll(() => workspace.service.chats.detail(chatId).run?.summary, { timeout: 30000 }).toContain('Then go faster')
   expect(workspace.service.chats.detail(chatId).run?.snapshot.agent).toMatchObject({ model: 'fixture-fast', speed: 'priority' })
+
+  // Codex's own list has no Fast for Deep thinker: the turn asks for Standard and says so.
+  await expect.poll(() => workspace.service.chats.detail(chatId).run?.status, { timeout: 30000 }).toBe('succeeded')
+  await picker.click()
+  await menu.getByRole('radio', { name: 'Deep thinker', exact: true }).click()
+  await page.keyboard.press('Escape')
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Now think deeply')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page.getByText('This turn runs at Standard speed')).toBeVisible({ timeout: 30000 })
+  await expect(page.getByText('Codex doesn’t list the selected speed for this model here, so Cairn asks for Standard')).toBeVisible()
+  expect(workspace.service.chats.detail(chatId).run?.snapshot.agent).toMatchObject({ model: 'fixture-deep', speed: 'priority' })
 })

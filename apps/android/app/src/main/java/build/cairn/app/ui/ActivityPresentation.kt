@@ -400,7 +400,7 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
             val subtitle =
                 if (account != null) account.second
                 else if (event.type == "status" && speedFallback(data))
-                    "Codex ne propose pas la vitesse choisie pour ce modèle ici"
+                    "Codex ne liste pas la vitesse choisie pour ce modèle ici : Cairn demande Standard"
                 else if (event.type == "status" && speedConfirmed(data))
                     "Codex propose désormais la vitesse choisie pour ce modèle ici"
                 else if (event.type == "status" && speedUnconfirmed(data))

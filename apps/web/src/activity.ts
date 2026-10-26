@@ -878,7 +878,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     const applied = text(record(data.speed).applied)
     if (event.type === 'status' && applied === 'standard') {
       artifact.title = 'This turn runs at Standard speed'
-      artifact.subtitle = 'Codex doesn’t offer the selected speed for this model here'
+      artifact.subtitle = 'Codex doesn’t list the selected speed for this model here, so Cairn asks for Standard'
       artifact.status = 'info'
       artifact.attention = true
     }

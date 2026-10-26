@@ -982,6 +982,16 @@ impl Chat<'_> {
             "" => self.thread_model.clone(),
             model => model.to_owned(),
         };
+        if model.is_empty() {
+            // No model is known for the turn, so its catalog row cannot be found.
+            self.emit(json!({
+                "type": "turn.speed",
+                "messageId": plan["execution"]["messageId"],
+                "speed": { "requested": tier, "unconfirmed": true },
+            }))
+            .await?;
+            return Ok(tier);
+        }
         let check = tokio::select! {
             () = self.cancel.cancelled() => return Err(Error::conflict(STOPPED)),
             check = crate::models::check_tier(self.session, &model, &tier) => check,
