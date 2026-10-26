@@ -9,6 +9,7 @@ import build.cairn.contracts.ListMissionsInput
 import build.cairn.contracts.ListProjectsInput
 import build.cairn.contracts.listAccountMethods
 import build.cairn.contracts.listAgents
+import build.cairn.contracts.listMcps
 import build.cairn.contracts.listMissions
 import build.cairn.contracts.listProjects
 import java.io.IOException
@@ -777,7 +778,9 @@ constructor(
         val projects = async { target.listProjects(ListProjectsInput()).projects }
         val tasks = async { target.listMissions(ListMissionsInput()).tasks }
         val skills = async { target.get<List<Skill>>("/skills") }
-        val mcps = async { if (owner) target.get<List<Mcp>>("/mcps") else emptyList() }
+        val mcps = async {
+            if (owner) target.listMcps(build.cairn.contracts.ListMcpsInput()).mcps else emptyList()
+        }
         val catalogs = codingAgents.associate { agent ->
             agent.provider to
                 async {

@@ -161,6 +161,115 @@ fn main() {
             + "\n",
     )
     .unwrap();
+    export::<McpInput>(root, &mut generator, Contract::Deserialize);
+    export::<McpIdInput>(root, &mut generator, Contract::Deserialize);
+    export::<UpdateMcpInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListMcpsInput>(root, &mut generator, Contract::Deserialize);
+    export::<BeginMcpInput>(root, &mut generator, Contract::Deserialize);
+    export::<McpView>(root, &mut generator, Contract::Serialize);
+    export::<ListMcpsOutput>(root, &mut generator, Contract::Serialize);
+    export::<McpMutationOutput>(root, &mut generator, Contract::Serialize);
+    export::<BeginMcpOutput>(root, &mut generator, Contract::Serialize);
+    export::<McpConnectionStatus>(root, &mut generator, Contract::Serialize);
+    let corpus: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/mcp-contracts.json")).unwrap();
+    let creates: Vec<McpInput> = corpus["creates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| serde_json::from_value(v.clone()).unwrap())
+        .collect();
+    let replacements: Vec<UpdateMcpInput> = creates
+        .iter()
+        .map(|input| {
+            serde_json::from_value(serde_json::json!({
+                "id": "00000000-0000-4000-8000-000000000001",
+                "revision": 1,
+                "connection": input,
+            }))
+            .unwrap()
+        })
+        .collect();
+    fs::write(
+        root.join("mcp-wire.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "creates": creates,
+            "replacements": replacements,
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let clients = serde_json::json!([
+        {
+            "name": "listMcps",
+            "input": "ListMcpsInput",
+            "output": "ListMcpsOutput",
+            "method": "GET",
+            "path": "/mcps"
+        },
+        {
+            "name": "createMcp",
+            "input": "McpInput",
+            "output": "McpView",
+            "method": "POST",
+            "path": "/mcps"
+        },
+        {
+            "name": "updateMcp",
+            "input": "UpdateMcpInput",
+            "output": "McpView",
+            "method": "PUT",
+            "path": "/mcps/{id}"
+        },
+        {
+            "name": "deleteMcp",
+            "input": "McpIdInput",
+            "output": "McpMutationOutput",
+            "method": "DELETE",
+            "path": "/mcps/{id}"
+        },
+        {
+            "name": "testMcp",
+            "input": "McpIdInput",
+            "output": "McpView",
+            "method": "POST",
+            "path": "/mcps/{id}/test"
+        },
+        {
+            "name": "disconnectMcp",
+            "input": "McpIdInput",
+            "output": "McpMutationOutput",
+            "method": "POST",
+            "path": "/mcps/{id}/disconnect"
+        },
+        {
+            "name": "beginMcpConnection",
+            "input": "BeginMcpInput",
+            "output": "BeginMcpOutput",
+            "method": "POST",
+            "path": "/mcps/{id}/connect"
+        },
+        {
+            "name": "mcpConnectionStatus",
+            "input": "McpIdInput",
+            "output": "McpConnectionStatus",
+            "method": "POST",
+            "path": "/mcps/{id}/callback"
+        },
+        {
+            "name": "cancelMcpConnection",
+            "input": "McpIdInput",
+            "output": "McpMutationOutput",
+            "method": "POST",
+            "path": "/mcps/{id}/cancel"
+        }
+    ]);
+    fs::write(
+        root.join("mcp-clients.json"),
+        serde_json::to_string_pretty(&clients).unwrap() + "\n",
+    )
+    .unwrap();
     let clients = serde_json::json!([
         {
             "name": "setAgentAvatar",

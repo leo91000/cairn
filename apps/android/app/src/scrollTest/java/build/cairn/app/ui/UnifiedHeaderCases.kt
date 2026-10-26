@@ -125,8 +125,8 @@ abstract class UnifiedHeaderCases {
                                     )
                                 )
                             "/api/installations/fixture/api/tasks/activity",
-                            "/api/installations/fixture/api/skills",
-                            "/api/installations/fixture/api/mcps" -> "[]"
+                            "/api/installations/fixture/api/skills" -> "[]"
+                            "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
                             else -> "{}"
                         }
                     return MockResponse()

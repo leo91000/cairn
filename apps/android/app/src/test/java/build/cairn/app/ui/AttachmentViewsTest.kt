@@ -128,6 +128,11 @@ class AttachmentViewsTest {
                                             true
                                     )
                                         """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
                                     else "[]"
                             }
                         return MockResponse()
@@ -335,6 +340,12 @@ class AttachmentViewsTest {
                                                     ?.endsWith("/api/tasks") == true
                                             )
                                                 """{"tasks":[]}"""
+                                            else if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/mcps") == true
+                                            )
+                                                """{"mcps":[]}"""
                                             else "[]"
                                     }
                                 return MockResponse()

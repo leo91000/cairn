@@ -495,10 +495,10 @@ test('tool choices stay visible and editable when every MCP connection is grante
     }
 
     const response = await route.fetch()
-    const list = (await response.json()).map((item: { id: string }) => item.id === mcp.id
+    const list = (await response.json()).mcps.map((item: { id: string }) => item.id === mcp.id
       ? { ...item, tools: [{ name: 'echo', inputSchema: { type: 'object' } }, { name: 'search', inputSchema: { type: 'object' } }] }
       : item)
-    await route.fulfill({ response, json: list })
+    await route.fulfill({ response, json: { mcps: list } })
   })
   await page.goto(workspacePath(`/agents/${agent.id}?section=mcps`))
   await authenticateWorkspace(page)

@@ -6,14 +6,12 @@ import {
   questionAnswerInput,
   questionFields,
 } from '../packages/contracts/chats.ts'
-import { mcpInput } from '../packages/contracts/mcp.ts'
 
 const schemas = {
   chat: chatInput,
   message: chatMessageInput,
   answer: questionAnswerInput,
   questions: questionFields,
-  mcp: mcpInput,
 }
 await writeFile('crates/installation/schemas/inputs.json', `${JSON.stringify(Object.fromEntries(Object.entries(schemas).map(([name, schema]) => [name, z.toJSONSchema(schema, { unrepresentable: 'any' })])), null, 2)}\n`)
 

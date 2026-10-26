@@ -380,7 +380,7 @@ impl Service {
             .flatten()
             .chain(access.mcp_tools.keys())
         {
-            self.get("mcps", connection).await?;
+            self.mcps.server(self, connection).await?;
         }
         for connection in access.mcp_tools.keys() {
             if access

@@ -88,6 +88,11 @@ abstract class ConnectionLostCases {
                                             true
                                     )
                                         """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
                                     else "[]"
                             }
                         return MockResponse()
@@ -214,6 +219,11 @@ abstract class ConnectionLostCases {
                                             true
                                     )
                                         """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
                                     else "[]"
                             }
                         return MockResponse()
@@ -282,6 +292,11 @@ abstract class ConnectionLostCases {
                                             true
                                     )
                                         """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
                                     else "[]"
                             }
                         return MockResponse()
@@ -345,6 +360,11 @@ abstract class ConnectionLostCases {
                                             true
                                     )
                                         """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
                                     else "[]"
                             }
                         return MockResponse()
@@ -425,6 +445,11 @@ abstract class ConnectionLostCases {
                                             true
                                     )
                                         """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
                                     else "[]"
                             }
                         return MockResponse()
@@ -491,6 +516,11 @@ abstract class ConnectionLostCases {
                                             true
                                     )
                                         """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
                                     else "[]"
                             }
                         return MockResponse()

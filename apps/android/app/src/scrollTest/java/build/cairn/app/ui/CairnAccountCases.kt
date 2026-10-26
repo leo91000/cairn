@@ -195,6 +195,12 @@ abstract class CairnAccountCases {
                                                     ?.endsWith("/api/tasks") == true
                                             )
                                                 """{"tasks":[]}"""
+                                            else if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/mcps") == true
+                                            )
+                                                """{"mcps":[]}"""
                                             else "[]"
                                     }
                                 }
@@ -460,6 +466,12 @@ abstract class CairnAccountCases {
                                                     ?.endsWith("/api/tasks") == true
                                             )
                                                 """{"tasks":[]}"""
+                                            else if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/mcps") == true
+                                            )
+                                                """{"mcps":[]}"""
                                             else "[]"
                                     }
                                 }
