@@ -270,6 +270,7 @@ fn merge_tiers(existing: &mut Value, model: &Value) {
 /// without knowing whether Codex applies it.
 fn mark_unconfirmed(model: &mut Value, catalogs: &[Value]) {
     let name = text(model, "model").to_owned();
+    let is_default = model["isDefault"] == true;
     // As routing: an account whose fresh catalog lacks the model runs it only when no other
     // fresh catalog lists the model.
     let listed_fresh = catalogs
@@ -283,9 +284,12 @@ fn mark_unconfirmed(model: &mut Value, catalogs: &[Value]) {
     for tier in tiers {
         let id = text(tier, "id").to_owned();
         // Without an account a run can land on, nothing confirms the speed.
+        // The catalog default is also what a run without a model gets on each account, which
+        // routing never excludes: that account's own default must confirm the speed too.
         let unconfirmed = catalogs.is_empty()
             || catalogs.iter().any(|catalog| {
-                !runs_elsewhere(catalog) && offers_tier(catalog, &name, &id) != Some(true)
+                (!runs_elsewhere(catalog) && offers_tier(catalog, &name, &id) != Some(true))
+                    || (is_default && offers_tier(catalog, "", &id) != Some(true))
             });
         if unconfirmed {
             tier["limited"] = true.into();
@@ -364,7 +368,6 @@ impl Models {
             }
         }
         let mut models = models.into_values().collect::<Vec<_>>();
-        // Only accounts a run can land on decide which speeds are limited.
         for model in &mut models {
             for tier in model["serviceTiers"].as_array_mut().into_iter().flatten() {
                 if let Some(tier) = tier.as_object_mut() {
@@ -742,6 +745,21 @@ mod tests {
         assert!(limited(&[confirming(TTL + 60_000), without_model]));
         // Without a signed-in account, nothing confirms it.
         assert!(limited(&[]));
+
+        // A run without a model gets each account's own default: one whose default lacks the
+        // speed makes the catalog default's speed limited.
+        let mut default = fast.clone();
+        default["isDefault"] = true.into();
+        let other_default = json!({ "checkedAt": now(), "models": [
+            { "model": "other", "isDefault": true, "serviceTiers": [] },
+        ] });
+        let confirming_default = json!({ "checkedAt": now(), "models": [default.clone()] });
+        mark_unconfirmed(&mut default, &[confirming_default.clone(), other_default]);
+        assert_eq!(default["serviceTiers"][0]["limited"], true);
+        let mut default = fast.clone();
+        default["isDefault"] = true.into();
+        mark_unconfirmed(&mut default, &[confirming_default]);
+        assert!(default["serviceTiers"][0].get("limited").is_none());
     }
 
     #[test]
