@@ -1778,6 +1778,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             if *action == "delete" {
                 for entry in [
                     "data",
+                    "docker-runtime",
                     "initialized",
                     "resources.json",
                     "attempt",
@@ -3358,6 +3359,16 @@ mod tests {
         let directory = workspace::directory(&controller.state, &run).unwrap();
         private_dir(&directory).await.unwrap();
         std::os::unix::fs::symlink(outside.path(), directory.join("data")).unwrap();
+        let docker_runtime = directory.join("docker-runtime");
+        let mirror = docker_runtime.join("runtime/mounts/fixture/source");
+        tokio::fs::create_dir_all(&mirror).await.unwrap();
+        tokio::fs::create_dir_all(docker_runtime.join("rootlesskit"))
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(outside.path(), mirror.join("outside")).unwrap();
+        tokio::fs::write(docker_runtime.join("rootlesskit/child_pid"), b"123")
+            .await
+            .unwrap();
         tokio::fs::write(directory.join("unrelated"), b"preserved")
             .await
             .unwrap();
@@ -3372,6 +3383,7 @@ mod tests {
             b"owner files"
         );
         assert!(!directory.join("data").exists());
+        assert!(!docker_runtime.exists());
         assert!(directory.join("unrelated").exists());
     }
 

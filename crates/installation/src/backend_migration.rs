@@ -185,6 +185,7 @@ fn migration_grant(db: &Db<'_>, run: &Value, agent: &Value, source: &Origin) -> 
         }
     }
     grant["nativePrincipals"] = people.into();
+    policy::merge_plugin_grants(&mut grant, run);
     grant["nativeAuthorityNodes"] = grant["nativeAuthorityNodes"]
         .as_array()
         .into_iter()
@@ -777,6 +778,17 @@ mod tests {
             assert_eq!(candidate["nativePrincipals"], json!(["editor", "owner"]));
             assert_eq!(candidate["nativeParentRunId"], parent);
             assert!(allowed(db, &candidate, &db.get("nodes", &node)?.unwrap())?);
+            let mut plugin_bound = historical.clone();
+            plugin_bound["nativeParentRunId"] = Value::Null;
+            plugin_bound["nativePluginGrants"] = json!([{
+                "connectionId": id(), "revision": id(), "authorId": "external-person"
+            }]);
+            let delegated = prospective(db, &plugin_bound, &agent, &origin)?;
+            assert!(!allowed(db, &delegated, &db.get("nodes", &node)?.unwrap())?,
+                "An agent cannot erase a removed bot's revocation lineage by migrating its conversation");
+            let adopted = prospective(db, &plugin_bound, &agent, &Origin::Human("owner".into()))?;
+            assert!(allowed(db, &adopted, &db.get("nodes", &node)?.unwrap())?,
+                "The explicit owner can still adopt existing work");
             let mut revoked = db.get("nodes", &node)?.unwrap();
             revoked["nativeAccounts"] = json!(["owner"]); db.put("nodes", &revoked)?;
             assert!(!allowed(db, &candidate, &revoked)?);

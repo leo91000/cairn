@@ -893,6 +893,14 @@ def main():
             for index, current in enumerate(runs):
                 progress('purge-' + str(index + 1) + '-of-' + str(len(runs)))
                 manager('purge', run=current)
+                if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
+                    # Backup purge and permanent local disk deletion are
+                    # separate operations; exercise both before checking state.
+                    api('/disks/' + current + '/delete')
+                    docker_runtime_path = state / 'native' / current / 'docker-runtime'
+                    assert not docker_runtime_path.exists() and not docker_runtime_path.is_symlink(), 'Permanent deletion retained Docker runtime state.'
+            if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
+                metrics['dockerRuntimeCleanupVerified'] = True
             progress('purge-completed')
             metrics['harnessCpuSeconds'] = resource.getrusage(resource.RUSAGE_SELF).ru_utime
             metrics['host']['loadAverageEnd'] = os.getloadavg()
