@@ -1368,9 +1368,6 @@ async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_gran
         )
         .await
         .unwrap();
-    owner.put("agents", json!({
-        "id": MAIN_AGENT_ID, "access": { "backend": "native", "nodes": [node], "projects": [project] },
-    })).await;
     let root = owner.service.config.data_dir.join("runs").join(&run);
     let project_path = root.join("workspace").join(&project);
     std::fs::create_dir_all(&project_path).unwrap();
@@ -1393,6 +1390,10 @@ async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_gran
         .transaction(move |db| db.save_project(&fixture_project, None))
         .await
         .unwrap();
+    owner.put("agents", json!({
+        "id": MAIN_AGENT_ID, "access": { "backend": "native", "nodes": [node], "projects": [project] },
+    })).await;
+
     let mut record = run_record(&run, RunStatus::Running);
     record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID, "provider": "codex", "access": { "backend": "native" } }, "projects": [project_record] });
     record["workspaces"] =

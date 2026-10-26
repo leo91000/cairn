@@ -199,7 +199,6 @@ fn access_covers_unchanged_or_wider_grants_but_not_reduced_ones() {
         "mcpTools": { "m": ["read"] },
         "sandbox": "workspace-write",
         "nodes": ["laptop"],
-        "maxResources": null,
     }));
     let same = agent(json!({
         "projects": ["a"],

@@ -938,13 +938,6 @@ async fn chats_continue_with_equivalent_access_but_not_reduced_access() {
     fixture
         .until(&run_id, |r| r["status"] == RunStatus::Succeeded)
         .await;
-    // Started by an older version that saved a setting the policy no longer has.
-    let mut snapshot = s.store.run(&run_id).await.unwrap()["snapshot"].clone();
-    snapshot["agent"]["access"]["maxResources"] = Value::Null;
-    s.store
-        .patch_run(&run_id, json!({ "snapshot": snapshot }))
-        .await
-        .unwrap();
     let follow_up = message("Continue with the same access.");
     s.chat_send(&chat_id, follow_up.clone()).await.unwrap();
     fixture
