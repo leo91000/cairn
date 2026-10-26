@@ -2,6 +2,9 @@
 //! in through the host's device flow, granted agents' runs receive the account's
 //! credentials, projects are imported through its project source, and data saved
 //! before the package exists moves into instances. GitHub is simulated locally.
+#[allow(unused_imports)]
+use common::{PluginServiceFixture as _, PluginStoreFixture as _};
+
 use common::AgentFixture;
 use common::MissionFixture;
 
@@ -80,7 +83,7 @@ async fn the_owner_signs_in_through_the_host_and_the_token_never_leaves_it() {
     assert!(body.contains("client_id=") && body.contains("scope=repo+workflow+read%3Aorg"));
 
     // Saving before the owner approves is refused.
-    let early = connections::save(
+    let early = common::save_plugin(
         &f.s,
         "github",
         &json!({ "name": "GitHub", "enabled": true, "credentialFlow": flow }),
@@ -102,7 +105,7 @@ async fn the_owner_signs_in_through_the_host_and_the_token_never_leaves_it() {
     assert!(!completed.to_string().contains(github::USER_TOKEN));
 
     // The package's form checks the account with the signed-in token, unsaved.
-    let form = connections::save(
+    let form = common::save_plugin(
         &f.s,
         "github",
         &json!({ "name": "GitHub", "enabled": true, "credentialFlow": flow, "agentIds": [MAIN_AGENT_ID] }),
@@ -242,7 +245,7 @@ async fn granted_runs_receive_the_account_and_lose_it_with_the_grant() {
     );
 
     // Withdrawing the grant empties the files when the run resumes.
-    connections::set_enabled(&f.s, "github", &instance, &json!({ "enabled": false }))
+    common::enable_plugin(&f.s, "github", &instance, &json!({ "enabled": false }))
         .await
         .unwrap();
     let withdrawn = run_credentials::for_run(&f.s, &agent_id, &[])
@@ -297,7 +300,7 @@ async fn each_agent_runs_with_one_account_and_tokens_are_masked() {
         .await
         .unwrap();
     // Existing instance editors must use a revision-guarded profile command.
-    let refused = connections::save(
+    let refused = common::save_plugin(
         &f.s,
         "github",
         &json!({ "name": "Second", "enabled": true, "agentIds": [agent["id"]] }),
@@ -316,7 +319,7 @@ async fn each_agent_runs_with_one_account_and_tokens_are_masked() {
     f.github
         .state(&json!({ "user": { "id": 7, "login": "long", "name": "é".repeat(150) } }));
     let long = github::instance(&f.s, "Long", "fixture-long", &[]).await;
-    let saved = f.s.get(connections::KIND, &long).await.unwrap();
+    let saved = f.s.instance_fixture(&long).await.unwrap();
     assert_eq!(saved["settings"]["gitName"], "é".repeat(100));
 
     let package = registry::builtin("github").unwrap();
@@ -515,7 +518,7 @@ async fn live_device_sign_in_against_github() {
     })
     .await;
     assert_eq!(status["state"], "completed", "{status}");
-    let saved = connections::save(
+    let saved = common::save_plugin(
         &s,
         "github",
         &json!({ "name": "GitHub", "enabled": true, "credentialFlow": flow }),
@@ -527,7 +530,7 @@ async fn live_device_sign_in_against_github() {
         "LIVE_GITHUB {}",
         json!({ "login": saved["settings"]["login"], "gitEmail": saved["settings"]["gitEmail"] })
     );
-    let test = cairn_installation::plugins::panels::test(&s, "github", text(&saved, "id"))
+    let test = common::plugin_test(&s, "github", text(&saved, "id"))
         .await
         .unwrap();
     println!("LIVE_GITHUB_TEST {test}");

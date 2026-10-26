@@ -2,7 +2,11 @@ import { api } from './api'
 
 /** Installation continues on the manager while each relay request stays short. */
 export async function pluginOperation<T = unknown>(path: string, body?: unknown, method = 'POST'): Promise<T> {
-  const result = await api<T & { operation?: string }>(path, { method, body: body === undefined ? undefined : JSON.stringify(body) })
+  return pluginRequest(path, { method, body: body === undefined ? undefined : JSON.stringify(body) })
+}
+
+export async function pluginRequest<T>(path: string, options: RequestInit): Promise<T> {
+  const result = await api<T & { operation?: string }>(path, options)
   if (!result.operation)
     return result
 

@@ -510,3 +510,50 @@ pub(crate) use crate::missions::{MISSION_OPERATIONS, MissionOperation, mission_o
 mod mcps;
 
 pub(crate) use mcps::{MCP_OPERATIONS, McpOperation, mcp_operation};
+
+/// Plugin management retains one named entry with a closed, generated command
+/// union. Manifest payloads do not supply authority or Cairn configuration keys.
+pub(crate) struct ManagePlugin;
+
+pub(crate) const MANAGE_PLUGIN: ManagePlugin = ManagePlugin;
+
+impl ManagePlugin {
+    pub(crate) fn descriptor(&self) -> Value {
+        serde_json::json!({
+            "name": "manage_plugin",
+            "description": "Configure a plugin instance with a typed command. Setup and sign-in keep credentials on the host. Agents cannot grant plugin access or approve native delegations; the owner does so in the apps.",
+            "inputSchema": cairn_contracts::schema_for::<cairn_contracts::ManagePluginInput>(cairn_contracts::Contract::Deserialize),
+            "outputSchema": cairn_contracts::schema_for::<cairn_contracts::ManagePluginOutput>(cairn_contracts::Contract::Serialize),
+            "_meta": { "securitySchemes": [{ "type": "oauth2", "scopes": ["manage"] }] },
+            "annotations": { "readOnlyHint": false, "destructiveHint": true, "openWorldHint": true },
+        })
+    }
+
+    pub(crate) async fn invoke(
+        &self,
+        s: &Arc<Service>,
+        input: Value,
+        context: ResumeContext,
+    ) -> Result<Value> {
+        let bearer = match context {
+            ResumeContext::Human(_) => None,
+            ResumeContext::Public(scopes) => {
+                if !scopes.iter().any(|scope| scope == "manage") {
+                    return Err(Error::forbidden("The manage scope is required."));
+                }
+                None
+            }
+            ResumeContext::Installation(bearer) => Some(bearer),
+        };
+        let input = crate::plugins::management::decode(input)?;
+        Ok(serde_json::to_value(
+            Box::pin(crate::plugins::management::invoke(
+                s,
+                input,
+                bearer.as_deref(),
+                false,
+            ))
+            .await?,
+        )?)
+    }
+}

@@ -6,6 +6,7 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class ProjectInput(val projectId: String) {
+
     init {
         java.util.UUID.fromString(projectId)
     }

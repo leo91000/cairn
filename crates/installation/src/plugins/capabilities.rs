@@ -83,7 +83,17 @@ async fn instance_status(s: &Service, context: &Context, args: &Value) -> Result
         link.send(super::socket::Command::Healthy)?;
     }
     let message = (!message.is_empty()).then_some(message);
-    super::connections::status_with(s, &context.connection, state, message).await;
+    super::connections::status_with(
+        s,
+        &context.connection,
+        if state == "connected" {
+            cairn_contracts::PluginState::Connected
+        } else {
+            cairn_contracts::PluginState::Connecting
+        },
+        message,
+    )
+    .await;
     Ok(Value::Null)
 }
 

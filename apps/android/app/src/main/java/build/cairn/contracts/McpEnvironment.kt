@@ -6,4 +6,14 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 @JvmInline
-value class McpEnvironment(val value: Map<String, String>) : Map<String, String> by value
+value class McpEnvironment(
+    val value:
+        Map<
+            String,
+            String,
+        >
+) :
+    Map<
+        String,
+        String,
+    > by value

@@ -146,3 +146,7 @@ pub use missions::*;
 mod mcps;
 
 pub use mcps::*;
+
+mod plugins;
+
+pub use plugins::*;

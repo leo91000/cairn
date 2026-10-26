@@ -1,0 +1,10 @@
+[
+  {
+    "deferred": true,
+    "input": "ManagePluginInput",
+    "method": "POST",
+    "name": "managePlugin",
+    "output": "ManagePluginOutput",
+    "path": "/plugins/manage"
+  }
+]

@@ -375,9 +375,14 @@ async fn recorded_member_and_final_group_results_recheck_authorization_before_re
             }
             let calls = f.calls().len();
             if revoke_grant {
-                connections::set_enabled(&f.s, "github", &f.instance, &json!({ "enabled": false }))
-                    .await
-                    .unwrap();
+                connections::set_enabled(
+                    &f.s,
+                    "github",
+                    &f.instance,
+                    &cairn_contracts::PluginEnabledInput { enabled: false },
+                )
+                .await
+                .unwrap();
             } else {
                 let mut project = f.s.get_project(&f.project).await.unwrap();
                 project.origin = "https://github.com/another/repository.git".into();
@@ -542,9 +547,14 @@ async fn an_unused_any_member_stays_null_when_its_grant_is_revoked_after_resolut
     f.set_status(&target, "succeeded").await;
     f.record_groups().await;
     assert!(f.wakeup().await["observation"]["members"][0]["result"].is_null());
-    connections::set_enabled(&f.s, "github", &f.instance, &json!({ "enabled": false }))
-        .await
-        .unwrap();
+    connections::set_enabled(
+        &f.s,
+        "github",
+        &f.instance,
+        &cairn_contracts::PluginEnabledInput { enabled: false },
+    )
+    .await
+    .unwrap();
     let resumed = f.tick().await;
     let prompt = text(&resumed["run"]["chatExecution"], "text");
     assert!(prompt.contains(r#""result":null"#));

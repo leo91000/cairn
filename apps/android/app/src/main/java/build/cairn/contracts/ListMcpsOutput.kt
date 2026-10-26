@@ -6,5 +6,6 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class ListMcpsOutput(val mcps: List<McpView>) {
+
     init {}
 }

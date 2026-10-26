@@ -50,13 +50,33 @@ class AgentEditingTest {
                 ),
             connections =
                 listOf(
-                    PluginConnection("prod", "onepassword", "Production"),
-                    PluginConnection("staging", "onepassword", "Staging", enabled = false),
                     PluginConnection(
-                        "bot",
-                        "discord",
-                        "#support",
+                        id = "prod",
+                        pluginId = "onepassword",
+                        name = "Production",
+                        settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                        status = PluginStatus(),
+                        usage = PluginUsage(),
+                        enabled = true,
+                    ),
+                    PluginConnection(
+                        id = "staging",
+                        pluginId = "onepassword",
+                        name = "Staging",
+                        enabled = false,
+                        settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                        status = PluginStatus(),
+                        usage = PluginUsage(),
+                    ),
+                    PluginConnection(
+                        id = "bot",
+                        pluginId = "discord",
+                        name = "#support",
                         agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                        settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                        status = PluginStatus(),
+                        usage = PluginUsage(),
+                        enabled = true,
                     ),
                 ),
         )
@@ -1047,8 +1067,24 @@ class AgentEditingTest {
                 connections =
                     catalog.connections +
                         listOf(
-                            PluginConnection("v1", "vault", "Coffre"),
-                            PluginConnection("b1", "broken", "Cassé"),
+                            PluginConnection(
+                                id = "v1",
+                                pluginId = "vault",
+                                name = "Coffre",
+                                settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                                status = PluginStatus(),
+                                usage = PluginUsage(),
+                                enabled = true,
+                            ),
+                            PluginConnection(
+                                id = "b1",
+                                pluginId = "broken",
+                                name = "Cassé",
+                                settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                                status = PluginStatus(),
+                                usage = PluginUsage(),
+                                enabled = true,
+                            ),
                         ),
             )
         // The Discord package gives agents nothing; the others no longer run.

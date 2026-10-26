@@ -78,8 +78,8 @@ pub(crate) fn merge(
         }
     }
 
-    for instance in db.list(crate::plugins::connections::KIND)? {
-        if instance["agentId"] == source_id {
+    for instance in db.plugin_instances()? {
+        if instance.agent_id == source_id {
             return Err(Error::conflict(
                 "Reassign the source's plugin delegations before merging.",
             ));

@@ -687,6 +687,21 @@
       ],
       "type": "object"
     },
+    "ListPluginInstancesOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "connections": {
+          "items": {
+            "$ref": "#/definitions/PluginConnection"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "connections"
+      ],
+      "type": "object"
+    },
     "ListProjectsInput": {
       "additionalProperties": false,
       "type": "object"
@@ -705,6 +720,564 @@
         "projects"
       ],
       "type": "object"
+    },
+    "ManagePluginInput": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "setup",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/PluginFormInput"
+            },
+            "instanceId": {
+              "default": null,
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "form",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/PluginConfiguration"
+            },
+            "instanceId": {
+              "default": null,
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "save",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/PluginEnabledInput"
+            },
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "enabled",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "delete",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "disconnect",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "test",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "view",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/PluginActionInput"
+            },
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "action",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/PluginFormInput"
+            },
+            "instanceId": {
+              "default": null,
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "signin",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "flowId": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "signin_status",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "flowId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "flowId": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "signin_cancel",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "flowId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "people",
+              "type": "string"
+            },
+            "operation": {
+              "pattern": "^(approve|deny|remove)$",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            },
+            "userId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId",
+            "userId",
+            "operation"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ManagePluginOutput": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "callbackUrl": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "setup",
+              "type": "string"
+            },
+            "managementUrl": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "manifest": true,
+            "setup": true
+          },
+          "required": [
+            "kind",
+            "manifest",
+            "setup",
+            "callbackUrl",
+            "managementUrl"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "form": {
+              "$ref": "#/definitions/PluginFormResult"
+            },
+            "kind": {
+              "const": "form",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "form"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instance": {
+              "$ref": "#/definitions/PluginConnection"
+            },
+            "kind": {
+              "const": "saved",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "instance"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instance": {
+              "$ref": "#/definitions/PluginConnection"
+            },
+            "kind": {
+              "const": "enabled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "instance"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deleted": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "deleted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "deleted"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "disconnected": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "disconnected",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "revoked": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "disconnected",
+            "revoked",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "tested",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "ok",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "view",
+              "type": "string"
+            },
+            "view": true
+          },
+          "required": [
+            "kind",
+            "view"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The package-defined view/action result has already passed its manifest validator.",
+          "properties": {
+            "kind": {
+              "const": "action",
+              "type": "string"
+            },
+            "result": true
+          },
+          "required": [
+            "kind",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "flow": {
+              "$ref": "#/definitions/PluginSigninFlow"
+            },
+            "kind": {
+              "const": "signin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "flow"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cancelled": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "signinCancelled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "cancelled"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instance": {
+              "$ref": "#/definitions/PluginConnection"
+            },
+            "kind": {
+              "const": "people",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "instance"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "McpConnectionStatus": {
       "properties": {
@@ -1539,6 +2112,644 @@
         "revision",
         "enabled",
         "archived"
+      ],
+      "type": "object"
+    },
+    "PluginActionInput": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "maxLength": 40,
+          "minLength": 1,
+          "type": "string"
+        },
+        "payload": {
+          "default": null
+        },
+        "values": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": "object",
+          "x-cairn-json-object": true
+        }
+      },
+      "required": [
+        "action",
+        "payload",
+        "values"
+      ],
+      "type": "object"
+    },
+    "PluginActivity": {
+      "additionalProperties": false,
+      "properties": {
+        "chatId": {
+          "default": "",
+          "type": "string"
+        },
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "preview": {
+          "default": "",
+          "type": "string"
+        },
+        "status": {
+          "default": "working",
+          "pattern": "^(working|replied|failed|stopped)$",
+          "type": "string"
+        },
+        "userId": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "chatId",
+        "userId",
+        "name",
+        "preview",
+        "status",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "PluginConfiguration": {
+      "additionalProperties": false,
+      "description": "Full Cairn configuration, with manifest settings and secret fields separate.\nMissing agentIds retains grants; agents are forbidden from submitting it at all.",
+      "properties": {
+        "accessMode": {
+          "default": "allowlist",
+          "pattern": "^(allowlist|requests|everyone)$",
+          "type": "string"
+        },
+        "agentId": {
+          "default": "",
+          "type": "string"
+        },
+        "agentIds": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "credentialFlow": {
+          "maxLength": 200,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "maxMessagesPerHour": {
+          "default": 20,
+          "format": "uint32",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maxPerPersonPerHour": {
+          "default": 5,
+          "format": "uint32",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "people": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginLabel"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "projectId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "description": "Required on replacement. Creation has no existing revision.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secrets": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-cairn-json-object": true
+        },
+        "settings": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": "object",
+          "x-cairn-json-object": true
+        },
+        "sharedFrom": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token": {
+          "maxLength": 16384,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "userIds": {
+          "default": [],
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "enabled",
+        "settings",
+        "agentId",
+        "projectId",
+        "accessMode",
+        "userIds",
+        "people",
+        "maxMessagesPerHour",
+        "maxPerPersonPerHour"
+      ],
+      "type": "object"
+    },
+    "PluginConnection": {
+      "additionalProperties": false,
+      "description": "Explicit owner/agent view: no credential, approved policy or native provenance.",
+      "properties": {
+        "accessMode": {
+          "default": "allowlist",
+          "pattern": "^(allowlist|requests|everyone)$",
+          "type": "string"
+        },
+        "activity": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginActivity"
+          },
+          "type": "array"
+        },
+        "agentId": {
+          "default": "",
+          "type": "string"
+        },
+        "agentIds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "maxMessagesPerHour": {
+          "default": 20,
+          "format": "uint32",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maxPerPersonPerHour": {
+          "default": 5,
+          "format": "uint32",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "people": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginLabel"
+          },
+          "type": "array"
+        },
+        "pluginId": {
+          "default": "",
+          "type": "string"
+        },
+        "projectId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requests": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginRequest"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "default": "",
+          "type": "string"
+        },
+        "secretKeys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "settings": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": "object",
+          "x-cairn-json-object": true
+        },
+        "status": {
+          "$ref": "#/definitions/PluginStatus"
+        },
+        "usage": {
+          "$ref": "#/definitions/PluginUsage"
+        },
+        "userIds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "pluginId",
+        "name",
+        "enabled",
+        "revision",
+        "settings",
+        "secretKeys",
+        "agentIds",
+        "agentId",
+        "projectId",
+        "accessMode",
+        "userIds",
+        "people",
+        "maxMessagesPerHour",
+        "maxPerPersonPerHour",
+        "status",
+        "usage",
+        "requests",
+        "activity"
+      ],
+      "type": "object"
+    },
+    "PluginEnabledInput": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "PluginFormInput": {
+      "additionalProperties": false,
+      "properties": {
+        "changed": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentialFlow": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "instance": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secrets": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": "object",
+          "x-cairn-json-object": true
+        },
+        "settings": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": "object",
+          "x-cairn-json-object": true
+        },
+        "sharedFrom": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "settings",
+        "secrets"
+      ],
+      "type": "object"
+    },
+    "PluginFormResult": {
+      "additionalProperties": false,
+      "properties": {
+        "errors": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "options": {
+          "additionalProperties": {
+            "items": {
+              "$ref": "#/definitions/PluginOption"
+            },
+            "type": "array"
+          },
+          "type": "object"
+        },
+        "values": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": "object",
+          "x-cairn-json-object": true
+        },
+        "view": {
+          "default": [],
+          "items": true,
+          "type": "array"
+        }
+      },
+      "required": [
+        "options",
+        "values",
+        "errors",
+        "view"
+      ],
+      "type": "object"
+    },
+    "PluginInstanceInput": {
+      "additionalProperties": false,
+      "properties": {
+        "instanceId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "pluginId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginId",
+        "instanceId"
+      ],
+      "type": "object"
+    },
+    "PluginLabel": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "PluginOption": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "disabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "label": {
+          "default": "",
+          "type": "string"
+        },
+        "value": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "label",
+        "description",
+        "disabled"
+      ],
+      "type": "object"
+    },
+    "PluginRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "mentions": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "updatedAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "userId": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "name",
+        "mentions",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "PluginSigninFlow": {
+      "additionalProperties": false,
+      "properties": {
+        "expiresAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "message": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pluginId": {
+          "default": "",
+          "type": "string"
+        },
+        "state": {
+          "default": "",
+          "type": "string"
+        },
+        "userCode": {
+          "default": "",
+          "type": "string"
+        },
+        "verificationUri": {
+          "default": "",
+          "type": "string"
+        },
+        "verificationUriComplete": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "pluginId",
+        "state",
+        "userCode",
+        "verificationUri",
+        "verificationUriComplete",
+        "expiresAt",
+        "message"
+      ],
+      "type": "object"
+    },
+    "PluginStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "message": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "default": "disconnected",
+          "pattern": "^(disconnected|connecting|connected|needs_review|ready)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "message"
+      ],
+      "type": "object"
+    },
+    "PluginUsage": {
+      "additionalProperties": false,
+      "properties": {
+        "hour": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "hour"
       ],
       "type": "object"
     },

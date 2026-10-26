@@ -25,4 +25,14 @@ data class AccessPolicy(
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 @JvmInline
-value class McpTools(val value: Map<String, List<String>>) : Map<String, List<String>> by value
+value class McpTools(
+    val value:
+        Map<
+            String,
+            List<String>,
+        >
+) :
+    Map<
+        String,
+        List<String>,
+    > by value
