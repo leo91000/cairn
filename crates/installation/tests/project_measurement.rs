@@ -559,10 +559,12 @@ fn measure<E: StorageEntity>(entities: &[E]) {
             drop(Store::open(root.path()).unwrap());
             let path = root.path().join("manager.db");
             let db = connection(&path);
+            // Supporting entities use current domain writers. Seed them before
+            // the reference replaces any of their grant tables.
+            E::prepare(&Db(&db));
             if reference {
                 E::reference_schema(&db);
             }
-            E::prepare(&Db(&db));
             E::setup(&db);
             let mut insert = Vec::new();
             let cpu_start = cpu();

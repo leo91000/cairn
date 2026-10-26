@@ -241,11 +241,34 @@ pub(crate) async fn form_managed(
         false,
     )
     .await?;
+    form_result(result)
+}
+
+/// Normalize the manifest's optional nulls at the package boundary. Nested
+/// setting values remain untouched; null can be meaningful inside their JSON.
+fn form_result(result: Value) -> Result<cairn_contracts::PluginFormResult> {
+    let field = |key: &str, empty: Value| {
+        result
+            .get(key)
+            .filter(|value| !value.is_null())
+            .cloned()
+            .unwrap_or(empty)
+    };
+    let mut options = field("options", json!({}));
+    if let Some(fields) = options.as_object_mut() {
+        for choices in fields.values_mut().filter_map(Value::as_array_mut) {
+            for choice in choices {
+                if choice.get("description").is_some_and(Value::is_null) {
+                    choice.as_object_mut().unwrap().remove("description");
+                }
+            }
+        }
+    }
     Ok(serde_json::from_value(json!({
-        "options": result.get("options").cloned().unwrap_or_else(|| json!({})),
-        "values": result.get("values").cloned().unwrap_or_else(|| json!({})),
-        "errors": result.get("errors").cloned().unwrap_or_else(|| json!({})),
-        "view": result.get("view").cloned().unwrap_or_else(|| json!([])),
+        "options": options,
+        "values": field("values", json!({})),
+        "errors": field("errors", json!({})),
+        "view": field("view", json!([])),
     }))?)
 }
 
@@ -290,4 +313,42 @@ pub(crate) async fn submit(
         }
     }
     connections::settings(&package.manifest, &merged)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_valid_null_guidance_survives_the_typed_form_boundary() {
+        let manifest: Manifest = serde_json::from_value(json!({
+            "id": "fixture", "name": "Fixture", "version": "1", "apiVersion": 2,
+            "capabilities": [], "instanceForm": true,
+            "settings": [{ "key": "choice", "title": "Choice", "type": "select", "dynamic": true }]
+        }))
+        .unwrap();
+        for result in [
+            Value::Null,
+            json!({}),
+            json!({ "options": null, "values": null, "errors": null, "view": null }),
+        ] {
+            validate_form_result(&manifest, &result).unwrap();
+            assert_eq!(
+                form_result(result).unwrap(),
+                cairn_contracts::PluginFormResult::default()
+            );
+        }
+        let result = json!({
+            "options": { "choice": [{ "value": "one", "label": "One", "description": null }] },
+            "values": { "choice": null }, "errors": null, "view": null
+        });
+        validate_form_result(&manifest, &result).unwrap();
+        assert_eq!(
+            serde_json::to_value(form_result(result).unwrap()).unwrap(),
+            json!({
+                "options": { "choice": [{ "value": "one", "label": "One", "description": "", "disabled": false }] },
+                "values": { "choice": null }, "errors": {}, "view": []
+            })
+        );
+    }
 }
