@@ -322,6 +322,7 @@ impl Turn<'_> {
                 self.receipt.operational_notices.insert(id.to_owned());
             }
             if id.is_empty()
+                || !crate::chat_inbox::joins_turn(&message, self.plan)
                 || self.submitted.contains(id)
                 || self.receipt.delivered.contains(id)
                 || self.receipt.previously_delivered.contains(id)

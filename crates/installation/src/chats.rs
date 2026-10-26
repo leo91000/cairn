@@ -771,14 +771,12 @@ fn acknowledge(db: &Db<'_>, run_id: &str, message_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Marks steering messages as sending so the running turn picks them up.
-fn claim_steering(
-    db: &Db<'_>,
-    chat_id: &str,
-    paused: bool,
-    delivering: &Value,
-    run_id: &str,
-) -> Result<Vec<Value>> {
+/// Marks steering messages as sending so the running turn picks them up. A plan request
+/// only joins a plan turn: one admitted while no turn ran stays queued for its own turn
+/// rather than joining a later turn that can change files.
+fn claim_steering(db: &Db<'_>, chat_id: &str, paused: bool, run: &Value) -> Result<Vec<Value>> {
+    let delivering = &run["chatExecution"]["messageId"];
+    let run_id = text(run, "id");
     if chat(db, chat_id).is_ok_and(|chat| !is_active(&chat)) {
         return Ok(Vec::new());
     }
@@ -788,8 +786,10 @@ fn claim_steering(
             || message["status"] == MessageStatus::Sending;
         // Answers to questions still flow while the chat is paused.
         let deliverable = !paused || message["questionId"].is_string();
+        let joins = message["plan"] != true || planning(run);
         if deliverable
             && pending
+            && joins
             && message["mode"] == MessageMode::Steer
             && message["id"] != *delivering
         {
@@ -1469,11 +1469,10 @@ impl Service {
     async fn publish_steering(&self, chat: &Value, run: &Value) -> Result<()> {
         let chat_id = text(chat, "id").to_owned();
         let paused = chat["paused"] == true;
-        let delivering = run["chatExecution"]["messageId"].clone();
-        let run_id = text(run, "id").to_owned();
+        let claiming = run.clone();
         let mut steering = self
             .store
-            .transaction(move |db| claim_steering(db, &chat_id, paused, &delivering, &run_id))
+            .transaction(move |db| claim_steering(db, &chat_id, paused, &claiming))
             .await?;
         let skills = &run["snapshot"]["skills"];
         for message in &mut steering {

@@ -1158,6 +1158,11 @@ fn plan_turn_arguments_use_plan_mode_a_networkless_sandbox_and_deny_workspace_ed
     assert_eq!(settings["sandbox"]["failIfUnavailable"], true);
     assert_eq!(settings["sandbox"]["allowUnsandboxedCommands"], false);
     assert_eq!(settings["sandbox"]["network"]["allowedDomains"], json!([]));
+    // No command widens the allowlist, and Cairn's callback decides rather than Claude
+    // Code's auto-mode classifier.
+    assert_eq!(settings["sandbox"]["network"]["strictAllowlist"], true);
+    assert_eq!(settings["useAutoModeDuringPlan"], false);
+    assert_eq!(settings["permissions"]["disableAutoMode"], "disable");
     assert_eq!(
         settings["sandbox"]["filesystem"]["denyWrite"],
         json!([root.path()])
@@ -1172,6 +1177,17 @@ fn plan_turn_arguments_use_plan_mode_a_networkless_sandbox_and_deny_workspace_ed
     let a = claude_process::args(&plan(&root, "test"), &root.path().join("instructions.txt"));
     assert!(a.contains(&"--dangerously-skip-permissions".into()));
     assert!(!a.iter().any(|arg| arg.contains("allowedDomains")));
+    let mut writing = plan(&root, "test");
+    writing["sandbox"] = "workspace-write".into();
+    let a = claude_process::args(&writing, &root.path().join("instructions.txt"));
+    let settings = a.iter().position(|arg| arg == "--settings").unwrap();
+    let settings: Value = serde_json::from_str(&a[settings + 1]).unwrap();
+    assert!(
+        settings["sandbox"]["network"]
+            .get("strictAllowlist")
+            .is_none()
+    );
+    assert!(settings.get("useAutoModeDuringPlan").is_none());
 }
 
 #[tokio::test]
@@ -1204,6 +1220,7 @@ async fn plan_turns_deny_writes_effects_and_leaving_plan_mode() {
         "home-write",
         "escaping-plan-file",
         "unsandboxed-shell",
+        "widening-shell",
         "excluded-mcp",
         "scheduler",
         "exit-plan",
@@ -1302,6 +1319,45 @@ async fn steering_waits_for_both_responses_and_acknowledges_each_message() {
     .unwrap();
     task.await.unwrap().unwrap();
     assert_eq!(delivered, vec![json!("original"), json!("steering")]);
+}
+
+#[tokio::test]
+async fn plan_requests_only_join_a_plan_turn() {
+    for planning in [false, true] {
+        let root = TempDir::new().unwrap();
+        let c = setup(&root);
+        // Left in the inbox for an earlier turn, or claimed before the turn changed.
+        deliver(
+            &root,
+            &json!([
+                { "id": "plan-request", "text": "fixture:slow plan it", "attachments": [], "plan": true },
+                { "id": "ordinary", "text": "fixture:slow keep going", "attachments": [] },
+            ]),
+        );
+        let mut p = plan(&root, "fixture:slow");
+        if planning {
+            p["planning"] = true.into();
+            p["sandbox"] = "read-only".into();
+        }
+        let (result, events) = tokio::time::timeout(Duration::from_secs(15), run_to_end(&c, p))
+            .await
+            .unwrap();
+        result.unwrap();
+        let delivered = events
+            .iter()
+            .filter(|event| event["type"] == "chat.delivered")
+            .map(|event| event["messageId"].clone())
+            .collect::<Vec<_>>();
+        assert!(delivered.contains(&json!("ordinary")), "{delivered:?}");
+        // A turn that can change files never receives the plan request.
+        assert_eq!(
+            delivered.contains(&json!("plan-request")),
+            planning,
+            "{delivered:?}"
+        );
+        let inputs = std::fs::read_to_string(c.home.join(".claude/user-messages.jsonl")).unwrap();
+        assert_eq!(inputs.contains("plan it"), planning);
+    }
 }
 
 #[tokio::test]

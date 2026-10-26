@@ -71,9 +71,13 @@ agent's access; MCP connections only offer tools they declare read-only
 `pending_questions` and, for an agent that delegates, `task_status`. Delegating or
 cancelling a task, plugin tools and plugin commands are unavailable. Builds and tests that
 write files fail. Claude Code runs in its plan permission mode; Codex receives the
-`plan` collaboration preset it lists, without subagents. OpenCode cannot run plan
-turns. A plan request cannot steer a running turn that may change files: queue it.
-See [the plan-turn decision](adr/0071-plan-turns.md).
+`plan` collaboration preset it lists. Subagents of either engine stay inside the
+same boundary, and Claude Code's auto-mode classifier never decides in place of
+Cairn. OpenCode cannot run plan turns. A plan request cannot steer a running turn
+that may change files: queue it. One sent to steer while no turn runs waits for its
+own plan turn rather than joining a later turn. See
+[the plan-turn decision](adr/0071-plan-turns.md), which also records the native
+qualification of each engine release.
 
 ## Invoking skills with `$`
 

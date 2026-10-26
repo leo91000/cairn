@@ -290,6 +290,7 @@ else {
         ['escaping-plan-file', 'Write', { file_path: path.join(plans, '..', 'escaped.md'), content: 'x' }],
         ['sandboxed-shell', 'Bash', { command: 'git status' }],
         ['unsandboxed-shell', 'Bash', { command: 'git push', dangerouslyDisableSandbox: true }],
+        ['widening-shell', 'Bash', { command: 'git push', allowed_domains: ['github.com'] }],
         ['read', 'Read', { file_path: file }],
         ['read-only-mcp', 'mcp__cairn_fixture__search', {}],
         ['excluded-mcp', 'mcp__cairn_fixture__delete', {}],

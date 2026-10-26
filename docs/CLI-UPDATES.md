@@ -142,4 +142,12 @@ following checks before merge:
   a permission prompt reaches Cairn, and that an MCP tool call completes. With a
   test account, check `claude auth login --claudeai`, `get_usage` quota values and
   resuming a subscription session.
+- Plan turns (Claude Code and Codex): run
+  `CLAUDE_NATIVE_BIN=… CODEX_NATIVE_BIN=… pnpm test:backend -p cairn-installation --test native_plan_turns -- --ignored`.
+  A local scripted model asks for writes, network access, escalation and a
+  subagent; none may take effect. The tests also need bubblewrap, and socat for
+  Claude Code: `NATIVE_PROBE_PATH` adds a directory to the engine's `PATH`,
+  `NATIVE_PROBE_DROP_CAPS` drops inherited capabilities, and
+  `NATIVE_PROBE_PRIVATE_TMP` gives Codex its own `/tmp` (with `TMPDIR` outside
+  `/tmp`). Record the results in [the plan-turn decision](adr/0071-plan-turns.md#qualification).
 - All engines: keep their autoupdaters disabled at runtime.

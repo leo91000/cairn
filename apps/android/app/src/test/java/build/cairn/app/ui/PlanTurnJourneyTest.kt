@@ -65,7 +65,7 @@ class PlanTurnJourneyTest {
                             "run",
                             status = "succeeded",
                             trigger = "chat",
-                            snapshot = Snapshot(agent = Agent(provider = "claude")),
+                            snapshot = Snapshot(agent = newAgent().copy(provider = "claude")),
                             chatExecution = ChatExecution("plan-request", plan = true),
                         ),
                 )
@@ -124,16 +124,22 @@ class PlanTurnJourneyTest {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
-                                        listOf(
-                                            Agent(
-                                                MAIN_AGENT_ID,
-                                                "Agent principal",
-                                                provider = "claude",
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                newAgent()
+                                                    .copy(
+                                                        id = MAIN_AGENT_ID,
+                                                        name = "Agent principal",
+                                                        provider = "claude",
+                                                    )
                                             )
                                         )
                                     )
                                 "/api/installations/fixture/api/chats/chat" ->
                                     wireJson.encodeToString(chat)
+                                "/api/installations/fixture/api/projects" -> """{"projects":[]}"""
+                                "/api/installations/fixture/api/tasks" -> """{"tasks":[]}"""
+                                "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
                                 "/api/installations/fixture/api/overview",
                                 "/api/installations/fixture/api/chats/chat/messages" -> "{}"
                                 else -> "[]"

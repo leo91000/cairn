@@ -1227,6 +1227,55 @@ async fn replay_of_completed_turn_does_not_submit_the_instruction_again() {
 }
 
 #[tokio::test]
+async fn plan_requests_only_steer_a_plan_turn() {
+    for planning in [false, true] {
+        let root = TempDir::new().unwrap();
+        let home = prepare(&root);
+        let config = config(&root);
+        // Left in the inbox for an earlier turn, or claimed before the turn changed.
+        deliver(
+            &root,
+            &json!([
+                { "id": "plan-request", "text": "Plan it, then finish now", "plan": true },
+                { "id": "ordinary", "text": "Keep going and finish now" },
+            ]),
+        )
+        .await;
+        let mut plan = plan(&root, "fixture:chat-hang");
+        if planning {
+            plan["planning"] = true.into();
+            plan["sandbox"] = "read-only".into();
+        }
+        let (tx, mut rx) = mpsc::channel::<Value>(64);
+        let events = tokio::spawn(async move {
+            let mut delivered = Vec::new();
+            while let Some(event) = rx.recv().await {
+                if event["type"] == "chat.delivered" {
+                    delivered.push(event["messageId"].clone());
+                }
+            }
+            delivered
+        });
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            chat_process::run(&config, &home, plan, tx, CancellationToken::new()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let delivered = events.await.unwrap();
+        let steered = conversation(&home)["turns"][0]["items"].to_string();
+        // A turn that can change files never receives the plan request.
+        assert_eq!(
+            delivered.contains(&json!("plan-request")),
+            planning,
+            "{delivered:?}"
+        );
+        assert_eq!(steered.contains("Plan it"), planning, "{steered}");
+    }
+}
+
+#[tokio::test]
 async fn images_and_files_reach_start_and_steer_as_readable_inputs() {
     let root = TempDir::new().unwrap();
     let config = config(&root);

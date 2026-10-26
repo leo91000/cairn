@@ -19,6 +19,14 @@ async fn messages(directory: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
     }
 }
 
+/// Whether an inbox message may join the running turn of `plan`. A plan request never
+/// joins a turn that can change files: it stays queued for its own plan turn, even when
+/// it was written to the inbox for an earlier turn. Other messages join any turn, which
+/// keeps its own restrictions.
+pub(crate) fn joins_turn(message: &serde_json::Value, plan: &serde_json::Value) -> bool {
+    message["plan"] != true || plan["planning"] == true
+}
+
 /// The controller owns a separate notice lane. Replacing user steering cannot
 /// lose a disk warning, and a warning never creates a user message or authority.
 pub(crate) async fn read(directory: &Path, limit: usize) -> Result<Option<Vec<u8>>> {

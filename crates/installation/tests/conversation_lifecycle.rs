@@ -1180,3 +1180,101 @@ async fn measure_retention_storage() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_plan_request_admitted_while_idle_never_joins_a_turn_that_can_change_files() {
+    let app = App::new().await;
+    common::managed_codex_home(&app.service.config.home);
+    let chat = app.create_chat().await;
+    let path = chat_path(&chat);
+    let messages = format!("{path}/messages");
+    let inbox = |run: &Value| {
+        let file = app
+            .service
+            .config
+            .data_dir
+            .join("runs")
+            .join(run["id"].as_str().unwrap())
+            .join("chat-input/messages.json");
+        serde_json::from_slice::<Value>(&std::fs::read(file).unwrap()).unwrap()
+    };
+
+    // With the queue paused no turn runs, so a plan request asking to steer is admitted.
+    let (status, _) = app
+        .request("POST", &format!("{path}/pause"), json!({ "paused": true }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let ordinary = id();
+    let plan = id();
+    for message in [
+        json!({ "id": ordinary, "text": "Refactor the queue" }),
+        json!({ "id": plan, "text": "Plan the follow-up", "mode": "steer", "plan": true }),
+    ] {
+        let (status, body) = app.request("POST", &messages, message).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    app.request("POST", &format!("{path}/pause"), json!({ "paused": false }))
+        .await;
+
+    // The ordinary message ahead starts a turn that can change files.
+    app.tick().await;
+    let run = app
+        .service
+        .chat_detail(chat["id"].as_str().unwrap())
+        .await
+        .unwrap()["run"]
+        .clone();
+    assert_eq!(run["chatExecution"]["messageId"], ordinary.as_str());
+    assert_ne!(run["chatExecution"]["plan"], true);
+    let run_id = run["id"].as_str().unwrap().to_owned();
+    app.service
+        .store
+        .patch_run(&run_id, json!({ "status": "running" }))
+        .await
+        .unwrap();
+    app.service
+        .chat_acknowledge(&run_id, &ordinary)
+        .await
+        .unwrap();
+    app.service
+        .store
+        .set(
+            &format!("run-checkpoint:{run_id}"),
+            json!({ "completed": true, "launched": true }),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Steering never hands it the plan request, which stays queued.
+    app.tick().await;
+    assert_eq!(inbox(&run), json!([]));
+    let (_, detail) = app.get(&path).await;
+    let pending = detail["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == plan.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(pending["status"], "queued");
+
+    // After the turn boundary it runs as its own plan turn.
+    app.service
+        .store
+        .patch_run(
+            &run_id,
+            json!({ "status": "succeeded", "sessionId": "saved-session", "workspace": "/saved/workspace" }),
+        )
+        .await
+        .unwrap();
+    app.tick().await;
+    let next = app
+        .service
+        .chat_detail(chat["id"].as_str().unwrap())
+        .await
+        .unwrap()["run"]
+        .clone();
+    assert_eq!(next["chatExecution"]["messageId"], plan.as_str());
+    assert_eq!(next["chatExecution"]["plan"], true);
+}

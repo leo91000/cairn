@@ -125,8 +125,9 @@ struct ThreadConfig<'a> {
     sandbox_workspace_write: WorkspaceWrite<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model_reasoning_effort: Option<&'a str>,
-    /// Off during a plan turn: Cairn has not verified that sub-agent threads keep
-    /// the turn's read-only sandbox.
+    /// Off during a plan turn. Codex 0.164.0 still offers its collaboration tools on a
+    /// resumed thread; the sub-agents they start keep the turn's read-only sandbox
+    /// (`tests/native_plan_turns.rs`).
     #[serde(
         rename = "features.multi_agent",
         skip_serializing_if = "Option::is_none"
@@ -1234,6 +1235,7 @@ impl Chat<'_> {
                 id.to_owned()
             };
             if self.completed.is_some()
+                || !crate::chat_inbox::joins_turn(&message, plan)
                 || self.seen.contains(&client_id)
                 || !self.attempted.insert(id.to_owned())
             {

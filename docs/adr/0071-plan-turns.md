@@ -35,14 +35,21 @@ Pendant un tour de plan, Cairn applique lui-même la frontière :
 
 - **Bac à sable du moteur en lecture seule, sans réseau pour le shell**, quels que
   soient les droits de l’agent, y compris YOLO. Pour Claude Code : bac à sable
-  `failIfUnavailable`, sans repli hors bac à sable, aucun domaine réseau, et des
-  règles `Edit(//racine/**)` qui refusent toute écriture dans l’espace de travail
-  avant tout mode ou callback. Pour Codex : `turn/start.sandboxPolicy` en
-  `readOnly` sans réseau, et les sous-agents désactivés (`features.multi_agent`).
-  Le champ `sandbox: read-only` du plan reste compris par les adaptateurs antérieurs.
-- **Callback Claude restreint** : lecture, recherche, shell dans le bac à sable,
-  outils MCP déjà restreints, et le seul fichier de plan sous l’état privé de Claude
-  Code. `ExitPlanMode` est refusé : l’accepter laisserait Claude implémenter dans le
+  `failIfUnavailable`, sans repli hors bac à sable, aucun domaine réseau et une liste
+  stricte (`network.strictAllowlist`) qu’aucune commande ne peut élargir par ses
+  propres `allowed_domains`, et des règles `Edit(//racine/**)` qui refusent toute
+  écriture dans l’espace de travail avant tout mode ou callback. Pour Codex :
+  `turn/start.sandboxPolicy` en `readOnly` sans réseau, y compris sur un fil créé en
+  YOLO. Les sous-agents des deux moteurs restent dans cette frontière : Codex 0.164.0
+  propose encore ses outils de collaboration malgré `features.multi_agent = false`,
+  et Claude Code lance ses sous-agents sans demander le callback. Le champ
+  `sandbox: read-only` du plan reste compris par les adaptateurs antérieurs.
+- **Callback Claude restreint** : lecture, recherche, shell dans le bac à sable sans
+  `allowed_domains`, outils MCP déjà restreints, et le seul fichier de plan sous l’état
+  privé de Claude Code. Claude Code 2.1.308 confie sinon les décisions du mode plan à
+  son classificateur du mode automatique, un modèle qui peut approuver une commande
+  et ses domaines : `useAutoModeDuringPlan: false` et
+  `permissions.disableAutoMode` rendent la décision au callback de Cairn. `ExitPlanMode` est refusé : l’accepter laisserait Claude implémenter dans le
   même tour. Son plan est affiché comme **plan proposé**, comme l’élément `plan` de
   Codex.
 - **Outils MCP en lecture seule seulement** : pour une connexion, les outils qu’elle
@@ -64,6 +71,26 @@ envoyé depuis le composeur ou le bouton **Implement** / **Implémenter** du der
 plan proposé. Il s’exécute avec les droits courants de l’agent, contrôlés comme
 avant par `covers` : il n’élargit aucun droit.
 
+## Qualification
+
+`crates/installation/tests/native_plan_turns.rs` (tests ignorés par défaut) fait
+exécuter un tour de plan aux vrais binaires, à travers les adaptateurs de Cairn, face
+à un modèle local scripté qui demande des effets. Aucun identifiant ni service externe
+n’est utilisé ; toutes les écritures visent un répertoire temporaire. Résultats du
+2026-10-27 :
+
+- Claude Code 2.1.308 et 2.1.280 : écritures du shell dans l’espace de travail, le
+  HOME et `/tmp` refusées (système de fichiers en lecture seule), connexion locale
+  refusée, hôte non autorisé refusé par le proxy (403), `allowed_domains` refusé,
+  `dangerouslyDisableSandbox` refusé par le callback, `Write`/`Edit` refusés, et un
+  sous-agent démarré par `Agent` soumis aux mêmes refus. Avant
+  `strictAllowlist`, un classificateur qui approuvait la commande laissait passer
+  l’hôte de ses `allowed_domains` jusqu’au proxy (502).
+- Codex 0.164.0, sur un fil créé par un tour YOLO : écritures dans l’espace de travail
+  et le HOME refusées, connexion locale refusée, demande d’escalade refusée, sous-agent
+  lancé par `spawn_agent` soumis aux mêmes refus ; le tour précédent et le tour qui
+  suit le plan écrivent normalement.
+
 ## Limites
 
 - `readOnlyHint` est déclaré par le serveur MCP. Un serveur qui le donne à tort à un
@@ -74,3 +101,9 @@ avant par `covers` : il n’élargit aucun droit.
   pas refuse le tour de plan avec une erreur explicite, sans rien exécuter.
 - Le refus du réseau s’applique au shell. `WebFetch` et la recherche web restent
   disponibles en lecture.
+- Sur une node native dont le processus de travail garde une capacité héritée, ou
+  dont `/tmp` est monté depuis un répertoire inaccessible, bubblewrap refuse de
+  démarrer : les commandes du shell échouent sans effet pendant le tour de plan.
+  La qualification ci-dessus retire ces capacités et donne à Codex un `/tmp` privé.
+- La frontière qualifiée est celle des versions mesurées. Une nouvelle version des
+  moteurs doit repasser `native_plan_turns` avant d’être servie.

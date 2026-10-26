@@ -190,11 +190,15 @@ Léo skills and instructions are supplied through the existing run context.
 
 A plan turn (see [chats](chats.md#plan-turns)) starts Claude with
 `--permission-mode plan`, never `--dangerously-skip-permissions`, even for YOLO
-agents. Its Bash sandbox is read-only with no network domain, and
-`Edit(//root/**)` rules deny writes to every workspace root before any mode or
-callback applies. The permission callback then allows reads, searches, sandboxed
-Bash, MCP tools already restricted to read-only ones, and only Claude Code's own
-plan file. It denies `ExitPlanMode`, which would let Claude implement in the same
+agents. Its Bash sandbox is read-only with no network domain and a strict allowlist
+that a command's own `allowed_domains` cannot widen, and `Edit(//root/**)` rules deny
+writes to every workspace root before any mode or callback applies. Claude Code
+2.1.308 would otherwise let its auto-mode classifier decide plan-mode tool calls;
+`useAutoModeDuringPlan: false` and `permissions.disableAutoMode` keep those decisions
+with the permission callback. The callback allows reads, searches, sandboxed Bash
+without `allowed_domains`, MCP tools already restricted to read-only ones, and only
+Claude Code's own plan file. Subagents start without asking it and keep the same
+sandbox and deny rules. It denies `ExitPlanMode`, which would let Claude implement in the same
 turn, and shows its plan as a proposed plan. Claude Code 2.1.280 writes that plan
 file itself without asking the callback. Without bubblewrap and socat, Claude Code
 refuses to start and the turn fails with an explicit error.

@@ -209,6 +209,15 @@ fn settings(plan: &Value) -> Value {
         "network": { "allowedDomains": domains },
         "filesystem": { "allowWrite": plan["writableRoots"], "denyWrite": deny_write },
     });
+    if planning {
+        // Claude Code 2.1.308 otherwise lets its auto-mode classifier approve plan-mode
+        // tool calls instead of asking Cairn, including a command's own `allowed_domains`,
+        // which then reach the network. Cairn's callback decides, and no command can widen
+        // the empty allowlist.
+        settings["useAutoModeDuringPlan"] = false.into();
+        settings["permissions"] = json!({ "disableAutoMode": "disable" });
+        settings["sandbox"]["network"]["strictAllowlist"] = true.into();
+    }
     settings
 }
 
@@ -722,7 +731,7 @@ impl Turn<'_> {
             if message["operationalNotice"] == true {
                 self.operational_notices.insert(id.to_owned());
             }
-            if self.submitted.contains(id) {
+            if self.submitted.contains(id) || !crate::chat_inbox::joins_turn(&message, self.plan) {
                 continue;
             }
             if message["questionCancelled"] == true {
@@ -1823,8 +1832,11 @@ fn allowed_tool(plan: &Value, name: &str, input: &Value) -> bool {
 fn plan_tool(plan: &Value, plans: &Path, name: &str, input: &Value) -> bool {
     match name {
         "Read" | "Glob" | "Grep" | "WebSearch" | "WebFetch" | "TodoWrite" => true,
-        // The shell runs in the read-only sandbox without network, never outside it.
-        "Bash" => input["dangerouslyDisableSandbox"] != true,
+        // The shell runs in the read-only sandbox without network, never outside it, and
+        // a command cannot widen the network allowlist for itself.
+        "Bash" => {
+            input["dangerouslyDisableSandbox"] != true && input.get("allowed_domains").is_none()
+        }
         "Write" | "Edit" | "NotebookEdit" => {
             let key = if name == "NotebookEdit" {
                 "notebook_path"
