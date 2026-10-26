@@ -1,4 +1,6 @@
 use common::AgentFixture;
+use common::MissionFixture;
+use common::StoreMissionFixture;
 
 mod common;
 #[path = "wait_for/groups.rs"]
@@ -117,7 +119,7 @@ impl Fixture {
 
     async fn mission() -> Self {
         let mut f = Self::new().await;
-        let task = f.s.task(json!({ "name": "Waiting mission", "prompt": "Finish after CI", "agentId": MAIN_AGENT_ID }), None).await.unwrap();
+        let task = f.s.task_fixture(json!({ "name": "Waiting mission", "prompt": "Finish after CI", "agentId": MAIN_AGENT_ID }), None).await.unwrap();
         let run =
             f.s.enqueue(text(&task, "id"), "manual", None)
                 .await
@@ -191,7 +193,7 @@ impl Fixture {
     }
 
     async fn target(&self) -> Value {
-        let task = self.s.task(json!({ "name": "Other work", "prompt": "Check result", "worktree": false, "agentId": MAIN_AGENT_ID }), None).await.unwrap();
+        let task = self.s.task_fixture(json!({ "name": "Other work", "prompt": "Check result", "worktree": false, "agentId": MAIN_AGENT_ID }), None).await.unwrap();
         self.s
             .enqueue(text(&task, "id"), "manual", None)
             .await
@@ -282,7 +284,7 @@ async fn installation_access_can_wait_for_another_agents_run() {
             .await
             .unwrap();
     let task =
-        f.s.task(
+        f.s.task_fixture(
             json!({
                 "name": "Delegated work",
                 "prompt": "Check result",
@@ -1287,9 +1289,12 @@ async fn mission_wait_is_cancellable_and_schedule_pause_only_affects_future_runs
     .unwrap();
     f.park_mission().await;
     let run = f.s.store.run(&f.run).await.unwrap();
-    let mut task = f.s.get("tasks", text(&run, "taskId")).await.unwrap();
+    let mut task =
+        f.s.mission_snapshot_fixture(text(&run, "taskId"))
+            .await
+            .unwrap();
     task["enabled"] = false.into();
-    f.s.store.put("tasks", task).await.unwrap();
+    f.s.store.put_mission_fixture(task).await.unwrap();
     assert_eq!(f.mission_tick().await["wakeup"], wait["wakeup"]);
     f.s.worker.cancel(&f.s, &f.run).await.unwrap();
     let cancelled = f.mission_tick().await;

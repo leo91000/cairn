@@ -136,7 +136,7 @@ JSON Schema's UUID format; clients never grant authority through validation.
 
 ### Development reset
 
-The fresh installation schema is now version 4. Earlier development databases
+The fresh installation schema is now version 5. Earlier development databases
 are rejected, without being rewritten. Stop the development processes, remove the
 **disposable development data directory** (SQLite, vault and related local state)
 and start with a newly empty data directory. Recreate projects/agents and rerun
@@ -230,7 +230,7 @@ prevent duplicate grants. Permission tables use WITHOUT ROWID so composite keys
 do not duplicate a separate rowid/primary-key index. Listing loads each relation
 once for the whole catalogue. Reads hydrate one SQLite snapshot, and profile/permission
 writes publish atomically. Revisions change on owner saves and resource revocation.
-There is no historical reader or migration: the initial schema is version 4.
+There is no historical reader or migration: the initial schema is version 5.
 
 The A2 mirror, resource reconciliation, Value permission writer and node
 configuration's `exclusiveAgents` input are removed. Resource wire lists are
@@ -261,3 +261,60 @@ uses the same alternating repetitions, warmups, read/write/list phases and CPU,
 DB/WAL/page reporting as A1/A2, with mixed wildcard/empty/selected grants and MCP
 tool selections. The reference mapping is test-only. Raw measurements stay out
 of Git and local SQLite timings do not include production network latency.
+
+## Missions and scheduled commitments (#405)
+
+`crates/contracts/src/missions.rs` owns mission settings, their public view, creation,
+complete replacement, state, deletion and cron preview commands. `list_tasks`,
+`get_task`, `create_task`, `replace_task`, `set_task_state`, `delete_task`,
+`preview_schedule` and `list_task_activity` extend the existing capability registry.
+HTTP lists return `{tasks: [...]}`. Replacements and state changes require `taskId`
+and the current `revision`; creation retries retain their identity and return the
+current mission without recomputing the schedule. The installation adapter retains
+the calling agent as the creation default; the public contract requires an explicit
+agent. Scope checks remain `read`/`manage`; deletion remains owner-only in the apps.
+Members can edit their own commitments and pause/archive another author's mission,
+but cannot resume or restore it, change its content, or recover its creation identity.
+
+The initial SQLite schema v5 adds `missions` with named scalar columns, agent/project
+foreign keys, update/reference indexes and a partial due-time index. Ordered
+`mission_tags` and `mission_skills` preserve selections, duplicates and their order;
+`skills_inherited` distinguishes all allowed skills (`null`) from an empty selection.
+An SQL trigger forbids changing the author or membership identity and undoing an
+observed removal. Wire timestamps, booleans, lengths and schedule/failure consistency
+have SQL checks. Relations cascade only when the mission is deleted; retained runs
+and their snapshots never cascade. `records` cannot store missions.
+
+`missions::Missions` owns the private author mutex: Beacon observations, saves,
+deletions, schedule admission and agent transfer share its ordering. Beacon has no
+comparable policy generation, so the mutex remains rather than weakening this
+ordering. No caller acquires it and no `_locked` API is exposed. Membership is
+captured at creation and never backfilled; removal/reinvitation cannot revive an
+old commitment. A partition defers admission with its due time intact. Preparation
+still freezes mission settings, profile/projects and skill bundles; author eligibility
+is checked again after that preparation. Already admitted runs, durable waits,
+fencing and `resume_run` retain their existing behavior.
+
+Both apps use generated mission models and commands, without manual Zod or Kotlin
+mission data classes. Android also shows the same author restrictions and scheduling
+wait/removal reasons as the web, in French/native controls. Run task presentation
+uses generated `RunTaskSnapshot`: chat runs synthesize typed settings without creating
+a mission. JSON remains only at the unconverted run/native-node boundaries (A5/A10),
+including typed native provenance lists and nullable plugin grant lists in named SQL
+columns. Connection/revision/external-author lineage from ADR-0068 survives mission
+replacement, restrictive state changes, restart and launch; revocation still uses
+the live native policy. `list_task_activity`
+returns the existing run-summary shape until the run conversion; its input and policy
+are registered here. It uses the authenticated account's read state in the apps and
+the owner's current read state in agent tools, without initializing that state on
+an agent read. No historical format, fallback reader or migration is included.
+
+`tests/fixtures/mission-contracts.json` qualifies defaults, null/empty skill selections,
+creation identities, command bounds and wire output in Rust, TypeScript and Kotlin.
+The existing author, worker, retry, read and mission-chat suites exercise the same
+commands against fresh fixtures. The A1/A2 `project_measurement` harness adds
+`mission_storage_layouts`, retaining the alternating five repetitions, warmups,
+1,000 writes and point reads, 100 fresh-connection reads and 50 lists, plus 50 due
+queries selecting 500 of 1,000 missions. It compares the records mapping on the A4
+base with typed SQL in the same build and corpus; preparation of the referenced
+profile is untimed. Measurements and line accounting belong in the PR, outside Git.

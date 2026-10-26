@@ -35,6 +35,18 @@ function chat(id: string, values: Partial<ChatView> = {}): ChatView {
 
 function task(id: string, values: Partial<Task> = {}): Task {
   return {
+    revision: 'fixture',
+    authorId: null,
+    authorAccessId: null,
+    authorRemoved: false,
+    scheduleWaitReason: null,
+    scheduleFailure: null,
+    nativePrincipals: [],
+    nativeAuthorityNodes: [],
+    nativeParentRunId: null,
+    nativeParentAccess: null,
+    nativeProvenanceUnknown: true,
+    nativePluginGrants: null,
     id,
     name: id,
     prompt: 'Do it',

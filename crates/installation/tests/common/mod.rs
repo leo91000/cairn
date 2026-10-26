@@ -280,3 +280,8 @@ pub mod agent_fixture;
 
 #[allow(unused_imports)]
 pub use agent_fixture::{AgentFixture, StoreAgentFixture};
+
+pub mod mission_fixture;
+
+#[allow(unused_imports)]
+pub use mission_fixture::{MissionFixture, StoreMissionFixture};

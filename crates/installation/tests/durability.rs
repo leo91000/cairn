@@ -1,4 +1,5 @@
 use common::AgentFixture;
+use common::MissionFixture;
 use common::ProjectFixture;
 
 mod common;
@@ -210,14 +211,14 @@ async fn restricted_agents_cannot_escalate_projects_skills_or_the_main_policy() 
         "projectId": id(),
         "prompt": "no",
     });
-    assert!(s.task(foreign, None).await.is_err());
+    assert!(s.task_fixture(foreign, None).await.is_err());
     let allowed = json!({
         "name": "Allowed",
         "agentId": agent["id"],
         "prompt": "inspect",
         "worktree": false,
     });
-    let task = s.task(allowed, None).await.unwrap();
+    let task = s.task_fixture(allowed, None).await.unwrap();
     let run = s
         .enqueue(task["id"].as_str().unwrap(), "manual", None)
         .await

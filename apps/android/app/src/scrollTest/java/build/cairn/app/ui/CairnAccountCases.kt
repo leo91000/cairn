@@ -189,6 +189,12 @@ abstract class CairnAccountCases {
                                                     ?.endsWith("/api/agents") == true
                                             )
                                                 """{"agents":[]}"""
+                                            else if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/tasks") == true
+                                            )
+                                                """{"tasks":[]}"""
                                             else "[]"
                                     }
                                 }
@@ -448,6 +454,12 @@ abstract class CairnAccountCases {
                                                     ?.endsWith("/api/agents") == true
                                             )
                                                 """{"agents":[]}"""
+                                            else if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/tasks") == true
+                                            )
+                                                """{"tasks":[]}"""
                                             else "[]"
                                     }
                                 }

@@ -1,3 +1,4 @@
+use common::MissionFixture;
 use common::StoreAgentFixture;
 
 mod common;
@@ -475,7 +476,7 @@ async fn delay_rejects_invalid_inputs_and_pending_steering_but_accepts_missions(
     );
     let task = f
         .service
-        .task(
+        .task_fixture(
             json!({ "name": "Scheduled task", "prompt": "Do work", "agentId": cairn_installation::config::MAIN_AGENT_ID }),
             None,
         )

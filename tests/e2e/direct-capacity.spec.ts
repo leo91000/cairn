@@ -155,7 +155,7 @@ test('a member mutation refused behind another member upload succeeds exactly on
     expect(await member.evaluate(() => (window as typeof window & { capacityRoutes: string[] }).capacityRoutes)).toEqual(['relay'])
     await expect(member.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', 'direct')
     const tasks = await (await member.request.get(`${url}/api/installations/${installationId}/api/tasks`)).json()
-    const created = tasks.filter((task: { name: string }) => task.name === 'Large member mission')
+    const created = tasks.tasks.filter((task: { name: string }) => task.name === 'Large member mission')
     expect(created).toHaveLength(1)
     expect(created[0].prompt).toBe(prompt)
     await expect(holder.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', 'direct')

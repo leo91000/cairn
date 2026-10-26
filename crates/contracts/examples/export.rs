@@ -46,6 +46,121 @@ fn main() {
     export::<AgentPreview>(root, &mut generator, Contract::Serialize);
     export::<MergeAgentsInput>(root, &mut generator, Contract::Deserialize);
     export::<MergeAgentsOutput>(root, &mut generator, Contract::Serialize);
+    export::<CreateMissionInput>(root, &mut generator, Contract::Deserialize);
+    export::<ReplaceMissionInput>(root, &mut generator, Contract::Deserialize);
+    export::<MissionStateInput>(root, &mut generator, Contract::Deserialize);
+    export::<MissionInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListMissionsInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListMissionsOutput>(root, &mut generator, Contract::Serialize);
+    export::<DeleteMissionOutput>(root, &mut generator, Contract::Serialize);
+    export::<RunTaskSnapshot>(root, &mut generator, Contract::Serialize);
+    export::<Mission>(root, &mut generator, Contract::Serialize);
+    export::<SchedulePreviewInput>(root, &mut generator, Contract::Deserialize);
+    export::<SchedulePreviewOutput>(root, &mut generator, Contract::Serialize);
+    let clients = serde_json::json!([
+        {
+            "name": "listMissions",
+            "input": "ListMissionsInput",
+            "output": "ListMissionsOutput",
+            "method": "GET",
+            "path": "/tasks"
+        },
+        {
+            "name": "getMission",
+            "input": "MissionInput",
+            "output": "Mission",
+            "method": "GET",
+            "path": "/tasks/{taskId}"
+        },
+        {
+            "name": "createMission",
+            "input": "CreateMissionInput",
+            "output": "Mission",
+            "method": "POST",
+            "path": "/tasks"
+        },
+        {
+            "name": "replaceMission",
+            "input": "ReplaceMissionInput",
+            "output": "Mission",
+            "method": "PUT",
+            "path": "/tasks/{taskId}"
+        },
+        {
+            "name": "setMissionState",
+            "input": "MissionStateInput",
+            "output": "Mission",
+            "method": "POST",
+            "path": "/tasks/{taskId}/state"
+        },
+        {
+            "name": "deleteMission",
+            "input": "MissionInput",
+            "output": "DeleteMissionOutput",
+            "method": "DELETE",
+            "path": "/tasks/{taskId}"
+        },
+        {
+            "name": "previewSchedule",
+            "input": "SchedulePreviewInput",
+            "output": "SchedulePreviewOutput",
+            "method": "POST",
+            "path": "/schedule/preview"
+        }
+    ]);
+    fs::write(
+        root.join("mission-clients.json"),
+        serde_json::to_string_pretty(&clients).unwrap() + "\n",
+    )
+    .unwrap();
+    let missions: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/mission-contracts.json"
+    ))
+    .unwrap();
+    let creates: Vec<CreateMissionInput> = missions["creates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| serde_json::from_value(v.clone()).unwrap())
+        .collect();
+    let views: Vec<Mission> = creates
+        .iter()
+        .map(|input| Mission {
+            id: MissionId(uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap()),
+            settings: input.settings.clone(),
+            revision: "revision".into(),
+            created_at: 9007199254740991,
+            next_run: None,
+            author_id: Some("owner".into()),
+            author_access_id: Some("membership".into()),
+            author_removed: false,
+            schedule_wait_reason: None,
+            schedule_failure: Some(ScheduleFailure {
+                message: "Unavailable".into(),
+                scheduled_for: 1,
+                at: 9007199254740991,
+            }),
+            native_principals: Vec::new(),
+            native_authority_nodes: Vec::new(),
+            native_parent_run_id: None,
+            native_parent_access: None,
+            native_provenance_unknown: true,
+            native_plugin_grants: input.settings.archived.then(|| {
+                vec![MissionPluginGrant {
+                    connection_id: "00000000-0000-4000-8000-000000000003".into(),
+                    revision: "connection-revision".into(),
+                    author_id: "external-person".into(),
+                }]
+            }),
+        })
+        .collect();
+    fs::write(
+        root.join("mission-wire.json"),
+        serde_json::to_string_pretty(&serde_json::json!({"creates":creates,"views":views}))
+            .unwrap()
+            + "\n",
+    )
+    .unwrap();
     let clients = serde_json::json!([
         {
             "name": "setAgentAvatar",

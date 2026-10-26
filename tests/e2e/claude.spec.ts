@@ -120,7 +120,7 @@ test('Claude agents, chats, questions and scheduled work run on a connected Clau
   const question = (await workspace.api(`/api/chats/${chat.id}`)).questions.find((q: { status: string }) => q.status === 'pending')
   await workspace.api(`/api/chats/${chat.id}/questions/${question.id}/answer`, 'POST', { id: crypto.randomUUID(), answers: { 0: ['Small change'] } })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
-  const task = await workspace.api('/api/tasks', 'POST', { name: 'Claude scheduled work', prompt: 'Review the workspace', agentId: agent.id })
+  const task = await workspace.api('/api/tasks', 'POST', { settings: { name: 'Claude scheduled work', prompt: 'Review the workspace', agentId: agent.id } })
   const run = await workspace.api(`/api/tasks/${task.id}/run`, 'POST')
   await expect.poll(async () => (await workspace.api(`/api/runs/${run.id}`)).status, { timeout: 20000 }).toBe('succeeded')
   // The run is recorded with the Claude account it used.

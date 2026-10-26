@@ -533,3 +533,9 @@ pub async fn stream_accounts_with_members(
     }
     cookies
 }
+
+#[path = "../../../installation/tests/common/mission_fixture.rs"]
+pub mod mission_fixture;
+
+#[allow(unused_imports)]
+pub use mission_fixture::{MissionFixture, StoreMissionFixture};

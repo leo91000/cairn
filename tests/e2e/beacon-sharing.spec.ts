@@ -149,12 +149,14 @@ test('owner shares an installation and member works without management controls'
     const taskResponse = await member.request.post(`${apiRoot}/tasks`, {
       headers: { 'origin': url, 'x-csrf-token': memberSession.csrf },
       data: {
-        name: 'Member commitment',
-        prompt: 'Shared scheduled work',
-        agentId: agents[0].id,
-        cron: '0 9 * * *',
-        timezone: 'UTC',
-        enabled: true,
+        settings: {
+          name: 'Member commitment',
+          prompt: 'Shared scheduled work',
+          agentId: agents[0].id,
+          cron: '0 9 * * *',
+          timezone: 'UTC',
+          enabled: true,
+        },
       },
     })
     expect(taskResponse.status()).toBe(200)
@@ -167,7 +169,16 @@ test('owner shares an installation and member works without management controls'
     const ownerSession = await (await page.request.get(`${url}/api/account/session`)).json()
     const ownerTaskResponse = await page.request.post(`${apiRoot}/tasks`, {
       headers: { 'origin': url, 'x-csrf-token': ownerSession.csrf },
-      data: { ...task, name: 'Owner commitment', enabled: false },
+      data: {
+        settings: {
+          name: 'Owner commitment',
+          prompt: task.prompt,
+          agentId: task.agentId,
+          cron: task.cron,
+          timezone: task.timezone,
+          enabled: false,
+        },
+      },
     })
     expect(ownerTaskResponse.status()).toBe(200)
     const ownerTask = await ownerTaskResponse.json()

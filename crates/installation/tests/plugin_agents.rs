@@ -2,6 +2,7 @@
 //! package with a secret setting, agent grants, commands, a tool, instructions, a
 //! declared program, a view, actions and a test.
 use common::AgentFixture;
+use common::MissionFixture;
 
 mod common;
 
@@ -46,7 +47,7 @@ async fn fixture() -> Fixture {
     write_program(&program, OP);
     s.plugins.use_program("onepassword", "op", program.clone());
     let task = s
-        .task(
+        .task_fixture(
             json!({ "name": "Probe", "agentId": MAIN_AGENT_ID, "prompt": "Hello" }),
             None,
         )

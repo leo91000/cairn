@@ -1,5 +1,6 @@
 //! Permissions are edited on typed profiles. Resource lists are projections of
 //! the same relations used by enforcement; no resource JSON is authoritative.
+use common::MissionFixture;
 use common::StoreAgentFixture;
 
 mod common;
@@ -441,7 +442,7 @@ async fn preview_counts_work_that_reduced_access_would_stop() {
     let agent = owner.create_agent("Busy").await;
     let task = owner
         .service
-        .task(
+        .task_fixture(
             json!({ "name": "Nightly", "prompt": "Build", "agentId": agent["id"] }),
             None,
         )

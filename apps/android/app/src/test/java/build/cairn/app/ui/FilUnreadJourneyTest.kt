@@ -54,18 +54,29 @@ class FilUnreadJourneyTest {
             name = "Rédacteur",
         )
     private val notes =
-        Task("notes", "Notes de version hebdomadaires", "Résumer la semaine.", MAIN_AGENT_ID)
-    private val audit = Task("audit", "Audit de sécurité nocturne", "Auditer.", MAIN_AGENT_ID)
+        Task(
+            "348988cc-0279-5ed4-801b-ac44d6987c6e",
+            "Notes de version hebdomadaires",
+            "Résumer la semaine.",
+            MAIN_AGENT_ID,
+        )
+    private val audit =
+        Task(
+            "b7ec3b50-62dd-530b-8060-bd5700fb7eb6",
+            "Audit de sécurité nocturne",
+            "Auditer.",
+            MAIN_AGENT_ID,
+        )
     private val activity =
         listOf(
             Run(
                 "notes-run",
-                taskId = "notes",
+                taskId = "348988cc-0279-5ed4-801b-ac44d6987c6e",
                 status = "succeeded",
                 trigger = "schedule",
                 startedAt = now - 30 * 60_000,
                 finishedAt = now - 20 * 60_000,
-                snapshot = Snapshot(task = notes, agent = main),
+                snapshot = Snapshot(task = notes.runTaskSnapshot(), agent = main),
                 provider = "codex",
                 unread = true,
                 preview =
@@ -73,12 +84,12 @@ class FilUnreadJourneyTest {
             ),
             Run(
                 "audit-run",
-                taskId = "audit",
+                taskId = "b7ec3b50-62dd-530b-8060-bd5700fb7eb6",
                 status = "failed",
                 trigger = "schedule",
                 startedAt = now - 7_200_000,
                 finishedAt = now - 7_000_000,
-                snapshot = Snapshot(task = audit, agent = main),
+                snapshot = Snapshot(task = audit.runTaskSnapshot(), agent = main),
                 provider = "opencode",
             ),
         )
@@ -176,7 +187,13 @@ class FilUnreadJourneyTest {
                                     )
                                 )
                             path == "/api/installations/fixture/api/tasks" ->
-                                json(wireJson.encodeToString(listOf(notes, audit)))
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListMissionsOutput(
+                                            listOf(notes, audit)
+                                        )
+                                    )
+                                )
                             path == "/api/installations/fixture/api/tasks/activity" ->
                                 json(wireJson.encodeToString(activity))
                             path == "/api/installations/fixture/api/chats/stream" ->
@@ -201,6 +218,11 @@ class FilUnreadJourneyTest {
                                             true
                                     )
                                         """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
                                     else "[]"
                                 )
                         }
@@ -278,7 +300,7 @@ class FilUnreadJourneyTest {
                     reads.size == 2
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"task:notes\",\"finishedAt\":${activity.first().finishedAt}}]}",
+                    "{\"items\":[{\"key\":\"task:348988cc-0279-5ed4-801b-ac44d6987c6e\",\"finishedAt\":${activity.first().finishedAt}}]}",
                     reads[1],
                 )
                 compose.waitUntil(10000) {
@@ -328,6 +350,11 @@ class FilUnreadJourneyTest {
                                             true
                                     )
                                         """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
                                     else "[]"
                             }
                         return MockResponse()
@@ -425,6 +452,11 @@ class FilUnreadJourneyTest {
                                             true
                                     )
                                         """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
                                     else "[]"
                             }
                         return MockResponse()
@@ -533,6 +565,11 @@ class FilUnreadJourneyTest {
                                             true
                                     )
                                         """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
                                     else "[]"
                             }
                         return MockResponse()
@@ -576,7 +613,7 @@ class FilUnreadJourneyTest {
                     reads.isNotEmpty()
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"task:notes\",\"finishedAt\":${finished.finishedAt}}]}",
+                    "{\"items\":[{\"key\":\"task:348988cc-0279-5ed4-801b-ac44d6987c6e\",\"finishedAt\":${finished.finishedAt}}]}",
                     reads.single(),
                 )
             } finally {

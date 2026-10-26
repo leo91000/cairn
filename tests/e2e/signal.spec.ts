@@ -407,14 +407,21 @@ test('blocked missions ask only when they wait on the user, and can be set aside
   await expect(forYou.locator('article.border-accent')).toContainText(proof.task.name)
   await page.keyboard.press('e')
   await expect(recent.locator(`[data-fil-key="task:${proof.task.id}"]`)).toContainText('Dismissed')
+
+  // Archiving from the feed uses the revisioned state command, just like Missions.
+  await card(scope.task).getByRole('button', { name: `More actions for “${scope.task.name}”` }).click()
+  await page.getByRole('menuitem', { name: 'Archive mission', exact: true }).click()
+  await expect.poll(() => workspace.service.store.get('tasks', scope.task.id)).toMatchObject({ archived: true, enabled: false })
 })
 
 test('a waiting mission sits in Waiting, shows its wait and can be stopped', async ({ page, workspace }) => {
   const task = await workspace.api('/api/tasks', 'POST', {
-    agentId: MAIN_AGENT_ID,
-    name: 'Mission waiting for CI',
-    prompt: 'Watch CI',
-    worktree: false,
+    settings: {
+      agentId: MAIN_AGENT_ID,
+      name: 'Mission waiting for CI',
+      prompt: 'Watch CI',
+      worktree: false,
+    },
   })
   const run = await workspace.api(`/api/tasks/${task.id}/run`, 'POST')
   await expect.poll(() => workspace.service.store.run(run.id)?.status).toBe('succeeded')

@@ -1,3 +1,5 @@
+use common::MissionFixture;
+
 mod common;
 
 use cairn_installation::{
@@ -13,7 +15,7 @@ async fn fixture() -> (tempfile::TempDir, std::sync::Arc<Service>, Value, Value)
     common::managed_codex_home(&root.path().join("home"));
     let service = Service::new(common::config(root.path())).await.unwrap();
     let task = service
-        .task(
+        .task_fixture(
             json!({
                 "name": "Review a deployment",
                 "prompt": "Check the deployment",
@@ -60,7 +62,13 @@ async fn mission_conversion_preserves_history_session_workspace_and_schedule() {
     assert_eq!(service.chat_list().await.unwrap().len(), 1);
     assert_eq!(chat["title"], task["name"]);
     assert_eq!(chat["runId"], original["id"]);
-    assert_eq!(service.get("tasks", text(&task, "id")).await.unwrap(), task);
+    assert_eq!(
+        service
+            .mission_snapshot_fixture(text(&task, "id"))
+            .await
+            .unwrap(),
+        task
+    );
     assert_eq!(service.store.kv(&checkpoint_key).await.unwrap(), checkpoint);
     let converted = service.store.run(run_id).await.unwrap();
     assert_eq!(converted["taskId"], chat["id"]);
@@ -156,7 +164,13 @@ async fn mission_conversion_keeps_delegated_work_attached_to_its_requester() {
         service.store.run(text(&unrelated, "id")).await.unwrap(),
         unrelated
     );
-    assert_eq!(service.get("tasks", text(&task, "id")).await.unwrap(), task);
+    assert_eq!(
+        service
+            .mission_snapshot_fixture(text(&task, "id"))
+            .await
+            .unwrap(),
+        task
+    );
 }
 
 #[tokio::test]
