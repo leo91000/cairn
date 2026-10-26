@@ -142,3 +142,7 @@ pub use agents::*;
 mod missions;
 
 pub use missions::*;
+
+mod mcps;
+
+pub use mcps::*;

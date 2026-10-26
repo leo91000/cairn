@@ -506,3 +506,7 @@ impl AgentOperation {
 }
 
 pub(crate) use crate::missions::{MISSION_OPERATIONS, MissionOperation, mission_operation};
+
+mod mcps;
+
+pub(crate) use mcps::{MCP_OPERATIONS, McpOperation, mcp_operation};

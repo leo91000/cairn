@@ -281,7 +281,7 @@ abstract class AgentPageCases {
                                 )
                             path == "/projects" ->
                                 """{"projects":[{"id":"2450c72e-6174-56da-b0fc-b06868e8e8e5","name":"cairn","path":"/srv/cairn","description":"","baseBranch":"main","sourceMode":"remote","origin":"","source":null,"revision":"fixture-revision","createdAt":0},{"id":"6501040b-e89b-5102-9fa7-24510fb014c8","name":"SheetOM","path":"/srv/sheetom","description":"","baseBranch":"main","sourceMode":"remote","origin":"","source":null,"revision":"fixture-revision","createdAt":0}]}"""
-                            path == "/mcps" -> mcps.get()
+                            path == "/mcps" -> """{"mcps":${mcps.get()}}"""
                             path == "/skills" ->
                                 """[{"name":"review","scope":"global"},{"name":"lint","scope":"2450c72e-6174-56da-b0fc-b06868e8e8e5"}]"""
                             path == "/nodes" -> nodes
@@ -304,6 +304,10 @@ abstract class AgentPageCases {
                                     request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true
                                 )
                                     """{"tasks":[]}"""
+                                else if (
+                                    request.requestUrl?.encodedPath?.endsWith("/api/mcps") == true
+                                )
+                                    """{"mcps":[]}"""
                                 else "[]"
                         }
                     return response.setBody(body)

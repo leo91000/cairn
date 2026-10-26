@@ -353,6 +353,8 @@ abstract class SkillWorkbenchCases {
                                 request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true
                             )
                                 """{"tasks":[]}"""
+                            else if (request.requestUrl?.encodedPath?.endsWith("/api/mcps") == true)
+                                """{"mcps":[]}"""
                             else "[]"
                         )
                 }

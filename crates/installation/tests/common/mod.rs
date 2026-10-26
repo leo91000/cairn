@@ -285,3 +285,30 @@ pub mod mission_fixture;
 
 #[allow(unused_imports)]
 pub use mission_fixture::{MissionFixture, StoreMissionFixture};
+
+/// JSON is fixture input only; production MCP writers accept the current Rust command.
+pub trait McpFixture {
+    fn mcp_fixture(
+        &self,
+        input: Value,
+        existing: Option<&str>,
+    ) -> impl std::future::Future<Output = cairn_installation::error::Result<Value>>;
+}
+
+impl McpFixture for Service {
+    async fn mcp_fixture(
+        &self,
+        input: Value,
+        existing: Option<&str>,
+    ) -> cairn_installation::error::Result<Value> {
+        let input: cairn_contracts::McpInput = serde_json::from_value(input)?;
+        let revision = if let Some(id) = existing {
+            Some(self.mcps.server(self, id).await?.revision)
+        } else {
+            None
+        };
+        Ok(serde_json::to_value(
+            self.mcps.save(self, input, existing, revision).await?,
+        )?)
+    }
+}

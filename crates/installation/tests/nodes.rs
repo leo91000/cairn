@@ -1,3 +1,4 @@
+use common::McpFixture;
 use common::StoreAgentFixture;
 
 #[path = "nodes/backend_migration.rs"]
@@ -2795,12 +2796,7 @@ async fn remote_vm_agents_reach_workspace_tools_only_through_their_node_session(
         "auth": "none",
         "allowPrivateNetwork": true,
     });
-    let connection = owner
-        .service
-        .mcps
-        .save(&owner.service, connection, None)
-        .await
-        .unwrap();
+    let connection = owner.service.mcp_fixture(connection, None).await.unwrap();
     let connection = connection["id"].as_str().unwrap();
     let configuration = owner
         .service
@@ -4408,11 +4404,19 @@ async fn mission_wait_and_node_move_exclude_each_other_without_leaking_destinati
         owner
             .service
             .store
-            .set(
-                &format!("mcp-grant:{}", auth::hex_digest(token)),
-                json!({ "runId": run_id, "messageId": null, "servers": {}, "workspace": true }),
-                None,
-            )
+            .transaction({
+                let grant: cairn_installation::mcps::record::RunGrant = serde_json::from_value(
+                    json!({ "runId": run_id, "messageId": null, "servers": {}, "installation": false, "workspace": true }),
+                )
+                .unwrap();
+                move |db| {
+                    db.save_mcp_run_grant(
+                        &cairn_installation::auth::hex_digest(token),
+                        &grant,
+                        None,
+                    )
+                }
+            })
             .await
             .unwrap();
         let input = json!({

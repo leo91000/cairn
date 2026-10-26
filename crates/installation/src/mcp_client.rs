@@ -8,16 +8,15 @@ use crate::{
         jsonrpc::{Frame, METHOD_NOT_FOUND, Message},
     },
     service::Service,
-    store::Db,
+    store::{Db, Store},
     validation::text,
 };
 use reqwest::{
     Method,
     header::{HeaderMap, HeaderValue},
 };
-use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 pub const MODERN: &str = "2026-07-28";
 
@@ -63,7 +62,10 @@ fn unsupported_version() -> Error {
     Error::bad_gateway("No supported MCP protocol version.")
 }
 
+type Authorization = Arc<dyn Fn(&Db<'_>) -> Result<()> + Send + Sync>;
+
 pub struct Client {
+    authorization: Option<(Store, Authorization)>,
     transport: Transport,
     pub capabilities: Value,
     protocol: String,
@@ -83,17 +85,13 @@ struct HttpTransport {
 }
 
 impl Client {
-    pub async fn connect(s: &Service, item: &Value) -> Result<Self> {
-        Self::connect_server(s, &McpServer::deserialize(item)?).await
-    }
-
     /// Connects with the stored credentials, refreshing OAuth tokens that expired
     /// or that the server rejects.
     pub async fn connect_server(s: &Service, server: &McpServer) -> Result<Self> {
         Self::connect_server_authorized(s, server, |_| Ok(())).await
     }
 
-    async fn connect_server_authorized<F>(
+    pub(crate) async fn connect_server_authorized<F>(
         s: &Service,
         server: &McpServer,
         authorize: F,
@@ -111,11 +109,23 @@ impl Client {
             crate::mcp_oauth::refresh_authorized(s, server, authorize.clone()).await?;
             secrets = s.mcps.server_secrets(s, &server.id).await?;
         }
-        let first = Self::open(s, server, &secrets).await;
+        s.store
+            .read({
+                let authorize = authorize.clone();
+                move |db| authorize(db)
+            })
+            .await?;
+        let first = Self::open(s, server, &secrets, authorize.clone()).await;
         if first.as_ref().is_err_and(Error::is_unauthorized) && refreshable(&secrets) {
             crate::mcp_oauth::refresh_authorized(s, server, authorize.clone()).await?;
             let secrets = s.mcps.server_secrets(s, &server.id).await?;
-            return Self::open(s, server, &secrets).await;
+            s.store
+                .read({
+                    let authorize = authorize.clone();
+                    move |db| authorize(db)
+                })
+                .await?;
+            return Self::open(s, server, &secrets, authorize.clone()).await;
         }
         first
     }
@@ -133,14 +143,20 @@ impl Client {
     where
         F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
     {
-        let mut client = Self::connect_server_authorized(s, server, authorize).await?;
+        let mut client = Self::connect_server_authorized(s, server, authorize.clone()).await?;
+        s.store.read(move |db| authorize(db)).await?;
         let tools = client.discover().await;
         client.close().await;
         tools
     }
 
-    fn new(transport: Transport, protocol: &str) -> Self {
+    fn new(
+        transport: Transport,
+        protocol: &str,
+        authorization: Option<(Store, Authorization)>,
+    ) -> Self {
         Self {
+            authorization,
             transport,
             capabilities: json!({}),
             protocol: protocol.into(),
@@ -152,8 +168,20 @@ impl Client {
         matches!(self.transport, Transport::Stdio(_))
     }
 
-    async fn open(s: &Service, server: &McpServer, secrets: &McpSecrets) -> Result<Self> {
-        let mut client = Self::new(Self::transport(s, server, secrets).await?, MODERN);
+    async fn open<F>(
+        s: &Service,
+        server: &McpServer,
+        secrets: &McpSecrets,
+        authorize: F,
+    ) -> Result<Self>
+    where
+        F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
+    {
+        let mut client = Self::new(
+            Self::transport(s, server, secrets).await?,
+            MODERN,
+            Some((s.store.clone(), Arc::new(authorize))),
+        );
         match client.request("server/discover", json!({})).await {
             Ok(discovery) => {
                 let modern = discovery["supportedVersions"]
@@ -184,8 +212,13 @@ impl Client {
     ) -> Result<Self> {
         // Command servers may exit on the unknown modern probe: restart them.
         let mut client = if self.is_stdio() {
+            let authorization = self.authorization.clone();
             self.close().await;
-            Self::new(Self::transport(s, server, secrets).await?, LEGACY)
+            Self::new(
+                Self::transport(s, server, secrets).await?,
+                LEGACY,
+                authorization,
+            )
         } else {
             self
         };
@@ -260,6 +293,10 @@ impl Client {
     }
 
     pub async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        if let Some((store, authorize)) = &self.authorization {
+            let authorize = authorize.clone();
+            store.read(move |db| authorize(db)).await?;
+        }
         let params = self.with_meta(params);
         match &mut self.transport {
             Transport::Stdio(session) => session.request(method, params).await,
@@ -272,6 +309,10 @@ impl Client {
     }
 
     async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
+        if let Some((store, authorize)) = &self.authorization {
+            let authorize = authorize.clone();
+            store.read(move |db| authorize(db)).await?;
+        }
         match &mut self.transport {
             Transport::Stdio(session) => session.rpc.notify(method, params).await,
             Transport::Http(http) => http.notify(&self.protocol, method, params).await,
@@ -314,7 +355,16 @@ impl Client {
     pub async fn close(self) {
         match self.transport {
             Transport::Stdio(session) => session.close().await,
-            Transport::Http(http) => http.close(&self.protocol).await,
+            Transport::Http(http) => {
+                if http.session.is_some()
+                    && let Some((store, authorize)) = self.authorization
+                    && store.read(move |db| authorize(db)).await.is_err()
+                {
+                    // Revocation also fences best-effort remote session cleanup.
+                    return;
+                }
+                http.close(&self.protocol).await;
+            }
         }
     }
 }

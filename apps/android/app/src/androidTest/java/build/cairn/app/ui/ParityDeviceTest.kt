@@ -218,8 +218,8 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                                         )
                                     )
                                 )
-                            "/api/installations/fixture/api/skills",
-                            "/api/installations/fixture/api/mcps" -> "[]"
+                            "/api/installations/fixture/api/skills" -> "[]"
+                            "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
                             else -> "{}"
                         }
                     return MockResponse()

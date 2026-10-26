@@ -228,7 +228,7 @@ class SignalJourneyTest {
                                         listOf(Skill("revue", "Guide de revue"))
                                     )
                                 )
-                            path == "/api/installations/fixture/api/mcps" -> json("[]")
+                            path == "/api/installations/fixture/api/mcps" -> json("""{"mcps":[]}""")
                             path == "/api/installations/fixture/api/chats/stream" ->
                                 stream(LiveState(chats = chats))
                             path == "/api/installations/fixture/api/chats" &&

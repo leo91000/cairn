@@ -8,6 +8,14 @@ import {
   ref,
 } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { beginMcpConnection } from '../../../../packages/contracts/generated/beginMcpConnection'
+import { cancelMcpConnection } from '../../../../packages/contracts/generated/cancelMcpConnection'
+import { createMcp } from '../../../../packages/contracts/generated/createMcp'
+import { deleteMcp } from '../../../../packages/contracts/generated/deleteMcp'
+import { disconnectMcp } from '../../../../packages/contracts/generated/disconnectMcp'
+import { listMcps } from '../../../../packages/contracts/generated/listMcps'
+import { testMcp } from '../../../../packages/contracts/generated/testMcp'
+import { updateMcp } from '../../../../packages/contracts/generated/updateMcp'
 import {
   api,
   date,
@@ -74,7 +82,7 @@ const labels = {
 async function load() {
   loading.value = true
   try {
-    const items = await api<McpView[]>('/mcps')
+    const { mcps: items } = await listMcps(api, {})
     if (!disposed)
       state.mcps = items
   }
@@ -121,6 +129,7 @@ function edit(item?: McpView) {
         allowPrivateNetwork: item.allowPrivateNetwork,
         enabled: item.enabled,
         enabledTools: item.enabledTools,
+        removeEnv: [],
       }
     : {
         name: '',
@@ -134,6 +143,7 @@ function edit(item?: McpView) {
         allowPrivateNetwork: false,
         enabled: true,
         enabledTools: null,
+        removeEnv: [],
       }
   argsText.value = item?.args.join('\n') || ''
   envRows.value = item?.envKeys.map(key => ({ key, value: '', saved: true })) || []
@@ -149,7 +159,7 @@ async function save() {
       throw new Error('Environment variable names must be unique.')
     const payload = {
       ...form.value,
-      auth: form.value.transport === 'stdio' ? 'none' : form.value.auth,
+      auth: form.value.transport === 'stdio' ? 'none' as const : form.value.auth,
       args: argsText.value ? argsText.value.split('\n') : [],
       env: Object.fromEntries(entries.filter(row => !row.saved || row.value).map(row => [row.key.trim(), row.value])),
       removeEnv: editing.value?.envKeys.filter(key => !entries.some(row => row.key === key)) || [],
@@ -158,7 +168,10 @@ async function save() {
       delete payload.token
     if (!payload.clientSecret)
       delete payload.clientSecret
-    await api(`/mcps${editing.value ? `/${editing.value.id}` : ''}`, { method: editing.value ? 'PUT' : 'POST', body: JSON.stringify(payload) })
+    if (editing.value)
+      await updateMcp(api, { id: editing.value.id, revision: editing.value.revision, connection: payload })
+    else
+      await createMcp(api, payload)
     open.value = false
     form.value.token = ''
     form.value.clientSecret = ''
@@ -178,14 +191,30 @@ async function action(item: McpView, kind: 'test' | 'connect') {
   busy.value[item.id] = kind
   error.value = ''
   try {
-    const result = await api(`/mcps/${item.id}/${kind}`, { method: 'POST' })
     if (kind === 'connect') {
+      const result = await beginMcpConnection(api, { id: item.id, native: false })
       redirect(result.url)
       return
     }
 
+    const result = await testMcp(api, { id: item.id })
     await load()
     notify(result.state === 'connected' ? `${result.tools.length} tools available` : result.error)
+  }
+  catch (e) {
+    error.value = (e as Error).message
+  }
+  finally {
+    delete busy.value[item.id]
+  }
+}
+
+async function cancel(item: McpView) {
+  busy.value[item.id] = 'Cancelling'
+  try {
+    await cancelMcpConnection(api, { id: item.id })
+    await load()
+    notify('Authorization was cancelled')
   }
   catch (e) {
     error.value = (e as Error).message
@@ -198,7 +227,7 @@ async function action(item: McpView, kind: 'test' | 'connect') {
 async function remove(item: McpView, disconnect = false) {
   busy.value[item.id] = 'Removing'
   try {
-    await api(`/mcps/${item.id}${disconnect ? '/disconnect' : ''}`, { method: disconnect ? 'POST' : 'DELETE' })
+    await (disconnect ? disconnectMcp(api, { id: item.id }) : deleteMcp(api, { id: item.id }))
     removing.value = undefined
     disconnecting.value = undefined
     await load()
@@ -222,7 +251,24 @@ async function saveTools() {
   const item = inspecting.value!
   busy.value.tools = 'Saving'
   try {
-    await api(`/mcps/${item.id}`, { method: 'PUT', body: JSON.stringify({ ...item, enabledTools: selectedTools.value }) })
+    await updateMcp(api, {
+      id: item.id,
+      revision: item.revision,
+      connection: {
+        name: item.name,
+        transport: item.transport,
+        url: item.url,
+        command: item.command,
+        args: item.args,
+        auth: item.auth,
+        clientId: item.clientId,
+        scopes: item.scopes,
+        allowPrivateNetwork: item.allowPrivateNetwork,
+        enabled: item.enabled,
+        enabledTools: selectedTools.value,
+        removeEnv: [],
+      },
+    })
     inspecting.value = undefined
     await load()
     notify('Tool access updated')
@@ -315,6 +361,13 @@ async function copyCallback() {
             :size="14"
             class="activity-spinning [animation:activity-spin_1.5s_linear_infinite] [@media(prefers-reduced-motion:_reduce)]:[animation:none]"
           /><Icon v-else :name="BrandMcp" :size="14" />{{ item.state === 'connected' ? 'Reconnect' : 'Connect' }}
+        </UiButton><UiButton
+          v-if="item.auth === 'oauth' && item.state === 'needs-auth'"
+          size="small"
+          :disabled="!!busy[item.id]"
+          @click="cancel(item)"
+        >
+          Cancel sign-in
         </UiButton>
       </footer>
     </article>

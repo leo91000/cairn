@@ -69,7 +69,7 @@ pub(crate) fn validate(
         .chain(settings.access.mcp_tools.keys())
     {
         required(
-            db.get("mcps", connection)?,
+            db.mcp_server(connection)?,
             "MCP connection no longer exists",
         )?;
     }
@@ -275,19 +275,19 @@ CREATE TABLE agent_nodes(
 CREATE INDEX agent_nodes_resource ON agent_nodes(node_id,agent_id);
 CREATE TABLE agent_mcps(
  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
- mcp_id TEXT NOT NULL CHECK(length(mcp_id)=36),
+ mcp_id TEXT NOT NULL REFERENCES mcp_servers(id) ON DELETE RESTRICT CHECK(length(mcp_id)=36),
  position INTEGER NOT NULL CHECK(position>=0),
  PRIMARY KEY(agent_id,mcp_id), UNIQUE(agent_id,position)
 ) WITHOUT ROWID;
 CREATE INDEX agent_mcps_resource ON agent_mcps(mcp_id,agent_id);
 CREATE TABLE agent_mcp_selections(
  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
- mcp_id TEXT NOT NULL CHECK(length(mcp_id)=36),
+ mcp_id TEXT NOT NULL REFERENCES mcp_servers(id) ON DELETE RESTRICT CHECK(length(mcp_id)=36),
  PRIMARY KEY(agent_id,mcp_id)
 ) WITHOUT ROWID;
 CREATE TABLE agent_mcp_tools(
  agent_id TEXT NOT NULL,
- mcp_id TEXT NOT NULL,
+ mcp_id TEXT NOT NULL REFERENCES mcp_servers(id) ON DELETE RESTRICT,
  tool TEXT NOT NULL CHECK(length(tool) BETWEEN 1 AND 200),
  position INTEGER NOT NULL CHECK(position>=0),
  PRIMARY KEY(agent_id,mcp_id,tool), UNIQUE(agent_id,mcp_id,position),
