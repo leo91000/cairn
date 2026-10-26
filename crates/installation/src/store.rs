@@ -86,11 +86,6 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('projects','agents','tasks','mcps','plugin-connections')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS records_kind ON records(kind,updated_at DESC);
 CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
-CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,project_id TEXT NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,data TEXT NOT NULL,dedupe TEXT UNIQUE);
-CREATE INDEX IF NOT EXISTS runs_status ON runs(status,created_at);
-CREATE INDEX IF NOT EXISTS runs_task ON runs(task_id,created_at DESC);
-CREATE INDEX IF NOT EXISTS runs_created ON runs(created_at DESC,id DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS runs_active_task ON runs(task_id) WHERE status IN ('queued','running','waiting');
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL,type TEXT NOT NULL,text TEXT NOT NULL,payload TEXT);
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id,id);
 CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY,data TEXT NOT NULL,expires INTEGER);
@@ -106,6 +101,7 @@ CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id,created_a
             tx.execute_batch("CREATE INDEX IF NOT EXISTS events_turns ON events(run_id,id) WHERE type='turn.started';
 CREATE INDEX IF NOT EXISTS events_user_input ON events(run_id,id) WHERE type='chat.user';
 CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload,'$.item.id'),id) WHERE json_extract(payload,'$.item.type')='agent_message';")?;
+            tx.execute_batch(crate::runs::SCHEMA)?;
             tx.execute_batch(crate::nodes::shared_blocks::SCHEMA)?;
             tx.execute_batch(crate::projects::SCHEMA)?;
             tx.execute_batch(crate::agents::SCHEMA)?;
@@ -281,13 +277,6 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         let id = id.to_owned();
         self.read(move |db| required(db.run(&id)?, "Run not found"))
             .await
-    }
-
-    pub async fn patch_run(&self, id: &str, patch: Value) -> Result<Value> {
-        let id = id.to_owned();
-        // Read and rewrite the document under one write lock: another connection,
-        // such as a second process on this database, must not interleave its patch.
-        self.transaction(move |db| db.patch_run(&id, &patch)).await
     }
 
     pub async fn event(
@@ -552,28 +541,17 @@ impl Db<'_> {
         self.json_row("SELECT data FROM runs WHERE id=?", [id])
     }
 
+    /// Temporary input adapter for chat/snapshot construction and test fixtures.
+    /// Lifecycle columns are decoded before publishing; the payload has no copies.
     pub fn add_run(&self, run: &Value, dedupe: Option<&str>) -> Result<Value> {
-        self.0
-            .prepare_cached("INSERT INTO runs VALUES(?,?,?,?,?,?,?)")?
-            .execute(params![
-                run["id"].as_str(),
-                run["taskId"].as_str(),
-                run["projectId"].as_str().unwrap_or(""),
-                run["status"].as_str(),
-                run["createdAt"].as_i64(),
-                run.to_string(),
-                dedupe
-            ])?;
-        Ok(run.clone())
-    }
-
-    pub fn patch_run(&self, id: &str, patch: &Value) -> Result<Value> {
-        let mut run = required(self.run(id)?, "Run not found")?;
-        merge(&mut run, patch);
-        self.0
-            .prepare_cached("UPDATE runs SET status=?,data=? WHERE id=?")?
-            .execute(params![run["status"].as_str(), run.to_string(), id])?;
-        Ok(run)
+        let state: cairn_contracts::RunState = serde_json::from_value(run.clone())?;
+        let mut boundary = run.clone();
+        let state_fields = serde_json::to_value(&state)?;
+        for key in state_fields.as_object().unwrap().keys() {
+            boundary.as_object_mut().unwrap().remove(key);
+        }
+        self.insert_run_state(&state, &boundary, dedupe)?;
+        required(self.run(&state.id)?, "Run not found")
     }
 
     pub fn active(&self) -> Result<Vec<Value>> {

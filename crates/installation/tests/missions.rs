@@ -91,7 +91,13 @@ async fn mission_commands_preserve_revisions_retries_relations_and_frozen_runs()
         StatusCode::CONFLICT
     );
     s.store
-        .patch_run(run["id"].as_str().unwrap(), json!({"status":"failed"}))
+        .change_run(
+            run["id"].as_str().unwrap(),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Failed),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -214,7 +220,13 @@ async fn installation_token(s: &Arc<Service>) -> String {
         .await
         .unwrap();
     s.store
-        .patch_run(run["id"].as_str().unwrap(), json!({"status":"running"}))
+        .change_run(
+            run["id"].as_str().unwrap(),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let run = s.store.run(run["id"].as_str().unwrap()).await.unwrap();

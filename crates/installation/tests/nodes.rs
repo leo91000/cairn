@@ -588,7 +588,7 @@ async fn component_version_mismatches_are_explicitly_rejected() {
         owner
             .service
             .store
-            .patch_run(
+            .update_run_boundary(
                 &run_id,
                 json!({
                     "placementTransition": false, "moveReservation": reservation,
@@ -3001,7 +3001,7 @@ async fn completed_run_storage_refresh_clears_stale_dirty_counts() {
     owner
         .service
         .store
-        .patch_run(
+        .update_run_boundary(
             &run,
             json!({ "nodeId": id(), "storage": { "dirtyBytes": 42 } }),
         )
@@ -3066,12 +3066,15 @@ async fn starting_vm_defers_publication_without_a_sync_failure() {
     owner
         .service
         .store
-        .patch_run(
+        .change_run(
             &run,
-            json!({
-                "status": RunStatus::Succeeded,
-                "storage": { "mode": "on-demand", "dirtyBytes": 0 },
-            }),
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Succeeded),
+                boundary: Some(
+                    serde_json::json!({"storage": { "mode": "on-demand", "dirtyBytes": 0 }}),
+                ),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -3139,7 +3142,7 @@ async fn retired_audit_errors_do_not_force_full_download_before_demand_resume() 
     owner
         .service
         .store
-        .patch_run(&run, json!({ "backup": { "id": point } }))
+        .update_run_boundary(&run, json!({ "backup": { "id": point } }))
         .await
         .unwrap();
     let selected = moves::latest(&owner.service, &run)
@@ -3855,9 +3858,13 @@ fn movement_controller(
                 if faults.cancel_during_capture.load(Ordering::SeqCst) {
                     service
                         .store
-                        .patch_run(
+                        .change_run(
                             &run,
-                            json!({ "cancelRequestedAt": now(), "status": RunStatus::Cancelled }),
+                            cairn_installation::runs::RunChanges {
+                                cancel_requested_at: Some(Some(now())),
+                                status: Some(RunStatus::Cancelled),
+                                ..Default::default()
+                            },
                         )
                         .await
                         .unwrap();
@@ -4146,7 +4153,7 @@ async fn pending_movement_retries_a_lost_stop_without_stopping_a_later_execution
     owner
         .service
         .store
-        .patch_run(&run, json!({ "moveRequest": null }))
+        .update_run_boundary(&run, json!({ "moveRequest": null }))
         .await
         .unwrap();
     moves::pause_pending(&owner.service, &run).await.unwrap();
@@ -4914,7 +4921,13 @@ async fn coalesced_final_publication_survives_a_new_attempt_and_preserves_later_
     owner
         .service
         .store
-        .patch_run(&run, json!({ "status": RunStatus::Cancelled }))
+        .change_run(
+            &run,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Cancelled),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     owner
@@ -5019,7 +5032,7 @@ async fn assert_lost_acknowledgement_keeps_the_new_pointer(
     owner
         .service
         .store
-        .patch_run(run, json!({ "storage": { "mode": "on-demand" } }))
+        .update_run_boundary(run, json!({ "storage": { "mode": "on-demand" } }))
         .await
         .unwrap();
     log.lost_ack.store(true, Ordering::SeqCst);
@@ -5335,7 +5348,7 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
     owner
         .service
         .store
-        .patch_run(&run, json!({ "nodeId": next }))
+        .update_run_boundary(&run, json!({ "nodeId": next }))
         .await
         .unwrap();
     assert!(!permits(&owner, &credential, &points[1]).await);
@@ -5404,7 +5417,7 @@ async fn publication_cleanup_preserves_current_and_in_use_points_then_retires_id
     owner
         .service
         .store
-        .patch_run(&run, json!({ "backup": { "id": ids[1] } }))
+        .update_run_boundary(&run, json!({ "backup": { "id": ids[1] } }))
         .await
         .unwrap();
     let grant = id();

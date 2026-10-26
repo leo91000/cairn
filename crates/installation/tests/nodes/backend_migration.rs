@@ -220,7 +220,13 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         owner
             .service
             .store
-            .patch_run(&run, json!({ "status": RunStatus::Running }))
+            .change_run(
+                &run,
+                cairn_installation::runs::RunChanges {
+                    status: Some(RunStatus::Running),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         owner.service.store.set("native-authority", json!({ "observedAt": now(), "accounts": { "fixture-owner": { "email": "fixture@example.test" } } }), None).await.unwrap();
@@ -341,7 +347,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     owner
         .service
         .store
-        .patch_run(&run, json!({ "backendMigration": marker }))
+        .update_run_boundary(&run, json!({ "backendMigration": marker }))
         .await
         .unwrap();
     let (status, response) = owner
@@ -368,7 +374,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let mut pending = json!({ "id": id(), "reservationId": reservation, "process": "old-manager-process", "paused": false,
         "nodeId": native_node, "runtimeId": "development", "snapshot": retried["snapshot"], "convertedBackup": saved_point });
     pending["grant"] = json!({ "nativePrincipals": retried["nativePrincipals"], "nativeAuthorityNodes": retried["nativeAuthorityNodes"], "nativeProvenanceUnknown": false });
-    owner.service.store.patch_run(&run, json!({ "snapshot": before["snapshot"], "nodeId": before["nodeId"], "backup": before["backup"], "backendMigration": pending })).await.unwrap();
+    owner.service.store.update_run_boundary(&run, json!({ "snapshot": before["snapshot"], "nodeId": before["nodeId"], "backup": before["backup"], "backendMigration": pending })).await.unwrap();
     let mut source_checkpoint = checkpoint_before;
     source_checkpoint["nodeId"] = vm_node.clone().into();
     source_checkpoint["prepared"]["backend"] = "firecracker".into();

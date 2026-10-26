@@ -102,14 +102,15 @@ pub(crate) fn is_compaction(run: &Value) -> bool {
 /// its outcome, and does not become newly finished. Resuming an interrupted compaction clears
 /// the run's outcome, so it comes from what the compaction saved. Failures and stops still show
 /// why it ended.
-pub(crate) fn keep_reply_after_compaction(run: &Value, patch: &mut Value) {
+pub(crate) fn keep_reply_after_compaction(run: &Value, patch: &mut crate::runs::RunChanges) -> Result<()> {
     if !is_compaction(run) {
-        return;
+        return Ok(());
     }
     let previous = &run["chatExecution"]["previous"];
-    patch["summary"] = previous["summary"].clone();
-    patch["finishedAt"] = previous["finishedAt"].clone();
-    patch["outcome"] = previous["outcome"].clone();
+    patch.summary = Some(serde_json::from_value(previous["summary"].clone())?);
+    patch.finished_at = Some(serde_json::from_value(previous["finishedAt"].clone())?);
+    patch.boundary.get_or_insert_with(|| json!({}))["outcome"] = previous["outcome"].clone();
+    Ok(())
 }
 
 /// Payload of the `chat.user` event recorded when a message reaches the agent.
@@ -894,14 +895,15 @@ fn continue_run(
         execution.context = Some(handoff_context(db, run_id)?);
         checkpoint["launched"] = false.into();
         remove_keys(&mut checkpoint, &["controllerRecoveries"]);
-        db.patch_run(
+        db.change_run(
             run_id,
-            &json!({
-                "sessionId": null,
-                "resumeAvailable": false,
+            crate::runs::RunChanges {
+                session_id: Some(None),
+                resume_available: Some(false),
                 // The fresh session starts with an empty context.
-                "contextUsage": null,
-            }),
+                boundary: Some(json!({ "contextUsage": null })),
+                ..Default::default()
+            },
         )?;
         let status = format!(
             "Continuing with {} · conversation context and workspace preserved",
@@ -923,21 +925,22 @@ fn continue_run(
     remove_keys(&mut checkpoint, &["lastMessage", "settled"]);
     db.set(&key, &checkpoint, None)?;
     let compaction = execution.operation == Some(COMPACT);
-    let mut patch = json!({
-        "snapshot": snapshot["snapshot"],
-        "status": RunStatus::Queued,
-        "error": null,
-        "finishedAt": null,
-        "cancelRequestedAt": null,
-        "recoveryPending": true,
-        "chatExecution": serde_json::to_value(execution)?,
-    });
+    let mut patch = crate::runs::RunChanges {
+        snapshot: Some(serde_json::from_value(snapshot["snapshot"].clone())?),
+        status: Some(RunStatus::Queued),
+        error: Some(None),
+        finished_at: Some(None),
+        cancel_requested_at: Some(None),
+        recovery_pending: Some(true),
+        boundary: Some(json!({ "chatExecution": serde_json::to_value(execution)? })),
+        ..Default::default()
+    };
     // A compaction answers no message: the last reply and its outcome stay current.
     if !compaction {
-        patch["summary"] = "".into();
-        patch["outcome"] = Value::Null;
+        patch.summary = Some(String::new());
+        patch.boundary.as_mut().unwrap()["outcome"] = Value::Null;
     }
-    db.patch_run(run_id, &patch)?;
+    db.change_run(run_id, patch)?;
     Ok(())
 }
 
@@ -1082,27 +1085,25 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
     task_projects(&agent, &chat, &db.projects()?)?;
 
     let chat = db.put("chats", &chat)?;
-    db.patch_run(
-        run_id,
-        &json!({
-            "sourceTaskId": run["taskId"],
-            "sourceTaskPrompt": run["snapshot"]["task"]["prompt"],
-            "sourceSessionId": run["sessionId"],
-            "taskId": chat["id"],
-            "trigger": "chat",
-        }),
+    db.change_run(run_id,crate::runs::RunChanges { task_id : Some(chat["id"].as_str().unwrap_or_default().to_owned()), trigger : Some(("chat").to_owned()), boundary: Some(serde_json::json!({"sourceTaskId": run["taskId"],"sourceTaskPrompt": run["snapshot"]["task"]["prompt"],"sourceSessionId": run["sessionId"]})), ..Default::default() })?;
+    // Work already delegated by this run still returns to its new conversation.
+    let dependents = db.json_rows(
+        "SELECT data FROM runs WHERE json_extract(requested_by,'$.runId')=?",
+        [run_id],
     )?;
-    db.0.execute(
-        "UPDATE runs SET task_id=? WHERE id=?",
-        rusqlite::params![text(&chat, "id"), run_id],
-    )?;
-    // Work launched by this execution still returns to the same requester,
-    // whose conversation now lives in Chats rather than the mission's history.
-    db.0.execute(
-        "UPDATE runs SET data=json_set(data, '$.requestedBy', json_object('runId', ?, 'chatId', ?))
-         WHERE json_extract(data, '$.requestedBy.runId')=?",
-        rusqlite::params![run_id, text(&chat, "id"), run_id],
-    )?;
+    for dependent in dependents {
+        db.change_run(
+            text(&dependent, "id"),
+            crate::runs::RunChanges {
+                requested_by: Some(Some(cairn_contracts::RunRequester {
+                    run_id: run_id.to_owned(),
+                    chat_id: Some(text(&chat, "id").to_owned()),
+                    task_id: None,
+                })),
+                ..Default::default()
+            },
+        )?;
+    }
     db.restore_chat_summaries(Some(run_id))?;
     db.audit(
         "run.converted_to_chat",
@@ -1787,7 +1788,13 @@ mod tests {
                         assert_eq!(question["blocking"], false);
 
                         // A later ordinary continuation resumes the newly established session.
-                        let resumed = db.patch_run("run", &json!({ "sessionId": "new-native" }))?;
+                        let resumed = db.change_run(
+                            "run",
+                            crate::runs::RunChanges {
+                                session_id: Some(Some("new-native".into())),
+                                ..Default::default()
+                            },
+                        )?;
                         continue_run(
                             db,
                             &chat,

@@ -102,14 +102,17 @@ impl Settled {
         })
     }
 
-    pub fn run_patch(&self) -> Result<Value> {
-        let mut patch = serde_json::to_value(self)?;
-        patch["accountWaitReason"] = Value::Null;
-        patch["recoveryPending"] = false.into();
-        if self.status == RunStatus::Cancelled {
-            patch["retry"] = Value::Null;
+    pub fn run_changes(&self) -> crate::runs::RunChanges {
+        crate::runs::RunChanges {
+            status: Some(self.status),
+            summary: self.summary.clone(),
+            error: self.error.clone().map(Some),
+            finished_at: Some(self.finished_at),
+            account_wait_reason: Some(None),
+            recovery_pending: Some(false),
+            retry: (self.status == RunStatus::Cancelled).then_some(None),
+            ..Default::default()
         }
-        Ok(patch)
     }
 }
 

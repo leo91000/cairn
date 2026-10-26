@@ -151,9 +151,9 @@ impl Worker {
         {
             return Ok(());
         }
-        let current = s.store.run(&run_id).await?;
-        if current["status"] != RunStatus::Queued
-            || crate::run_retry::Retry::waiting(&current, now())
+        let current = s.store.run_state(&run_id).await?;
+        if current.status != RunStatus::Queued
+            || crate::run_retry::Retry::waiting(current.retry.as_ref(), now())
         {
             return Ok(());
         }
@@ -359,8 +359,12 @@ async fn report_account_wait(
         .needs_attention(s, provider)
         .await?
         .then_some(provider);
-    let patch = json!({ "accountWaitReason": error.message, "accountRequired": required });
-    s.store.patch_run(run_id, patch).await?;
+    let patch = crate::runs::RunChanges {
+        account_wait_reason: Some(Some((error.message).to_owned())),
+        account_required: Some(serde_json::from_value(serde_json::json!(required))?),
+        ..Default::default()
+    };
+    s.store.change_run(run_id, patch).await?;
     s.store.event(run_id, "status", &error.message, None).await
 }
 
@@ -373,8 +377,12 @@ pub(super) async fn report_capacity_wait(s: &Service, run: &Value, detail: &str)
         return Ok(());
     }
     let run_id = text(run, "id");
-    let patch = json!({ "accountWaitReason": reason, "accountRequired": null });
-    s.store.patch_run(run_id, patch).await?;
+    let patch = crate::runs::RunChanges {
+        account_wait_reason: Some(Some((reason).to_owned())),
+        account_required: Some(None),
+        ..Default::default()
+    };
+    s.store.change_run(run_id, patch).await?;
     if previous.starts_with(CAPACITY_WAIT_REASON) {
         return Ok(());
     }
@@ -389,8 +397,11 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
     if run["accountWaitReason"] != RECOVERY_WAIT_REASON
         && !text(run, "accountWaitReason").starts_with(CAPACITY_WAIT_REASON)
     {
-        let patch = json!({ "accountWaitReason": RECOVERY_WAIT_REASON });
-        s.store.patch_run(text(run, "id"), patch).await?;
+        let patch = crate::runs::RunChanges {
+            account_wait_reason: Some(Some((RECOVERY_WAIT_REASON).to_owned())),
+            ..Default::default()
+        };
+        s.store.change_run(text(run, "id"), patch).await?;
     }
     Ok(false)
 }
@@ -432,12 +443,12 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
     }
     if let Some(checkpoint) = checkpoint {
         if let Some(settled) = checkpoint.settled() {
-            let mut patch = settled.run_patch()?;
+            let mut patch = settled.run_changes();
             if settled.status == RunStatus::Waiting {
-                patch["resumeAvailable"] = true.into();
-                patch["outcome"] = Value::Null;
+                patch.resume_available = Some(true);
+                patch.boundary = Some(json!({"outcome": null}));
             }
-            db.patch_run(id, &patch)?;
+            db.change_run(id, patch)?;
             return Ok(false);
         }
         if checkpoint.completed() {
@@ -449,51 +460,57 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
             };
             let waiting = current["trigger"] != "chat" && current["wakeup"].is_object();
             if waiting && !current["sessionId"].is_string() {
-                db.patch_run(id, &json!({
-                    "status": RunStatus::Failed,
-                    "finishedAt": now(),
-                    "wakeup": null,
-                    "recoveryPending": false,
-                    "accountWaitReason": null,
-                    "error": "Cannot wait without a saved agent session. Working files were preserved.",
-                }))?;
+                db.change_run(id,crate::runs::RunChanges { status : Some(RunStatus::Failed), finished_at : Some(Some(now())), recovery_pending : Some(false), account_wait_reason : Some(None), error : Some(Some("Cannot wait without a saved agent session. Working files were preserved.".into())), boundary: Some(serde_json::json!({"wakeup": null})), ..Default::default() })?;
                 return Ok(false);
             }
-            let mut patch = json!({
-                "status": if waiting { RunStatus::Waiting } else { RunStatus::Succeeded },
-                "finishedAt": if waiting { None } else { Some(now()) },
-                "resumeAvailable": waiting,
-                "accountWaitReason": null,
-                "recoveryPending": false,
-                "summary": summary,
-            });
+            let mut patch = crate::runs::RunChanges {
+                status: Some(if waiting {
+                    RunStatus::Waiting
+                } else {
+                    RunStatus::Succeeded
+                }),
+                finished_at: Some(if waiting { None } else { Some(now()) }),
+                resume_available: Some(waiting),
+                account_wait_reason: Some(None),
+                recovery_pending: Some(false),
+                summary: Some((summary).to_owned()),
+                boundary: Some(serde_json::json!({})),
+                ..Default::default()
+            };
             if waiting {
-                patch["outcome"] = Value::Null;
+                patch.boundary.as_mut().unwrap()["outcome"] = Value::Null;
             } else {
                 // A compaction completed before the restart settles like one that did not.
-                crate::chats::keep_reply_after_compaction(&current, &mut patch);
+                crate::chats::keep_reply_after_compaction(&current, &mut patch)?;
             }
-            db.patch_run(id, &patch)?;
+            db.change_run(id, patch)?;
             return Ok(false);
         }
     }
-    db.patch_run(id, &json!({ "recoveryPending": false }))?;
+    db.change_run(
+        id,
+        crate::runs::RunChanges {
+            recovery_pending: Some(false),
+            ..Default::default()
+        },
+    )?;
     Ok(true)
 }
 
 /// Settles a recovering run whose cancellation was requested. One waiting for an automatic
 /// retry shows the stop in its conversation; a wait's own card already shows its cancellation.
 fn cancel_recovery(db: &Db<'_>, id: &str, run: &Value) -> Result<()> {
-    db.patch_run(
+    db.change_run(
         id,
-        &json!({
-            "status": RunStatus::Cancelled,
-            "finishedAt": now(),
-            "accountWaitReason": null,
-            "recoveryPending": false,
-            "retry": null,
-            "wakeup": null,
-        }),
+        crate::runs::RunChanges {
+            status: Some(RunStatus::Cancelled),
+            finished_at: Some(Some(now())),
+            account_wait_reason: Some(None),
+            recovery_pending: Some(false),
+            retry: Some(None),
+            boundary: Some(serde_json::json!({"wakeup": null})),
+            ..Default::default()
+        },
     )?;
     if run["retry"]["nextAttemptAt"].is_number() {
         db.event(id, "status", RunStatus::Cancelled.as_str(), None)?;
@@ -517,16 +534,17 @@ async fn requeue_after_error(store: &Store, run_id: &str, lease: Option<Lease>) 
                 checkpoint.settled = Some(Some(settled));
             }
             checkpoint.store_in(db, &id)?;
-            let mut patch = json!({
-                "status": RunStatus::Queued,
-                "recoveryPending": true,
-                "finishedAt": null,
-                "accountWaitReason": "Recovering after a worker error.",
-            });
+            let mut patch = crate::runs::RunChanges {
+                status: Some(RunStatus::Queued),
+                recovery_pending: Some(true),
+                finished_at: Some(None),
+                account_wait_reason: Some(Some("Recovering after a worker error.".into())),
+                ..Default::default()
+            };
             if let Some(lease) = lease {
-                patch["accountId"] = lease.account_id.into();
+                patch.account_id = Some(Some((lease.account_id).to_owned()));
             }
-            db.patch_run(&id, &patch)?;
+            db.change_run(&id, patch)?;
             Ok(())
         })
         .await
@@ -644,13 +662,20 @@ mod tests {
             });
             service
                 .store
-                .patch_run(
+                .change_run(
                     &run_id,
-                    json!({
-                        "status": if queued { "queued" } else { "waiting" },
-                        "recoveryPending": queued, "trigger": "manual", "sessionId": "saved",
-                        "isolated": true, "wakeup": wakeup,
-                    }),
+                    crate::runs::RunChanges {
+                        status: Some(if queued {
+                            RunStatus::Queued
+                        } else {
+                            RunStatus::Waiting
+                        }),
+                        recovery_pending: Some(queued),
+                        trigger: Some(("manual").to_owned()),
+                        session_id: Some(Some("saved".into())),
+                        boundary: Some(serde_json::json!({"isolated": true,"wakeup": wakeup})),
+                        ..Default::default()
+                    },
                 )
                 .await
                 .unwrap();
@@ -735,12 +760,15 @@ mod tests {
                 for settled in [false, true] {
                     // A stale recovery snapshot preceded this cancellation. Completion
                     // must read it in the same transaction that writes the next state.
-                    db.patch_run(
+                    db.change_run(
                         "mission",
-                        &json!({
-                            "status": "queued", "recoveryPending": true,
-                            "cancelRequestedAt": now(), "wakeup": null,
-                        }),
+                        crate::runs::RunChanges {
+                            status: Some(cairn_contracts::RunStatus::Queued),
+                            recovery_pending: Some(true),
+                            cancel_requested_at: Some(Some(now())),
+                            boundary: Some(serde_json::json!({"wakeup": null})),
+                            ..Default::default()
+                        },
                     )?;
                     let mut checkpoint = checkpoint.clone();
                     if settled {
@@ -940,9 +968,7 @@ mod tests {
     #[tokio::test]
     async fn a_retry_that_expires_during_preparation_cannot_register() {
         let (_root, service, _chat_id, run_id, workspace) = fixture().await;
-        let prepared = service.store.patch_run(&run_id, json!({
-            "retry": { "attempt": 1, "limit": 5, "nextAttemptAt": now() - 1, "deadlineAt": now() + 60_000 },
-        })).await.unwrap();
+        let prepared = service.store.change_run(&run_id,crate::runs::RunChanges { retry : Some(Some(serde_json::from_value(json!({ "attempt": 1, "limit": 5, "nextAttemptAt": now() - 1, "deadlineAt": now() + 60_000, "cause": {"kind":"timeout","message":"temporary"} })).unwrap())), ..Default::default() }).await.unwrap();
         // Admission captured an eligible run, then waits behind asynchronous work.
         let active = service.worker.active.lock().await;
         let registration = service
@@ -956,7 +982,17 @@ mod tests {
         .await;
         service
             .store
-            .patch_run(&run_id, json!({ "retry": { "deadlineAt": now() - 1 } }))
+            .change_run(
+                &run_id,
+                crate::runs::RunChanges {
+                    retry: Some({
+                        let mut retry = service.store.run_state(&run_id).await.unwrap().retry;
+                        retry.as_mut().unwrap().deadline_at = Some(now() - 1);
+                        retry
+                    }),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         drop(active);
@@ -1065,7 +1101,7 @@ mod tests {
             .unwrap();
         let prepared = service
             .store
-            .patch_run(
+            .update_run_boundary(
                 &run_id,
                 json!({
                     "snapshot": { "agent": source },
@@ -1076,7 +1112,13 @@ mod tests {
             .unwrap();
         service
             .store
-            .patch_run(&run_id, json!({ "status": RunStatus::Cancelled }))
+            .change_run(
+                &run_id,
+                crate::runs::RunChanges {
+                    status: Some(RunStatus::Cancelled),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         service

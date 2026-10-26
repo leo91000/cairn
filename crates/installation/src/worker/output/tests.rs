@@ -113,7 +113,7 @@ async fn runtime_disk_notice_preserves_publication_metadata_and_redacts_all_payl
     fixture
         .service
         .store
-        .patch_run(&fixture.id, json!({ "storage": storage }))
+        .update_run_boundary(&fixture.id, json!({ "storage": storage }))
         .await
         .unwrap();
     fixture
@@ -130,7 +130,7 @@ async fn runtime_disk_notice_preserves_publication_metadata_and_redacts_all_payl
     fixture
         .service
         .store
-        .patch_run(
+        .update_run_boundary(
             &fixture.id,
             json!({ "storage": { "mode": "on-demand", "dirtyBytes": 0 } }),
         )
@@ -765,7 +765,7 @@ async fn a_completed_outcome_retires_questions_but_input_needed_and_old_reports_
         fixture
             .service
             .store
-            .patch_run(
+            .update_run_boundary(
                 &fixture.id,
                 json!({
                     "chatExecution": { "messageId": "current" },

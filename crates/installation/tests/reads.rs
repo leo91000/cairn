@@ -1,3 +1,4 @@
+use crate::common::run_fixture::RunFixture;
 use common::MissionFixture;
 
 mod common;
@@ -630,7 +631,7 @@ async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_agai
     let stored = app
         .service
         .store
-        .patch_run(&run, blocked("blocked"))
+        .change_run_fixture(&run, blocked("blocked"))
         .await
         .unwrap();
     let finished_at = stored["finishedAt"].as_i64().unwrap();
@@ -650,7 +651,7 @@ async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_agai
     // Input the agent asked for can only be snoozed.
     app.service
         .store
-        .patch_run(&run, blocked("needs_input"))
+        .change_run_fixture(&run, blocked("needs_input"))
         .await
         .unwrap();
     assert!(app.dismissal(&app.owner, &run).await.is_null());
@@ -672,7 +673,7 @@ async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_agai
     let next = app.finished_run(task_id, "mcp", RunStatus::Succeeded).await;
     app.service
         .store
-        .patch_run(&next, blocked("blocked"))
+        .change_run_fixture(&next, blocked("blocked"))
         .await
         .unwrap();
     let runs = app.get(&app.owner, "/api/tasks/activity").await;

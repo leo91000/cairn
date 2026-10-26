@@ -172,7 +172,13 @@ async fn assert_large_metadata_is_chunked_consistently(
     cursor: &Value,
 ) {
     s.store
-        .patch_run(run, json!({ "summary": "\0".repeat(800_000) }))
+        .change_run(
+            run,
+            cairn_installation::runs::RunChanges {
+                summary: Some(("\0".repeat(800_000)).to_owned()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let response = mcp
@@ -189,7 +195,13 @@ async fn assert_large_metadata_is_chunked_consistently(
     let chunk = result(&response);
     assert!(chunk["nextOffset"].as_u64().unwrap() > 0);
     s.store
-        .patch_run(run, json!({ "summary": "Updated result" }))
+        .change_run(
+            run,
+            cairn_installation::runs::RunChanges {
+                summary: Some(("Updated result").to_owned()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let continuation = json!({
@@ -478,7 +490,13 @@ async fn agents_manage_connections_through_the_self_gateway_without_deadlocks_or
     let run = manual_run(&s, "Manage", "Manage connections").await;
     let run_id = run["id"].as_str().unwrap();
     s.store
-        .patch_run(run_id, json!({ "status": RunStatus::Running }))
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Running),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();

@@ -118,7 +118,7 @@ async fn main() -> Result<()> {
                 "run" => db.run(string(0))?.unwrap_or(Value::Null),
                 "runs" => db.runs(None, None, 10000, 0, true)?.into(),
                 "addRun" => db.add_run(&arg(0), None)?,
-                "updateRun" => db.patch_run(string(0), &arg(1))?,
+                "updateRun" => run_fixture::change_run_fixture(db, string(0), &arg(1))?,
                 "events" => db
                     .events(
                         string(0),
@@ -185,3 +185,6 @@ async fn open_store(directory: &std::path::Path) -> Result<Store> {
     }
     unreachable!()
 }
+
+#[path = "../tests/common/run_fixture.rs"]
+mod run_fixture;

@@ -258,7 +258,7 @@ pub(super) async fn record(
         // Capacity is runtime diagnostic state, separate from the controller's
         // authoritative storage document refreshed by the publication monitor.
         s.store
-            .patch_run(id, serde_json::json!({ "diskCapacity": event["capacity"] }))
+            .update_run_boundary(id, serde_json::json!({ "diskCapacity": event["capacity"] }))
             .await?;
         s.store.event(id, "status", &message, Some(event)).await?;
         return Ok(false);
@@ -288,7 +288,7 @@ pub(super) async fn record(
             let mut execution = run["chatExecution"].clone();
             execution["recovery"] = false.into();
             s.store
-                .patch_run(id, serde_json::json!({ "chatExecution": execution }))
+                .update_run_boundary(id, serde_json::json!({ "chatExecution": execution }))
                 .await?;
         }
 
@@ -423,8 +423,12 @@ async fn apply_event(
             .await?;
     }
     if event["type"] == "thread.started" && event["thread_id"].is_string() {
-        let patch = serde_json::json!({ "sessionId": event["thread_id"], "resumeAvailable": true });
-        s.store.patch_run(id, patch).await?;
+        let patch = crate::runs::RunChanges {
+            session_id: Some(serde_json::from_value(event["thread_id"].clone())?),
+            resume_available: Some(true),
+            ..Default::default()
+        };
+        s.store.change_run(id, patch).await?;
     }
     // The latest occupancy of the native session, shown before its history loads.
     if event["type"] == "context.usage" && event["usage"]["contextTokens"].is_u64() {
@@ -452,7 +456,7 @@ async fn apply_event(
         }
         if !event["usage"].is_null() {
             let patch = serde_json::json!({ "usage": event["usage"] });
-            s.store.patch_run(id, patch).await?;
+            s.store.update_run_boundary(id, patch).await?;
         }
     }
     Ok(())

@@ -278,7 +278,13 @@ async fn deletion_waits_for_running_agents_before_removing_their_files() {
     );
     app.service
         .store
-        .patch_run(&run, json!({ "status": RunStatus::Succeeded }))
+        .change_run(
+            &run,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Succeeded),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     app.service.cleanup_conversations().await.unwrap();
@@ -359,7 +365,7 @@ async fn fresh_session_availability_uses_restored_runs_and_keeps_its_lifetime() 
         if historical_chat {
             app.service
                 .store
-                .patch_run(&run, json!({ "restoredAt": 10 }))
+                .update_run_boundary(&run, json!({ "restoredAt": 10 }))
                 .await
                 .unwrap();
         }
@@ -381,7 +387,7 @@ async fn fresh_session_availability_uses_restored_runs_and_keeps_its_lifetime() 
             );
             app.service
                 .store
-                .patch_run(&run, json!({ "restoredAt": 10 }))
+                .update_run_boundary(&run, json!({ "restoredAt": 10 }))
                 .await
                 .unwrap();
         }
@@ -394,7 +400,13 @@ async fn fresh_session_availability_uses_restored_runs_and_keeps_its_lifetime() 
         ] {
             app.service
                 .store
-                .patch_run(&run, json!({ "status": status }))
+                .change_run(
+                    &run,
+                    cairn_installation::runs::RunChanges {
+                        status: Some(status),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .unwrap();
             assert_eq!(app.get(&path).await.1["canRequestNewSession"], available);

@@ -75,11 +75,13 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
         .unwrap();
     let mut original_snapshot = run["snapshot"].clone();
     s.store
-        .patch_run(
+        .change_run(
             run["id"].as_str().unwrap(),
-            json!({
-                "status": "failed", "chatExecution": { "messageId": id() },
-            }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Failed),
+                boundary: Some(serde_json::json!({"chatExecution": { "messageId": id() }})),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -246,10 +248,26 @@ async fn merge_rejects_busy_recovering_and_unsettled_workers_without_mutation() 
             .enqueue(task["id"].as_str().unwrap(), "manual", None)
             .await
             .unwrap();
-        s.store.patch_run(run["id"].as_str().unwrap(), json!({
-            "status": if state == "queued" || state == "running" { state } else { "succeeded" },
-            "recoveryPending": state == "recovering",
-        })).await.unwrap();
+        s.store
+            .change_run(
+                run["id"].as_str().unwrap(),
+                cairn_installation::runs::RunChanges {
+                    status: Some(
+                        cairn_contracts::RunStatus::parse(
+                            if state == "queued" || state == "running" {
+                                state
+                            } else {
+                                "succeeded"
+                            },
+                        )
+                        .unwrap(),
+                    ),
+                    recovery_pending: Some(state == "recovering"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         if state == "settling" {
             s.worker.active.lock().await.insert(
                 run["id"].as_str().unwrap().to_owned(),
@@ -441,9 +459,12 @@ async fn merge_http_is_owner_only_and_both_mcp_interfaces_have_the_same_effect()
                     .unwrap();
                 let caller = s
                     .store
-                    .patch_run(
+                    .change_run(
                         caller["id"].as_str().unwrap(),
-                        json!({ "status": RunStatus::Running }),
+                        cairn_installation::runs::RunChanges {
+                            status: Some(RunStatus::Running),
+                            ..Default::default()
+                        },
                     )
                     .await
                     .unwrap();

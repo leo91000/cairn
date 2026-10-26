@@ -32,15 +32,15 @@ pub(super) async fn schedule(
     s.store
         .transaction(move |db| {
             let run = db
-                .run(&id)?
+                .run_state(&id)?
                 .ok_or_else(|| Error::not_found("Run not found"))?;
-            if !run["cancelRequestedAt"].is_null()
-                || (!run["sessionId"].is_string() && !cause.startup)
-                || !RunStatus::of(&run).is_some_and(RunStatus::is_active)
+            if run.cancel_requested_at.is_some()
+                || (run.session_id.is_none() && !cause.startup)
+                || !run.status.is_active()
             {
                 return Ok(false);
             }
-            let previous = run.get("retry").filter(|retry| retry.is_object());
+            let previous = run.retry.as_ref();
             let Some(retry) = Retry::next(previous, cause, now()) else {
                 return Ok(false);
             };
@@ -50,17 +50,18 @@ pub(super) async fn schedule(
                 "Temporary agent error. Retrying in {seconds} seconds (attempt {}/{}).",
                 retry.attempt, retry.limit
             );
-            let patch = json!({
-                "status": RunStatus::Queued,
-                "retry": retry,
-                "recoveryPending": true,
-                "resumeAvailable": true,
-                "finishedAt": null,
-                "error": null,
-                "accountWaitReason": reason,
-                "accountRequired": null,
-            });
-            db.patch_run(&id, &patch)?;
+            let patch = crate::runs::RunChanges {
+                status: Some(RunStatus::Queued),
+                retry: Some(Some(retry.clone())),
+                recovery_pending: Some(true),
+                resume_available: Some(true),
+                finished_at: Some(None),
+                error: Some(None),
+                account_wait_reason: Some(Some((reason).to_owned())),
+                account_required: Some(None),
+                ..Default::default()
+            };
+            db.change_run(&id, patch)?;
             db.event(
                 &id,
                 "retry.scheduled",
@@ -83,11 +84,11 @@ pub(super) async fn expire(s: &Service, id: &str) -> Result<bool> {
 /// fenced the previous execution before entering the transaction.
 pub(super) fn expire_in(db: &Db<'_>, id: &str) -> Result<bool> {
     let run = db
-        .run(id)?
+        .run_state(id)?
         .ok_or_else(|| Error::not_found("Run not found"))?;
-    if run["status"] != RunStatus::Queued
-        || !run["cancelRequestedAt"].is_null()
-        || !Retry::expired(&run, now())
+    if run.status != RunStatus::Queued
+        || run.cancel_requested_at.is_some()
+        || !Retry::expired(run.retry.as_ref(), now())
     {
         return Ok(false);
     }
@@ -97,19 +98,22 @@ pub(super) fn expire_in(db: &Db<'_>, id: &str) -> Result<bool> {
         Err(error) => return Err(error),
     }
     let message = "Automatic recovery reached its 10-minute limit. Your conversation and files are preserved; resume when ready.";
-    let mut retry = run["retry"].clone();
-    retry["nextAttemptAt"] = serde_json::Value::Null;
-    db.patch_run(
+    let mut retry = run.retry;
+    if let Some(retry) = &mut retry {
+        retry.next_attempt_at = None;
+    }
+    db.change_run(
         id,
-        &json!({
-            "status": RunStatus::Failed,
-            "finishedAt": now(),
-            "error": message,
-            "summary": message,
-            "accountWaitReason": null,
-            "recoveryPending": false,
-            "retry": retry,
-        }),
+        crate::runs::RunChanges {
+            status: Some(RunStatus::Failed),
+            finished_at: Some(Some(now())),
+            error: Some(Some((message).to_owned())),
+            summary: Some((message).to_owned()),
+            account_wait_reason: Some(None),
+            recovery_pending: Some(false),
+            retry: Some(retry),
+            ..Default::default()
+        },
     )?;
     db.event(id, "status", RunStatus::Failed.as_str(), None)?;
     Ok(true)

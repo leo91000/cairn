@@ -282,7 +282,7 @@ async fn writes_serialize_and_failed_transactions_roll_back() {
 /// The worker integration tests patch a run from a second process while the
 /// worker patches the same run. Neither writer may drop the other's fields.
 #[tokio::test]
-async fn run_patches_from_two_connections_keep_every_field() {
+async fn run_transitions_from_two_connections_preserve_each_others_fields() {
     const PATCHES: usize = 200;
 
     let root = TempDir::new().unwrap();
@@ -301,8 +301,19 @@ async fn run_patches_from_two_connections_keep_every_field() {
         let run_id = run_id.clone();
         tokio::spawn(async move {
             for index in 0..PATCHES {
-                let patch = json!({ format!("{name}-{index}"): index });
-                store.patch_run(&run_id, patch).await.unwrap();
+                let value = format!("{name}-{index}");
+                let change = if name == "first" {
+                    cairn_installation::runs::RunChanges {
+                        summary: Some(value),
+                        ..Default::default()
+                    }
+                } else {
+                    cairn_installation::runs::RunChanges {
+                        account_wait_reason: Some(Some(value)),
+                        ..Default::default()
+                    }
+                };
+                store.change_run(&run_id, change).await.unwrap();
             }
         })
     });
@@ -310,13 +321,12 @@ async fn run_patches_from_two_connections_keep_every_field() {
         writer.await.unwrap();
     }
 
-    let patched = first.run(&run_id).await.unwrap();
-    let missing = ["first", "second"]
-        .iter()
-        .flat_map(|name| (0..PATCHES).map(move |index| format!("{name}-{index}")))
-        .filter(|field| patched[field].is_null())
-        .collect::<Vec<_>>();
-    assert!(missing.is_empty(), "Lost run fields: {missing:?}");
+    let state = first.run_state(&run_id).await.unwrap();
+    assert_eq!(state.summary, format!("first-{}", PATCHES - 1));
+    assert_eq!(
+        state.account_wait_reason,
+        Some(format!("second-{}", PATCHES - 1))
+    );
 }
 
 #[tokio::test]

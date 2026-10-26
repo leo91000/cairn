@@ -89,7 +89,13 @@ impl Fixture {
         let run = s.chat_detail(&chat).await.unwrap()["run"].clone();
         let run_id = text(&run, "id").to_owned();
         s.store
-            .patch_run(&run_id, json!({ "status": "running" }))
+            .change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         s.chat_acknowledge(&run_id, &message).await.unwrap();
@@ -127,7 +133,13 @@ impl Fixture {
         f.run = text(&run, "id").to_owned();
         let run =
             f.s.store
-                .patch_run(&f.run, json!({ "status": "running" }))
+                .change_run(
+                    &f.run,
+                    cairn_installation::runs::RunChanges {
+                        status: Some(cairn_contracts::RunStatus::Running),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .unwrap();
         let config = f.s.mcps.run_configuration(&f.s, &run).await.unwrap();
@@ -153,12 +165,15 @@ impl Fixture {
     async fn park_mission(&self) {
         self.s
             .store
-            .patch_run(
+            .change_run(
                 &self.run,
-                json!({
-                    "status": "waiting", "recoveryPending": false,
-                    "sessionId": "saved-session", "workspace": "/saved/workspace",
-                }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Waiting),
+                    recovery_pending: Some(false),
+                    session_id: Some(Some("saved-session".into())),
+                    workspace: Some(Some("/saved/workspace".into())),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -211,9 +226,20 @@ impl Fixture {
     }
 
     async fn finish(&self) {
-        self.s.store.patch_run(&self.run, json!({
-            "status": "succeeded", "recoveryPending": false, "sessionId": "saved-session", "workspace": "/saved/workspace",
-        })).await.unwrap();
+        self.s
+            .store
+            .change_run(
+                &self.run,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Succeeded),
+                    recovery_pending: Some(false),
+                    session_id: Some(Some("saved-session".into())),
+                    workspace: Some(Some("/saved/workspace".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
     }
 
     async fn tick(&self) -> Value {
@@ -251,9 +277,13 @@ async fn run_wait_survives_restart_and_only_resumes_after_target_completion() {
         wait["wakeup"]
     );
     f.s.store
-        .patch_run(
+        .change_run(
             text(&target, "id"),
-            json!({ "status": "succeeded", "finishedAt": now() }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Succeeded),
+                finished_at: Some(Some(now())),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -305,7 +335,13 @@ async fn installation_access_can_wait_for_another_agents_run() {
     assert_eq!(wait["deferred"], true);
     f.finish().await;
     f.s.store
-        .patch_run(text(&target, "id"), json!({ "status": "succeeded" }))
+        .change_run(
+            text(&target, "id"),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Succeeded),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let resumed = f.tick().await;
@@ -319,7 +355,13 @@ async fn already_finished_sources_return_results_without_scheduling_or_ending_th
         let f = Fixture::new().await;
         let target = f.target().await;
         f.s.store
-            .patch_run(text(&target, "id"), json!({ "status": status }))
+            .change_run(
+                text(&target, "id"),
+                cairn_installation::runs::RunChanges {
+                    status: Some(status),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         wait_for::schedule(
@@ -443,14 +485,14 @@ async fn github_monitor_only_probes_resumable_wakeups() {
         ("chatExecution", json!({ "messageId": "another-turn" })),
     ] {
         f.s.store
-            .patch_run(&f.run, json!({ (field): value }))
+            .update_run_boundary(&f.run, json!({ (field): value }))
             .await
             .unwrap();
         conditions::poll_once(&f.s).await.unwrap();
         assert_eq!(f.calls().len(), 1, "run guard: {field}");
         assert_eq!(f.s.get("chats", &f.chat).await.unwrap(), chat);
         f.s.store
-            .patch_run(&f.run, json!({ (field): run[field] }))
+            .update_run_boundary(&f.run, json!({ (field): run[field] }))
             .await
             .unwrap();
     }
@@ -638,7 +680,7 @@ async fn delay_replaces_condition_waits_and_private_tokens_follow_agent_identity
     let mut other = target.clone();
     other["snapshot"]["agent"]["id"] = id().into();
     f.s.store
-        .patch_run(
+        .update_run_boundary(
             text(&target, "id"),
             json!({ "snapshot": other["snapshot"] }),
         )
@@ -684,7 +726,13 @@ async fn deferred_target_conversations_are_not_finished_and_cycles_are_rejected(
     });
     f.s.store.put("chats", other.clone()).await.unwrap();
     f.s.store
-        .patch_run(text(&target, "id"), json!({ "status": "succeeded" }))
+        .change_run(
+            text(&target, "id"),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Succeeded),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let input = json!({ "conditions": [{ "type": "run_finished", "runId": target["id"] }], "timeoutSeconds": 420, "reason": "Join other work" });
@@ -890,7 +938,13 @@ async fn watchers_share_requests_only_for_the_same_granted_project_origin() {
         let mut run = f.s.chat_detail(chat).await.unwrap()["run"].clone();
         run =
             f.s.store
-                .patch_run(text(&run, "id"), json!({ "status": "running" }))
+                .change_run(
+                    text(&run, "id"),
+                    cairn_installation::runs::RunChanges {
+                        status: Some(cairn_contracts::RunStatus::Running),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .unwrap();
         f.s.chat_acknowledge(text(&run, "id"), &message)
@@ -907,7 +961,13 @@ async fn watchers_share_requests_only_for_the_same_granted_project_origin() {
         .await
         .unwrap();
         f.s.store
-            .patch_run(text(&run, "id"), json!({ "status": "succeeded" }))
+            .change_run(
+                text(&run, "id"),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Succeeded),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         assert_eq!(f.calls().len(), 2);
@@ -947,13 +1007,26 @@ async fn all_existing_cancellation_paths_also_invalidate_condition_waits() {
             "failure" => {
                 f.s.chat_pause(&f.chat, true).await.unwrap();
                 f.s.store
-                    .patch_run(&f.run, json!({ "status": "failed" }))
+                    .change_run(
+                        &f.run,
+                        cairn_installation::runs::RunChanges {
+                            status: Some(cairn_contracts::RunStatus::Failed),
+                            ..Default::default()
+                        },
+                    )
                     .await
                     .unwrap();
             }
             "new_session" => {
                 f.s.store
-                    .patch_run(&f.run, json!({ "status": "failed", "restoredAt": now() }))
+                    .change_run(
+                        &f.run,
+                        cairn_installation::runs::RunChanges {
+                            status: Some(cairn_contracts::RunStatus::Failed),
+                            boundary: Some(serde_json::json!({"restoredAt": now()})),
+                            ..Default::default()
+                        },
+                    )
                     .await
                     .unwrap();
                 f.s.chat_new_session(&f.chat, true).await.unwrap();
@@ -1057,7 +1130,13 @@ async fn scoped_agent_token_removal_never_falls_back_to_shared_credentials() {
     f.s.chat_tick(&HashSet::new()).await.unwrap();
     let run = f.s.chat_detail(chat_id).await.unwrap()["run"].clone();
     f.s.store
-        .patch_run(text(&run, "id"), json!({ "status": "running" }))
+        .change_run(
+            text(&run, "id"),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     f.s.chat_acknowledge(text(&run, "id"), &message)
@@ -1077,7 +1156,13 @@ async fn scoped_agent_token_removal_never_falls_back_to_shared_credentials() {
     assert_eq!(f.calls()[0]["token"], "fixture-only-token");
     assert!(!result.to_string().contains("fixture-only-token"));
     f.s.store
-        .patch_run(text(&run, "id"), json!({ "status": "succeeded" }))
+        .change_run(
+            text(&run, "id"),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Succeeded),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     connections::remove(&f.s, "github", &dedicated)
@@ -1259,7 +1344,13 @@ async fn mission_plugin_wait_survives_restart_and_resumes_on_the_pinned_result()
     // Even a retained credential from the previous turn cannot act in the next one.
     restarted
         .store
-        .patch_run(&f.run, json!({ "status": "running" }))
+        .change_run(
+            &f.run,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert!(
@@ -1307,7 +1398,7 @@ async fn missions_share_dependency_cycle_detection_with_conversations() {
     let f = Fixture::mission().await;
     let target = f.target().await;
     f.s.store
-        .patch_run(
+        .update_run_boundary(
             text(&target, "id"),
             json!({
                 "wakeup": { "condition": { "type": "run_finished", "runId": f.run } },
@@ -1333,7 +1424,13 @@ async fn mission_dependency_wait_observes_completion_and_not_another_missions_wa
     let f = Fixture::mission().await;
     let target = f.target().await;
     f.s.store
-        .patch_run(text(&target, "id"), json!({ "status": "waiting" }))
+        .change_run(
+            text(&target, "id"),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Waiting),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let wait = f
@@ -1343,9 +1440,13 @@ async fn mission_dependency_wait_observes_completion_and_not_another_missions_wa
     f.park_mission().await;
     assert_eq!(f.mission_tick().await["status"], "waiting");
     f.s.store
-        .patch_run(
+        .change_run(
             text(&target, "id"),
-            json!({ "status": "failed", "finishedAt": now() }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Failed),
+                finished_at: Some(Some(now())),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();

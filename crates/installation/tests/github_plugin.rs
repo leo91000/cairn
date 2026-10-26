@@ -344,7 +344,13 @@ async fn granted_agents_see_github_conditions_and_others_do_not() {
     let run = run(&f.s, &agent_id).await;
     let run =
         f.s.store
-            .patch_run(text(&run, "id"), json!({ "status": "running" }))
+            .change_run(
+                text(&run, "id"),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
     let config = f.s.mcps.run_configuration(&f.s, &run).await.unwrap();

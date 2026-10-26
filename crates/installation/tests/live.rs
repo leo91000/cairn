@@ -221,7 +221,13 @@ async fn cached_resume_drains_backlog_without_waiting_between_live_batches() {
     let f = Fixture::new().await;
     f.service
         .store
-        .patch_run(&f.run, json!({ "trigger": "chat" }))
+        .change_run(
+            &f.run,
+            cairn_installation::runs::RunChanges {
+                trigger: Some(("chat").to_owned()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let mut chat = f.service.chat_create(json!({})).await.unwrap();
@@ -290,7 +296,13 @@ async fn following_viewer_resumes_a_long_backlog_on_the_recent_window() {
     let f = Fixture::new().await;
     f.service
         .store
-        .patch_run(&f.run, json!({ "trigger": "chat" }))
+        .change_run(
+            &f.run,
+            cairn_installation::runs::RunChanges {
+                trigger: Some(("chat").to_owned()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let mut chat = f.service.chat_create(json!({})).await.unwrap();
@@ -387,7 +399,13 @@ async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
     let f = Fixture::new().await;
     f.service
         .store
-        .patch_run(&f.run, json!({ "trigger": "chat" }))
+        .change_run(
+            &f.run,
+            cairn_installation::runs::RunChanges {
+                trigger: Some(("chat").to_owned()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let mut chat = f.service.chat_create(json!({})).await.unwrap();
@@ -652,9 +670,13 @@ async fn metadata_shutdown_and_invalid_requests() {
     stream.batch().await;
     f.service
         .store
-        .patch_run(
+        .change_run(
             &f.run,
-            json!({ "status": RunStatus::Succeeded, "result": "Done" }),
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Succeeded),
+                boundary: Some(serde_json::json!({"result": "Done"})),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();

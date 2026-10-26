@@ -647,7 +647,7 @@ async fn reconcile_node(s: &Service, node_id: &str) -> Result<()> {
                     if let Some(run_record) = db.run(run.as_str().unwrap_or(""))?
                         && run_record["suspendedByExclusive"] != public(&current)
                     {
-                        db.patch_run(
+                        db.update_run_boundary(
                             run.as_str().unwrap(),
                             &json!({ "suspendedByExclusive": public(&current) }),
                         )?;
@@ -734,7 +734,7 @@ fn clear_suspensions(db: &Db<'_>, record: &Value) -> Result<()> {
         if let Some(run) = db.run(run_id)?
             && run["suspendedByExclusive"]["id"] == record["id"]
         {
-            db.patch_run(run_id, &json!({ "suspendedByExclusive": null }))?;
+            db.update_run_boundary(run_id, &json!({ "suspendedByExclusive": null }))?;
         }
     }
     Ok(())

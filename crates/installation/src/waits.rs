@@ -978,7 +978,7 @@ impl Owner {
             db.put("chats", &self.record)?;
             Ok(())
         } else {
-            db.patch_run(
+            db.update_run_boundary(
                 text(&self.record, "id"),
                 &json!({ "wakeup": self.record["wakeup"] }),
             )?;
@@ -1054,22 +1054,7 @@ pub(crate) async fn tick_missions(s: &Service, active: &HashSet<String>) -> Resu
                 db.set(&key, &checkpoint, None)?;
                 let mut wakeup = run["wakeup"].clone();
                 wakeup["observation"] = observed;
-                db.patch_run(
-                    &run_id,
-                    &json!({
-                        "status": RunStatus::Queued,
-                        "missionTurnId": wakeup["id"],
-                        "waitContinuation": wakeup,
-                        "wakeup": null,
-                        "recoveryPending": true,
-                        "finishedAt": null,
-                        "outcome": null,
-                        "summary": "",
-                        "error": null,
-                        "retry": null,
-                        "accountWaitReason": null,
-                    }),
-                )?;
+                db.change_run(&run_id,crate::runs::RunChanges { status : Some(RunStatus::Queued), recovery_pending : Some(true), finished_at : Some(None), summary : Some(("").to_owned()), error : Some(None), retry : Some(None), account_wait_reason : Some(None), boundary: Some(serde_json::json!({"missionTurnId": wakeup["id"],"waitContinuation": wakeup,"wakeup": null,"outcome": null})), ..Default::default() })?;
                 db.event(
                     &run_id,
                     "run.wakeup",

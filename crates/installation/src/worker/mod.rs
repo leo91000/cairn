@@ -188,27 +188,30 @@ fn restore_after_restart(db: &mut Db<'_>) -> Result<()> {
             // Waiting was committed before fencing and release. A restart must
             // finish that cleanup even when the wakeup is still far away.
             if run["status"] == RunStatus::Waiting || !run["cancelRequestedAt"].is_null() {
-                db.patch_run(id, &json!({ "recoveryPending": true }))?;
+                db.change_run(
+                    id,
+                    crate::runs::RunChanges {
+                        recovery_pending: Some(true),
+                        ..Default::default()
+                    },
+                )?;
             }
             continue;
         }
         if db.kv(&checkpoint::key(id))?.is_none() && !run["startedAt"].is_null() {
-            let patch = json!({
-                "status": RunStatus::Interrupted,
-                "finishedAt": now(),
-                "summary": "This run has no restart checkpoint. Review its working files before retrying.",
-            });
-            db.patch_run(id, &patch)?;
+            let patch = crate::runs::RunChanges { status : Some(RunStatus::Interrupted), finished_at : Some(Some(now())), summary : Some(("This run has no restart checkpoint. Review its working files before retrying.").to_owned()), ..Default::default() };
+            db.change_run(id, patch)?;
             continue;
         }
-        let patch = json!({
-            "status": RunStatus::Queued,
-            "recoveryPending": true,
-            "finishedAt": null,
-            "capacityWaitUntil": null,
-            "accountWaitReason": "Recovering after worker restart.",
-        });
-        db.patch_run(id, &patch)?;
+        let patch = crate::runs::RunChanges {
+            status: Some(RunStatus::Queued),
+            recovery_pending: Some(true),
+            finished_at: Some(None),
+            capacity_wait_until: Some(None),
+            account_wait_reason: Some(Some("Recovering after worker restart.".into())),
+            ..Default::default()
+        };
+        db.change_run(id, patch)?;
         db.event(id, "status", "Recovering after worker restart", None)?;
     }
     Ok(())

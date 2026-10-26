@@ -592,7 +592,7 @@ mod tests {
                     }),
                 )?;
                 let current_run =
-                    db.patch_run("run", &json!({ "snapshot": { "agent": target } }))?;
+                    db.update_run_boundary("run", &json!({ "snapshot": { "agent": target } }))?;
                 let stale_denial =
                     crate::waits::access(db, &captured_run, &chat["wakeup"]["condition"])
                         .unwrap_err();

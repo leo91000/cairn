@@ -613,7 +613,7 @@ fn claim_reservation(
     held["runtimeId"] = record["runtimeId"].clone();
     held["leaseExpiresAt"] = (now() + RESERVATION_LEASE_MS).into();
     db.put("node-attempts", &held)?;
-    db.patch_run(request.run_id(), &json!({ "moveReservation": null }))?;
+    db.update_run_boundary(request.run_id(), &json!({ "moveReservation": null }))?;
     let placement = Placement {
         native_mode: held["nativeMode"].clone(),
         node_id: &held["nodeId"],
@@ -816,7 +816,7 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
         if record["moveRequest"].is_object() || record["moveReservation"].is_string() {
             return Err(Error::conflict("Wait for the current movement to finish."));
         }
-        record = db.patch_run(run, &serde_json::to_value(&selection)?)?;
+        record = db.update_run_boundary(run, &serde_json::to_value(&selection)?)?;
         db.audit(
             "node.placement.configured",
             &json!({

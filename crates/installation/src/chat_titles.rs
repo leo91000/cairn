@@ -742,7 +742,13 @@ mod tests {
         let root = tempfile::TempDir::new().unwrap();
         let s = service(&root, "ready").await;
         s.store
-            .patch_run("run", json!({ "status": "running" }))
+            .change_run(
+                "run",
+                crate::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         tick(&s).await.unwrap();
@@ -754,7 +760,13 @@ mod tests {
                 .is_none()
         );
         s.store
-            .patch_run("run", json!({ "status": "succeeded" }))
+            .change_run(
+                "run",
+                crate::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Succeeded),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         s.store

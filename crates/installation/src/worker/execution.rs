@@ -101,12 +101,13 @@ async fn record_failure(
         checkpoint
             .update(|state| state.capacity_retry_at = Some(now() + CONTROLLER_CAPACITY_RETRY_MS))
             .await?;
-        let patch = json!({
-            "status": RunStatus::Queued,
-            "recoveryPending": true,
-            "finishedAt": null,
-        });
-        let run = s.store.patch_run(run_id, patch).await?;
+        let patch = crate::runs::RunChanges {
+            status: Some(RunStatus::Queued),
+            recovery_pending: Some(true),
+            finished_at: Some(None),
+            ..Default::default()
+        };
+        let run = s.store.change_run(run_id, patch).await?;
         return super::schedule::report_capacity_wait(s, &run, &error.message).await;
     }
     let saved = checkpoint.snapshot().await;
@@ -132,11 +133,11 @@ async fn record_failure(
             .update(|c| c.settled = Some(Some(settled)))
             .await?;
     }
-    let mut patch = failure_patch(status, needs_fence, &summary);
+    let mut patch = failure_changes(status, needs_fence, &summary);
     if status != RunStatus::Queued {
-        patch["wakeup"] = Value::Null;
+        patch.boundary = Some(json!({ "wakeup": null }));
     }
-    s.store.patch_run(run_id, patch).await?;
+    s.store.change_run(run_id, patch).await?;
     let kind = if s.shutdown.is_cancelled() {
         "status"
     } else {
@@ -171,7 +172,7 @@ async fn recovers_controller(
 
 /// A run whose VM may still be running stays queued for recovery; its final
 /// fields are settled from the checkpoint once the VM is fenced.
-fn failure_patch(status: RunStatus, needs_fence: bool, summary: &str) -> Value {
+fn failure_changes(status: RunStatus, needs_fence: bool, summary: &str) -> crate::runs::RunChanges {
     let recovery_pending = needs_fence || status == RunStatus::Queued;
     let finished_at = (!recovery_pending).then(now);
     let error = (status == RunStatus::Failed).then_some(summary);
@@ -187,14 +188,15 @@ fn failure_patch(status: RunStatus, needs_fence: bool, summary: &str) -> Value {
     } else {
         status
     };
-    json!({
-        "status": status,
-        "recoveryPending": recovery_pending,
-        "finishedAt": finished_at,
-        "summary": summary,
-        "error": error,
-        "accountWaitReason": wait_reason,
-    })
+    crate::runs::RunChanges {
+        status: Some(status),
+        recovery_pending: Some(recovery_pending),
+        finished_at: Some(finished_at),
+        summary: Some(summary.to_owned()),
+        error: Some(error.map(str::to_owned)),
+        account_wait_reason: Some(wait_reason.map(str::to_owned)),
+        ..Default::default()
+    }
 }
 
 /// Returns whether the execution is confirmed stopped. Otherwise the run is
@@ -219,17 +221,23 @@ async fn fence(s: &Service, checkpoint: &Checkpoint) -> Result<bool> {
             .update(|c| c.settled = Some(Some(settled)))
             .await?;
     }
-    let patch = json!({
-        "status": RunStatus::Queued,
-        "recoveryPending": true,
-        "finishedAt": null,
-        "accountWaitReason": if text(&current, "accountWaitReason").starts_with(super::schedule::CAPACITY_WAIT_REASON) {
-            text(&current, "accountWaitReason")
-        } else {
-            VM_STOP_WAIT_REASON
-        },
-    });
-    s.store.patch_run(run_id, patch).await?;
+    let patch = crate::runs::RunChanges {
+        status: Some(RunStatus::Queued),
+        recovery_pending: Some(true),
+        finished_at: Some(None),
+        account_wait_reason: Some(Some(
+            (if text(&current, "accountWaitReason")
+                .starts_with(super::schedule::CAPACITY_WAIT_REASON)
+            {
+                text(&current, "accountWaitReason")
+            } else {
+                VM_STOP_WAIT_REASON
+            })
+            .to_owned(),
+        )),
+        ..Default::default()
+    };
+    s.store.change_run(run_id, patch).await?;
     Ok(false)
 }
 
@@ -242,7 +250,7 @@ async fn release(
     let run_id = checkpoint.id.as_str();
     let saved = checkpoint.snapshot().await;
     if fenced && let Some(settled) = saved.settled() {
-        s.store.patch_run(run_id, settled.run_patch()?).await?;
+        s.store.change_run(run_id, settled.run_changes()).await?;
     }
     if fenced
         && let Some(account) = account
@@ -298,12 +306,13 @@ async fn requeue_pending_move(s: &Service, checkpoint: &Checkpoint) -> Result<()
             c.settled = Some(None);
         })
         .await?;
-    let patch = json!({
-        "status": RunStatus::Queued,
-        "recoveryPending": true,
-        "finishedAt": null,
-    });
-    s.store.patch_run(run_id, patch).await?;
+    let patch = crate::runs::RunChanges {
+        status: Some(RunStatus::Queued),
+        recovery_pending: Some(true),
+        finished_at: Some(None),
+        ..Default::default()
+    };
+    s.store.change_run(run_id, patch).await?;
     Ok(())
 }
 
@@ -388,9 +397,9 @@ mod tests {
                 .await
                 .settled()
                 .unwrap()
-                .run_patch()
-                .unwrap()["status"],
-            "failed"
+                .run_changes()
+                .status,
+            Some(RunStatus::Failed)
         );
         assert_eq!(
             checkpoint.snapshot().await.controller_recoveries(),

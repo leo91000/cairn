@@ -1,3 +1,4 @@
+use crate::common::run_fixture::RunFixture;
 use common::MissionFixture;
 
 mod common;
@@ -240,7 +241,11 @@ async fn mission_conversion_rejects_unavailable_and_unfinished_conversations_ato
     ] {
         let (_root, service, _task, run) = fixture().await;
         let run_id = text(&run, "id");
-        let original = service.store.patch_run(run_id, patch).await.unwrap();
+        let original = service
+            .store
+            .change_run_fixture(run_id, patch)
+            .await
+            .unwrap();
         assert!(service.chat_from_run(run_id).await.is_err());
         assert!(service.chat_list().await.unwrap().is_empty());
         assert_eq!(service.store.run(run_id).await.unwrap(), original);

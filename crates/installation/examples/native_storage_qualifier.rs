@@ -74,11 +74,23 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
         "publish" | "live-publish" => {
             if command["op"] == "live-publish" {
                 s.store
-                    .patch_run(run_id, json!({ "status": "running" }))
+                    .change_run(
+                        run_id,
+                        cairn_installation::runs::RunChanges {
+                            status: Some(cairn_contracts::RunStatus::Running),
+                            ..Default::default()
+                        },
+                    )
                     .await?;
             } else {
                 s.store
-                    .patch_run(run_id, json!({ "status": "succeeded" }))
+                    .change_run(
+                        run_id,
+                        cairn_installation::runs::RunChanges {
+                            status: Some(cairn_contracts::RunStatus::Succeeded),
+                            ..Default::default()
+                        },
+                    )
                     .await?;
                 publication::request(s, run_id).await?;
             }

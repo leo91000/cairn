@@ -342,7 +342,7 @@ impl Service {
             }
             chat["paused"] = true.into();
             db.put("chats", &chat)?;
-            db.patch_run(text(&run, "id"), &json!({ "backendMigration": migration, "backendMigrationError": null }))?;
+            db.update_run_boundary(text(&run, "id"), &json!({ "backendMigration": migration, "backendMigrationError": null }))?;
             db.audit("chat.backend-migration.requested", &json!({
                 "chatId": chat["id"],
                 "backend": args["backend"],
@@ -380,7 +380,7 @@ impl Service {
                             if !migration["convertedBackup"].is_string() {
                                 migration = Value::Null;
                             }
-                            db.patch_run(
+                            db.update_run_boundary(
                                 text(&run, "id"),
                                 &json!({
                                     "backendMigration": migration,
@@ -441,9 +441,13 @@ impl Service {
         crate::recovery::fence(self, &run).await?;
         if RunStatus::of(&run).is_some_and(RunStatus::is_active) {
             self.store
-                .patch_run(
+                .change_run(
                     &run_id,
-                    json!({ "status": RunStatus::Cancelled, "recoveryPending": false }),
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Cancelled),
+                        recovery_pending: Some(false),
+                        ..Default::default()
+                    },
                 )
                 .await?;
         }
@@ -458,7 +462,7 @@ impl Service {
                     ));
                 }
                 current["backendMigration"]["sourceReadReady"] = true.into();
-                db.patch_run(
+                db.update_run_boundary(
                     &key,
                     &json!({ "backendMigration": current["backendMigration"] }),
                 )
@@ -567,28 +571,10 @@ impl Service {
             checkpoint["completed"] = true.into();
             for key in ["process", "settled", "controllerRecoveries"] { checkpoint[key] = Value::Null; }
             db.set(&key, &checkpoint, None)?;
-            let mut patch = json!({
-                "snapshot": proposed["snapshot"],
-                "nodeId": node["id"],
-                "resources": placement["resources"],
-                "requiredRuntime": node["runtimeId"],
-                "pinnedNodeId": null,
-                "preferredNodeId": null,
-                "backendMigration": null,
-                "backendMigrationError": null,
-                "sessionId": null,
-                "resumeAvailable": false,
-                "status": RunStatus::Succeeded,
-                "error": null,
-                "cancelRequestedAt": null,
-                "recoveryPending": false,
-                "nodeState": null,
-                "storage": { "mode": nodes::ON_DEMAND },
-                "backup": { "id": point["id"], "snapshotId": point["snapshotId"], "capturedAt": point["capturedAt"], "status": "ready" },
-            });
+            let mut patch = crate::runs::RunChanges { session_id : Some(None), resume_available : Some(false), status : Some(RunStatus::Succeeded), error : Some(None), cancel_requested_at : Some(None), recovery_pending : Some(false), boundary: Some(serde_json::json!({"snapshot": proposed["snapshot"],"nodeId": node["id"],"resources": placement["resources"],"requiredRuntime": node["runtimeId"],"pinnedNodeId": null,"preferredNodeId": null,"backendMigration": null,"backendMigrationError": null,"nodeState": null,"storage": { "mode": nodes::ON_DEMAND },"backup": { "id": point["id"], "snapshotId": point["snapshotId"], "capturedAt": point["capturedAt"], "status": "ready" }})), ..Default::default() };
             let grant = migration_grant(db, &current, &agent, &source)?;
-            policy::apply(&mut patch, &grant);
-            db.patch_run(&run_id, &patch)?;
+            policy::apply(patch.boundary.as_mut().unwrap(), &grant);
+            db.change_run(&run_id, patch)?;
             policy::apply(&mut chat, &grant);
             chat["paused"] = migration["paused"].clone();
             chat["sessionRestartRequested"] = true.into();

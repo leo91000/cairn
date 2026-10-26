@@ -27,9 +27,13 @@ impl Fixture {
     async fn set_status(&self, run: &Value, status: &str) {
         self.s
             .store
-            .patch_run(
+            .change_run(
                 text(run, "id"),
-                json!({ "status": status, "finishedAt": now() }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(status),
+                    finished_at: Some(Some(now())),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -305,7 +309,13 @@ async fn cycles_through_grouped_dependencies_are_rejected() {
     });
     f.s.store.put("chats", other).await.unwrap();
     f.s.store
-        .patch_run(text(&target, "id"), json!({ "status": "succeeded" }))
+        .change_run(
+            text(&target, "id"),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Succeeded),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
 
@@ -484,7 +494,13 @@ async fn measure_group_metadata() {
                 f.set_status(target, "queued").await;
             }
             f.s.store
-                .patch_run(&f.run, json!({ "status": "running" }))
+                .change_run(
+                    &f.run,
+                    cairn_installation::runs::RunChanges {
+                        status: Some(cairn_contracts::RunStatus::Running),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .unwrap();
             wait_for::schedule(
@@ -610,7 +626,7 @@ async fn long_dependency_chains_are_allowed_but_cycles_at_the_end_are_rejected()
     }
     for pair in targets.windows(2) {
         f.s.store
-            .patch_run(
+            .update_run_boundary(
                 text(&pair[0], "id"),
                 json!({
                     "wakeup": { "condition": run_condition(&pair[1]) },
@@ -625,7 +641,7 @@ async fn long_dependency_chains_are_allowed_but_cycles_at_the_end_are_rejected()
         true
     );
     f.s.store
-        .patch_run(
+        .update_run_boundary(
             text(&targets[39], "id"),
             json!({
                 "wakeup": { "condition": { "type": "run_finished", "runId": f.run } },

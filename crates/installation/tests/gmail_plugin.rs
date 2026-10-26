@@ -777,9 +777,13 @@ async fn private_cli_transfers_use_the_run_and_current_account_grant() {
             .unwrap();
     let run =
         f.s.store
-            .patch_run(
+            .change_run(
                 text(&run, "id"),
-                json!({ "status": "running", "isolated": true }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    boundary: Some(serde_json::json!({"isolated": true})),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -836,9 +840,13 @@ async fn installation_management_revocation_during_oauth_refresh_cannot_publish_
             .unwrap();
     let run =
         f.s.store
-            .patch_run(
+            .change_run(
                 text(&run, "id"),
-                json!({ "status": "running", "isolated": true }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    boundary: Some(serde_json::json!({"isolated": true})),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -901,9 +909,13 @@ async fn manage(f: &Fixture, args: Value) -> Value {
             .unwrap();
     let run =
         f.s.store
-            .patch_run(
+            .change_run(
                 text(&run, "id"),
-                json!({ "status": "running", "isolated": true }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    boundary: Some(serde_json::json!({"isolated": true})),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();

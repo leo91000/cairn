@@ -189,7 +189,7 @@ async fn record_workspace(s: &Service, run_id: &str, entry: Value) -> Result<()>
             if !entries.iter().any(|w| w["projectId"] == entry["projectId"]) {
                 entries.push(entry);
             }
-            db.patch_run(&id, &json!({ "workspaces": entries }))?;
+            db.update_run_boundary(&id, &json!({ "workspaces": entries }))?;
             Ok(())
         })
         .await

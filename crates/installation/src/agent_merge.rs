@@ -129,7 +129,7 @@ pub(crate) fn merge(
         if snapshot["task"]["agentId"] == source_id {
             snapshot["task"]["agentId"] = target_id.into();
         }
-        db.patch_run(text(run, "id"), &json!({ "snapshot": snapshot }))?;
+        db.update_run_boundary(text(run, "id"), &json!({ "snapshot": snapshot }))?;
     }
     crate::service::forget_agent(db, source_id)?;
     db.remove_agent(source_id)?;

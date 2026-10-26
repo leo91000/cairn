@@ -148,12 +148,13 @@ impl Worker {
         for workspace in &managed {
             remove_workspace(&run, workspace, &env).await?;
         }
-        let patch = json!({
-            "workspace": null,
-            "resumeAvailable": false,
-            "workspaceCleanedAt": now(),
-        });
-        s.store.patch_run(id, patch).await?;
+        let patch = crate::runs::RunChanges {
+            workspace: Some(None),
+            resume_available: Some(false),
+            workspace_cleaned_at: Some(Some(now())),
+            ..Default::default()
+        };
+        s.store.change_run(id, patch).await?;
         s.store
             .audit("run.workspace.cleaned", json!({ "id": id }))
             .await?;
@@ -170,18 +171,25 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
         }
         return Err(Error::conflict("This run has already finished."));
     }
-    db.patch_run(id, &json!({ "cancelRequestedAt": now() }))?;
+    db.change_run(
+        id,
+        crate::runs::RunChanges {
+            cancel_requested_at: Some(Some(now())),
+            ..Default::default()
+        },
+    )?;
     // Waiting means the agent process already exited. Release may still hold
     // its in-memory slot; cancellation must settle this wait even in that gap.
     // Executing or recovering runs are settled by their worker once stopped.
     if (!is_active || run["status"] == RunStatus::Waiting) && run["recoveryPending"] != true {
-        let patch = json!({
-            "status": RunStatus::Cancelled,
-            "finishedAt": now(),
-            "summary": "Cancelled before execution.",
-            "retry": null,
-        });
-        db.patch_run(id, &patch)?;
+        let patch = crate::runs::RunChanges {
+            status: Some(RunStatus::Cancelled),
+            finished_at: Some(Some(now())),
+            summary: Some(("Cancelled before execution.").to_owned()),
+            retry: Some(None),
+            ..Default::default()
+        };
+        db.change_run(id, patch)?;
         // A run waiting for an automatic retry shows the stop in its conversation; a wait's
         // own card already shows its cancellation.
         if run["retry"]["nextAttemptAt"].is_number() {
@@ -254,21 +262,22 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
         checkpoint.store_in(db, id)?;
     }
     let wait_reason = (!before_launch).then_some("Resuming saved conversation.");
-    let mut patch = json!({
-        "status": RunStatus::Queued,
-        "error": null,
-        "outcome": null,
-        "recoveryPending": true,
-        "cancelRequestedAt": null,
-        "finishedAt": null,
-        "accountWaitReason": wait_reason,
-        "retry": null,
-    });
+    let mut patch = crate::runs::RunChanges {
+        status: Some(RunStatus::Queued),
+        error: Some(None),
+        recovery_pending: Some(true),
+        cancel_requested_at: Some(None),
+        finished_at: Some(None),
+        account_wait_reason: Some(wait_reason.map(str::to_owned)),
+        retry: Some(None),
+        boundary: Some(serde_json::json!({"outcome": null})),
+        ..Default::default()
+    };
     if completed_mission {
-        patch["missionTurnId"] = crate::config::id().into();
-        patch["waitContinuation"] = Value::Null;
+        patch.boundary.as_mut().unwrap()["missionTurnId"] = crate::config::id().into();
+        patch.boundary.as_mut().unwrap()["waitContinuation"] = Value::Null;
     }
-    let result = db.patch_run(id, &patch)?;
+    let result = db.change_run(id, patch)?;
     db.event(id, "status", "Resume requested", None)?;
     Ok(result)
 }

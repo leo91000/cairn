@@ -196,7 +196,13 @@ fn trash(db: &Db<'_>, id: &str, confirmed: bool) -> Result<Value> {
     unshare_artifacts(db, text(&chat, "runId"))?;
     db.delete(&format!("chat-title-pending:{id}"))?;
     if let Some(run) = run.filter(|run| run_is_active(Some(run))) {
-        db.patch_run(text(&run, "id"), &json!({ "cancelRequestedAt": now() }))?;
+        db.change_run(
+            text(&run, "id"),
+            crate::runs::RunChanges {
+                cancel_requested_at: Some(Some(now())),
+                ..Default::default()
+            },
+        )?;
     }
     chat["cancelledByDeletion"] = busy.into();
     chat["wakeup"] = Value::Null;
@@ -476,12 +482,13 @@ pub(crate) fn request_new_session(db: &Db<'_>, id: &str) -> Result<Value> {
             "A fresh session is available after a restored session fails.",
         ));
     }
-    db.patch_run(
+    db.change_run(
         text(&run, "id"),
-        &json!({
-            "sessionId": null,
-            "resumeAvailable": false
-        }),
+        crate::runs::RunChanges {
+            session_id: Some(None),
+            resume_available: Some(false),
+            ..Default::default()
+        },
     )?;
     chat["sessionRestartRequested"] = true.into();
     chat["wakeup"] = Value::Null;

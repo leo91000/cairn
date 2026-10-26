@@ -1093,7 +1093,7 @@ fn release_placements(db: &Db<'_>, node: &str) -> Result<u64> {
                 patch[field] = Value::Null;
             }
         }
-        db.patch_run(text(&run, "id"), &patch)?;
+        db.update_run_boundary(text(&run, "id"), &patch)?;
         released += 1;
     }
     Ok(released)

@@ -57,7 +57,13 @@ impl Fixture {
         let run = self
             .s
             .store
-            .patch_run(&run_id, json!({ "status": "running" }))
+            .change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         let message = text(&run["chatExecution"], "messageId").to_owned();
@@ -140,9 +146,14 @@ impl Fixture {
     async fn finish(&self, turn: &Turn) {
         self.s
             .store
-            .patch_run(
+            .change_run(
                 &turn.run,
-                json!({ "status": "succeeded", "sessionId": "saved-session", "workspace": "/saved/workspace" }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Succeeded),
+                    session_id: Some(Some("saved-session".into())),
+                    workspace: Some(Some("/saved/workspace".into())),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -412,13 +423,7 @@ async fn deleted_tasks_are_finished_in_status_and_waits() {
     let child_turn = f.running(child).await;
     f.finish(&child_turn).await;
     f.s.store
-        .patch_run(
-            &child_turn.run,
-            json!({
-                "summary": "A report that must disappear when deleted",
-                "outcome": { "status": "completed", "reason": "A private outcome" },
-            }),
-        )
+        .change_run(&child_turn.run,cairn_installation::runs::RunChanges { summary : Some(("A report that must disappear when deleted").to_owned()), boundary: Some(serde_json::json!({"outcome": { "status": "completed", "reason": "A private outcome" }})), ..Default::default() })
         .await
         .unwrap();
     f.s.chat_trash(child, true).await.unwrap();
@@ -475,15 +480,7 @@ async fn the_requester_waits_for_its_task_and_reads_the_report() {
     assert_eq!(resumed["run"]["status"], "succeeded", "Still waiting");
 
     f.s.store
-        .patch_run(
-            &delegated_turn.run,
-            json!({
-                "status": "succeeded",
-                "finishedAt": cairn_installation::config::now(),
-                "summary": "**2 findings**\n\n1. Retry can reorder a steered message.",
-                "outcome": { "status": "completed", "reason": "Reviewed", "evidence": ["diff"] },
-            }),
-        )
+        .change_run(&delegated_turn.run,cairn_installation::runs::RunChanges { status : Some(cairn_contracts::RunStatus::Succeeded), finished_at : Some(Some(cairn_installation::config::now())), summary : Some(("**2 findings**\n\n1. Retry can reorder a steered message.").to_owned()), boundary: Some(serde_json::json!({"outcome": { "status": "completed", "reason": "Reviewed", "evidence": ["diff"] }})), ..Default::default() })
         .await
         .unwrap();
     f.s.chat_tick(&HashSet::new()).await.unwrap();
@@ -544,7 +541,13 @@ async fn delegated_tasks_can_be_waited_on_as_all_or_any_without_installation_acc
         let first_turn = f.running(first_chat).await;
         let second_turn = f.running(second_chat).await;
         f.s.store
-            .patch_run(&first_turn.run, json!({ "status": "failed" }))
+            .change_run(
+                &first_turn.run,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Failed),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         wait_for::tick_groups(&f.s, &HashSet::new()).await.unwrap();
@@ -765,9 +768,13 @@ async fn run_failures_include_their_error_in_status_and_wait_results() {
     let child = text(&delegated, "chatId");
     let child_turn = f.running(child).await;
     f.s.store
-        .patch_run(
+        .change_run(
             &child_turn.run,
-            json!({ "status": "failed", "error": "Provider request failed" }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Failed),
+                error: Some(Some("Provider request failed".into())),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -857,9 +864,13 @@ async fn deleting_a_task_redacts_recorded_group_progress_and_final_results() {
         let second_turn = f.running(second_chat).await;
         let diagnostic = "Private diagnostic from a deleted task";
         f.s.store
-            .patch_run(
+            .change_run(
                 &first_turn.run,
-                json!({ "status": "failed", "error": diagnostic }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Failed),
+                    error: Some(Some((diagnostic).to_owned())),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();

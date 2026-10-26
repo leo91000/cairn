@@ -41,9 +41,12 @@ async fn active_run(s: &Service, agent: &Value) -> (Value, Value) {
         .unwrap();
     let run = s
         .store
-        .patch_run(
+        .change_run(
             run["id"].as_str().unwrap(),
-            json!({ "status": RunStatus::Running }),
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Running),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -225,7 +228,13 @@ async fn pending_recovery_can_be_inspected_and_cancelled_through_both_tool_inter
                 "cause": { "kind": "timeout", "message": "Temporary timeout", "startup": true },
             });
             s.store
-                .patch_run(run_id, json!({ "retry": retry }))
+                .change_run(
+                    run_id,
+                    cairn_installation::runs::RunChanges {
+                        retry: Some(Some(retry.clone())),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .unwrap();
             let (_, history) =
@@ -369,7 +378,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
         assert_eq!(node["nativeAccounts"], json!([trusted]));
         assert_eq!(node["slots"], 6);
         s.store
-            .patch_run(
+            .update_run_boundary(
                 run["id"].as_str().unwrap(),
                 json!({ "pinnedNodeId": previous }),
             )
@@ -390,7 +399,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
         assert!(s.store.run(run["id"].as_str().unwrap()).await.unwrap()["pinnedNodeId"].is_null());
         // Ordinary revocation preserves an explicit preference, as the owner UI does.
         s.store
-            .patch_run(
+            .update_run_boundary(
                 run["id"].as_str().unwrap(),
                 json!({ "preferredNodeId": next }),
             )
@@ -1164,9 +1173,12 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
     let id = agent["id"].as_str().unwrap();
     let (run, _) = active_run(&s, &agent).await;
     s.store
-        .patch_run(
+        .change_run(
             run["id"].as_str().unwrap(),
-            json!({ "status": RunStatus::Succeeded }),
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Succeeded),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -1899,7 +1911,7 @@ async fn run_grants_enforce_revocation_completion_and_chat_turn_binding() {
         .unwrap();
     let id = run["id"].as_str().unwrap();
     s.store
-        .patch_run(id, json!({ "chatExecution": { "messageId": "new-turn" } }))
+        .update_run_boundary(id, json!({ "chatExecution": { "messageId": "new-turn" } }))
         .await
         .unwrap();
     assert_eq!(
@@ -1907,7 +1919,7 @@ async fn run_grants_enforce_revocation_completion_and_chat_turn_binding() {
         StatusCode::UNAUTHORIZED
     );
     s.store
-        .patch_run(id, json!({ "chatExecution": null }))
+        .update_run_boundary(id, json!({ "chatExecution": null }))
         .await
         .unwrap();
     s.agent_fixture(
@@ -1937,17 +1949,12 @@ async fn run_grants_enforce_revocation_completion_and_chat_turn_binding() {
     assert!(!root.path().join("home/.agents/skills/revoked").exists());
     enabled_main(&s).await;
     s.store
-        .patch_run(id, json!({ "status": RunStatus::Succeeded }))
-        .await
-        .unwrap();
-    assert_eq!(
-        request(&s, token, "tools/list", json!({})).await.0,
-        StatusCode::UNAUTHORIZED
-    );
-    s.store
-        .patch_run(
+        .change_run(
             id,
-            json!({ "status": RunStatus::Running, "cancelRequestedAt": 1 }),
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Succeeded),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -1956,7 +1963,28 @@ async fn run_grants_enforce_revocation_completion_and_chat_turn_binding() {
         StatusCode::UNAUTHORIZED
     );
     s.store
-        .patch_run(id, json!({ "cancelRequestedAt": null }))
+        .change_run(
+            id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Running),
+                cancel_requested_at: Some(Some(1)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&s, token, "tools/list", json!({})).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    s.store
+        .change_run(
+            id,
+            cairn_installation::runs::RunChanges {
+                cancel_requested_at: Some(None),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     s.mcps.revoke_run(&s, id).await.unwrap();
@@ -2052,14 +2080,15 @@ async fn mission_conversion_matches_public_mcp_and_installation_tools() {
         let run_id = target["id"].as_str().unwrap();
         let original = s
             .store
-            .patch_run(
+            .change_run(
                 run_id,
-                json!({
-                    "status": "succeeded",
-                    "sessionId": "mission-session",
-                    "workspace": "/saved/mission-workspace",
-                    "summary": "Mission result",
-                }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Succeeded),
+                    session_id: Some(Some("mission-session".into())),
+                    workspace: Some(Some("/saved/mission-workspace".into())),
+                    summary: Some(("Mission result").to_owned()),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -2419,9 +2448,12 @@ async fn chat_tools_preserve_scopes_caller_defaults_and_revocation() {
     let read = public_call(&s, &["read"], "get_chat", json!({ "chatId": chat_id })).await;
     assert_eq!(result(&read)["chat"]["id"], chat_id);
     s.store
-        .patch_run(
+        .change_run(
             run["id"].as_str().unwrap(),
-            json!({ "cancelRequestedAt": 1 }),
+            cairn_installation::runs::RunChanges {
+                cancel_requested_at: Some(Some(1)),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -2745,9 +2777,13 @@ async fn chat_recovery_tools_preserve_confirmation_and_retention_rules() {
     let (target, _) = active_run(&s, &main).await;
     let run_id = target["id"].as_str().unwrap();
     s.store
-        .patch_run(
+        .change_run(
             run_id,
-            json!({ "status": RunStatus::Failed, "restoredAt": 1 }),
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Failed),
+                boundary: Some(serde_json::json!({"restoredAt": 1})),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -3170,7 +3206,14 @@ async fn waiting_missions_are_visible_and_cancellable_through_both_installation_
         let run_id = run["id"].as_str().unwrap();
         let wakeup = json!({ "id": cairn_installation::config::id(), "messageId": null, "reason": "Mission CI", "seconds": 60, "createdAt": 1, "wakeAt": 60_001 });
         s.store
-            .patch_run(run_id, json!({ "status": "waiting", "wakeup": wakeup }))
+            .change_run(
+                run_id,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Waiting),
+                    boundary: Some(serde_json::json!({"wakeup": wakeup})),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         let (status, fetched) =
@@ -3379,15 +3422,18 @@ async fn saved_mission(s: &Service, agent: &Value) -> Value {
     )
     .await;
     s.store
-        .patch_run(
+        .change_run(
             id,
-            json!({
-                "status": "failed",
-                "sessionId": "saved-provider-session",
-                "workspace": "/saved/workspace",
-                "resumeAvailable": true,
-                "retry": { "attempt": 5 },
-            }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Failed),
+                session_id: Some(Some("saved-provider-session".into())),
+                workspace: Some(Some("/saved/workspace".into())),
+                resume_available: Some(true),
+                retry: Some(Some(serde_json::from_value(
+                    serde_json::json!({ "attempt": 5 }),
+                )?)),
+                ..Default::default()
+            },
         )
         .await
         .unwrap()

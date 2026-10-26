@@ -69,9 +69,13 @@ async fn bearer_for_agent(s: &Service, agent: &str) -> String {
     let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
     let run = s
         .store
-        .patch_run(
+        .change_run(
             text(&run, "id"),
-            json!({ "status": "running", "isolated": true }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                boundary: Some(serde_json::json!({"isolated": true})),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();

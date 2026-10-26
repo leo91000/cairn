@@ -24,6 +24,13 @@ fn main() {
     let root = Path::new(&root);
     fs::create_dir_all(root).unwrap();
     let mut generator = SchemaSettings::draft07().for_serialize().into_generator();
+    export::<RunState>(root, &mut generator, Contract::Serialize);
+    export::<RunStatus>(root, &mut generator, Contract::Serialize);
+    export::<Retry>(root, &mut generator, Contract::Serialize);
+    export::<RunInput>(root, &mut generator, Contract::Deserialize);
+    export::<RunMissionInput>(root, &mut generator, Contract::Deserialize);
+    export::<CancelRunOutput>(root, &mut generator, Contract::Serialize);
+    export::<CleanupRunOutput>(root, &mut generator, Contract::Serialize);
     export::<ResumeRunInput>(root, &mut generator, Contract::Deserialize);
     export::<ResumeRunOutput>(root, &mut generator, Contract::Serialize);
     export::<QualificationFixture>(root, &mut generator, Contract::Serialize);

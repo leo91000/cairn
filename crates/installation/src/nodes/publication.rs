@@ -646,7 +646,7 @@ impl Publication<'_> {
                     .cloned()
                     .unwrap_or_default();
                 backup.extend(patch["backup"].as_object().unwrap().clone());
-                db.patch_run(&run, &json!({ "backup": backup }))?;
+                db.update_run_boundary(&run, &json!({ "backup": backup }))?;
                 Ok(())
             })
             .await
@@ -709,7 +709,7 @@ async fn complete_request(s: &Service, run: &str, revision: u64) -> Result<()> {
                 }),
             );
             backup.insert("error".into(), Value::Null);
-            db.patch_run(&run, &json!({ "backup": backup }))?;
+            db.update_run_boundary(&run, &json!({ "backup": backup }))?;
             Ok(())
         })
         .await?;
@@ -795,7 +795,7 @@ pub(crate) async fn converted_environment(
             db.put("node-backups", &point)?;
             let mut migration = current["backendMigration"].clone();
             migration["convertedBackup"] = point["id"].clone();
-            db.patch_run(&owner, &json!({ "backendMigration": migration }))?;
+            db.update_run_boundary(&owner, &json!({ "backendMigration": migration }))?;
             Ok(())
         })
         .await?;
@@ -1274,7 +1274,7 @@ pub async fn request(s: &Service, run: &str) -> Result<()> {
                 .ok_or_else(|| Error::conflict("Publication revision exhausted."))?;
             backup.insert("requestedRevision".into(), revision.into());
             backup.insert("status".into(), json!(BackupStatus::Pending));
-            db.patch_run(&run, &json!({ "backup": backup }))?;
+            db.update_run_boundary(&run, &json!({ "backup": backup }))?;
             Ok(())
         })
         .await?;
@@ -1296,7 +1296,7 @@ async fn update_status(s: &Service, run: &str, patch: Value) -> Result<()> {
                 .ok_or_else(|| Error::not_found("Conversation missing."))?;
             let mut status = current["backup"].as_object().cloned().unwrap_or_default();
             status.extend(patch.as_object().unwrap().clone());
-            db.patch_run(&run, &json!({ "backup": status }))?;
+            db.update_run_boundary(&run, &json!({ "backup": status }))?;
             Ok(())
         })
         .await
