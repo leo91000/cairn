@@ -100,6 +100,11 @@ class MissionChatDeviceTest {
                                             true
                                     )
                                         """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
                                     else "[]"
                             }
                         return MockResponse()
@@ -204,6 +209,11 @@ class MissionChatDeviceTest {
                                             true
                                     )
                                         """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
                                     else "[]"
                             }
                         return MockResponse()
@@ -302,6 +312,11 @@ class MissionChatDeviceTest {
                                             true
                                     )
                                         """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
                                     else "[]"
                             }
                         return MockResponse()

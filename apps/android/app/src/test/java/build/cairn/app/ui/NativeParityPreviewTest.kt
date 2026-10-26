@@ -277,8 +277,8 @@ class NativeParityPreviewTest {
                                     return stream(LiveState(chat = chat, run = chat.run))
                                 "/api/installations/fixture/api/runs/run/stream" ->
                                     return stream(LiveState(run = run))
-                                "/api/installations/fixture/api/skills",
-                                "/api/installations/fixture/api/mcps" -> "[]"
+                                "/api/installations/fixture/api/skills" -> "[]"
+                                "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
                                 else -> "{}"
                             }
                         return MockResponse()

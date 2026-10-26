@@ -931,8 +931,20 @@ class AgentEditingTest {
     fun issuesFlagMissingProjectsAndDisabledConnectionsGrantedThroughAll() {
         val mcps =
             listOf(
-                Mcp(id = "on", name = "Linear"),
-                Mcp(id = "off", name = "Sentry", enabled = false),
+                Mcp(
+                    id = "on",
+                    name = "Linear",
+                    checkedAt = null,
+                    enabledTools = null,
+                    enabled = true,
+                ),
+                Mcp(
+                    id = "off",
+                    name = "Sentry",
+                    checkedAt = null,
+                    enabledTools = null,
+                    enabled = false,
+                ),
             )
         val gone =
             agent.copy(

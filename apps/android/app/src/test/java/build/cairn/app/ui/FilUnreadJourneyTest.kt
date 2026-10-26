@@ -223,6 +223,11 @@ class FilUnreadJourneyTest {
                                             true
                                     )
                                         """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
                                     else "[]"
                                 )
                         }
@@ -355,6 +360,11 @@ class FilUnreadJourneyTest {
                                             true
                                     )
                                         """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
                                     else "[]"
                             }
                         return MockResponse()
@@ -457,6 +467,11 @@ class FilUnreadJourneyTest {
                                             true
                                     )
                                         """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
                                     else "[]"
                             }
                         return MockResponse()
@@ -570,6 +585,11 @@ class FilUnreadJourneyTest {
                                             true
                                     )
                                         """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
                                     else "[]"
                             }
                         return MockResponse()

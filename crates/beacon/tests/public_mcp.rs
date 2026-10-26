@@ -1655,24 +1655,54 @@ async fn native_mcp_callback_uses_beacon_account_authentication_instead_of_local
     use std::collections::HashMap;
 
     let relay = RelayedInstallation::new(axum::Router::new()).await;
-    let connection = "00000000-0000-4000-8000-000000000099";
     let nonce = "native-callback-test-nonce";
-    let key = format!("mcp-oauth:{}", hex_digest(nonce));
+    let key = hex_digest(nonce);
     let expires = now() + 600_000;
     let account = relay.session["account"]["id"].as_str().unwrap();
-    let pending = json!({
-        "native": true,
-        "connectionId": connection,
-        "session": hex_digest(&format!("cairn-account:{account}")),
-        "nonce": nonce,
-        "expiresAt": expires,
-    });
-    relay
+    let input = serde_json::from_value(json!({
+        "name": "Native callback fixture",
+        "url": "https://mcp.example.test",
+        "auth": "oauth"
+    }))
+    .unwrap();
+    let saved = relay
         .installation
-        .store
-        .set(&key, pending, Some(expires))
+        .mcps
+        .save(&relay.installation, input, None, None)
         .await
         .unwrap();
+    let connection = saved.server.id.as_str();
+    let pending = cairn_installation::mcps::record::PendingAuthorization {
+        connection_id: connection.to_owned(),
+        revision: saved.server.revision,
+        native: true,
+        session: hex_digest(&format!("cairn-account:{account}")),
+        nonce: nonce.to_owned(),
+        expires_at: expires,
+        callback: None,
+    };
+    let store = &relay.installation.store;
+    let vault = relay.installation.vault.clone();
+    store
+        .transaction({
+            let key = key.clone();
+            let vault = vault.clone();
+            move |db| db.save_pending_mcp_oauth(&key, &pending, &vault)
+        })
+        .await
+        .unwrap();
+    async fn read_pending(
+        s: &cairn_installation::service::Service,
+        key: &str,
+    ) -> cairn_installation::mcps::record::PendingAuthorization {
+        let key = key.to_owned();
+        let vault = s.vault.clone();
+        s.store
+            .read(move |db| db.pending_mcp_oauth(&key, &vault))
+            .await
+            .unwrap()
+            .unwrap()
+    }
     let parameters = json!({ "state": nonce, "code": "private-fixture-code" });
     let callback = format!("{}/mcps/oauth/callback", relay.base);
 
@@ -1693,14 +1723,9 @@ async fn native_mcp_callback_uses_beacon_account_authentication_instead_of_local
             .unwrap();
         assert_eq!(response.status(), expected);
         assert!(
-            relay
-                .installation
-                .store
-                .kv(&key)
+            read_pending(&relay.installation, &key)
                 .await
-                .unwrap()
-                .unwrap()
-                .get("callback")
+                .callback
                 .is_none()
         );
     }
@@ -1720,14 +1745,9 @@ async fn native_mcp_callback_uses_beacon_account_authentication_instead_of_local
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert!(
-        relay
-            .installation
-            .store
-            .kv(&key)
+        read_pending(&relay.installation, &key)
             .await
-            .unwrap()
-            .unwrap()
-            .get("callback")
+            .callback
             .is_none()
     );
 
@@ -1747,9 +1767,12 @@ async fn native_mcp_callback_uses_beacon_account_authentication_instead_of_local
         response.json::<Value>().await.unwrap(),
         json!({ "result": "native" })
     );
-    let captured = relay.installation.store.kv(&key).await.unwrap().unwrap();
-    assert_eq!(captured["callback"]["code"], "private-fixture-code");
-    assert_eq!(captured["expiresAt"], expires);
+    let captured = read_pending(&relay.installation, &key).await;
+    assert_eq!(
+        captured.callback.as_ref().unwrap()["code"],
+        "private-fixture-code"
+    );
+    assert_eq!(captured.expires_at, expires);
 
     let replay = json!({ "state": nonce, "code": "replacement" });
     let response = relay
@@ -1765,8 +1788,8 @@ async fn native_mcp_callback_uses_beacon_account_authentication_instead_of_local
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        relay.installation.store.kv(&key).await.unwrap().unwrap(),
-        captured
+        serde_json::to_value(read_pending(&relay.installation, &key).await).unwrap(),
+        serde_json::to_value(&captured).unwrap()
     );
 
     relay
@@ -1795,10 +1818,13 @@ async fn native_mcp_callback_uses_beacon_account_authentication_instead_of_local
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-    relay
-        .installation
-        .store
-        .set(&key, captured, Some(now() - 1))
+    let mut expired = captured;
+    expired.expires_at = now() - 1;
+    store
+        .transaction(move |db| {
+            db.delete_pending_mcp_oauth(&key)?;
+            db.save_pending_mcp_oauth(&key, &expired, &vault)
+        })
         .await
         .unwrap();
     let replacement = HashMap::from([

@@ -118,7 +118,8 @@ class WorkspaceJourneyTest {
                                     """{"agents":[{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"d3153f9f-724b-59c3-9614-ab78f231c4d3","instructions":"","model":"","name":"Reviewer","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0}]}"""
                                 "/api/installations/fixture/api/projects" ->
                                     """{"projects":[{"id":"46d045dd-9bce-51e3-8a99-65aa9384efc9","name":"Cairn","path":"/fixtures/cairn","description":"","baseBranch":"main","sourceMode":"remote","origin":"","source":null,"revision":"fixture-revision","createdAt":0}]}"""
-                                "/api/installations/fixture/api/mcps",
+                                "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
+
                                 "/api/installations/fixture/api/skills",
                                 "/api/installations/fixture/tokens",
                                 "/api/installations/fixture/api/audit" -> "[]"

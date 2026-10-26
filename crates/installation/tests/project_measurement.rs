@@ -46,6 +46,8 @@ trait StorageEntity:
 
     fn id(&self) -> String;
 
+    fn setup(_db: &Connection) {}
+
     fn read(db: &Db<'_>, id: &str) -> Self;
 
     fn list(db: &Db<'_>) -> usize;
@@ -103,6 +105,17 @@ impl StorageEntity for Project {
 }
 
 impl StorageEntity for Agent {
+    fn setup(db: &Connection) {
+        Db(db)
+            .save_mcp_server(&cairn_contracts::McpServer {
+                id: "00000000-0000-4000-8000-000000000003".into(),
+                name: "Measurement MCP".into(),
+                url: "https://example.test/mcp".into(),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+
     const KIND: &'static str = "agents";
     const SAVE: &'static str = "agent.saved";
 
@@ -351,6 +364,7 @@ fn measure<E: StorageEntity>(entities: &[E]) {
                 E::reference_schema(&db);
             }
             E::prepare(&Db(&db));
+            E::setup(&db);
             let mut insert = Vec::new();
             let cpu_start = cpu();
             for project in entities {
@@ -473,4 +487,84 @@ fn measure<E: StorageEntity>(entities: &[E]) {
             );
         }
     }
+}
+
+impl StorageEntity for cairn_contracts::McpServer {
+    const KIND: &'static str = "mcps";
+    const TABLE: &'static str = "mcp_servers";
+    const SAVE: &'static str = "mcp.saved";
+
+    fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    fn read(db: &Db<'_>, id: &str) -> Self {
+        db.mcp_server(id).unwrap().unwrap()
+    }
+
+    fn list(db: &Db<'_>) -> usize {
+        db.mcp_servers().unwrap().len()
+    }
+
+    fn write(&self, db: &Db<'_>, replacement: bool) {
+        if replacement {
+            assert_eq!(
+                db.mcp_server(&self.id).unwrap().unwrap().revision,
+                self.revision
+            );
+        }
+        db.save_mcp_server(self).unwrap();
+        db.audit(Self::SAVE, &json!({"id":self.id})).unwrap();
+    }
+
+    // Frozen MCP mapping at 6653951f: the existing DTO was decoded from records
+    // Values, not directly from SQL text. Match that entity boundary on both sides.
+    fn reference_read(db: &Db<'_>, id: &str) -> Self {
+        let record = db.get(Self::KIND, id).unwrap().unwrap();
+        serde::Deserialize::deserialize(&record).unwrap()
+    }
+
+    fn reference_list(db: &Db<'_>) -> usize {
+        let servers: Vec<Self> = db
+            .list(Self::KIND)
+            .unwrap()
+            .iter()
+            .map(|record| serde::Deserialize::deserialize(record).unwrap())
+            .collect();
+        servers.len()
+    }
+
+    fn reference_write(&self, db: &Db<'_>, replacement: bool) {
+        // The old save reads previous revision/creation time/tools before replacing.
+        if replacement {
+            assert_eq!(Self::reference_read(db, &self.id).revision, self.revision);
+        }
+        let record = serde_json::to_value(self).unwrap();
+        db.0.prepare_cached("INSERT INTO records VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at").unwrap().execute(params![self.id,Self::KIND,serde_json::to_string(&record).unwrap(),now()]).unwrap();
+    }
+
+    fn reference_schema(db: &Connection) {
+        db.execute_batch("DROP TABLE records;
+CREATE TABLE records(id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+CREATE INDEX records_kind ON records(kind,updated_at DESC);
+CREATE INDEX records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
+CREATE UNIQUE INDEX records_chat_slug ON records(json_extract(data,'$.slug')) WHERE kind='chats';").unwrap();
+    }
+}
+
+#[test]
+#[ignore = "local measurement; run alone with --ignored --nocapture --test-threads=1"]
+fn mcp_storage_layouts() {
+    use cairn_contracts::{AuthKind, ConnectionState, McpServer, Transport};
+    let servers:Vec<_>=(0..1000).map(|index|McpServer{
+        id:format!("00000000-0000-4000-8000-{index:012}"),
+        name:format!("Connection {index}"),transport:if index%3==0{Transport::Stdio}else{Transport::Http},
+        url:format!("https://example.test/workspaces/{index}/mcp"),command:if index%3==0{"node"}else{""}.into(),
+        args:if index%3==0{vec!["server.js".into(),"--workspace".into(),index.to_string(),String::new()]}else{vec![]},
+        auth:if index%3==0{AuthKind::None}else{AuthKind::OAuth},client_id:format!("client-{index}"),scopes:"read write".into(),
+        enabled:index%5!=0,enabled_tools:match index%3{0=>None,1=>Some(vec![]),_=>Some(vec!["echo".into(),"search".into()])},
+        created_at:1_700_000_000_000,revision:1,state:ConnectionState::Connected,checked_at:Some(1_700_000_001_000),error:String::new(),allow_private_network:false,
+        tools:(0..8).map(|tool|json!({"name":format!("tool_{tool}"),"description":"External tool description. ".repeat(12),"inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}})).collect(),
+    }).collect();
+    measure(&servers);
 }

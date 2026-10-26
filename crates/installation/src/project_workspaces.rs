@@ -2,12 +2,11 @@
 use crate::{
     error::{Error, Result},
     mcp_server::{ToolResult, empty_listing},
-    mcps::{grant_key, record::RunGrant},
+    mcps::grant_key,
     run_status::RunStatus,
     service::{Service, covers, run_projects},
     validation::{text, uuid},
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -31,10 +30,9 @@ pub fn catalog(run: &Value) -> Vec<Value> {
 
 pub fn authorize_in(db: &crate::store::Db<'_>, bearer: &str) -> Result<Value> {
     let denied = || Error::unauthorized("Workspace access expired or was revoked.");
-    let grant = db.kv(&grant_key(bearer))?.ok_or_else(denied)?;
-    let grant = RunGrant::deserialize(&grant)?;
+    let grant = db.mcp_run_grant(&grant_key(bearer))?.ok_or_else(denied)?;
     let run = db.run(&grant.run_id)?.ok_or_else(denied)?;
-    let revoked = grant.message_id != *crate::waits::execution_id(&run)
+    let revoked = grant.message_id.as_deref() != crate::waits::execution_id(&run).as_str()
         || !grant.workspace
         || run["status"] != RunStatus::Running
         || !run["cancelRequestedAt"].is_null();

@@ -136,7 +136,7 @@ JSON Schema's UUID format; clients never grant authority through validation.
 
 ### Development reset
 
-The fresh installation schema is now version 5. Earlier development databases
+The fresh installation schema is now version 6. Earlier development databases
 are rejected, without being rewritten. Stop the development processes, remove the
 **disposable development data directory** (SQLite, vault and related local state)
 and start with a newly empty data directory. Recreate projects/agents and rerun
@@ -230,7 +230,7 @@ prevent duplicate grants. Permission tables use WITHOUT ROWID so composite keys
 do not duplicate a separate rowid/primary-key index. Listing loads each relation
 once for the whole catalogue. Reads hydrate one SQLite snapshot, and profile/permission
 writes publish atomically. Revisions change on owner saves and resource revocation.
-There is no historical reader or migration: the initial schema is version 5.
+There is no historical reader or migration: the initial schema is version 6.
 
 The A2 mirror, resource reconciliation, Value permission writer and node
 configuration's `exclusiveAgents` input are removed. Resource wire lists are
@@ -247,9 +247,10 @@ agent command confers owner authority; A3 adds no agent confirmation workflow.
 Live plugin/exclusive revocation and saved run/delegation policy rules stay intact.
 
 Deferred foreign keys, tracked in contraction ticket #433: node/exclusive node
-IDs (A9/A10, #410/#411), MCP server and tool selection IDs (A14, #415), plugin instance IDs (A12, #413),
-and file-backed skill keys (A16, #428). These use the existing business validators;
-node and MCP targets are checked again in the publication transaction, and only
+IDs (A9/A10, #410/#411), plugin instance IDs (A12, #413),
+and file-backed skill keys (A16, #428). MCP server and tool selections gained their
+foreign keys in A14 (#415). Deferred targets use the existing business validators;
+node targets are checked again in the publication transaction, and only
 active agent-capable packages can receive new plugin grants. Already held grants
 remain editable while their package awaits review. Skill selections retain their
 existing named-filter semantics, including absent skills; they confer no access
@@ -276,7 +277,7 @@ agent. Scope checks remain `read`/`manage`; deletion remains owner-only in the a
 Members can edit their own commitments and pause/archive another author's mission,
 but cannot resume or restore it, change its content, or recover its creation identity.
 
-The initial SQLite schema v5 adds `missions` with named scalar columns, agent/project
+The initial SQLite schema v6 adds `missions` with named scalar columns, agent/project
 foreign keys, update/reference indexes and a partial due-time index. Ordered
 `mission_tags` and `mission_skills` preserve selections, duplicates and their order;
 `skills_inherited` distinguishes all allowed skills (`null`) from an empty selection.
@@ -318,3 +319,42 @@ commands against fresh fixtures. The A1/A2 `project_measurement` harness adds
 queries selecting 500 of 1,000 missions. It compares the records mapping on the A4
 base with typed SQL in the same build and corpus; preparation of the referenced
 profile is untimed. Measurements and line accounting belong in the PR, outside Git.
+## External MCP connections (#415)
+
+`crates/contracts/src/mcps.rs` reuses the connection enums/state model and owns the
+public input, redacted view, revision replacement and OAuth begin/status/cancel
+contracts. Creation retains its server defaults; `McpReplacementInput` requires every
+ordinary setting, including explicit nullable tool selection, so omissions cannot
+reactivate a connection or widen its tools. Both apps and both agent interfaces use the existing generator and
+capability registry. The former hand-written Zod model, Kotlin classes, static
+operation schemas and generic records path are removed. Typed SQLite methods live
+locally in `mcps/sql.rs`, with no ORM or generic repository.
+
+The fresh schema adds `mcp_servers`, ordered arguments/scopes/enabled tools,
+`mcp_discovery_cache`, encrypted `mcp_credentials`, execution grants with server/tool
+relations and indexed `mcp_pending_oauth`. A point read projects its ordered
+selections in one SQL statement; lists hydrate relations in batches under one
+snapshot. The opaque tool cache uses a rowid table: large tool documents would
+spill earlier in a `WITHOUT ROWID` index b-tree. Tool descriptors are opaque third-party
+protocol JSON. Credentials and captured callback parameters use the existing
+AES-GCM vault key and owner/purpose binding, stored as ciphertext blobs separately
+from public views. Pending OAuth uses hashed state/session keys and its original
+expiry, first callback and single-consumption rules. The optional execution message identity
+is captured from the unconverted run domain at its boundary. Agent MCP selections
+now have foreign keys; deletion removes selections through typed agent writes,
+changing revisions before deleting the server.
+
+The initial schema version is 6. Earlier development databases require the same
+explicit disposable-data reset described above. No migration or historical reader
+is provided. `mcp_storage_layouts` extends the existing measurement harness with
+1,000 mixed HTTP/command connections, wildcard/empty/selected tools and opaque tool
+catalogues against the records mapping on the A14 base, including its existing
+Value-to-DTO decoding and the previous-state read on replacements. It measures local SQLite
+layout operations, excluding encryption, transport and full authorization; PR
+results state the host/corpus, CPU, bytes and latency limits. Raw measurements stay
+outside Git.
+
+`tests/fixtures/mcp-contracts.json` checks the shared defaults, omitted secret
+changes and malformed commands in Rust, TS and Kotlin. The generator renders
+unconstrained JSON Schema values as `JsonElement` for external tool schemas; it
+does not replace any domain union or decision with dynamic JSON.

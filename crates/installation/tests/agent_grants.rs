@@ -1,7 +1,7 @@
 //! Permissions are edited on typed profiles. Resource lists are projections of
 //! the same relations used by enforcement; no resource JSON is authoritative.
 use common::MissionFixture;
-use common::StoreAgentFixture;
+use common::{McpFixture, StoreAgentFixture};
 
 mod common;
 
@@ -484,9 +484,7 @@ async fn deleting_an_mcp_connection_keeps_live_grants_and_marks_changed_agents()
     let account = owner.add_service_account(json!([])).await;
     let mcp = owner
         .service
-        .mcps
-        .save(
-            &owner.service,
+        .mcp_fixture(
             json!({ "name": "Docs", "transport": "stdio", "command": "node", "args": ["mcp.mjs"] }),
             None,
         )
@@ -837,9 +835,7 @@ async fn selected_permissions_and_empty_tool_selections_survive_reopening() {
     let account = owner.add_service_account(json!([])).await;
     let connection = owner
         .service
-        .mcps
-        .save(
-            &owner.service,
+        .mcp_fixture(
             json!({
                 "name": "Tools", "transport": "http", "url": "https://example.test/mcp",
             }),

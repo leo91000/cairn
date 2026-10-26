@@ -202,3 +202,17 @@ Update the app, Beacon and installation together.
 Network fallback from direct transport to the relay remains available. Current
 activity and plugin presentation is unchanged; there is no platform difference or
 new UI/MCP/installation-tool capability.
+
+### MCP typed contracts (#415)
+
+Web and Android use the generated MCP settings, view and nine operation clients.
+Both replace complete settings with the current revision, preserve omitted secret
+changes, select tools, test, disconnect, delete and cancel pending OAuth at the
+server. Web redirects in its authenticated browser session; Android opens a Custom
+Tab, then polls the session-bound native callback. Android cancellation now calls
+the same server cancellation operation instead of only stopping its local poll.
+Public MCP and `cairn_installation` share the registry and policy. Begin returns a
+human management URL for agents; status never consumes another session's callback.
+PKCE, refresh and private-network/metadata protection remain in the existing
+protocol implementations. The shared corpus qualifies Rust/TS/Kotlin; browser MCP
+journeys and `McpJourneyCases` (JVM/device) cover the clients.

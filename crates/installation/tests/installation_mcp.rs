@@ -1,4 +1,5 @@
 use common::AgentFixture;
+use common::McpFixture;
 use common::MissionFixture;
 use common::ProjectFixture;
 
@@ -1015,6 +1016,17 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
+    public_names.extend([
+        "list_mcps",
+        "create_mcp",
+        "update_mcp",
+        "test_mcp",
+        "disconnect_mcp",
+        "delete_mcp",
+        "begin_mcp_connection",
+        "mcp_connection_status",
+        "cancel_mcp_connection",
+    ]);
     public_names.insert(cairn_contracts::RESUME_RUN_ID);
     public_names.extend([
         "set_agent_avatar",
@@ -1441,10 +1453,19 @@ async fn installation_access_manages_resources_and_other_agents_work() {
         "update_mcp",
         json!({
             "id": connection_id,
+            "revision": result(&connection)["revision"],
             "connection": {
                 "name": "Renamed connection",
                 "url": "https://example.com/mcp",
-                "enabled": false
+                "enabled": false,
+                "enabledTools": null,
+                "allowPrivateNetwork": false,
+                "transport": "http",
+                "command": "",
+                "args": [],
+                "auth": "none",
+                "clientId": "",
+                "scopes": ""
             }
         }),
     )
@@ -1452,7 +1473,7 @@ async fn installation_access_manages_resources_and_other_agents_work() {
     assert_eq!(result(&updated)["name"], "Renamed connection");
     let connections = call(&s, &configuration, "list_mcps", json!({})).await;
     assert!(
-        result(&connections)
+        result(&connections)["mcps"]
             .as_array()
             .unwrap()
             .iter()
@@ -1465,7 +1486,7 @@ async fn installation_access_manages_resources_and_other_agents_work() {
         json!({ "id": connection_id }),
     )
     .await;
-    assert_eq!(result(&disconnected)["disconnected"], true);
+    assert_eq!(result(&disconnected)["completed"], true);
     let deleted = call(
         &s,
         &configuration,
@@ -1473,9 +1494,9 @@ async fn installation_access_manages_resources_and_other_agents_work() {
         json!({ "id": connection_id }),
     )
     .await;
-    assert_eq!(result(&deleted)["deleted"], true);
+    assert_eq!(result(&deleted)["completed"], true);
     let connections = call(&s, &configuration, "list_mcps", json!({})).await;
-    assert!(result(&connections).as_array().unwrap().is_empty());
+    assert!(result(&connections)["mcps"].as_array().unwrap().is_empty());
 
     let created = call(
         &s,
@@ -1625,89 +1646,138 @@ async fn installation_access_can_save_global_and_project_skills() {
 }
 
 #[tokio::test]
-async fn management_discovery_cannot_publish_after_its_grant_is_revoked() {
-    use axum::{Json, Router, routing::post};
-    use std::time::Duration;
+async fn management_discovery_and_legacy_teardown_are_fenced_by_revocation() {
+    use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
+    use std::{
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        time::Duration,
+    };
     use tokio::sync::Notify;
 
-    let root = TempDir::new().unwrap();
-    let s = service(&root).await;
-    let main = enabled_main(&s).await;
-    let (run, configuration) = active_run(&s, &main).await;
-    let started = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let app = Router::new().route(
-        "/mcp",
-        post({
-            let started = started.clone();
-            let release = release.clone();
-            move |Json(request): Json<Value>| {
+    for legacy in [false, true] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        let main = enabled_main(&s).await;
+        let (run, configuration) = active_run(&s, &main).await;
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let blocked = Arc::new(AtomicBool::new(false));
+        let deletions = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/mcp",
+            post({
                 let started = started.clone();
                 let release = release.clone();
-                async move {
-                    let result = if request["method"] == "server/discover" {
-                        json!({
-                            "supportedVersions": ["2026-07-28"],
-                            "capabilities": { "tools": {} }
-                        })
-                    } else {
-                        assert_eq!(request["method"], "tools/list");
-                        started.notify_one();
-                        release.notified().await;
-                        json!({ "tools": [] })
-                    };
-                    Json(json!({
-                        "jsonrpc": "2.0",
-                        "id": request["id"],
-                        "result": result
-                    }))
+                let blocked = blocked.clone();
+                move |Json(request): Json<Value>| {
+                    let started = started.clone();
+                    let release = release.clone();
+                    let blocked = blocked.clone();
+                    async move {
+                        if legacy && request["method"] == "server/discover" {
+                            return StatusCode::BAD_REQUEST.into_response();
+                        }
+                        if request["method"] == "notifications/initialized" {
+                            return StatusCode::ACCEPTED.into_response();
+                        }
+                        let result = match text(&request, "method") {
+                            "server/discover" => json!({
+                                "supportedVersions": ["2026-07-28"],
+                                "capabilities": {"tools": {}}
+                            }),
+                            "initialize" => json!({
+                                "protocolVersion": "2025-11-25",
+                                "capabilities": {"tools": {}}
+                            }),
+                            method => {
+                                assert_eq!(method, "tools/list");
+                                if blocked.load(Ordering::SeqCst) {
+                                    started.notify_one();
+                                    release.notified().await;
+                                }
+                                json!({"tools": []})
+                            }
+                        };
+                        let mut response = Json(json!({
+                            "jsonrpc": "2.0",
+                            "id": request["id"],
+                            "result": result
+                        }))
+                        .into_response();
+                        if legacy {
+                            response
+                                .headers_mut()
+                                .insert("mcp-session-id", "fixture-session".parse().unwrap());
+                        }
+                        response
+                    }
                 }
-            }
-        }),
-    );
-    let (origin, server) = common::serve_locally(app).await;
-    let connection = s
-        .mcps
-        .save(
-            &s,
-            json!({
-                "name": "Delayed discovery",
-                "url": format!("{origin}/mcp"),
-                "allowPrivateNetwork": true
+            })
+            .delete({
+                let deletions = deletions.clone();
+                move || {
+                    let deletions = deletions.clone();
+                    async move {
+                        deletions.fetch_add(1, Ordering::SeqCst);
+                        StatusCode::NO_CONTENT
+                    }
+                }
             }),
-            None,
-        )
-        .await
-        .unwrap();
-    let before = s.mcps.list(&s).await.unwrap();
-    let pending = tokio::spawn({
-        let s = s.clone();
-        let configuration = configuration.clone();
-        async move {
-            call(
-                &s,
-                &configuration,
-                "test_mcp",
-                json!({ "id": connection["id"] }),
+        );
+        let (origin, server) = common::serve_locally(app).await;
+        let connection = s
+            .mcp_fixture(
+                json!({
+                    "name":"Delayed discovery",
+                    "url":format!("{origin}/mcp"),
+                    "allowPrivateNetwork":true,
+                    "auth":"bearer",
+                    "token":"synthetic-teardown-token"
+                }),
+                None,
             )
             .await
-        }
-    });
-    tokio::time::timeout(Duration::from_secs(10), started.notified())
-        .await
-        .unwrap();
-    s.mcps
-        .revoke_run(&s, run["id"].as_str().unwrap())
-        .await
-        .unwrap();
-    release.notify_one();
-    let response = tokio::time::timeout(Duration::from_secs(10), pending)
-        .await
-        .unwrap()
-        .unwrap();
-    server.abort();
-    assert_eq!(response["result"]["isError"], true, "{response}");
-    assert_eq!(s.mcps.list(&s).await.unwrap(), before);
+            .unwrap();
+        let id = connection["id"].as_str().unwrap();
+        // Authorized legacy sessions still send DELETE, and modern ones remain stateless.
+        s.mcps.test(&s, id).await.unwrap();
+        assert_eq!(deletions.swap(0, Ordering::SeqCst), usize::from(legacy));
+        let before = s.mcps.list(&s).await.unwrap();
+        blocked.store(true, Ordering::SeqCst);
+        let pending = tokio::spawn({
+            let s = s.clone();
+            let configuration = configuration.clone();
+            async move {
+                call(
+                    &s,
+                    &configuration,
+                    "test_mcp",
+                    json!({"id":connection["id"]}),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(10), started.notified())
+            .await
+            .unwrap();
+        s.mcps
+            .revoke_run(&s, run["id"].as_str().unwrap())
+            .await
+            .unwrap();
+        release.notify_one();
+        let response = tokio::time::timeout(Duration::from_secs(10), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        server.abort();
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        assert_eq!(
+            deletions.load(Ordering::SeqCst),
+            0,
+            "A revoked grant must not send a remote teardown request"
+        );
+        assert_eq!(s.mcps.list(&s).await.unwrap(), before);
+    }
 }
 
 #[tokio::test]
@@ -1744,9 +1814,7 @@ async fn management_oauth_refresh_cannot_save_credentials_after_revocation() {
     );
     let (origin, server) = common::serve_locally(app).await;
     let connection = s
-        .mcps
-        .save(
-            &s,
+        .mcp_fixture(
             json!({
                 "name": "Delayed OAuth refresh",
                 "url": format!("{origin}/mcp"),
@@ -1773,7 +1841,12 @@ async fn management_oauth_refresh_cannot_save_credentials_after_revocation() {
             "authorizationServerMetadata": { "token_endpoint": format!("{origin}/token") }
         }
     });
-    s.vault.set(&id, &credentials).await.unwrap();
+    let replacement: cairn_installation::mcps::record::McpSecrets =
+        serde_json::from_value(credentials.clone()).unwrap();
+    s.mcps
+        .update_secrets(&s, &id, |secrets| *secrets = replacement)
+        .await
+        .unwrap();
     let before = s.mcps.list(&s).await.unwrap();
     let pending = tokio::spawn({
         let s = s.clone();
@@ -1803,7 +1876,9 @@ async fn management_oauth_refresh_cannot_save_credentials_after_revocation() {
     server.abort();
     assert_eq!(response["result"]["isError"], true, "{response}");
     // Assert equality without printing even fixture credentials on failure.
-    assert!(s.vault.get(&id).await.unwrap().as_ref() == Some(&credentials));
+    assert!(
+        serde_json::to_value(s.mcps.server_secrets(&s, &id).await.unwrap()).unwrap() == credentials
+    );
     assert_eq!(s.mcps.list(&s).await.unwrap(), before);
 }
 
@@ -1886,7 +1961,7 @@ async fn run_grants_enforce_revocation_completion_and_chat_turn_binding() {
 }
 
 #[tokio::test]
-async fn legacy_grants_do_not_acquire_installation_access_and_vm_channels_bind_the_run() {
+async fn workspace_grants_do_not_acquire_installation_access_and_vm_channels_bind_the_run() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let main = enabled_main(&s).await;
@@ -1894,10 +1969,13 @@ async fn legacy_grants_do_not_acquire_installation_access_and_vm_channels_bind_t
     let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
         .as_str()
         .unwrap();
-    let key = format!("mcp-grant:{}", hex_digest(token));
-    let mut legacy = s.store.kv(&key).await.unwrap().unwrap();
-    legacy.as_object_mut().unwrap().remove("installation");
-    s.store.set(&key, legacy, None).await.unwrap();
+    let key = hex_digest(token);
+    let mut grant = s.store.mcp_run_grant(&key).await.unwrap().unwrap();
+    grant.installation = false;
+    s.store
+        .transaction(move |db| db.save_mcp_run_grant(&key, &grant, None))
+        .await
+        .unwrap();
     assert_eq!(
         request(&s, token, "tools/list", json!({})).await.0,
         StatusCode::UNAUTHORIZED
@@ -3497,7 +3575,7 @@ async fn typed_agent_profiles_preview_and_avatars_match_on_both_tools() {
     let (_, configuration) = active_run(&s, &main).await;
     let token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
     let app = common::relay_fixture::router(s.clone()).await.unwrap();
-    let connection = s.mcps.save(&s, json!({
+    let connection = s.mcp_fixture( json!({
         "name": "Selected tools", "transport": "http", "url": "http://127.0.0.1:9/mcp", "allowPrivateNetwork": true,
     }), None).await.unwrap();
     let connection_id = connection["id"].as_str().unwrap();
@@ -3688,4 +3766,114 @@ fn mission_settings(mission: &Value) -> Value {
         .contains(&key.as_str())
     });
     settings
+}
+
+#[tokio::test]
+async fn typed_mcp_commands_share_revisions_secret_redaction_and_human_oauth_boundaries() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let agent_token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    let public = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+    let read_only = common::relay_fixture::grant(&s, &["read"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    for (endpoint, token) in [
+        ("/mcp", public.as_str()),
+        ("/mcp-installation", agent_token),
+    ] {
+        let input = json!({"name":"Typed MCP","url":"https://example.test/mcp","auth":"oauth","clientSecret":"synthetic-secret","enabled":false,"enabledTools":[]});
+        let (_, created) =
+            node_management_call(&app, endpoint, token, "create_mcp", input.clone()).await;
+        let view = result(&created).clone();
+        assert_eq!(view["hasClientSecret"], true, "{created}");
+        assert_eq!(view["enabledTools"], json!([]));
+        for key in [
+            "clientSecret",
+            "token",
+            "env",
+            "tokens",
+            "verifier",
+            "discovery",
+        ] {
+            assert!(view.get(key).is_none());
+        }
+        let id = view["id"].as_str().unwrap();
+        let before = s.mcps.server_secrets(&s, id).await.unwrap();
+        let (_, begin) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "begin_mcp_connection",
+            json!({"id":id,"native":true}),
+        )
+        .await;
+        assert!(
+            result(&begin)["url"].as_str().unwrap().ends_with("/mcps"),
+            "{begin}"
+        );
+        let (_, status) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "mcp_connection_status",
+            json!({"id":id}),
+        )
+        .await;
+        assert_eq!(result(&status)["pending"], false);
+        assert_eq!(
+            s.mcps.server_secrets(&s, id).await.unwrap(),
+            before,
+            "An agent cannot initiate a human session or mutate OAuth credentials"
+        );
+        let settings = serde_json::to_value(
+            serde_json::from_value::<cairn_contracts::McpInput>(input).unwrap(),
+        )
+        .unwrap();
+        let command = json!({"id":id,"revision":view["revision"],"connection":settings});
+        for omitted in ["enabled", "enabledTools"] {
+            let mut incomplete = command.clone();
+            incomplete["connection"]
+                .as_object_mut()
+                .unwrap()
+                .remove(omitted);
+            let (_, denied) =
+                node_management_call(&app, endpoint, token, "update_mcp", incomplete).await;
+            assert_eq!(denied["result"]["isError"], true, "{denied}");
+            let unchanged = s.mcps.server(&s, id).await.unwrap();
+            assert_eq!(unchanged.revision, 1);
+            assert!(!unchanged.enabled);
+            assert_eq!(unchanged.enabled_tools, Some(vec![]));
+        }
+        let (_, saved) =
+            node_management_call(&app, endpoint, token, "update_mcp", command.clone()).await;
+        assert_eq!(result(&saved)["revision"], 2);
+        let (_, stale) = node_management_call(&app, endpoint, token, "update_mcp", command).await;
+        assert_eq!(stale["result"]["isError"], true, "{stale}");
+        assert!(stale.to_string().contains("changed elsewhere"));
+        let (_, cancel) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "cancel_mcp_connection",
+            json!({"id":id}),
+        )
+        .await;
+        assert_eq!(result(&cancel)["completed"], true);
+        assert_eq!(s.mcps.server_secrets(&s, id).await.unwrap(), before);
+        let (_, deleted) =
+            node_management_call(&app, endpoint, token, "delete_mcp", json!({"id":id})).await;
+        assert_eq!(result(&deleted)["completed"], true);
+        assert!(s.store.mcp_server(id).await.unwrap().is_none());
+    }
+    let (_, denied) = node_management_call(
+        &app,
+        "/mcp",
+        &read_only,
+        "create_mcp",
+        json!({"name":"denied","url":"https://example.test"}),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true);
+    assert!(s.mcps.list(&s).await.unwrap().is_empty());
 }
