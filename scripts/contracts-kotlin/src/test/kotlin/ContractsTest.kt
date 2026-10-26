@@ -8,6 +8,36 @@ class ContractsTest {
     private val json = Json { encodeDefaults = true }
 
     @Test
+    fun agentsMatchRustWireAndDefaults() {
+        val root = File(System.getProperty("cairn.contractWire")).parentFile
+        val corpus =
+            json
+                .parseToJsonElement(
+                    File(
+                            root.parentFile.parentFile.parentFile,
+                            "tests/fixtures/agent-contracts.json",
+                        )
+                        .readText()
+                )
+                .jsonObject
+        val wire = json.parseToJsonElement(File(root, "agent-wire.json").readText()).jsonObject
+        // As in the app decoder, omitted nullable fields decode to null. The wire encoder
+        // is explicit: null node selections must not become the local-runner default.
+        val decoder = Json(json) { explicitNulls = false }
+        for ((index, input) in corpus.getValue("creates").jsonArray.withIndex()) {
+            val model = decoder.decodeFromJsonElement<CreateAgentInput>(input)
+            assertEquals(wire.getValue("creates").jsonArray[index], json.encodeToJsonElement(model))
+        }
+        for (value in wire.getValue("views").jsonArray) {
+            val model = json.decodeFromJsonElement<Agent>(value)
+            assertEquals(value, json.encodeToJsonElement(model))
+        }
+        for (value in corpus.getValue("invalidCreates").jsonArray.take(5)) {
+            assertFails(value.toString()) { decoder.decodeFromJsonElement<CreateAgentInput>(value) }
+        }
+    }
+
+    @Test
     fun accountMethodsCorpusDecodesAppResponses() {
         val corpus =
             json

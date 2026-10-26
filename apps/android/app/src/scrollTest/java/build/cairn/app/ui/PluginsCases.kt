@@ -227,7 +227,7 @@ abstract class PluginsCases {
                     put("botName", "Cairn Bot")
                 },
             accessMode = "requests",
-            agentId = "helper",
+            agentId = "08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3",
             status = PluginStatus("connected", "Signed in as Cairn Bot"),
             requests = listOf(PluginRequest(id = "r", userId = "300", name = "Sarah")),
             activity =
@@ -443,7 +443,10 @@ abstract class PluginsCases {
                 },
                 payload["settings"],
             )
-            assertEquals("helper", payload["agentId"]?.jsonPrimitive?.content)
+            assertEquals(
+                "08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3",
+                payload["agentId"]?.jsonPrimitive?.content,
+            )
             assertEquals("project", payload["projectId"]?.jsonPrimitive?.content)
             assertEquals(
                 JsonArray(listOf(JsonPrimitive("300"), JsonPrimitive("301"))),
@@ -774,7 +777,10 @@ abstract class PluginsCases {
                 payload["settings"],
             )
             assertEquals("requests", payload["accessMode"]?.jsonPrimitive?.content)
-            assertEquals("helper", payload["agentId"]?.jsonPrimitive?.content)
+            assertEquals(
+                "08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3",
+                payload["agentId"]?.jsonPrimitive?.content,
+            )
             // The token is only ever sent to the installation, never echoed back in settings.
             assertFalse(payload["settings"].toString().contains("synthetic_android_token"))
         }
@@ -1324,7 +1330,10 @@ abstract class PluginsCases {
                 buildJsonObject { put("token", "ops_android_fixture") },
                 payload["secrets"],
             )
-            assertEquals(JsonArray(listOf(JsonPrimitive("helper"))), payload["agentIds"])
+            assertEquals(
+                JsonArray(listOf(JsonPrimitive("08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3"))),
+                payload["agentIds"],
+            )
             assertEquals(JsonObject(emptyMap()), payload["settings"])
         }
     }
@@ -1350,7 +1359,7 @@ abstract class PluginsCases {
                 id = "work",
                 pluginId = "forge",
                 name = "Work",
-                agentIds = listOf("helper"),
+                agentIds = listOf("08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3"),
             )
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<JsonObject>()
@@ -1645,7 +1654,10 @@ abstract class PluginsCases {
             assertEquals("bob@example.test", payload["name"]?.jsonPrimitive?.content)
             assertEquals("alice", payload["sharedFrom"]?.jsonPrimitive?.content)
             assertEquals("oauth-g", payload["credentialFlow"]?.jsonPrimitive?.content)
-            assertEquals(JsonArray(listOf(JsonPrimitive("helper"))), payload["agentIds"])
+            assertEquals(
+                JsonArray(listOf(JsonPrimitive("08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3"))),
+                payload["agentIds"],
+            )
             assertEquals(
                 buildJsonObject {
                     put("clientId", clientId)
@@ -1765,18 +1777,41 @@ abstract class PluginsCases {
                         "/api/account/session" -> beaconAccountFixture("fixture-csrf")
                         "/api/installations/fixture/api/agents" ->
                             wireJson.encodeToString(
-                                listOf(
-                                    Agent(
-                                        id = MAIN_AGENT_ID,
-                                        name = "Cairn",
-                                        revision = "r1",
-                                    ),
-                                    Agent(
-                                        id = "helper",
-                                        name = "Helper",
-                                        access = AccessPolicy(projects = listOf("project")),
-                                        revision = "r1",
-                                    ),
+                                build.cairn.contracts.ListAgentsOutput(
+                                    listOf(
+                                        Agent(
+                                            exclusiveNodes = emptyList(),
+                                            plugins = emptyList(),
+                                            createdAt = 0,
+                                            access =
+                                                AccessPolicy(
+                                                    mcpTools =
+                                                        build.cairn.contracts.McpTools(emptyMap()),
+                                                    projects = null,
+                                                    skills = null,
+                                                    mcps = null,
+                                                ),
+                                            id = MAIN_AGENT_ID,
+                                            name = "Cairn",
+                                            revision = "r1",
+                                        ),
+                                        Agent(
+                                            exclusiveNodes = emptyList(),
+                                            plugins = emptyList(),
+                                            createdAt = 0,
+                                            id = "08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3",
+                                            name = "Helper",
+                                            access =
+                                                AccessPolicy(
+                                                    mcpTools =
+                                                        build.cairn.contracts.McpTools(emptyMap()),
+                                                    skills = null,
+                                                    mcps = null,
+                                                    projects = listOf("project"),
+                                                ),
+                                            revision = "r1",
+                                        ),
+                                    )
                                 )
                             )
                         "/api/installations/fixture/api/plugins" ->
@@ -1807,6 +1842,10 @@ abstract class PluginsCases {
                         else ->
                             if (request.requestUrl?.encodedPath?.endsWith("/api/projects") == true)
                                 """{"projects":[]}"""
+                            else if (
+                                request.requestUrl?.encodedPath?.endsWith("/api/agents") == true
+                            )
+                                """{"agents":[]}"""
                             else "[]"
                     }
                 return MockResponse().setBody(result)

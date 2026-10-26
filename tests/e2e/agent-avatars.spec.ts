@@ -77,9 +77,9 @@ test('shows generation progress, refreshes the portrait and falls back if an ima
   // Complete outside the editor so its pending state can only settle through
   // the app's background refresh, as it does after provider generation.
   const session = await (await page.request.get('/api/account/session')).json()
-  const completed = await page.request.put(`/api/installations/${workspace.installationId}/api/agents/${agent.id}/avatar`, {
-    headers: { 'Origin': workspace.url, 'X-CSRF-Token': session.csrf, 'Content-Type': 'image/png' },
-    data: await readFile('tests/fixtures/artifacts/thumbnail.png'),
+  const completed = await page.request.post(`/api/installations/${workspace.installationId}/api/agents/${agent.id}/avatar/upload`, {
+    headers: { 'Origin': workspace.url, 'X-CSRF-Token': session.csrf, 'Content-Type': 'application/json' },
+    data: { agentId: agent.id, data: (await readFile('tests/fixtures/artifacts/thumbnail.png')).toString('base64') },
   })
   expect(completed.ok()).toBe(true)
   await expect(portrait.getByRole('status')).toHaveCount(0)

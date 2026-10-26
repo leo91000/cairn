@@ -121,7 +121,28 @@ abstract class QueueStripCases {
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
-                                        listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                Agent(
+                                                    exclusiveNodes = emptyList(),
+                                                    plugins = emptyList(),
+                                                    revision = "",
+                                                    createdAt = 0,
+                                                    access =
+                                                        AccessPolicy(
+                                                            mcpTools =
+                                                                build.cairn.contracts.McpTools(
+                                                                    emptyMap()
+                                                                ),
+                                                            projects = null,
+                                                            skills = null,
+                                                            mcps = null,
+                                                        ),
+                                                    id = MAIN_AGENT_ID,
+                                                    name = "Agent principal",
+                                                )
+                                            )
+                                        )
                                     )
                                 "/api/installations/fixture/api/overview" -> "{}"
                                 "/api/installations/fixture/api/chats/chat" ->

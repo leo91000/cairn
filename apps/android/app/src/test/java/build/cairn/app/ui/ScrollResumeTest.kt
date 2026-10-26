@@ -121,7 +121,7 @@ class ScrollResumeTest {
                                     "/api/account/session" -> beaconAccountFixture("fixture")
                                     "/api/installations/fixture/api/projects" ->
                                         """{"projects":[]}"""
-                                    "/api/installations/fixture/api/agents",
+                                    "/api/installations/fixture/api/agents" -> """{"agents":[]}"""
                                     "/api/installations/fixture/api/tasks",
                                     "/api/installations/fixture/api/skills",
                                     "/api/installations/fixture/api/mcps" -> "[]"

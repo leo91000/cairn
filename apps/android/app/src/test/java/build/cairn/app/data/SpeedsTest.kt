@@ -82,6 +82,6 @@ class SpeedsTest {
         assertNull(older.defaultServiceTier)
         val message = json.decodeFromString<ChatMessage>("""{"id":"m","text":"Hi"}""")
         assertEquals("", message.speed)
-        assertEquals("", json.decodeFromString<Agent>("""{"id":"a"}""").speed)
+        assertEquals("", newAgent().speed)
     }
 }

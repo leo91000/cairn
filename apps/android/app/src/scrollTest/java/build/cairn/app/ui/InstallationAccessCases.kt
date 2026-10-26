@@ -11,6 +11,7 @@ import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
+import build.cairn.contracts.ReplaceAgentInput
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.first
@@ -26,7 +27,24 @@ abstract class InstallationAccessCases {
     fun ownerCanEnableAndRevokeInstallationAccessOnTheAgentPage() {
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<Agent>()
-            val agent = AtomicReference(Agent(MAIN_AGENT_ID, "Agent principal"))
+            val agent =
+                AtomicReference(
+                    Agent(
+                        exclusiveNodes = emptyList(),
+                        plugins = emptyList(),
+                        revision = "",
+                        createdAt = 0,
+                        access =
+                            AccessPolicy(
+                                mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                                projects = null,
+                                skills = null,
+                                mcps = null,
+                            ),
+                        id = MAIN_AGENT_ID,
+                        name = "Agent principal",
+                    )
+                )
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
@@ -35,15 +53,22 @@ abstract class InstallationAccessCases {
                             when {
                                 path == "/api/installations/fixture/api/agents/$MAIN_AGENT_ID" &&
                                     request.method == "PUT" -> {
+                                    val command =
+                                        wireJson.decodeFromString<ReplaceAgentInput>(
+                                            request.body.readUtf8()
+                                        )
                                     val updated =
-                                        wireJson.decodeFromString<Agent>(request.body.readUtf8())
+                                        agentFixture(command.settings, command.agentId, "saved")
                                     agent.set(updated)
                                     saved += updated
                                     wireJson.encodeToString(updated)
                                 }
-                                path.endsWith("/preview") -> "{}"
+                                path.endsWith("/preview") ->
+                                    """{"runs":{"queued":0,"running":0},"delegations":[]}"""
                                 path == "/api/installations/fixture/api/agents" ->
-                                    wireJson.encodeToString(listOf(agent.get()))
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(listOf(agent.get()))
+                                    )
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path.endsWith("/models") -> """{"models":[]}"""
@@ -55,6 +80,11 @@ abstract class InstallationAccessCases {
                                             ?.endsWith("/api/projects") == true
                                     )
                                         """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
                                     else "[]"
                             }
                         return MockResponse()

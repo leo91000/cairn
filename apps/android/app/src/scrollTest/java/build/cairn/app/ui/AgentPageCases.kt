@@ -34,20 +34,35 @@ abstract class AgentPageCases {
 
     private val main =
         Agent(
-            MAIN_AGENT_ID,
-            "Agent principal",
+            exclusiveNodes = emptyList(),
+            plugins = emptyList(),
+            createdAt = 0,
+            id = MAIN_AGENT_ID,
+            name = "Agent principal",
             revision = "m1",
-            access = AccessPolicy(nodes = listOf(LOCAL_NODE_ID)),
+            access =
+                AccessPolicy(
+                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                    projects = null,
+                    skills = null,
+                    mcps = null,
+                    nodes = listOf(LOCAL_NODE_ID),
+                ),
         )
     private val release =
         Agent(
-            "agent",
-            "Release engineer",
-            "Publie les versions web et Android",
+            exclusiveNodes = emptyList(),
+            plugins = emptyList(),
+            createdAt = 0,
+            id = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+            name = "Release engineer",
+            description = "Publie les versions web et Android",
             model = "gpt-5",
             revision = "r1",
             access =
                 AccessPolicy(
+                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                    mcps = null,
                     nodes = listOf(LOCAL_NODE_ID),
                     projects =
                         listOf(
@@ -108,7 +123,12 @@ abstract class AgentPageCases {
                 listOf(
                     PluginConnection("prod", "onepassword", "Production"),
                     PluginConnection("staging", "onepassword", "Staging", enabled = false),
-                    PluginConnection("bot", "discord", "#support", agentId = "agent"),
+                    PluginConnection(
+                        "bot",
+                        "discord",
+                        "#support",
+                        agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                    ),
                     PluginConnection("gh-work", "github", "octo-work"),
                     PluginConnection("gh-home", "github", "octo-home"),
                 ),
@@ -164,10 +184,25 @@ abstract class AgentPageCases {
                         saved += path to body
                         // A replayed creation identity returns the agent it already created.
                         val created =
-                            agents.get().find { it.id == "created" }
+                            agents.get().find { it.id == "625c462a-fcff-5985-b84a-e212b3ac665d" }
                                 ?: wireJson
-                                    .decodeFromJsonElement<Agent>(body)
-                                    .copy(id = "created", revision = "c1")
+                                    .decodeFromJsonElement<Agent>(
+                                        JsonObject(
+                                            body["settings"]!!.jsonObject +
+                                                mapOf(
+                                                    "id" to
+                                                        JsonPrimitive(
+                                                            "ecf23b20-8841-5456-a8d8-1e43edc19cb9"
+                                                        ),
+                                                    "revision" to JsonPrimitive("c1"),
+                                                    "createdAt" to JsonPrimitive(0),
+                                                )
+                                        )
+                                    )
+                                    .copy(
+                                        id = "625c462a-fcff-5985-b84a-e212b3ac665d",
+                                        revision = "c1",
+                                    )
                                     .also { agents.set(agents.get() + it) }
                         if (loseCreation.getAndSet(false))
                             return MockResponse()
@@ -179,7 +214,7 @@ abstract class AgentPageCases {
                         saved += path to body
                         // Like the server: runs use one account's credentials per package.
                         val github =
-                            body["plugins"]?.jsonArray.orEmpty().count {
+                            body["settings"]!!.jsonObject["plugins"]?.jsonArray.orEmpty().count {
                                 it.jsonPrimitive.content.startsWith("gh-")
                             }
                         if (github > 1)
@@ -204,7 +239,17 @@ abstract class AgentPageCases {
                                 )
                         val updated =
                             wireJson
-                                .decodeFromJsonElement<Agent>(body)
+                                .decodeFromJsonElement<Agent>(
+                                    JsonObject(
+                                        body["settings"]!!.jsonObject +
+                                            mapOf(
+                                                "id" to
+                                                    JsonPrimitive(path.removePrefix("/agents/")),
+                                                "revision" to JsonPrimitive("saved"),
+                                                "createdAt" to JsonPrimitive(0),
+                                            )
+                                    )
+                                )
                                 .copy(
                                     id = path.removePrefix("/agents/"),
                                     revision = "saved-${saved.size}",
@@ -227,10 +272,13 @@ abstract class AgentPageCases {
                     val body =
                         when {
                             path.endsWith("/preview") ->
-                                if (path.startsWith("/agents/agent"))
+                                if (path.startsWith("/agents/d3153f9f-724b-59c3-9614-ab78f231c4d3"))
                                     """{"runs":{"queued":0,"running":0},"delegations":[{"id":"bot","pluginId":"discord","name":"#support","enabled":true,"suspended":true,"blocked":null,"alreadySuspended":${alreadySuspended.get()}}]}"""
                                 else """{"runs":{"queued":0,"running":0},"delegations":[]}"""
-                            path == "/agents" -> wireJson.encodeToString(agents.get())
+                            path == "/agents" ->
+                                wireJson.encodeToString(
+                                    build.cairn.contracts.ListAgentsOutput(agents.get())
+                                )
                             path == "/projects" ->
                                 """{"projects":[{"id":"2450c72e-6174-56da-b0fc-b06868e8e8e5","name":"cairn","path":"/srv/cairn","description":"","baseBranch":"main","sourceMode":"remote","origin":"","source":null,"revision":"fixture-revision","createdAt":0},{"id":"6501040b-e89b-5102-9fa7-24510fb014c8","name":"SheetOM","path":"/srv/sheetom","description":"","baseBranch":"main","sourceMode":"remote","origin":"","source":null,"revision":"fixture-revision","createdAt":0}]}"""
                             path == "/mcps" -> mcps.get()
@@ -248,6 +296,10 @@ abstract class AgentPageCases {
                                         true
                                 )
                                     """{"projects":[]}"""
+                                else if (
+                                    request.requestUrl?.encodedPath?.endsWith("/api/agents") == true
+                                )
+                                    """{"agents":[]}"""
                                 else "[]"
                         }
                     return response.setBody(body)
@@ -403,19 +455,22 @@ abstract class AgentPageCases {
             compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
             val (path, body) = fixture.saved.single()
             assertEquals("/agents/$MAIN_AGENT_ID", path)
-            val access = body["access"]!!.jsonObject
+            val access = body["settings"]!!.jsonObject["access"]!!.jsonObject
             // Live grants are sent next to the access policy, never inside it.
-            assertEquals(JsonArray(listOf(JsonPrimitive("prod"))), body["plugins"])
+            assertEquals(
+                JsonArray(listOf(JsonPrimitive("prod"))),
+                body["settings"]!!.jsonObject["plugins"],
+            )
             assertFalse("plugins" in access)
             assertEquals(JsonNull, access["projects"])
             assertEquals("m1", body["revision"]!!.jsonPrimitive.content)
-            assertFalse("reapproveDelegations" in body)
+            assertTrue(body["review"]!!.jsonObject["reapproveDelegations"]!!.jsonArray.isEmpty())
         }
     }
 
     @Test
     fun exclusiveReservationIsGrantedOnlyWhereTheAgentRuns() {
-        journey("agent") { fixture ->
+        journey("d3153f9f-724b-59c3-9614-ab78f231c4d3") { fixture ->
             open(AgentSection.Nodes)
             waitForDescription("Réserver gpu-box en exclusivité")
             compose
@@ -462,21 +517,27 @@ abstract class AgentPageCases {
             confirmReview()
             compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
             val body = fixture.saved.single().second
-            val access = body["access"]!!.jsonObject
+            val access = body["settings"]!!.jsonObject["access"]!!.jsonObject
             assertEquals(
                 listOf(LOCAL_NODE_ID, "gpu"),
                 access["nodes"]!!.jsonArray.map { it.jsonPrimitive.content },
             )
-            assertEquals(JsonArray(listOf(JsonPrimitive("gpu"))), body["exclusiveNodes"])
+            assertEquals(
+                JsonArray(listOf(JsonPrimitive("gpu"))),
+                body["settings"]!!.jsonObject["exclusiveNodes"],
+            )
             assertFalse("exclusiveNodes" in access)
-            assertEquals(JsonArray(listOf(JsonPrimitive("bot"))), body["reapproveDelegations"])
+            assertEquals(
+                JsonArray(listOf(JsonPrimitive("bot"))),
+                body["review"]!!.jsonObject["reapproveDelegations"],
+            )
             assertEquals("r1", body["revision"]!!.jsonPrimitive.content)
         }
     }
 
     @Test
     fun onePasswordAccountIsGrantedFromTheAgentWithReadableSkills() {
-        journey("agent") { fixture ->
+        journey("d3153f9f-724b-59c3-9614-ab78f231c4d3") { fixture ->
             open(AgentSection.Skills)
             compose.onNodeWithText("review · Global").assertExists()
             compose.onNodeWithText("lint · cairn").assertExists()
@@ -521,14 +582,17 @@ abstract class AgentPageCases {
             confirmReview()
             compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
             val body = fixture.saved.single().second
-            assertEquals(JsonArray(listOf(JsonPrimitive("prod"))), body["plugins"])
-            assertFalse("reapproveDelegations" in body)
+            assertEquals(
+                JsonArray(listOf(JsonPrimitive("prod"))),
+                body["settings"]!!.jsonObject["plugins"],
+            )
+            assertTrue(body["review"]!!.jsonObject["reapproveDelegations"]!!.jsonArray.isEmpty())
         }
     }
 
     @Test
     fun aDelegationSuspendedEarlierIsNotReapprovedByDefault() {
-        journey("agent") { fixture ->
+        journey("d3153f9f-724b-59c3-9614-ab78f231c4d3") { fixture ->
             fixture.alreadySuspended.set(true)
             // An earlier suspension alone does not open the review.
             open(AgentSection.Identity)
@@ -540,7 +604,14 @@ abstract class AgentPageCases {
                     compose.onAllNodesWithTag("agent-save-bar").fetchSemanticsNodes().isEmpty()
             }
             compose.onNodeWithTag("agent-review").assertDoesNotExist()
-            assertFalse("reapproveDelegations" in fixture.saved.single().second)
+            assertTrue(
+                fixture.saved
+                    .single()
+                    .second["review"]!!
+                    .jsonObject["reapproveDelegations"]!!
+                    .jsonArray
+                    .isEmpty()
+            )
 
             // When a grant opens it, the delegation is listed unchecked.
             open(AgentSection.Plugins)
@@ -560,13 +631,20 @@ abstract class AgentPageCases {
                 .assertExists()
             confirmReview()
             compose.waitUntil(15000) { fixture.saved.size == 2 }
-            assertFalse("reapproveDelegations" in fixture.saved.last().second)
+            assertTrue(
+                fixture.saved
+                    .last()
+                    .second["review"]!!
+                    .jsonObject["reapproveDelegations"]!!
+                    .jsonArray
+                    .isEmpty()
+            )
         }
     }
 
     @Test
     fun aGithubAccountIsAPluginGrantAndTwoAccountsShowTheServerRefusal() {
-        journey("agent") { fixture ->
+        journey("d3153f9f-724b-59c3-9614-ab78f231c4d3") { fixture ->
             open(AgentSection.Plugins)
             waitForDescription("Accès à octo-work")
             compose
@@ -589,7 +667,7 @@ abstract class AgentPageCases {
             waitForText(oneInstance, substring = true)
             assertEquals(
                 listOf("gh-work", "gh-home"),
-                fixture.saved.single().second["plugins"]!!.jsonArray.map {
+                fixture.saved.single().second["settings"]!!.jsonObject["plugins"]!!.jsonArray.map {
                     it.jsonPrimitive.content
                 },
             )
@@ -608,14 +686,17 @@ abstract class AgentPageCases {
                     compose.onAllNodesWithTag("agent-save-bar").fetchSemanticsNodes().isEmpty()
             }
             val body = fixture.saved.last().second
-            assertEquals(JsonArray(listOf(JsonPrimitive("gh-work"))), body["plugins"])
-            assertFalse("github" in body["access"]!!.jsonObject)
+            assertEquals(
+                JsonArray(listOf(JsonPrimitive("gh-work"))),
+                body["settings"]!!.jsonObject["plugins"],
+            )
+            assertFalse("github" in body["settings"]!!.jsonObject["access"]!!.jsonObject)
         }
     }
 
     @Test
     fun switchingToNativeExecutionStartsFromNoNodesAndIsReviewed() {
-        journey("agent") { fixture ->
+        journey("d3153f9f-724b-59c3-9614-ab78f231c4d3") { fixture ->
             open(AgentSection.Nodes)
             waitForDescription("Exécuter ses conversations sur gpu-box")
             // A VM agent only sees VM machines.
@@ -655,7 +736,8 @@ abstract class AgentPageCases {
                 .assertExists()
             confirmReview()
             compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
-            val access = fixture.saved.single().second["access"]!!.jsonObject
+            val access =
+                fixture.saved.single().second["settings"]!!.jsonObject["access"]!!.jsonObject
             assertEquals(JsonPrimitive("native"), access["backend"])
             assertEquals(JsonArray(listOf(JsonPrimitive("desk"))), access["nodes"])
         }
@@ -663,7 +745,7 @@ abstract class AgentPageCases {
 
     @Test
     fun nativeAgentCanUseAllCurrentAndFutureNodes() {
-        journey("agent") { fixture ->
+        journey("d3153f9f-724b-59c3-9614-ab78f231c4d3") { fixture ->
             open(AgentSection.Nodes)
             compose.waitUntil(15000) {
                 compose
@@ -687,7 +769,8 @@ abstract class AgentPageCases {
             }
             confirmReview()
             compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
-            val access = fixture.saved.single().second["access"]!!.jsonObject
+            val access =
+                fixture.saved.single().second["settings"]!!.jsonObject["access"]!!.jsonObject
             assertEquals(JsonPrimitive("native"), access["backend"])
             assertEquals(JsonNull, access["nodes"])
         }
@@ -696,11 +779,12 @@ abstract class AgentPageCases {
     @Test
     fun everyMcpConnectionCanBeChosenEvenBeforeAnyExists() {
         journey(
-            "agent",
+            "d3153f9f-724b-59c3-9614-ab78f231c4d3",
             prepare = { fixture ->
                 fixture.agents.set(
                     fixture.agents.get().map {
-                        if (it.id == "agent") it.copy(access = it.access.copy(mcps = emptyList()))
+                        if (it.id == "d3153f9f-724b-59c3-9614-ab78f231c4d3")
+                            it.copy(access = it.access.copy(mcps = emptyList()))
                         else it
                     }
                 )
@@ -716,26 +800,36 @@ abstract class AgentPageCases {
             compose.onNodeWithText("Enregistrer").performClick()
             confirmReview()
             compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
-            assertEquals(JsonNull, fixture.saved.single().second["access"]!!.jsonObject["mcps"])
+            assertEquals(
+                JsonNull,
+                fixture.saved
+                    .single()
+                    .second["settings"]!!
+                    .jsonObject["access"]!!
+                    .jsonObject["mcps"],
+            )
         }
     }
 
     @Test
     fun untickingAConnectionKeepsItsToolRestrictionForWhenItIsGrantedAgain() {
         journey(
-            "agent",
+            "d3153f9f-724b-59c3-9614-ab78f231c4d3",
             prepare = { fixture ->
                 fixture.mcps.set(
                     """[{"id":"linear","name":"Linear","url":"https://mcp.linear.invalid","tools":[{"name":"read"},{"name":"write"}]}]"""
                 )
                 fixture.agents.set(
                     fixture.agents.get().map {
-                        if (it.id == "agent")
+                        if (it.id == "d3153f9f-724b-59c3-9614-ab78f231c4d3")
                             it.copy(
                                 access =
                                     it.access.copy(
                                         mcps = listOf("linear"),
-                                        mcpTools = mapOf("linear" to listOf("read")),
+                                        mcpTools =
+                                            build.cairn.contracts.McpTools(
+                                                mapOf("linear" to listOf("read"))
+                                            ),
                                     )
                             )
                         else it
@@ -756,7 +850,7 @@ abstract class AgentPageCases {
 
     @Test
     fun aFailedReReadOnReloadMakesPluginsUnknown() {
-        journey("agent") { fixture ->
+        journey("d3153f9f-724b-59c3-9614-ab78f231c4d3") { fixture ->
             open(AgentSection.Identity)
             compose.onNodeWithText("Nom").performTextReplacement("Release bot")
             back()
@@ -779,12 +873,14 @@ abstract class AgentPageCases {
     @Test
     fun pluginGrantsStayAsTheyAreWhenTheCatalogFailsToLoad() {
         journey(
-            "agent",
+            "d3153f9f-724b-59c3-9614-ab78f231c4d3",
             prepare = { fixture ->
                 fixture.failPlugins.set(true)
                 fixture.agents.set(
                     fixture.agents.get().map {
-                        if (it.id == "agent") it.copy(plugins = listOf("prod")) else it
+                        if (it.id == "d3153f9f-724b-59c3-9614-ab78f231c4d3")
+                            it.copy(plugins = listOf("prod"))
+                        else it
                     }
                 )
             },
@@ -844,19 +940,28 @@ abstract class AgentPageCases {
             compose.onNodeWithText("Créer l’agent").performClick()
             compose.waitUntil(15000) { left.get() }
             assertEquals(
-                listOf("/agents", "/agents", "/agents/created", "/agents/created"),
+                listOf(
+                    "/agents",
+                    "/agents",
+                    "/agents/625c462a-fcff-5985-b84a-e212b3ac665d",
+                    "/agents/625c462a-fcff-5985-b84a-e212b3ac665d",
+                ),
                 fixture.saved.map { it.first },
             )
             assertEquals(
                 listOf("Agent de release"),
-                fixture.agents.get().filter { it.id == "created" }.map { it.name },
+                fixture.agents
+                    .get()
+                    .filter { it.id == "625c462a-fcff-5985-b84a-e212b3ac665d" }
+                    .map { it.name },
             )
         }
     }
 
     @Test
     fun nodeAccessCannotChangeUntilTheMachinesLoad() {
-        journey("agent", prepare = { it.failNodes.set(true) }) { fixture ->
+        journey("d3153f9f-724b-59c3-9614-ab78f231c4d3", prepare = { it.failNodes.set(true) }) {
+            fixture ->
             // Summaries computed from machines do not pretend there are none.
             waitForDescription("Nodes, Non chargé")
             compose.onNodeWithContentDescription("Pouvoirs spéciaux, Non chargé").assertExists()
@@ -888,11 +993,13 @@ abstract class AgentPageCases {
     fun aHeldGrantOnAnUngrantablePluginIsShownAndCanBeRemoved() {
         // The Discord package gives agents nothing: an old grant on its bot is kept but useless.
         journey(
-            "agent",
+            "d3153f9f-724b-59c3-9614-ab78f231c4d3",
             prepare = { fixture ->
                 fixture.agents.set(
                     fixture.agents.get().map {
-                        if (it.id == "agent") it.copy(plugins = listOf("bot")) else it
+                        if (it.id == "d3153f9f-724b-59c3-9614-ab78f231c4d3")
+                            it.copy(plugins = listOf("bot"))
+                        else it
                     }
                 )
             },
@@ -915,13 +1022,16 @@ abstract class AgentPageCases {
             compose.onNodeWithText("Enregistrer").performClick()
             confirmReview()
             compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
-            assertEquals(JsonArray(emptyList()), fixture.saved.single().second["plugins"])
+            assertEquals(
+                JsonArray(emptyList()),
+                fixture.saved.single().second["settings"]!!.jsonObject["plugins"],
+            )
         }
     }
 
     @Test
     fun unsavedChangesAskBeforeLeavingAndAConflictKeepsTheDraft() {
-        journey("agent") { fixture ->
+        journey("d3153f9f-724b-59c3-9614-ab78f231c4d3") { fixture ->
             // Without changes, back leaves at once.
             compose.runOnIdle { checkNotNull(backDispatcher).onBackPressed() }
             compose.waitUntil(5000) { left.get() }
@@ -942,7 +1052,7 @@ abstract class AgentPageCases {
             fixture.conflict.set(true)
             fixture.agents.set(
                 fixture.agents.get().map {
-                    if (it.id == "agent")
+                    if (it.id == "d3153f9f-724b-59c3-9614-ab78f231c4d3")
                         it.copy(
                             description = "Changée ailleurs",
                             timeoutMinutes = 45,
@@ -971,10 +1081,16 @@ abstract class AgentPageCases {
                     compose.onAllNodesWithTag("agent-save-bar").fetchSemanticsNodes().isEmpty()
             }
             val body = fixture.saved.last().second
-            assertEquals("Release bot", body["name"]!!.jsonPrimitive.content)
-            assertEquals("Changée ailleurs", body["description"]!!.jsonPrimitive.content)
+            assertEquals(
+                "Release bot",
+                body["settings"]!!.jsonObject["name"]!!.jsonPrimitive.content,
+            )
+            assertEquals(
+                "Changée ailleurs",
+                body["settings"]!!.jsonObject["description"]!!.jsonPrimitive.content,
+            )
             // The untouched time limit takes the newer value instead of restoring the old one.
-            assertEquals(45, body["timeoutMinutes"]!!.jsonPrimitive.int)
+            assertEquals(45, body["settings"]!!.jsonObject["timeoutMinutes"]!!.jsonPrimitive.int)
             assertEquals("r2", body["revision"]!!.jsonPrimitive.content)
 
             // Discarding restores the saved agent.
@@ -983,6 +1099,31 @@ abstract class AgentPageCases {
             back()
             compose.onNodeWithText("Annuler").performClick()
             compose.onNodeWithTag("agent-save-bar").assertDoesNotExist()
+        }
+    }
+
+    @Test
+    fun anInvalidTimeLimitStaysEditableUntilCorrected() {
+        journey(release.id) { fixture ->
+            open(AgentSection.Advanced)
+            compose.onNodeWithText("Sans limite de temps").performClick()
+            compose.onNodeWithText("Limite en minutes (1–720)").performTextReplacement("900")
+            waitForText("Saisissez une limite entre 1 et 720 minutes.")
+            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+            compose.onNodeWithText("Limite en minutes (1–720)").performTextReplacement("720")
+            back()
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
+            assertEquals(
+                720,
+                fixture.saved
+                    .last()
+                    .second["settings"]!!
+                    .jsonObject["timeoutMinutes"]!!
+                    .jsonPrimitive
+                    .int,
+            )
         }
     }
 
@@ -1022,7 +1163,12 @@ abstract class AgentPageCases {
             compose.waitUntil(15000) { left.get() }
             val requests = fixture.saved.map { it.first }
             assertEquals(
-                listOf("/agents", "/agents", "/agents/created", "/agents/created"),
+                listOf(
+                    "/agents",
+                    "/agents",
+                    "/agents/625c462a-fcff-5985-b84a-e212b3ac665d",
+                    "/agents/625c462a-fcff-5985-b84a-e212b3ac665d",
+                ),
                 requests,
             )
             assertEquals("c1", fixture.saved[3].second["revision"]!!.jsonPrimitive.content)
@@ -1030,7 +1176,7 @@ abstract class AgentPageCases {
             assertEquals(creation["creationId"], fixture.saved[1].second["creationId"])
             assertNotNull(creation["creationId"])
             assertFalse("revision" in creation)
-            val access = creation["access"]!!.jsonObject
+            val access = creation["settings"]!!.jsonObject["access"]!!.jsonObject
             assertEquals(JsonArray(emptyList()), access["projects"])
             assertEquals(JsonArray(emptyList()), access["skills"])
             assertEquals(JsonArray(emptyList()), access["mcps"])
@@ -1038,11 +1184,14 @@ abstract class AgentPageCases {
             assertEquals(JsonArray(listOf(JsonPrimitive(LOCAL_NODE_ID))), access["nodes"])
             assertEquals(
                 "Agent de release",
-                fixture.saved[3].second["name"]!!.jsonPrimitive.content,
+                fixture.saved[3].second["settings"]!!.jsonObject["name"]!!.jsonPrimitive.content,
             )
             assertEquals(
                 listOf("Agent de release"),
-                fixture.agents.get().filter { it.id == "created" }.map { it.name },
+                fixture.agents
+                    .get()
+                    .filter { it.id == "625c462a-fcff-5985-b84a-e212b3ac665d" }
+                    .map { it.name },
             )
         }
     }

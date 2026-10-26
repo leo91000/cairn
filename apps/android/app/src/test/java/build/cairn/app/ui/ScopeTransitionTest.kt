@@ -92,6 +92,10 @@ class ScopeTransitionTest {
                                         true
                                 )
                                     """{"projects":[]}"""
+                                else if (
+                                    request.requestUrl?.encodedPath?.endsWith("/api/agents") == true
+                                )
+                                    """{"agents":[]}"""
                                 else "[]"
                         }
                     return MockResponse().setBody(result)

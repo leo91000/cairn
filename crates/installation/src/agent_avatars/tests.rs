@@ -1,8 +1,8 @@
 use super::*;
 use crate::config::Config;
 use axum::{
-    Router,
-    body::Body,
+    Json, Router,
+    body::{Body, to_bytes},
     http::{Request, StatusCode},
     routing::post,
 };
@@ -110,6 +110,19 @@ impl Fixture {
     }
 
     async fn request(&self, method: &str, path: &str, bytes: Vec<u8>) -> Response {
+        let (method, path, bytes) = if method == "PUT" && path.ends_with("/avatar") {
+            let agent_id = path
+                .trim_start_matches("/api/agents/")
+                .trim_end_matches("/avatar");
+            (
+                "POST",
+                format!("{path}/upload"),
+                serde_json::to_vec(&json!({ "agentId": agent_id, "data": STANDARD.encode(bytes) }))
+                    .unwrap(),
+            )
+        } else {
+            (method, path.to_owned(), bytes)
+        };
         self.app
             .clone()
             .oneshot(
@@ -143,13 +156,13 @@ impl Fixture {
             "description": "Ship tested software",
             "instructions": "PRIVATE INSTRUCTIONS NEVER SENT",
         });
-        self.json("POST", "/api/agents", agent).await
+        self.json("POST", "/api/agents", json!({ "settings": { "exclusiveNodes": [], "plugins": [], "access": cairn_contracts::AccessPolicy::default(), "name": agent["name"], "description": agent["description"], "instructions": agent["instructions"] }, "review": {} })).await
     }
 
     async fn wait(&self, id: &str, status: &str) -> Value {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let agent = self.s.get("agents", id).await.unwrap();
+                let agent = self.s.agent_snapshot(id).await.unwrap();
                 if agent["avatar"]["status"] == status {
                     return agent;
                 }
@@ -208,10 +221,19 @@ async fn creation_is_nonblocking_and_portrait_survives_edits_with_private_authen
             .status(),
         409
     );
+    let mut rename = cairn_contracts::ReplaceAgentInput {
+        agent_id: serde_json::from_value(agent["id"].clone()).unwrap(),
+        revision: text(&agent, "revision").into(),
+        settings: serde_json::from_value::<Agent>(agent.clone())
+            .unwrap()
+            .settings,
+        review: cairn_contracts::AgentReview::default(),
+    };
+    rename.settings.name = "Renamed agent".into();
     f.json(
         "PUT",
         &format!("/api/agents/{id}"),
-        json!({ "name": "Renamed agent" }),
+        serde_json::to_value(rename).unwrap(),
     )
     .await;
     reply.send(generated(png([50, 100, 180]))).unwrap();
@@ -220,11 +242,31 @@ async fn creation_is_nonblocking_and_portrait_survives_edits_with_private_authen
     for account in f.s.accounts.list(&f.s).await.unwrap() {
         assert!(f.s.accounts.active(text(&account, "id")).await.is_empty());
     }
+    let current: Agent = serde_json::from_value(ready.clone()).unwrap();
+    let mut input = cairn_contracts::ReplaceAgentInput {
+        agent_id: current.id,
+        revision: current.revision,
+        settings: current.settings,
+        review: cairn_contracts::AgentReview::default(),
+    };
+    input.settings.name = "New role".into();
+    let mut malicious = serde_json::to_value(&input).unwrap();
+    malicious["settings"]["avatar"] = json!({ "url": "https://evil.invalid" });
+    assert_eq!(
+        f.request(
+            "PUT",
+            &format!("/api/agents/{id}"),
+            serde_json::to_vec(&malicious).unwrap()
+        )
+        .await
+        .status(),
+        400
+    );
     let edited = f
         .json(
             "PUT",
             &format!("/api/agents/{id}"),
-            json!({ "name": "New role", "avatar": { "url": "https://evil.invalid" } }),
+            serde_json::to_value(input).unwrap(),
         )
         .await;
     assert_eq!(edited["avatar"], ready["avatar"]);
@@ -291,7 +333,7 @@ async fn upload_wins_over_generation_and_invalid_images_preserve_the_previous_po
     .await
     .unwrap();
     assert_eq!(
-        f.s.get("agents", id).await.unwrap()["avatar"],
+        f.s.agent_snapshot(id).await.unwrap()["avatar"],
         uploaded["avatar"]
     );
     for bytes in [
@@ -369,7 +411,7 @@ async fn regeneration_failure_keeps_the_image_and_does_not_expose_provider_error
     f.json("DELETE", &format!("/api/agents/{id}"), Value::Null)
         .await;
     reply.send(generated(png([0, 0, 0]))).unwrap();
-    assert!(f.s.store.get("agents", id).await.unwrap().is_none());
+    assert!(f.s.store.agent_snapshot(id).await.unwrap().is_none());
     assert!(
         f.s.store
             .kv(&format!("agent-avatar:{id}"))
@@ -399,9 +441,12 @@ async fn uploads_work_without_provider_configuration_and_restart_never_rebills()
     let uploaded = body(f.request("PUT", &path, png([120, 80, 40])).await).await;
     let mut interrupted = uploaded.clone();
     interrupted["avatar"]["status"] = "generating".into();
-    f.s.store.put("agents", interrupted).await.unwrap();
+    f.s.store
+        .transaction(move |db| db.save_agent_permissions(&interrupted))
+        .await
+        .unwrap();
     let restarted = Service::new(f.s.config.clone()).await.unwrap();
-    let recovered = restarted.get("agents", id).await.unwrap();
+    let recovered = restarted.agent_snapshot(id).await.unwrap();
     assert_eq!(recovered["avatar"]["status"], "failed");
     assert_eq!(recovered["avatar"]["url"], uploaded["avatar"]["url"]);
     assert!(
@@ -457,7 +502,7 @@ async fn close_drains_running_and_queued_portraits_and_rejects_new_jobs() {
         .unwrap();
     // close itself must wait for metadata, process exit and lease release; do not poll.
     for agent in [&first, &second, &queued] {
-        let failed = f.s.get("agents", text(agent, "id")).await.unwrap();
+        let failed = f.s.agent_snapshot(text(agent, "id")).await.unwrap();
         assert_eq!(failed["avatar"]["status"], "failed");
         assert_eq!(failed["avatar"]["error"], INTERRUPTED);
     }

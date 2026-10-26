@@ -1,4 +1,6 @@
 //! Gmail and Google OAuth are simulated locally; tests never use personal mail.
+use common::AgentFixture;
+
 mod common;
 
 use axum::{
@@ -801,7 +803,7 @@ async fn private_cli_transfers_use_the_run_and_current_account_grant() {
             .unwrap(),
         bytes
     );
-    f.s.agent(
+    f.s.agent_fixture(
         json!({ "name": "Main agent", "plugins": [] }),
         Some(MAIN_AGENT_ID),
     )
@@ -814,7 +816,7 @@ async fn private_cli_transfers_use_the_run_and_current_account_grant() {
 async fn installation_management_revocation_during_oauth_refresh_cannot_publish_tokens() {
     let f = fixture().await;
     let account = connect(&f, "alice").await;
-    f.s.agent(
+    f.s.agent_fixture(
         json!({ "name": "Main agent", "access": { "installation": true } }),
         Some(MAIN_AGENT_ID),
     )
@@ -856,7 +858,7 @@ async fn installation_management_revocation_during_oauth_refresh_cannot_publish_
         .unwrap();
     let revoke = async {
         started.notified().await;
-        f.s.agent(
+        f.s.agent_fixture(
             json!({ "name": "Main agent", "access": { "installation": false } }),
             Some(MAIN_AGENT_ID),
         )
@@ -879,7 +881,7 @@ async fn installation_management_revocation_during_oauth_refresh_cannot_publish_
 
 /// An installation management run of Main agent, through the installation MCP endpoint.
 async fn manage(f: &Fixture, args: Value) -> Value {
-    f.s.agent(
+    f.s.agent_fixture(
         json!({ "name": "Main agent", "access": { "installation": true } }),
         Some(MAIN_AGENT_ID),
     )

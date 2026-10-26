@@ -140,7 +140,28 @@ abstract class ConversationLifecycleCases {
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
-                                        listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                Agent(
+                                                    exclusiveNodes = emptyList(),
+                                                    plugins = emptyList(),
+                                                    revision = "",
+                                                    createdAt = 0,
+                                                    access =
+                                                        AccessPolicy(
+                                                            mcpTools =
+                                                                build.cairn.contracts.McpTools(
+                                                                    emptyMap()
+                                                                ),
+                                                            projects = null,
+                                                            skills = null,
+                                                            mcps = null,
+                                                        ),
+                                                    id = MAIN_AGENT_ID,
+                                                    name = "Agent principal",
+                                                )
+                                            )
+                                        )
                                     )
                                 path == "/api/installations/fixture/api/overview" -> "{}"
                                 path.endsWith("/models") -> """{"models":[]}"""
@@ -151,6 +172,11 @@ abstract class ConversationLifecycleCases {
                                             ?.endsWith("/api/projects") == true
                                     )
                                         """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
                                     else "[]"
                             }
                         return MockResponse().setBody(body)

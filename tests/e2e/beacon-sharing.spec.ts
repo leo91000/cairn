@@ -145,7 +145,7 @@ test('owner shares an installation and member works without management controls'
     const installationUrl = `${url}/installations/${memberSession.installations[0].slug}/`
     await expect(member).toHaveURL(installationUrl)
     const apiRoot = `${url}/api/installations/${memberSession.installations[0].id}/api`
-    const agents = await (await member.request.get(`${apiRoot}/agents`)).json()
+    const { agents } = await (await member.request.get(`${apiRoot}/agents`)).json()
     const taskResponse = await member.request.post(`${apiRoot}/tasks`, {
       headers: { 'origin': url, 'x-csrf-token': memberSession.csrf },
       data: {

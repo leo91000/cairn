@@ -104,7 +104,28 @@ class ArtifactLinksTest {
                                     "Annexe du même run."
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
-                                        listOf(Agent(id = MAIN_AGENT_ID, name = "Cairn"))
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                Agent(
+                                                    exclusiveNodes = emptyList(),
+                                                    plugins = emptyList(),
+                                                    revision = "",
+                                                    createdAt = 0,
+                                                    access =
+                                                        AccessPolicy(
+                                                            mcpTools =
+                                                                build.cairn.contracts.McpTools(
+                                                                    emptyMap()
+                                                                ),
+                                                            projects = null,
+                                                            skills = null,
+                                                            mcps = null,
+                                                        ),
+                                                    id = MAIN_AGENT_ID,
+                                                    name = "Cairn",
+                                                )
+                                            )
+                                        )
                                     )
                                 "/api/installations/fixture/api/overview",
                                 "/api/installations/fixture/api/codex/models" -> "{}"
@@ -115,6 +136,11 @@ class ArtifactLinksTest {
                                             ?.endsWith("/api/projects") == true
                                     )
                                         """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
                                     else "[]"
                             }
                         return MockResponse().setBody(body).apply {

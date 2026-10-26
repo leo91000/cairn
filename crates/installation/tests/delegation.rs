@@ -1,3 +1,6 @@
+use common::AgentFixture;
+use common::StoreAgentFixture;
+
 mod common;
 
 use common::ProjectFixture;
@@ -35,7 +38,7 @@ impl Fixture {
         })
         .await
         .unwrap();
-        s.agent(
+        s.agent_fixture(
             json!({ "name": "Main agent", "access": { "delegation": delegation } }),
             Some(MAIN_AGENT_ID),
         )
@@ -253,7 +256,7 @@ async fn delegation_never_reaches_access_the_requesting_agent_lacks() {
     let f = Fixture::new(true).await;
     let project = id();
     let restricted =
-        f.s.agent(
+        f.s.agent_fixture(
             json!({
                 "name": "Reviewer",
                 "access": { "projects": [], "skills": [], "mcps": [], "delegation": true },
@@ -275,7 +278,7 @@ async fn delegation_never_reaches_access_the_requesting_agent_lacks() {
 
     // An agent within the requester's access is allowed.
     let narrower =
-        f.s.agent(
+        f.s.agent_fixture(
             json!({
                 "name": "Read-only reviewer",
                 "access": { "projects": [], "skills": [], "mcps": [], "sandbox": "read-only" },
@@ -309,8 +312,11 @@ async fn delegation_never_reaches_access_the_requesting_agent_lacks() {
 async fn delegation_checks_node_plugin_and_exclusive_reservation_grants() {
     let f = Fixture::new(true).await;
     let turn = f.conversation(MAIN_AGENT_ID).await;
-    let requester = f.s.get("agents", MAIN_AGENT_ID).await.unwrap();
-    let target = f.s.agent(json!({ "name": "Target" }), None).await.unwrap();
+    let requester = f.s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
+    let target =
+        f.s.agent_fixture(json!({ "name": "Target" }), None)
+            .await
+            .unwrap();
     let node = id();
     let instance = id();
     let changes = [
@@ -330,7 +336,7 @@ async fn delegation_checks_node_plugin_and_exclusive_reservation_grants() {
     for (key, value) in changes {
         let mut wider = target.clone();
         wider[key] = value;
-        f.s.store.put("agents", wider).await.unwrap();
+        f.s.store.put_agent_fixture(wider).await.unwrap();
         let denied = f
             .delegate(&turn, json!({ "task": "Review", "agentId": target["id"] }))
             .await
@@ -342,11 +348,11 @@ async fn delegation_checks_node_plugin_and_exclusive_reservation_grants() {
     let mut current = requester;
     current["plugins"] = json!([instance]);
     current["exclusiveNodes"] = json!([node]);
-    f.s.store.put("agents", current).await.unwrap();
+    f.s.store.put_agent_fixture(current).await.unwrap();
     let mut allowed = target.clone();
     allowed["plugins"] = json!([instance]);
     allowed["exclusiveNodes"] = json!([node]);
-    f.s.store.put("agents", allowed).await.unwrap();
+    f.s.store.put_agent_fixture(allowed).await.unwrap();
     assert!(
         f.delegate(&turn, json!({ "task": "Review", "agentId": target["id"] }))
             .await
@@ -357,7 +363,7 @@ async fn delegation_checks_node_plugin_and_exclusive_reservation_grants() {
 #[tokio::test]
 async fn omitted_engine_choices_are_recorded_before_the_task_starts() {
     let f = Fixture::new(true).await;
-    f.s.agent(
+    f.s.agent_fixture(
         json!({
             "name": "Main agent",
             "provider": "codex",
@@ -677,7 +683,7 @@ async fn preparation_failures_reach_the_requester_and_are_redacted_after_deletio
     .await
     .unwrap();
     let agent =
-        f.s.agent(
+        f.s.agent_fixture(
             json!({ "name": "Reviewer", "access": { "projects": [project] } }),
             None,
         )
@@ -691,7 +697,7 @@ async fn preparation_failures_reach_the_requester_and_are_redacted_after_deletio
         .await
         .unwrap();
     let child = text(&delegated, "chatId");
-    f.s.agent(
+    f.s.agent_fixture(
         json!({ "name": "Reviewer", "access": { "projects": [] } }),
         agent["id"].as_str(),
     )
@@ -785,7 +791,7 @@ async fn run_failures_include_their_error_in_status_and_wait_results() {
 async fn removing_delegation_revokes_a_live_requester() {
     let f = Fixture::new(true).await;
     let turn = f.conversation(MAIN_AGENT_ID).await;
-    f.s.agent(
+    f.s.agent_fixture(
         json!({ "name": "Main agent", "access": { "delegation": false } }),
         Some(MAIN_AGENT_ID),
     )
@@ -804,7 +810,7 @@ async fn older_profile_updates_keep_delegation() {
     let f = Fixture::new(true).await;
     // An older client sends access without the key it does not know.
     let saved =
-        f.s.agent(
+        f.s.agent_fixture(
             json!({ "name": "Main agent", "access": { "installation": false } }),
             Some(MAIN_AGENT_ID),
         )

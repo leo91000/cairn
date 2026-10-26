@@ -31,7 +31,7 @@ pub(crate) fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
         return Err(denied());
     }
     let agent = &run["snapshot"]["agent"];
-    let current = db.get("agents", text(agent, "id"))?.ok_or_else(denied)?;
+    let current = db.agent_snapshot(text(agent, "id"))?.ok_or_else(denied)?;
     if policy(agent)["installation"] != true || !agent_allowed(&current, agent) {
         return Err(Error::forbidden("Agent permissions were reduced."));
     }
@@ -81,7 +81,7 @@ pub(crate) fn authorize_task_in(
         required(db.get("tasks", id)?, "Task not found")?;
     }
 
-    required(db.get("agents", text(task, "agentId"))?, "Agent not found")?;
+    required(db.agent_snapshot(text(task, "agentId"))?, "Agent not found")?;
 
     Ok(caller)
 }
@@ -157,7 +157,15 @@ pub(crate) async fn operation(
     if !known {
         return Err(Error::not_found("Unknown operation"));
     }
-
+    if let Some(op) = crate::capabilities::agent_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
     if let Some(op) = crate::capabilities::project_operation(name) {
         return op
             .invoke(
@@ -215,7 +223,6 @@ async fn invoke_inner(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -
             authorize_in(db, &token)?;
 
             let result = match operation.as_str() {
-                "list_agents" => Some(db.list("agents")?.into()),
                 "list_tasks" => Some(db.list("tasks")?.into()),
                 "list_runs" => Some(
                     db.runs(

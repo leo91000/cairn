@@ -37,7 +37,14 @@ internal fun TaskEditor(
     var tags by rememberSaveable { mutableStateOf(initial.tags.joinToString(", ")) }
     var occurrences by remember { mutableStateOf<List<Long>>(emptyList()) }
     LaunchedEffect(form.cron, form.timezone) { occurrences = emptyList() }
-    val access = state.agents.find { it.id == form.agentId }?.access ?: AccessPolicy()
+    val access =
+        state.agents.find { it.id == form.agentId }?.access
+            ?: AccessPolicy(
+                mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                projects = null,
+                skills = null,
+                mcps = null,
+            )
     val projects = state.projects.filter { access.projects == null || it.id in access.projects }
     val available =
         state.skills.filter {
@@ -105,7 +112,14 @@ internal fun TaskEditor(
         Field("Nom", form.name, { form = form.copy(name = it) })
         Field("Mission et critères de réussite", form.prompt, { form = form.copy(prompt = it) }, 6)
         Choice("Agent", form.agentId, state.agents.map { it.id to it.name }) {
-            val nextAccess = state.agents.find { agent -> agent.id == it }?.access ?: AccessPolicy()
+            val nextAccess =
+                state.agents.find { agent -> agent.id == it }?.access
+                    ?: AccessPolicy(
+                        mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                        projects = null,
+                        skills = null,
+                        mcps = null,
+                    )
             form =
                 form.copy(
                     agentId = it,

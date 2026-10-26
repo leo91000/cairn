@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 import { promisify } from 'node:util'
+import agentWire from '../packages/contracts/generated/agent-wire.json' with { type: 'json' }
 import { startBeacon } from './beacon-smoke.mjs'
 
 const exec = promisify(execFile)
@@ -120,7 +121,11 @@ async function main() {
     const saved = await fetch(`${api}/agents`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ name: 'Persistent profile' }),
+      body: JSON.stringify({
+        ...agentWire.creates[0],
+        creationId: randomUUID(),
+        settings: { ...agentWire.creates[0].settings, name: 'Persistent profile' },
+      }),
     })
     assert.equal(saved.status, 200)
     const savedAgent = await saved.json()
@@ -152,7 +157,7 @@ async function main() {
     for (let attempt = 0; ; attempt++) {
       const response = await fetch(`${api}/agents`, { headers })
       if (response.ok) {
-        agents = await response.json()
+        agents = (await response.json()).agents
         break
       }
 

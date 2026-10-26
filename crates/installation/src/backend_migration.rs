@@ -86,7 +86,10 @@ fn chat_run(db: &Db<'_>, chat_id: &str) -> Result<(Value, Value, Value)> {
     let chat = required(db.get("chats", chat_id)?, "Chat not found")?;
     require_active(&chat)?;
     let run = required(db.run(text(&chat, "runId"))?, "Run not found")?;
-    let agent = required(db.get("agents", text(&chat, "agentId"))?, "Agent not found")?;
+    let agent = required(
+        db.agent_snapshot(text(&chat, "agentId"))?,
+        "Agent not found",
+    )?;
     Ok((chat, run, agent))
 }
 
@@ -140,7 +143,7 @@ pub(crate) fn source_read(db: &Db<'_>, run_id: &str, node: &Value) -> Result<boo
     {
         return Ok(false);
     }
-    let agent = required(db.get("agents", nodes::run_agent(&run))?, "Agent removed")?;
+    let agent = required(db.agent_snapshot(nodes::run_agent(&run))?, "Agent removed")?;
     check_access(&run, &agent)?;
     let destination = required(
         db.get("nodes", text(&run["backendMigration"], "nodeId"))?,
@@ -199,7 +202,7 @@ fn migration_grant(db: &Db<'_>, run: &Value, agent: &Value, source: &Origin) -> 
 
 fn allowed(db: &Db<'_>, proposed: &Value, node: &Value) -> Result<bool> {
     let agent = required(
-        db.get("agents", nodes::run_agent(proposed))?,
+        db.agent_snapshot(nodes::run_agent(proposed))?,
         "Agent not found",
     )?;
     Ok(node["revoked"] != true
@@ -223,7 +226,7 @@ pub(crate) async fn chat_id(s: &Service, run: &str) -> Result<String> {
 
 async fn refresh_authority(s: &Service, chat: &Value) -> Result<()> {
     let run = s.store.run(text(chat, "runId")).await?;
-    let agent = s.get("agents", text(chat, "agentId")).await?;
+    let agent = s.agent_snapshot(text(chat, "agentId")).await?;
     if policy::native(&run["snapshot"]["agent"]) || policy::native(&agent) {
         policy::refresh(s).await?;
     }
@@ -730,8 +733,8 @@ mod tests {
         store.transaction(|db| {
             let node = id(); let parent = id(); let coordinator = id(); let target = id();
             db.set("native-authority", &json!({ "observedAt": now(), "accounts": { "owner": {}, "editor": {} } }), None)?;
-            let parent_agent = json!({ "id": coordinator, "access": { "installation": true } });
-            db.put("agents", &parent_agent)?;
+            let parent_agent = serde_json::to_value(crate::agent_fixture::profile(json!({ "id": coordinator, "access": { "installation": true } }))?)?;
+            db.save_agent_permissions(&parent_agent)?;
             let parent_run = json!({
                 "id": parent,
                 "taskId": "fixture",
@@ -743,8 +746,8 @@ mod tests {
                 "nativeProvenanceUnknown": false,
             });
             db.add_run(&parent_run, None)?;
-            let agent = json!({ "id": target, "access": { "backend": "native", "nodes": [node] } });
-            db.put("agents", &agent)?;
+            let agent = serde_json::to_value(crate::agent_fixture::profile(json!({ "id": target, "access": { "backend": "native", "nodes": [node] } }))?)?;
+            db.save_agent_permissions(&agent)?;
             db.put("nodes", &json!({
                 "id": node,
                 "capabilities": { "backend": "native", "nativeModeProtocol": 1 },

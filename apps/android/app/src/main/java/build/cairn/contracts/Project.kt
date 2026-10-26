@@ -18,7 +18,9 @@ data class Project(
     val sourceMode: String = "remote",
 ) {
     init {
+        require(Regex("^[a-zA-Z0-9][a-zA-Z0-9_/.-]*\$").containsMatchIn(baseBranch))
         require(createdAt <= 9007199254740991L)
         java.util.UUID.fromString(id)
+        require(Regex("^(remote|local)\$").containsMatchIn(sourceMode))
     }
 }

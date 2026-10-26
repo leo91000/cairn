@@ -77,7 +77,22 @@ class NativeParityPreviewTest {
                     cron = "0 9 * * 1",
                     nextRun = now + 86400000,
                 )
-            val agent = Agent(MAIN_AGENT_ID, "Agent principal")
+            val agent =
+                Agent(
+                    exclusiveNodes = emptyList(),
+                    plugins = emptyList(),
+                    revision = "",
+                    createdAt = 0,
+                    access =
+                        AccessPolicy(
+                            mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                            projects = null,
+                            skills = null,
+                            mcps = null,
+                        ),
+                    id = MAIN_AGENT_ID,
+                    name = "Agent principal",
+                )
             val project = Project("46d045dd-9bce-51e3-8a99-65aa9384efc9", "Cairn")
             val outcome =
                 TaskOutcome(
@@ -207,7 +222,29 @@ class NativeParityPreviewTest {
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
-                                        listOf(Agent("custom", "Agent spécialisé"), agent)
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                Agent(
+                                                    exclusiveNodes = emptyList(),
+                                                    plugins = emptyList(),
+                                                    revision = "",
+                                                    createdAt = 0,
+                                                    access =
+                                                        AccessPolicy(
+                                                            mcpTools =
+                                                                build.cairn.contracts.McpTools(
+                                                                    emptyMap()
+                                                                ),
+                                                            projects = null,
+                                                            skills = null,
+                                                            mcps = null,
+                                                        ),
+                                                    id = "b918f201-4801-5816-afec-b8facde634f4",
+                                                    name = "Agent spécialisé",
+                                                ),
+                                                agent,
+                                            )
+                                        )
                                     )
                                 "/api/installations/fixture/api/projects" ->
                                     wireJson.encodeToString(

@@ -134,7 +134,7 @@ fn authorize_run(db: &Db<'_>, run: &Value, node_id: &str) -> Result<String> {
     let denied = || Error::forbidden("Exclusive node access is unavailable or was revoked.");
     let node = db.get("nodes", node_id)?.ok_or_else(denied)?;
     let agent_id = super::run_agent(run);
-    let agent = db.get("agents", agent_id)?.ok_or_else(denied)?;
+    let agent = db.agent_snapshot(agent_id)?.ok_or_else(denied)?;
     if run["status"] != RunStatus::Running
         || !run["cancelRequestedAt"].is_null()
         || run["moveRequest"].is_object()

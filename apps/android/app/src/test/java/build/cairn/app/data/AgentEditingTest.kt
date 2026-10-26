@@ -52,16 +52,27 @@ class AgentEditingTest {
                 listOf(
                     PluginConnection("prod", "onepassword", "Production"),
                     PluginConnection("staging", "onepassword", "Staging", enabled = false),
-                    PluginConnection("bot", "discord", "#support", agentId = "agent"),
+                    PluginConnection(
+                        "bot",
+                        "discord",
+                        "#support",
+                        agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                    ),
                 ),
         )
     private val agent =
         Agent(
-            id = "agent",
+            exclusiveNodes = emptyList(),
+            plugins = emptyList(),
+            createdAt = 0,
+            id = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
             name = "Release engineer",
             revision = "r1",
             access =
                 AccessPolicy(
+                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                    skills = null,
+                    mcps = null,
                     nodes = listOf(LOCAL_NODE_ID, "gpu"),
                     projects =
                         listOf(
@@ -73,26 +84,6 @@ class AgentEditingTest {
     private val resources = AgentResources(projects, nodes = nodes, catalog = catalog)
 
     @Test
-    fun newFieldsDecodeWithDefaultsAndUnknownKeys() {
-        val old =
-            wireJson.decodeFromString<Agent>(
-                """{"id":"a","name":"Old","access":{"projects":null,"future":1},"later":true}"""
-            )
-        assertEquals(emptyList<String>(), old.exclusiveNodes)
-        assertEquals(emptyList<String>(), old.plugins)
-        assertEquals("", old.revision)
-
-        // Live grants sit next to the access policy, never inside it.
-        val current =
-            wireJson.decodeFromString<Agent>(
-                """{"id":"a","name":"New","revision":"r9","access":{},"exclusiveNodes":["gpu"],"plugins":["prod"]}"""
-            )
-        assertEquals(listOf("gpu"), current.exclusiveNodes)
-        assertEquals(listOf("prod"), current.plugins)
-        assertEquals("r9", current.revision)
-    }
-
-    @Test
     fun saveBodySendsExplicitAllSelectionsRevisionAndReapprovals() {
         val body =
             agentSaveBody(
@@ -102,22 +93,50 @@ class AgentEditingTest {
                 ),
                 listOf("bot"),
             )
-        val access = body["access"]!!.jsonObject
+        val access = body["settings"]!!.jsonObject["access"]!!.jsonObject
         assertEquals(JsonNull, access["nodes"])
         assertEquals(JsonNull, access["skills"])
         assertEquals(JsonNull, access["mcps"])
         assertEquals(2, access["projects"]!!.jsonArray.size)
-        assertEquals("prod", body["plugins"]!!.jsonArray.single().jsonPrimitive.content)
+        assertEquals(
+            "prod",
+            body["settings"]!!.jsonObject["plugins"]!!.jsonArray.single().jsonPrimitive.content,
+        )
         assertFalse("plugins" in access)
         assertFalse("exclusiveNodes" in access)
         assertEquals("r1", body["revision"]!!.jsonPrimitive.content)
-        assertEquals("bot", body["reapproveDelegations"]!!.jsonArray.single().jsonPrimitive.content)
+        assertEquals(
+            "bot",
+            body["review"]!!
+                .jsonObject["reapproveDelegations"]!!
+                .jsonArray
+                .single()
+                .jsonPrimitive
+                .content,
+        )
         assertFalse("avatar" in body)
 
         // A legacy record without a revision, or a new agent, sends none.
-        val created = agentSaveBody(Agent(name = "New"))
-        assertFalse("revision" in created)
-        assertFalse("reapproveDelegations" in created)
+        val created =
+            agentSaveBody(
+                Agent(
+                    exclusiveNodes = emptyList(),
+                    plugins = emptyList(),
+                    id = "00000000-0000-4000-8000-000000000000",
+                    revision = "",
+                    createdAt = 0,
+                    access =
+                        AccessPolicy(
+                            mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                            projects = null,
+                            skills = null,
+                            mcps = null,
+                        ),
+                    name = "New",
+                )
+            )
+        assertEquals(JsonPrimitive(""), created["revision"])
+        assertTrue(created["review"]!!.jsonObject["reapproveDelegations"]!!.jsonArray.isEmpty())
     }
 
     @Test
@@ -190,8 +209,13 @@ class AgentEditingTest {
 
     @Test
     fun invalidDraftsPointToTheirSection() {
-        val errors = agentErrors(AgentDraft(agent.copy(name = " "), timeout = "900"))
+        val invalid = AgentDraft(agent.copy(name = " "), timeout = "900")
+        val errors = agentErrors(invalid)
         assertEquals(setOf(AgentSection.Identity, AgentSection.Advanced), errors.keys)
+        assertEquals(
+            listOf(AgentSection.Identity, AgentSection.Advanced),
+            agentChanges(agent, invalid),
+        )
         assertEquals(AgentSection.Nodes, sectionOfError("Exclusive agent missing."))
         assertEquals(
             AgentSection.Plugins,
@@ -222,8 +246,19 @@ class AgentEditingTest {
             )
         val preview =
             AgentPreview(
-                AgentPreviewRuns(queued = 2, running = 1),
-                listOf(AgentDelegationEffect("bot", "discord", "#support", suspended = true)),
+                runs = AgentPreviewRuns(queued = 2, running = 1),
+                delegations =
+                    listOf(
+                        AgentDelegationEffect(
+                            enabled = true,
+                            alreadySuspended = false,
+                            blocked = null,
+                            id = "bot",
+                            pluginId = "discord",
+                            name = "#support",
+                            suspended = true,
+                        )
+                    ),
             )
         val lines = agentReview(agent, edited, resources, preview)
         assertEquals(
@@ -244,9 +279,26 @@ class AgentEditingTest {
 
         // A harmless change saves directly.
         val renamed = agent.copy(name = "Renamed")
-        val quiet = agentReview(agent, renamed, resources, AgentPreview())
+        val quiet =
+            agentReview(
+                agent,
+                renamed,
+                resources,
+                AgentPreview(
+                    runs = AgentPreviewRuns(queued = 0, running = 0),
+                    delegations = emptyList(),
+                ),
+            )
         assertTrue(quiet.isEmpty())
-        assertFalse(needsReview(quiet, AgentPreview()))
+        assertFalse(
+            needsReview(
+                quiet,
+                AgentPreview(
+                    runs = AgentPreviewRuns(queued = 0, running = 0),
+                    delegations = emptyList(),
+                ),
+            )
+        )
 
         // A reduction that stops no work is listed but does not require the review.
         val reduced =
@@ -257,27 +309,51 @@ class AgentEditingTest {
                         agent.access.copy(projects = listOf("2450c72e-6174-56da-b0fc-b06868e8e8e5"))
                 ),
                 resources,
-                AgentPreview(),
+                AgentPreview(
+                    runs = AgentPreviewRuns(queued = 0, running = 0),
+                    delegations = emptyList(),
+                ),
             )
         assertEquals(listOf(ReviewKind.Reduction), reduced.map { it.kind })
-        assertFalse(needsReview(reduced, AgentPreview()))
+        assertFalse(
+            needsReview(
+                reduced,
+                AgentPreview(
+                    runs = AgentPreviewRuns(queued = 0, running = 0),
+                    delegations = emptyList(),
+                ),
+            )
+        )
     }
 
     @Test
     fun delegationIsAReviewedPower() {
         val granted = agent.copy(access = agent.access.copy(delegation = true))
-        val added = agentReview(agent, granted, resources, AgentPreview())
+        val added =
+            agentReview(
+                agent,
+                granted,
+                resources,
+                AgentPreview(
+                    runs = AgentPreviewRuns(queued = 0, running = 0),
+                    delegations = emptyList(),
+                ),
+            )
         assertEquals(ReviewKind.Power, added.single().kind)
         assertTrue(added.single().text.startsWith("Ajout : délégation de tâches."))
         assertEquals(listOf("délégation de tâches"), agentReductions(granted, agent, resources))
         assertEquals(
             JsonPrimitive(false),
-            agentSaveBody(agent)["access"]!!.jsonObject["delegation"],
+            agentSaveBody(agent)["settings"]!!.jsonObject["access"]!!.jsonObject["delegation"],
         )
         val revoked = granted.copy(access = granted.access.copy(delegation = false))
         assertEquals(
             "false",
-            agentSaveBody(revoked)["access"]!!.jsonObject["delegation"]!!.jsonPrimitive.content,
+            agentSaveBody(revoked)["settings"]!!
+                .jsonObject["access"]!!
+                .jsonObject["delegation"]!!
+                .jsonPrimitive
+                .content,
         )
     }
 
@@ -297,7 +373,16 @@ class AgentEditingTest {
             ),
             agentReductions(granted, agent, resources),
         )
-        val lines = agentReview(granted, agent, resources, AgentPreview())
+        val lines =
+            agentReview(
+                granted,
+                agent,
+                resources,
+                AgentPreview(
+                    runs = AgentPreviewRuns(queued = 0, running = 0),
+                    delegations = emptyList(),
+                ),
+            )
         assertEquals(
             "Retrait : réservation exclusive sur « gpu-box », 1Password « Production », gestion de l’installation.",
             lines.single().text,
@@ -322,16 +407,28 @@ class AgentEditingTest {
     fun onlyNarrowerMcpToolChoicesAreReviewedAsRestrictions() {
         val chosen =
             agent.copy(
-                access = agent.access.copy(mcps = null, mcpTools = mapOf("m" to listOf("a", "b")))
+                access =
+                    agent.access.copy(
+                        mcps = null,
+                        mcpTools = build.cairn.contracts.McpTools(mapOf("m" to listOf("a", "b"))),
+                    )
             )
         fun tools(vararg names: String) =
-            chosen.copy(access = chosen.access.copy(mcpTools = mapOf("m" to names.toList())))
+            chosen.copy(
+                access =
+                    chosen.access.copy(
+                        mcpTools = build.cairn.contracts.McpTools(mapOf("m" to names.toList()))
+                    )
+            )
         assertEquals(emptyList<String>(), agentReductions(chosen, tools("a", "b", "c"), resources))
         assertEquals(
             listOf("outils MCP restreints"),
             agentReductions(chosen, tools("a"), resources),
         )
-        val all = chosen.copy(access = chosen.access.copy(mcpTools = emptyMap()))
+        val all =
+            chosen.copy(
+                access = chosen.access.copy(mcpTools = build.cairn.contracts.McpTools(emptyMap()))
+            )
         assertEquals(listOf("outils MCP restreints"), agentReductions(all, tools("a"), resources))
         assertEquals(emptyList<String>(), agentReductions(chosen, all, resources))
     }
@@ -340,27 +437,52 @@ class AgentEditingTest {
     fun onlyDelegationsThisSaveSuspendsArePreselectedForReapproval() {
         val preview =
             AgentPreview(
+                runs = AgentPreviewRuns(queued = 0, running = 0),
                 delegations =
                     listOf(
-                        AgentDelegationEffect("new", suspended = true),
-                        AgentDelegationEffect("earlier", suspended = true, alreadySuspended = true),
                         AgentDelegationEffect(
-                            "blocked",
+                            name = "",
+                            pluginId = "",
+                            enabled = true,
+                            alreadySuspended = false,
+                            blocked = null,
+                            id = "new",
+                            suspended = true,
+                        ),
+                        AgentDelegationEffect(
+                            name = "",
+                            pluginId = "",
+                            enabled = true,
+                            blocked = null,
+                            id = "earlier",
+                            suspended = true,
+                            alreadySuspended = true,
+                        ),
+                        AgentDelegationEffect(
+                            name = "",
+                            pluginId = "",
+                            enabled = true,
+                            alreadySuspended = false,
+                            id = "blocked",
                             suspended = true,
                             blocked = "Accès refusé",
                         ),
-                        AgentDelegationEffect("kept"),
-                    )
+                        AgentDelegationEffect(
+                            name = "",
+                            pluginId = "",
+                            enabled = true,
+                            suspended = false,
+                            alreadySuspended = false,
+                            blocked = null,
+                            id = "kept",
+                        ),
+                    ),
             )
         assertEquals(setOf("new"), preview.preselectedReapprovals())
         assertEquals(
             listOf("new", "earlier", "blocked"),
             preview.suspendedDelegations().map { it.id },
         )
-        // Older servers omit the flag: it means not already suspended.
-        val decoded =
-            wireJson.decodeFromString<AgentDelegationEffect>("""{"id":"bot","suspended":true}""")
-        assertFalse(decoded.alreadySuspended)
     }
 
     @Test
@@ -397,7 +519,10 @@ class AgentEditingTest {
         val base =
             agent.copy(
                 access =
-                    agent.access.copy(mcps = listOf("m"), mcpTools = mapOf("m" to listOf("t1"))),
+                    agent.access.copy(
+                        mcps = listOf("m"),
+                        mcpTools = build.cairn.contracts.McpTools(mapOf("m" to listOf("t1"))),
+                    ),
                 plugins = listOf("prod"),
                 exclusiveNodes = listOf("gpu"),
             )
@@ -406,7 +531,7 @@ class AgentEditingTest {
                 access =
                     base.access.copy(
                         projects = listOf("2450c72e-6174-56da-b0fc-b06868e8e8e5"),
-                        mcpTools = mapOf("m" to listOf("t1", "t2")),
+                        mcpTools = build.cairn.contracts.McpTools(mapOf("m" to listOf("t1", "t2"))),
                     ),
                 plugins = listOf("prod", "staging"),
             )
@@ -430,7 +555,7 @@ class AgentEditingTest {
         assertEquals(listOf("2450c72e-6174-56da-b0fc-b06868e8e8e5", "p3"), rebased.access.projects)
         assertEquals(listOf("prod", "bot", "staging"), rebased.plugins)
         assertEquals(emptyList<String>(), rebased.exclusiveNodes)
-        assertEquals(mapOf("m" to listOf("t1", "t2")), rebased.access.mcpTools)
+        assertEquals(mapOf("m" to listOf("t1", "t2")), rebased.access.mcpTools.value)
         // Tool choices of a connection deleted meanwhile are dropped.
         assertTrue(rebaseAgent(base, mine, theirs, mcpIds = emptySet()).access.mcpTools.isEmpty())
     }
@@ -483,12 +608,23 @@ class AgentEditingTest {
     @Test
     fun toolChoicesOfDeletedConnectionsAreNeverSent() {
         val tools = mapOf("kept" to listOf("a"), "gone" to listOf("b"))
-        val all = agent.copy(access = agent.access.copy(mcps = null, mcpTools = tools))
-        val sent = agentSaveBody(all, mcpIds = setOf("kept"))["access"]!!.jsonObject["mcpTools"]!!
+        val all =
+            agent.copy(
+                access =
+                    agent.access.copy(mcps = null, mcpTools = build.cairn.contracts.McpTools(tools))
+            )
+        val sent =
+            agentSaveBody(all, mcpIds = setOf("kept"))["settings"]!!
+                .jsonObject["access"]!!
+                .jsonObject["mcpTools"]!!
         assertEquals(setOf("kept"), sent.jsonObject.keys)
         assertEquals(
             setOf("kept", "gone"),
-            agentSaveBody(all)["access"]!!.jsonObject["mcpTools"]!!.jsonObject.keys,
+            agentSaveBody(all)["settings"]!!
+                .jsonObject["access"]!!
+                .jsonObject["mcpTools"]!!
+                .jsonObject
+                .keys,
         )
     }
 
@@ -521,17 +657,29 @@ class AgentEditingTest {
     fun toolRestrictionsWaitInTheDraftAndOnlyGrantedOnesAreSaved() {
         val restricted =
             agent.copy(
-                access = agent.access.copy(mcps = listOf("m"), mcpTools = mapOf("m" to listOf("t")))
+                access =
+                    agent.access.copy(
+                        mcps = listOf("m"),
+                        mcpTools = build.cairn.contracts.McpTools(mapOf("m" to listOf("t"))),
+                    )
             )
         // The connection is removed: its restriction stays in the draft but is not saved.
         val removed = restricted.copy(access = restricted.access.copy(mcps = emptyList()))
-        assertEquals(mapOf("m" to listOf("t")), removed.access.mcpTools)
-        assertEquals(0, agentSaveBody(removed)["access"]!!.jsonObject["mcpTools"]!!.jsonObject.size)
+        assertEquals(mapOf("m" to listOf("t")), removed.access.mcpTools.value)
+        assertEquals(
+            0,
+            agentSaveBody(removed)["settings"]!!
+                .jsonObject["access"]!!
+                .jsonObject["mcpTools"]!!
+                .jsonObject
+                .size,
+        )
         // Granted again, it comes back restricted: nothing to review, no tool change.
         val again = removed.copy(access = removed.access.copy(mcps = listOf("m")))
         assertEquals(
             listOf("t"),
-            agentSaveBody(again)["access"]!!
+            agentSaveBody(again)["settings"]!!
+                .jsonObject["access"]!!
                 .jsonObject["mcpTools"]!!
                 .jsonObject["m"]!!
                 .jsonArray
@@ -593,13 +741,16 @@ class AgentEditingTest {
     @Test
     fun toolChoicesOfConnectionsNoLongerGrantedAreDropped() {
         val tools = mapOf("a" to listOf("x"), "b" to listOf("y"))
-        val all = agent.access.copy(mcps = null, mcpTools = tools)
-        assertEquals(tools, all.withGrantedTools().mcpTools)
+        val all = agent.access.copy(mcps = null, mcpTools = build.cairn.contracts.McpTools(tools))
+        assertEquals(tools, all.withGrantedTools().mcpTools.value)
         val chosen = all.copy(mcps = listOf("a"))
-        assertEquals(mapOf("a" to listOf("x")), chosen.withGrantedTools().mcpTools)
+        assertEquals(mapOf("a" to listOf("x")), chosen.withGrantedTools().mcpTools.value)
 
         val body = agentSaveBody(agent.copy(access = all.copy(mcps = emptyList())))
-        assertEquals(0, body["access"]!!.jsonObject["mcpTools"]!!.jsonObject.size)
+        assertEquals(
+            0,
+            body["settings"]!!.jsonObject["access"]!!.jsonObject["mcpTools"]!!.jsonObject.size,
+        )
     }
 
     @Test
@@ -620,15 +771,27 @@ class AgentEditingTest {
         val added =
             limited.copy(
                 access =
-                    limited.access.copy(mcps = listOf("a", "b"), mcpTools = mapOf("b" to listOf()))
+                    limited.access.copy(
+                        mcps = listOf("a", "b"),
+                        mcpTools = build.cairn.contracts.McpTools(mapOf("b" to listOf())),
+                    )
             )
         assertEquals(emptyList<String>(), agentReductions(limited, added, resources))
         val narrowed =
-            limited.copy(access = limited.access.copy(mcpTools = mapOf("a" to listOf("x"))))
+            limited.copy(
+                access =
+                    limited.access.copy(
+                        mcpTools = build.cairn.contracts.McpTools(mapOf("a" to listOf("x")))
+                    )
+            )
         assertEquals(listOf("outils MCP restreints"), agentReductions(limited, narrowed, resources))
 
         // Work the server says stops is reported even when nothing listed is removed.
-        val runs = AgentPreview(AgentPreviewRuns(queued = 2, running = 1))
+        val runs =
+            AgentPreview(
+                delegations = emptyList(),
+                runs = AgentPreviewRuns(queued = 2, running = 1),
+            )
         val renamed = agent.copy(name = "Renamed")
         val line = agentReview(agent, renamed, resources, runs).single()
         assertEquals(ReviewKind.Reduction, line.kind)
@@ -652,10 +815,15 @@ class AgentEditingTest {
     @Test
     fun nodeGrantsOnlyAddAndPropagateFailures() = runBlocking {
         val sent = mutableListOf<JsonObject>()
-        grantNodeAgents(listOf("agent", "agent"), setOf("other")) { sent += it }
+        grantNodeAgents(
+            listOf("d3153f9f-724b-59c3-9614-ab78f231c4d3", "d3153f9f-724b-59c3-9614-ab78f231c4d3"),
+            setOf("other"),
+        ) {
+            sent += it
+        }
         assertEquals(1, sent.size)
         assertEquals(
-            listOf("agent"),
+            listOf("d3153f9f-724b-59c3-9614-ab78f231c4d3"),
             sent.single()["agentIds"]!!.jsonArray.map { it.jsonPrimitive.content },
         )
         assertEquals(true, sent.single()["add"]!!.jsonPrimitive.content.toBoolean())
@@ -669,7 +837,8 @@ class AgentEditingTest {
             )) {
             sent.clear()
             val failed = runCatching {
-                grantNodeAgents(listOf("agent"), setOf("other")) { body ->
+                grantNodeAgents(listOf("d3153f9f-724b-59c3-9614-ab78f231c4d3"), setOf("other")) {
+                    body ->
                     sent += body
                     throw error
                 }
@@ -692,26 +861,68 @@ class AgentEditingTest {
 
         val earlier =
             AgentPreview(
+                runs = AgentPreviewRuns(queued = 0, running = 0),
                 delegations =
-                    listOf(AgentDelegationEffect("bot", suspended = true, alreadySuspended = true))
+                    listOf(
+                        AgentDelegationEffect(
+                            name = "",
+                            pluginId = "",
+                            enabled = true,
+                            blocked = null,
+                            id = "bot",
+                            suspended = true,
+                            alreadySuspended = true,
+                        )
+                    ),
             )
         assertFalse(needsReview(emptyList(), earlier))
-        val now = AgentPreview(delegations = listOf(AgentDelegationEffect("bot", suspended = true)))
+        val now =
+            AgentPreview(
+                runs = AgentPreviewRuns(queued = 0, running = 0),
+                delegations =
+                    listOf(
+                        AgentDelegationEffect(
+                            name = "",
+                            pluginId = "",
+                            enabled = true,
+                            alreadySuspended = false,
+                            blocked = null,
+                            id = "bot",
+                            suspended = true,
+                        )
+                    ),
+            )
         assertTrue(needsReview(emptyList(), now))
     }
 
     @Test
     fun reorderedToolChoicesAreNotAChange() {
         val chosen =
-            agent.copy(access = agent.access.copy(mcpTools = mapOf("m" to listOf("a", "b"))))
+            agent.copy(
+                access =
+                    agent.access.copy(
+                        mcpTools = build.cairn.contracts.McpTools(mapOf("m" to listOf("a", "b")))
+                    )
+            )
         val reordered =
             AgentDraft(
-                chosen.copy(access = chosen.access.copy(mcpTools = mapOf("m" to listOf("b", "a"))))
+                chosen.copy(
+                    access =
+                        chosen.access.copy(
+                            mcpTools =
+                                build.cairn.contracts.McpTools(mapOf("m" to listOf("b", "a")))
+                        )
+                )
             )
         assertTrue(agentChanges(chosen, reordered).isEmpty())
         val narrowed =
             AgentDraft(
-                chosen.copy(access = chosen.access.copy(mcpTools = mapOf("m" to listOf("a"))))
+                chosen.copy(
+                    access =
+                        chosen.access.copy(
+                            mcpTools = build.cairn.contracts.McpTools(mapOf("m" to listOf("a")))
+                        )
+                )
             )
         assertEquals(listOf(AgentSection.Mcp), agentChanges(chosen, narrowed))
     }
@@ -853,6 +1064,7 @@ class AgentEditingTest {
         // Only its reload failed: saving again sends nothing new, from the new revision.
         val retry = AgentDraft(saved)
         assertFalse(profileChanged(saved, retry.resolved()))
+        assertFalse(profileChanged(saved.copy(createdAt = 100), retry.resolved()))
         assertTrue(agentChanges(saved, retry).isEmpty())
         assertEquals("r2", agentSaveBody(retry.resolved())["revision"]!!.jsonPrimitive.content)
 
@@ -864,44 +1076,27 @@ class AgentEditingTest {
     @Test
     fun aNewAgentStartsWithoutAccessWhileExistingAgentsKeepServerDefaults() {
         val created = newAgent()
-        val access = agentSaveBody(created)["access"]!!.jsonObject
+        val access = agentSaveBody(created)["settings"]!!.jsonObject["access"]!!.jsonObject
         assertEquals(0, access["projects"]!!.jsonArray.size)
         assertEquals(0, access["skills"]!!.jsonArray.size)
         assertEquals(0, access["mcps"]!!.jsonArray.size)
         assertEquals(0, access["mcpTools"]!!.jsonObject.size)
         val body = agentSaveBody(created)
-        assertEquals(0, body["exclusiveNodes"]!!.jsonArray.size)
-        assertEquals(0, body["plugins"]!!.jsonArray.size)
+        assertEquals("", body["settings"]!!.jsonObject["speed"]!!.jsonPrimitive.content)
+        assertEquals(
+            "priority",
+            agentSaveBody(created.copy(speed = "priority"))["settings"]!!
+                .jsonObject["speed"]!!
+                .jsonPrimitive
+                .content,
+        )
+        assertEquals(0, body["settings"]!!.jsonObject["exclusiveNodes"]!!.jsonArray.size)
+        assertEquals(0, body["settings"]!!.jsonObject["plugins"]!!.jsonArray.size)
         assertEquals(LOCAL_NODE_ID, access["nodes"]!!.jsonArray.single().jsonPrimitive.content)
         // GitHub is a plugin instance granted like any other: no access field of its own.
         assertFalse("github" in access)
         assertFalse(access["installation"]!!.jsonPrimitive.content.toBoolean())
         assertEquals("yolo", access["sandbox"]!!.jsonPrimitive.content)
-
-        // A saved agent without access fields still decodes to the server defaults.
-        val existing = wireJson.decodeFromString<Agent>("""{"id":"a","name":"Old"}""")
-        assertNull(existing.access.projects)
-        // An older installation's `github` flag is ignored.
-        val older =
-            wireJson.decodeFromString<Agent>(
-                """{"id":"a","name":"Old","access":{"github":true,"projects":[]}}"""
-            )
-        assertFalse("github" in agentSaveBody(older)["access"]!!.jsonObject)
-    }
-
-    @Test
-    fun emptyGrantsOmittedByTheServerAreNotUnsavedChanges() {
-        val omitted =
-            wireJson.decodeFromString<Agent>(
-                """{"id":"agent","name":"Release","revision":"r1","access":{"nodes":["$LOCAL_NODE_ID"]}}"""
-            )
-        val explicit =
-            wireJson.decodeFromString<Agent>(
-                """{"id":"agent","name":"Release","revision":"r1","access":{"nodes":["$LOCAL_NODE_ID"]},"exclusiveNodes":[],"plugins":[]}"""
-            )
-        assertEquals(explicit, omitted)
-        assertTrue(agentChanges(omitted, AgentDraft(explicit)).isEmpty())
-        assertFalse(profileChanged(omitted, explicit))
     }
 
     @Test
@@ -925,7 +1120,12 @@ class AgentEditingTest {
         val body = agentSaveBody(edited, nativeNodeReviews = edited.nativeReviewNodes(current))
         assertEquals(
             administrator.id,
-            body["nativeNodeReviews"]!!.jsonArray.single().jsonPrimitive.content,
+            body["review"]!!
+                .jsonObject["nativeNodeReviews"]!!
+                .jsonArray
+                .single()
+                .jsonPrimitive
+                .content,
         )
         val reviewed = administrator.copy(nativeReviewedAgents = listOf(agent.id))
         assertEquals(

@@ -6,6 +6,7 @@ import type {
 } from '../../../packages/contracts/contracts'
 import type { McpView } from '../../../packages/contracts/mcp'
 import { reactive, watch } from 'vue'
+import { listAgents } from '../../../packages/contracts/generated/listAgents'
 import { listProjects } from '../../../packages/contracts/generated/listProjects'
 import { beaconOrigin, installationHost } from './beacon-location'
 import { ProtocolMismatch } from './direct-channel'
@@ -409,7 +410,7 @@ export async function refresh() {
   let lists: [Agent[], Project[], Task[], Skill[], McpView[]]
   try {
     lists = await Promise.all([
-      api<Agent[]>('/agents'),
+      listAgents(api, {}).then(output => output.agents),
       listProjects(api, {}).then(output => output.projects),
       api<Task[]>('/tasks'),
       api<Skill[]>('/skills'),

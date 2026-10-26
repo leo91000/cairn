@@ -72,3 +72,12 @@ pub mod validation;
 pub mod vault;
 pub mod waits;
 pub mod worker;
+
+pub mod agents;
+
+#[cfg(test)]
+extern crate self as cairn_installation;
+
+#[cfg(test)]
+#[path = "../tests/common/agent_fixture.rs"]
+pub(crate) mod agent_fixture;
