@@ -714,8 +714,14 @@ where
     }
     let connection_id = existing.map_or_else(id, str::to_owned);
     uuid(&connection_id)?;
-    // Agents are granted from their own page; clients that omit the list keep it.
-    let keep_agents = existing.is_some() && input.get("agentIds").is_none();
+    // Existing grants require a revision-guarded profile command. Setup may
+    // grant the newly created instance atomically, before any editor can hold it.
+    if existing.is_some() && input.get("agentIds").is_some() {
+        return Err(Error::bad(
+            "Edit plugin grants from the agent page with its current revision.",
+        ));
+    }
+    let keep_agents = existing.is_some();
     let agent_ids = agent_grants(&manifest, &input["agentIds"])?;
     let saved = match existing {
         Some(_) => secret_values(s, &connection_id).await?,

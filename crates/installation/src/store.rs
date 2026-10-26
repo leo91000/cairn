@@ -39,7 +39,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-const DATABASE_VERSION: i64 = 3;
+const DATABASE_VERSION: i64 = 4;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -109,6 +109,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::nodes::shared_blocks::SCHEMA)?;
             tx.execute_batch(crate::projects::SCHEMA)?;
             tx.execute_batch(crate::agents::SCHEMA)?;
+            tx.execute_batch(crate::agent_grants::SCHEMA)?;
             tx.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS records_chat_slug ON records(json_extract(data,'$.slug')) WHERE kind='chats';")?;
             tx.commit()?;
         }
@@ -352,10 +353,21 @@ impl Db<'_> {
     }
 
     pub fn list(&self, kind: &str) -> Result<Vec<Value>> {
-        self.json_rows(
+        if self.0.is_autocommit() && matches!(kind, "nodes" | "plugin-connections") {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            return Db(&tx).list(kind);
+        }
+        let mut values = self.json_rows(
             "SELECT data FROM records WHERE kind=? ORDER BY updated_at DESC",
             [kind],
-        )
+        )?;
+        for value in &mut values {
+            self.resource_grants(kind, value)?;
+        }
+        Ok(values)
     }
 
     pub fn node_backups_for_run(&self, run: &str) -> Result<Vec<Value>> {
@@ -371,10 +383,29 @@ impl Db<'_> {
 
     /// Typed variant of [`Db::get`].
     pub fn get_as<T: DeserializeOwned>(&self, kind: &str, id: &str) -> Result<Option<T>> {
-        self.json_row(
+        if !matches!(kind, "nodes" | "plugin-connections") {
+            return self.json_row(
+                "SELECT data FROM records WHERE kind=? AND id=?",
+                params![kind, id],
+            );
+        }
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            return Db(&tx).get_as(kind, id);
+        }
+        let value: Option<Value> = self.json_row(
             "SELECT data FROM records WHERE kind=? AND id=?",
             params![kind, id],
-        )
+        )?;
+        value
+            .map(|mut value| {
+                self.resource_grants(kind, &mut value)?;
+                Ok(serde_json::from_value(value)?)
+            })
+            .transpose()
     }
 
     pub fn chat_id_for_slug(&self, slug: &str) -> Result<Option<String>> {
@@ -405,6 +436,19 @@ impl Db<'_> {
         if matches!(kind, "projects" | "agents") {
             return Err(Error::bad("Use typed domain commands."));
         }
+        let projection = match kind {
+            "nodes" => Some("exclusiveAgents"),
+            "plugin-connections" => Some("agentIds"),
+            _ => None,
+        };
+        let mut resource;
+        let value = if let Some(field) = projection {
+            resource = value.clone();
+            resource.as_object_mut().unwrap().remove(field);
+            &resource
+        } else {
+            value
+        };
         let mut chat;
         let value = if kind == "chats" {
             chat = value.clone();
@@ -432,7 +476,9 @@ impl Db<'_> {
                 value.to_string(),
                 now()
             ])?;
-        Ok(value.clone())
+        let mut result = value.clone();
+        self.resource_grants(kind, &mut result)?;
+        Ok(result)
     }
 
     pub fn remove(&self, kind: &str, id: &str) -> Result<()> {

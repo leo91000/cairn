@@ -735,7 +735,7 @@ mod tests {
             let node = id(); let parent = id(); let coordinator = id(); let target = id();
             db.set("native-authority", &json!({ "observedAt": now(), "accounts": { "owner": {}, "editor": {} } }), None)?;
             let parent_agent = serde_json::to_value(crate::agent_fixture::profile(json!({ "id": coordinator, "access": { "installation": true } }))?)?;
-            db.save_agent_permissions(&parent_agent)?;
+            db.save_agent(&serde_json::from_value(parent_agent.clone())?)?;
             let parent_run = json!({
                 "id": parent,
                 "taskId": "fixture",
@@ -748,7 +748,7 @@ mod tests {
             });
             db.add_run(&parent_run, None)?;
             let agent = serde_json::to_value(crate::agent_fixture::profile(json!({ "id": target, "access": { "backend": "native", "nodes": [node] } }))?)?;
-            db.save_agent_permissions(&agent)?;
+            db.save_agent(&serde_json::from_value(agent.clone())?)?;
             db.put("nodes", &json!({
                 "id": node,
                 "capabilities": { "backend": "native", "nativeModeProtocol": 1 },

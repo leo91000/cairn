@@ -1,5 +1,5 @@
-//! Typed profiles. Permission relations are kept in their current JSON representation
-//! until A3; adapters here serialize typed profiles only at unconverted domain edges.
+//! Typed profiles with relational permissions. Snapshots are serialized only at
+//! unconverted run, plugin and node boundaries.
 use crate::{
     config::{id, now},
     error::Result,
@@ -20,9 +20,6 @@ CREATE TABLE agents(
  speed TEXT NOT NULL CHECK(length(speed)<=40),
  instructions TEXT NOT NULL CHECK(length(instructions)<=20000),
  timeout_minutes INTEGER NOT NULL CHECK(timeout_minutes BETWEEN 0 AND 720),
- access TEXT NOT NULL,
- exclusive_nodes TEXT NOT NULL,
- plugins TEXT NOT NULL,
  revision TEXT NOT NULL CHECK(length(revision)>0),
  created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),
  updated_at INTEGER NOT NULL,
@@ -35,7 +32,7 @@ CREATE TABLE agents(
 CREATE INDEX agents_updated ON agents(updated_at DESC,id);
 ";
 
-const COLUMNS: &str = "id,name,provider,description,model,reasoning,speed,instructions,timeout_minutes,access,exclusive_nodes,plugins,revision,created_at,updated_at,avatar_status,avatar_revision,avatar_url,avatar_error";
+const COLUMNS: &str = "id,name,provider,description,model,reasoning,speed,instructions,timeout_minutes,revision,created_at,updated_at,avatar_status,avatar_revision,avatar_url,avatar_error";
 
 fn decode<T: serde::de::DeserializeOwned>(index: usize, value: &str) -> rusqlite::Result<T> {
     serde_json::from_str(value).map_err(|error| {
@@ -47,13 +44,14 @@ fn decode<T: serde::de::DeserializeOwned>(index: usize, value: &str) -> rusqlite
     })
 }
 
-fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
+fn row(db: &Db<'_>, row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
     let identifier: String = row.get(0)?;
     let identifier = uuid::Uuid::parse_str(&identifier).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
     })?;
     let provider: String = row.get(2)?;
-    let status: Option<String> = row.get(15)?;
+    let status: Option<String> = row.get(12)?;
+    let (access, exclusive_nodes, plugins) = db.agent_permissions(&identifier.to_string())?;
     Ok(Agent {
         id: AgentId(identifier),
         settings: AgentSettings {
@@ -65,18 +63,18 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
             speed: row.get(6)?,
             instructions: row.get(7)?,
             timeout_minutes: row.get(8)?,
-            access: decode(9, &row.get::<_, String>(9)?)?,
-            exclusive_nodes: decode(10, &row.get::<_, String>(10)?)?,
-            plugins: decode(11, &row.get::<_, String>(11)?)?,
+            access,
+            exclusive_nodes,
+            plugins,
         },
-        revision: row.get(12)?,
-        created_at: row.get(13)?,
+        revision: row.get(9)?,
+        created_at: row.get(10)?,
         avatar: match status {
             Some(status) => Some(cairn_contracts::AgentAvatar {
                 status,
-                revision: row.get(16)?,
-                url: row.get(17)?,
-                error: row.get(18)?,
+                revision: row.get(13)?,
+                url: row.get(14)?,
+                error: row.get(15)?,
             }),
             None => None,
         },
@@ -85,33 +83,57 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
 
 impl Db<'_> {
     pub fn agents(&self) -> Result<Vec<Agent>> {
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            return Db(&tx).agents();
+        }
         Ok(self
             .0
             .prepare_cached(&format!(
                 "SELECT {COLUMNS} FROM agents ORDER BY updated_at DESC,id"
             ))?
-            .query_map([], row)?
+            .query_map([], |value| row(self, value))?
             .collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn agent(&self, id: &str) -> Result<Option<Agent>> {
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            return Db(&tx).agent(id);
+        }
         Ok(self
             .0
             .prepare_cached(&format!("SELECT {COLUMNS} FROM agents WHERE id=?"))?
-            .query_row([id], row)
+            .query_row([id], |value| row(self, value))
             .optional()?)
     }
 
     pub fn save_agent(&self, agent: &Agent) -> Result<Agent> {
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            let saved = Db(&tx).save_agent(agent)?;
+            tx.commit()?;
+            return Ok(saved);
+        }
         let settings = &agent.settings;
         let provider = serde_json::to_value(settings.provider)?;
         let avatar = agent.avatar.as_ref();
-        self.0.prepare_cached("INSERT INTO agents VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
-ON CONFLICT(id) DO UPDATE SET name=excluded.name,provider=excluded.provider,description=excluded.description,model=excluded.model,reasoning=excluded.reasoning,speed=excluded.speed,instructions=excluded.instructions,timeout_minutes=excluded.timeout_minutes,access=excluded.access,exclusive_nodes=excluded.exclusive_nodes,plugins=excluded.plugins,revision=excluded.revision,created_at=excluded.created_at,updated_at=excluded.updated_at,avatar_status=excluded.avatar_status,avatar_revision=excluded.avatar_revision,avatar_url=excluded.avatar_url,avatar_error=excluded.avatar_error")?.execute(params![
+        self.0.prepare_cached("INSERT INTO agents VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+ON CONFLICT(id) DO UPDATE SET name=excluded.name,provider=excluded.provider,description=excluded.description,model=excluded.model,reasoning=excluded.reasoning,speed=excluded.speed,instructions=excluded.instructions,timeout_minutes=excluded.timeout_minutes,revision=excluded.revision,created_at=excluded.created_at,updated_at=excluded.updated_at,avatar_status=excluded.avatar_status,avatar_revision=excluded.avatar_revision,avatar_url=excluded.avatar_url,avatar_error=excluded.avatar_error")?.execute(params![
  agent.id.to_string(), settings.name, provider.as_str().unwrap(), settings.description, settings.model, settings.reasoning, settings.speed, settings.instructions, settings.timeout_minutes,
- serde_json::to_string(&settings.access)?, serde_json::to_string(&settings.exclusive_nodes)?, serde_json::to_string(&settings.plugins)?, agent.revision, agent.created_at, now(),
+ agent.revision, agent.created_at, now(),
  avatar.map(|a| &a.status), avatar.map(|a| &a.revision), avatar.and_then(|a| a.url.as_ref()), avatar.and_then(|a| a.error.as_ref())
  ])?;
+        self.save_permissions(agent)?;
         Ok(agent.clone())
     }
 
@@ -135,13 +157,6 @@ ON CONFLICT(id) DO UPDATE SET name=excluded.name,provider=excluded.provider,desc
             .into_iter()
             .map(|agent| Ok(serde_json::to_value(agent)?))
             .collect()
-    }
-
-    /// A3 mutates the existing permission representation. Always decode back into
-    /// the authoritative profile before writing; no generic records writer remains.
-    pub fn save_agent_permissions(&self, value: &Value) -> Result<Value> {
-        let agent: Agent = serde_json::from_value(value.clone())?;
-        Ok(serde_json::to_value(self.save_agent(&agent)?)?)
     }
 }
 
