@@ -10,6 +10,7 @@ pub mod device_flow;
 pub mod files;
 pub mod forms;
 mod idempotency;
+pub mod instances;
 pub(crate) mod management;
 mod mime;
 pub mod oauth;
@@ -186,56 +187,59 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         .trim_start_matches("/api/")
         .split('/')
         .collect::<Vec<_>>();
+    if input.method == "POST" && parts.as_slice() == ["plugins", "manage"] {
+        let command = management::decode(input.body.clone())?;
+        return manage_http(s, command, true).await;
+    }
     let body = &input.body;
     let version = || crate::validation::text(body, "version").to_owned();
-    // Cold owner handlers may prepare programs. Keep that work outside the relay's
-    // short request lifetime, including views/forms that call exec lazily.
-    let cold_handler = match (input.method.as_str(), parts.as_slice()) {
-        ("POST", ["plugins", id, "form"]) => Some((*id, "", "form")),
-        ("GET", ["plugins", id, "connections", instance, "view"]) => Some((*id, *instance, "view")),
-        ("POST", ["plugins", id, "connections", instance, "test"]) => {
-            Some((*id, *instance, "test"))
+    // Each route is an authenticated transport adapter to the same typed command.
+    let command = match (input.method.as_str(), parts.as_slice()) {
+        ("POST", ["plugins", plugin, "form"]) => Some(
+            json!({ "kind": "form", "pluginId": plugin, "instanceId": body["instance"], "data": body }),
+        ),
+        ("POST", ["plugins", plugin, "connections"]) => {
+            Some(json!({ "kind": "save", "pluginId": plugin, "data": body }))
         }
-        ("POST", ["plugins", id, "connections", instance, "actions"]) => {
-            Some((*id, *instance, "action"))
+        ("PUT", ["plugins", plugin, "connections", instance]) => Some(
+            json!({ "kind": "save", "pluginId": plugin, "instanceId": instance, "data": body }),
+        ),
+        ("DELETE", ["plugins", plugin, "connections", instance]) => {
+            Some(json!({ "kind": "delete", "pluginId": plugin, "instanceId": instance }))
         }
-        ("POST", ["plugins", id, "connections"]) => Some((*id, "", "save")),
-        ("PUT", ["plugins", id, "connections", instance]) => Some((*id, *instance, "save")),
+        ("POST", ["plugins", plugin, "connections", instance, "enabled"]) => Some(
+            json!({ "kind": "enabled", "pluginId": plugin, "instanceId": instance, "data": body }),
+        ),
+        ("POST", ["plugins", plugin, "connections", instance, "disconnect"]) => {
+            Some(json!({ "kind": "disconnect", "pluginId": plugin, "instanceId": instance }))
+        }
+        ("POST", ["plugins", plugin, "connections", instance, "test"]) => {
+            Some(json!({ "kind": "test", "pluginId": plugin, "instanceId": instance }))
+        }
+        ("GET", ["plugins", plugin, "connections", instance, "view"]) => {
+            Some(json!({ "kind": "view", "pluginId": plugin, "instanceId": instance }))
+        }
+        ("POST", ["plugins", plugin, "connections", instance, "actions"]) => Some(
+            json!({ "kind": "action", "pluginId": plugin, "instanceId": instance, "data": body }),
+        ),
+        (
+            "POST",
+            [
+                "plugins",
+                plugin,
+                "connections",
+                instance,
+                "people",
+                person,
+                operation,
+            ],
+        ) => Some(
+            json!({ "kind": "people", "pluginId": plugin, "instanceId": instance, "userId": person, "operation": operation }),
+        ),
         _ => None,
     };
-    if let Some((id, instance, handler)) = cold_handler {
-        let package = registry::active(s, id).await?;
-        let invokes_handler = match handler {
-            "form" | "save" => package.manifest.instance_form,
-            "view" | "action" => package.manifest.instance_view,
-            "test" => package.manifest.instance_test,
-            _ => false,
-        };
-        if invokes_handler && program_installation::needs_preparation(s, &package) {
-            let (service, id, instance, body) =
-                (s.clone(), id.to_owned(), instance.to_owned(), body.clone());
-            return s.plugins.operations.start(s.clone(), async move {
-                match handler {
-                    "form" => forms::form(&service, &id, &body).await,
-                    "view" => panels::view(&service, &id, &instance).await,
-                    "test" => panels::test(&service, &id, &instance).await,
-                    "action" => panels::action(&service, &id, &instance, &body).await,
-                    "save" => {
-                        if !instance.is_empty() {
-                            connections::get(&service, &id, &instance).await?;
-                        }
-                        connections::save(
-                            &service,
-                            &id,
-                            &body,
-                            (!instance.is_empty()).then_some(instance.as_str()),
-                        )
-                        .await
-                    }
-                    _ => unreachable!("classified owner handler"),
-                }
-            });
-        }
+    if let Some(command) = command {
+        return manage_http(s, management::decode(command)?, false).await;
     }
     match (input.method.as_str(), parts.as_slice()) {
         ("POST", ["plugins", "oauth", "callback"]) => {
@@ -274,30 +278,7 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 .oauth_flows
                 .cancel(id, flow, identity.oauth_binding())
         }
-        ("GET", ["plugins"]) => {
-            let mut catalog = registry::catalog(s).await?;
-            let mut overview = connections::overview(s).await?;
-            // Instances of packages without a worker are ready whenever enabled.
-            for connection in &mut overview {
-                let worker = catalog["packages"].as_array().and_then(|packages| {
-                    packages
-                        .iter()
-                        .find(|package| package["id"] == connection["pluginId"])
-                        .and_then(|package| {
-                            serde_json::from_value::<cairn_plugin_api::Manifest>(
-                                package["manifest"].clone(),
-                            )
-                            .ok()
-                        })
-                        .map(|manifest| manifest.needs_worker())
-                });
-                if worker == Some(false) && connection["enabled"] == true {
-                    connection["status"] = json!({ "state": "ready" });
-                }
-            }
-            catalog["connections"] = json!(overview);
-            Ok(catalog)
-        }
+        ("GET", ["plugins"]) => management::catalog(s).await,
         ("POST", ["plugins", "packages"]) => registry::install(s, body).await,
         ("GET", ["plugins", "packages", "operations", id]) => s.plugins.operations.get(id),
         ("POST", ["plugins", "packages", id, "approve"]) => {
@@ -313,7 +294,6 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
             registry::activate_request(s, id, &version(), None).await
         }
         ("DELETE", ["plugins", "packages", id]) => registry::uninstall(s, id).await,
-        ("POST", ["plugins", id, "form"]) => forms::form(s, id, body).await,
         ("POST", ["plugins", id, "device-flow"]) => device_flow::start(s, id).await,
         ("GET", ["plugins", id, "device-flow", flow]) => device_flow::status(s, id, flow),
         ("DELETE", ["plugins", id, "device-flow", flow]) => Ok(device_flow::cancel(s, id, flow)),
@@ -331,41 +311,77 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 program_installation::action(&service, &id, &name, &action, &body).await
             })
         }
-        ("POST", ["plugins", id, "connections"]) => connections::save(s, id, body, None).await,
-        ("PUT", ["plugins", id, "connections", connection]) => {
-            connections::get(s, id, connection).await?;
-            connections::save(s, id, body, Some(connection)).await
-        }
-        ("DELETE", ["plugins", id, "connections", connection]) => {
-            connections::remove(s, id, connection).await
-        }
-        ("POST", ["plugins", id, "connections", connection, "enabled"]) => {
-            connections::set_enabled(s, id, connection, body).await
-        }
-        ("POST", ["plugins", id, "connections", connection, "disconnect"]) => {
-            oauth::disconnect(s, id, connection, |_| Ok(())).await
-        }
-        ("POST", ["plugins", id, "connections", connection, "test"]) => {
-            panels::test(s, id, connection).await
-        }
-        ("GET", ["plugins", id, "connections", connection, "view"]) => {
-            panels::view(s, id, connection).await
-        }
-        ("POST", ["plugins", id, "connections", connection, "actions"]) => {
-            panels::action(s, id, connection, body).await
-        }
-        (
-            "POST",
-            [
-                "plugins",
-                id,
-                "connections",
-                connection,
-                "people",
-                user,
-                action,
-            ],
-        ) => connections::people(s, id, connection, user, action).await,
         _ => Err(Error::not_found("Not found.")),
     }
+}
+
+async fn manage_http(
+    s: &Arc<Service>,
+    command: cairn_contracts::ManagePluginInput,
+    wrapped: bool,
+) -> Result<Value> {
+    use cairn_contracts::ManagePluginInput as Command;
+    let preparation = match &command {
+        Command::Form { plugin_id, .. }
+        | Command::Save { plugin_id, .. }
+        | Command::Test { plugin_id, .. }
+        | Command::View { plugin_id, .. }
+        | Command::Action { plugin_id, .. } => Some(plugin_id),
+        _ => None,
+    };
+    if let Some(plugin) = preparation {
+        let package = registry::active(s, plugin).await?;
+        if program_installation::needs_preparation(s, &package) {
+            let origin = crate::native::policy::origin();
+            let service = s.clone();
+            return s.plugins.operations.start(s.clone(), async move {
+                crate::native::policy::DELEGATION
+                    .scope(origin, async move {
+                        present(
+                            Box::pin(management::invoke(&service, command, None, true)).await?,
+                            wrapped,
+                        )
+                    })
+                    .await
+            });
+        }
+    }
+    present(
+        Box::pin(management::invoke(s, command, None, true)).await?,
+        wrapped,
+    )
+}
+
+/// The per-command routes keep their native response shape; all results originate
+/// from the typed capability, including deferred preparation results.
+fn present(output: cairn_contracts::ManagePluginOutput, wrapped: bool) -> Result<Value> {
+    use cairn_contracts::ManagePluginOutput as Output;
+    if wrapped {
+        return Ok(serde_json::to_value(output)?);
+    }
+    Ok(match output {
+        Output::Form { form } => serde_json::to_value(form)?,
+        Output::Saved { instance } | Output::Enabled { instance } | Output::People { instance } => {
+            serde_json::to_value(instance)?
+        }
+        Output::Deleted { deleted } => json!({ "deleted": deleted }),
+        Output::Disconnected {
+            disconnected,
+            revoked,
+            message,
+        } => json!({ "disconnected": disconnected, "revoked": revoked, "message": message }),
+        Output::Tested { ok, message } => json!({ "ok": ok, "message": message }),
+        Output::View { view } => json!({ "view": view }),
+        Output::Action { result } => result,
+        Output::Signin { flow } => serde_json::to_value(flow)?,
+        Output::SigninCancelled { cancelled } => json!({ "cancelled": cancelled }),
+        Output::Setup {
+            manifest,
+            setup,
+            callback_url,
+            management_url,
+        } => {
+            json!({ "manifest": manifest, "setup": setup, "callbackUrl": callback_url, "managementUrl": management_url })
+        }
+    })
 }

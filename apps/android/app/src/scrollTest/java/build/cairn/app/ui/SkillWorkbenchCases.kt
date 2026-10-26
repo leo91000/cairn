@@ -146,7 +146,18 @@ abstract class SkillWorkbenchCases {
                             ),
                     )
                 ),
-            connections = listOf(PluginConnection("acct", "github", "octo")),
+            connections =
+                listOf(
+                    PluginConnection(
+                        id = "acct",
+                        pluginId = "github",
+                        name = "octo",
+                        settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                        status = PluginStatus(),
+                        usage = PluginUsage(),
+                        enabled = true,
+                    )
+                ),
         )
 
     private val pdfBundle =

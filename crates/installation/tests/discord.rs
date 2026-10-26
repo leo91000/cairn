@@ -1,6 +1,9 @@
 //! The Discord package runs entirely in Luau: its Gateway session over the generic
 //! `socket` capability, its setup form, its test and its panel. Discord is simulated
 //! by local HTTP and WebSocket servers.
+#[allow(unused_imports)]
+use common::{PluginServiceFixture as _, PluginStoreFixture as _};
+
 use common::AgentFixture;
 
 mod common;
@@ -13,10 +16,7 @@ use axum::{
     routing::get,
 };
 use cairn_installation::{
-    plugins::{
-        connections::{self, Connection},
-        forms, panels, registry, socket, work,
-    },
+    plugins::{connections::Connection, panels, registry, socket, work},
     service::Service,
     validation::text,
 };
@@ -188,7 +188,7 @@ async fn save(
     agent: &Value,
     settings: Value,
 ) -> cairn_installation::error::Result<Value> {
-    connections::save(
+    common::save_plugin(
         s,
         "discord",
         &json!({
@@ -213,13 +213,13 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     assert!(registry::builtin("discord").unwrap().manifest.instance_form);
 
     // Before a token: guidance only.
-    let empty = forms::form(&s, "discord", &json!({ "settings": {} }))
+    let empty = common::plugin_form(&s, "discord", &json!({ "settings": {} }))
         .await
         .unwrap();
     assert_eq!(empty["view"][0]["title"], "Create the bot");
     assert_eq!(empty["options"], json!({}));
 
-    let result = forms::form(
+    let result = common::plugin_form(
         &s,
         "discord",
         &json!({ "token": "synthetic_discord_token", "settings": { "guildId": "100", "channelId": "200" } }),
@@ -229,7 +229,7 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     assert_eq!(result["errors"], json!({}), "{result}");
     assert_eq!(
         result["options"]["guildId"],
-        json!([{ "value": "100", "label": "Acme" }])
+        json!([{ "value": "100", "label": "Acme", "description": "", "disabled": false }])
     );
     let channels = result["options"]["channelId"].as_array().unwrap();
     let names = channels
@@ -274,7 +274,7 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     );
 
     // A new server resets the channel; unknown servers and bad tokens explain themselves.
-    let changed = forms::form(
+    let changed = common::plugin_form(
         &s,
         "discord",
         &json!({ "token": "synthetic_discord_token", "settings": { "guildId": "100", "channelId": "200" }, "changed": "guildId" }),
@@ -282,7 +282,7 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     .await
     .unwrap();
     assert_eq!(changed["values"]["channelId"], "");
-    let unknown = forms::form(
+    let unknown = common::plugin_form(
         &s,
         "discord",
         &json!({ "token": "synthetic_discord_token", "settings": { "guildId": "999" } }),
@@ -293,7 +293,7 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
         unknown["errors"]["guildId"],
         "The bot isn’t in this server yet. Invite it, then refresh."
     );
-    let rejected = forms::form(
+    let rejected = common::plugin_form(
         &s,
         "discord",
         &json!({ "token": "wrong_token", "settings": {} }),
@@ -324,7 +324,7 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     let connection: Connection = serde_json::from_value(saved).unwrap();
 
     // Editing reuses the saved token; the test and the panel run in Luau too.
-    let editing = forms::form(
+    let editing = common::plugin_form(
         &s,
         "discord",
         &json!({ "instance": connection.id, "settings": connection.settings }),
@@ -332,7 +332,9 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     .await
     .unwrap();
     assert_eq!(editing["values"]["botName"], "cairn");
-    let tested = panels::test(&s, "discord", &connection.id).await.unwrap();
+    let tested = common::plugin_test(&s, "discord", &connection.id)
+        .await
+        .unwrap();
     assert_eq!(tested["message"], "Token works · signed in as cairn");
     let panel = panels::view(&s, "discord", &connection.id).await.unwrap();
     assert_eq!(panel["view"][0]["items"][2]["value"], "#support");
@@ -475,7 +477,7 @@ async fn gateway_identifies_heartbeats_admits_mentions_and_resumes_in_luau() {
     assert_eq!(events[0]["payload"]["botId"], "400");
     let status = s
         .store
-        .kv(&format!("plugin-status:{}", connection.id))
+        .status_fixture(&connection.id)
         .await
         .unwrap()
         .unwrap();
@@ -696,7 +698,7 @@ async fn unused_session_budget_connects_and_identifies() {
     .await;
     let status = s
         .store
-        .kv(&format!("plugin-status:{}", connection.id))
+        .status_fixture(&connection.id)
         .await
         .unwrap()
         .unwrap();
@@ -869,7 +871,7 @@ async fn gateway_lifecycle_matches_discord_and_discord_js() {
     connected_to(&issued);
     let status = s
         .store
-        .kv(&format!("plugin-status:{}", connection.id))
+        .status_fixture(&connection.id)
         .await
         .unwrap()
         .unwrap();
@@ -1349,14 +1351,14 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     let updated = s.agent_fixture(stricter, Some(&id)).await.unwrap();
     let stored: Connection = serde_json::from_value(
         s.store
-            .get(connections::KIND, &connection)
+            .instance_fixture(&connection)
             .await
             .unwrap()
             .unwrap(),
     )
     .unwrap();
     assert_eq!(
-        stored.granted_access,
+        serde_json::to_value(stored.granted_access).unwrap(),
         cairn_installation::service::policy(&updated)
     );
     assert_ne!(stored.revision, text(&saved, "revision"));
@@ -1379,7 +1381,7 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     let widened = s.agent_fixture(wider, Some(&id)).await.unwrap();
     let stored = s
         .store
-        .get(connections::KIND, &connection)
+        .instance_fixture(&connection)
         .await
         .unwrap()
         .unwrap();
@@ -1397,7 +1399,7 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     // A bot bound to a previous installation owner cannot be reapproved from the agent.
     let mut previous = stored.clone();
     previous["ownerAccessId"] = "previous-owner".into();
-    s.store.put(connections::KIND, previous).await.unwrap();
+    s.store.put_instance_fixture(previous).await.unwrap();
     let mut restored = renamed.clone();
     restored["access"] = updated["access"].clone();
     let preview = s.agent_preview_fixture(restored, &id).await.unwrap();
@@ -1409,7 +1411,7 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
 #[tokio::test]
 async fn plugin_grants_keep_a_bot_anyone_can_reach_answering() {
     let (_root, s, agent) = service().await;
-    let saved = connections::save(
+    let saved = common::save_plugin(
         &s,
         "discord",
         &json!({
@@ -1425,7 +1427,7 @@ async fn plugin_grants_keep_a_bot_anyone_can_reach_answering() {
     )
     .await
     .unwrap();
-    let account = connections::save(
+    let account = common::save_plugin(
         &s,
         "onepassword",
         &json!({ "name": "Production", "enabled": true, "secrets": { "token": "ops_fixture" } }),
@@ -1446,7 +1448,7 @@ async fn plugin_grants_keep_a_bot_anyone_can_reach_answering() {
     s.agent_fixture(secret, Some(&id)).await.unwrap();
     let stored: Connection = serde_json::from_value(
         s.store
-            .get(connections::KIND, text(&saved, "id"))
+            .instance_fixture(text(&saved, "id"))
             .await
             .unwrap()
             .unwrap(),

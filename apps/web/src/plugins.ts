@@ -1,4 +1,6 @@
 import type { Agent } from '../../../packages/contracts/contracts'
+import type { PluginConnection } from '../../../packages/contracts/generated/typescript/PluginConnection'
+import type { PluginOption as GeneratedPluginOption } from '../../../packages/contracts/generated/typescript/PluginOption'
 import type { IconName } from './icons'
 import type { PluginSetup, SetupRisk } from './plugin-setup'
 import {
@@ -19,13 +21,7 @@ import {
   Wrench,
 } from './icons'
 
-export interface FieldOption {
-  value: string
-  label: string
-  /** Shown under the choice, e.g. why it can't be picked. */
-  description?: string
-  disabled?: boolean
-}
+export type FieldOption = Pick<GeneratedPluginOption, 'value' | 'label'> & Partial<GeneratedPluginOption>
 
 /** One field of a declarative plugin form (instance settings or a view's form). */
 export interface SettingField {
@@ -51,13 +47,7 @@ export interface SettingField {
   default?: unknown
 }
 
-/** What a package's `form` handler returns while the owner edits an instance. */
-export interface FormResult {
-  options: Record<string, FieldOption[]>
-  values: Record<string, unknown>
-  errors: Record<string, string>
-  view: any[]
-}
+export type { PluginActivity as Activity } from '../../../packages/contracts/generated/typescript/PluginActivity'
 
 export interface PluginArgument {
   name: string
@@ -193,52 +183,10 @@ export interface Catalog {
   connections: PluginConnection[]
 }
 
-export interface Label {
-  id: string
-  name: string
-}
-
-export interface AccessRequest {
-  id: string
-  userId: string
-  name: string
-  mentions: number
-  updatedAt: number
-}
-
-export interface Activity {
-  id: string
-  chatId: string
-  userId: string
-  name: string
-  preview: string
-  status: 'working' | 'replied' | 'failed' | 'stopped'
-  createdAt: number
-}
-
-export interface PluginConnection {
-  id: string
-  pluginId: string
-  name: string
-  enabled: boolean
-  settings: Record<string, any>
-  /** Agents granted the package's commands and tools on this instance. */
-  agentIds?: string[]
-  /** Secret fields saved in the vault; values never reach the browser. */
-  secretKeys?: string[]
-  userIds: string[]
-  people: Label[]
-  accessMode: 'allowlist' | 'requests' | 'everyone'
-  maxPerPersonPerHour?: number
-  agentId: string
-  projectId: string | null
-  maxMessagesPerHour: number
-  /** Live state, with the package's own message (e.g. who it is signed in as). */
-  status: { state: string, message?: string | null }
-  usage: { hour: number }
-  requests: AccessRequest[]
-  activity: Activity[]
-}
+export type { PluginConnection } from '../../../packages/contracts/generated/typescript/PluginConnection'
+export type { PluginFormResult as FormResult } from '../../../packages/contracts/generated/typescript/PluginFormResult'
+export type { PluginLabel as Label } from '../../../packages/contracts/generated/typescript/PluginLabel'
+export type { PluginRequest as AccessRequest } from '../../../packages/contracts/generated/typescript/PluginRequest'
 
 /** How each host capability reads in the catalogue. */
 export const capabilityLabels: Record<string, [IconName, string]> = {

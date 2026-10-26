@@ -259,7 +259,12 @@ fn admit(db: &Db<'_>, expected: &Connection, event: &Value) -> Result<(Connectio
 
 fn origin(context: &Context) -> crate::native::policy::Origin {
     use crate::native::policy::{Origin, PluginOrigin};
-    if context.connection.native_authority["nativeProvenanceUnknown"] != false {
+    if context
+        .connection
+        .native_authority
+        .as_ref()
+        .is_none_or(|grant| grant.native_provenance_unknown)
+    {
         return Origin::Unknown;
     }
     Origin::Plugin(PluginOrigin {

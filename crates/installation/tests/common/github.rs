@@ -9,7 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use cairn_installation::{plugins::connections, service::Service, validation::text};
+use cairn_installation::{service::Service, validation::text};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -78,7 +78,7 @@ impl Github {
 
 /// A GitHub instance saved through the package's own form, granted to `agents`.
 pub async fn instance(s: &Service, name: &str, token: &str, agents: &[&str]) -> String {
-    let saved = connections::save(
+    let saved = super::save_plugin(
         s,
         "github",
         &json!({ "name": name, "enabled": true, "token": token, "agentIds": agents }),

@@ -1,3 +1,6 @@
+#[allow(unused_imports)]
+use common::{PluginServiceFixture as _, PluginStoreFixture as _};
+
 use common::AgentFixture;
 use common::MissionFixture;
 use common::StoreAgentFixture;
@@ -27,7 +30,7 @@ const OTHER: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 
 #[tokio::test]
 async fn an_owner_approved_bot_can_submit_to_its_native_agent() {
-    use cairn_installation::plugins::{capabilities, connections, registry, work};
+    use cairn_installation::plugins::{capabilities, registry, work};
 
     let f = Fixture::new().await;
     f.service
@@ -44,10 +47,20 @@ async fn an_owner_approved_bot_can_submit_to_its_native_agent() {
     let input = json!({
         "name": "Native bot", "enabled": true, "agentId": f.agent["id"],
         "accessMode": "everyone", "settings": { "guildId": "100", "channelId": "200" },
-        "token": "synthetic-discord-token",
-        "nativeAuthority": { "nativePrincipals": ["fixture-owner"], "nativeProvenanceUnknown": false }
+        "token": "synthetic-discord-token"
     });
-    let denied = connections::save(&f.service, "discord", &input, None)
+    let mut forged = input.clone();
+    forged["nativeAuthority"] =
+        json!({ "nativePrincipals": ["fixture-owner"], "nativeProvenanceUnknown": false });
+    assert_eq!(
+        common::save_plugin(&f.service, "discord", &forged, None)
+            .await
+            .unwrap_err()
+            .status,
+        400,
+        "The typed command must not accept authority from JSON"
+    );
+    let denied = common::save_plugin(&f.service, "discord", &input, None)
         .await
         .unwrap_err();
     assert_eq!(
@@ -64,7 +77,13 @@ async fn an_owner_approved_bot_can_submit_to_its_native_agent() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    let connection: connections::Connection = serde_json::from_value(saved).unwrap();
+    let connection = f
+        .service
+        .store
+        .plugin_instance(saved["id"].as_str().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
     let event = json!({
         "name": "message", "revision": connection.revision, "authorId": "external-person",
         "payload": { "id": "external-message", "author": { "id": "external-person", "name": "Person" } }
@@ -172,11 +191,7 @@ async fn an_owner_approved_bot_can_submit_to_its_native_agent() {
     ] {
         let mut changed = original.clone();
         changed[field] = value;
-        f.service
-            .store
-            .put(connections::KIND, changed)
-            .await
-            .unwrap();
+        f.service.store.put_instance_fixture(changed).await.unwrap();
         let (check, target) = (run.clone(), node.clone());
         assert!(
             !f.service
@@ -197,7 +212,7 @@ async fn an_owner_approved_bot_can_submit_to_its_native_agent() {
         );
         f.service
             .store
-            .put(connections::KIND, original.clone())
+            .put_instance_fixture(original.clone())
             .await
             .unwrap();
     }
@@ -217,7 +232,7 @@ async fn an_owner_approved_bot_can_submit_to_its_native_agent() {
         "Fresh membership must match the owner access that approved the delegation"
     );
 
-    connections::set_enabled(
+    common::enable_plugin(
         &f.service,
         "discord",
         &connection.id,

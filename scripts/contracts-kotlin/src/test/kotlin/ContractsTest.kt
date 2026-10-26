@@ -220,4 +220,34 @@ class ContractsTest {
                 .runId,
         )
     }
+    @Test
+    fun pluginsPreserveTheirTypedEnvelopeAndManifestJson() {
+        val root = File(System.getProperty("cairn.contractWire")).parentFile
+        val wire = json.parseToJsonElement(File(root, "plugin-wire.json").readText()).jsonObject
+        val corpus =
+            json
+                .parseToJsonElement(
+                    File(
+                            root.parentFile.parentFile.parentFile,
+                            "tests/fixtures/plugin-contracts.json",
+                        )
+                        .readText()
+                )
+                .jsonObject
+        for ((index, value) in corpus.getValue("inputs").jsonArray.withIndex()) {
+            val command = json.decodeFromJsonElement<ManagePluginInput>(value)
+            assertEquals(
+                wire.getValue("inputs").jsonArray[index],
+                json.encodeToJsonElement(command),
+            )
+        }
+        for (value in wire.getValue("outputs").jsonArray) {
+            val output = json.decodeFromJsonElement<ManagePluginOutput>(value)
+            assertEquals(value, json.encodeToJsonElement(output))
+        }
+        for (value in corpus.getValue("invalidInputs").jsonArray) {
+            assertFails(value.toString()) { json.decodeFromJsonElement<ManagePluginInput>(value) }
+        }
+    }
+
 }

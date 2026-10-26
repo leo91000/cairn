@@ -10,14 +10,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
-@Serializable
-data class PluginOption(
-    val value: String = "",
-    val label: String = "",
-    /** Shown under the choice, e.g. why it can't be picked. */
-    val description: String = "",
-    val disabled: Boolean = false,
-)
+typealias PluginOption = build.cairn.contracts.PluginOption
 
 /** One field of a declarative plugin form: instance settings or a view's form. */
 @Serializable
@@ -45,13 +38,7 @@ data class PluginSetting(
 )
 
 /** What a package's `form` handler returns while the owner edits an instance. */
-@Serializable
-data class PluginForm(
-    val options: Map<String, List<PluginOption>> = emptyMap(),
-    val values: JsonObject = JsonObject(emptyMap()),
-    val errors: Map<String, String> = emptyMap(),
-    val view: JsonArray = JsonArray(emptyList()),
-)
+typealias PluginForm = build.cairn.contracts.PluginFormResult
 
 @Serializable
 data class PluginCredential(
@@ -236,85 +223,39 @@ data class PluginEntry(
         get() = manifest?.name ?: id
 }
 
-@Serializable data class PluginLabel(val id: String = "", val name: String = "")
+typealias PluginLabel = build.cairn.contracts.PluginLabel
 
-@Serializable
-data class PluginRequest(
-    val id: String = "",
-    val userId: String = "",
-    val name: String = "",
-    val mentions: Int = 0,
-    val updatedAt: Long = 0,
-)
+typealias PluginRequest = build.cairn.contracts.PluginRequest
 
-@Serializable
-data class PluginActivity(
-    val id: String = "",
-    val chatId: String = "",
-    val userId: String = "",
-    val name: String = "",
-    val preview: String = "",
-    /** `working`, `replied`, `failed` or `stopped`. */
-    val status: String = "",
-    val createdAt: Long = 0,
-)
+typealias PluginActivity = build.cairn.contracts.PluginActivity
 
-/** Live state, with the package's own message (e.g. who it is signed in as). */
-@Serializable
-data class PluginStatus(val state: String = "disconnected", val message: String? = null)
+typealias PluginStatus = build.cairn.contracts.PluginStatus
 
-@Serializable data class PluginUsage(val hour: Int = 0)
+typealias PluginUsage = build.cairn.contracts.PluginUsage
 
-/** One configured instance of a plugin, such as a Discord bot or a service account. */
-@Serializable
-data class PluginConnection(
-    val id: String = "",
-    val pluginId: String = "",
-    val name: String = "",
-    val enabled: Boolean = true,
-    val settings: JsonObject = JsonObject(emptyMap()),
-    val userIds: List<String> = emptyList(),
-    val people: List<PluginLabel> = emptyList(),
-    /** `allowlist`, `requests` or `everyone`. */
-    val accessMode: String = "allowlist",
-    val maxPerPersonPerHour: Int? = null,
-    val agentId: String = "",
-    val projectId: String? = null,
-    val maxMessagesPerHour: Int = 20,
-    /** Agents granted the package's commands and tools on this instance. */
-    val agentIds: List<String> = emptyList(),
-    /** Secret fields saved in the vault; values never reach the app. */
-    val secretKeys: List<String> = emptyList(),
-    val status: PluginStatus = PluginStatus(),
-    val usage: PluginUsage = PluginUsage(),
-    val requests: List<PluginRequest> = emptyList(),
-    val activity: List<PluginActivity> = emptyList(),
-) {
-    fun setting(key: String): String? =
-        (settings[key] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+typealias PluginConnection = build.cairn.contracts.PluginConnection
 
-    fun flag(key: String): Boolean = (settings[key] as? JsonPrimitive)?.booleanOrNull == true
+fun PluginConnection.setting(key: String): String? =
+    (settings[key] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
 
-    /** A setting as people read it: lists joined, switches as Oui/Non. */
-    fun display(key: String): String =
-        when (val value = settings[key]) {
-            null -> "—"
-            is JsonArray ->
-                value
-                    .mapNotNull { it.jsonPrimitive.contentOrNull }
-                    .joinToString(", ")
-                    .ifBlank { "—" }
-            is JsonPrimitive ->
-                value.booleanOrNull?.let { if (it) "Oui" else "Non" }
-                    ?: value.contentOrNull?.ifBlank { null }
-                    ?: "—"
-            else -> value.toString()
-        }
+fun PluginConnection.flag(key: String): Boolean =
+    (settings[key] as? JsonPrimitive)?.booleanOrNull == true
 
-    fun personName(id: String) =
-        people.find { it.id == id }?.name?.takeIf { it.isNotBlank() }
-            ?: "Utilisateur ${id.takeLast(4)}"
-}
+/** A setting as people read it: lists joined, switches as Oui/Non. */
+fun PluginConnection.display(key: String): String =
+    when (val value = settings[key]) {
+        null -> "—"
+        is JsonArray ->
+            value.mapNotNull { it.jsonPrimitive.contentOrNull }.joinToString(", ").ifBlank { "—" }
+        is JsonPrimitive ->
+            value.booleanOrNull?.let { if (it) "Oui" else "Non" }
+                ?: value.contentOrNull?.ifBlank { null }
+                ?: "—"
+        else -> value.toString()
+    }
+
+fun PluginConnection.personName(id: String) =
+    people.find { it.id == id }?.name?.takeIf { it.isNotBlank() } ?: "Utilisateur ${id.takeLast(4)}"
 
 @Serializable data class PluginCapability(val name: String = "", val description: String = "")
 
@@ -548,28 +489,17 @@ fun PluginCatalog.grantsOf(agentId: String): List<String> =
  * A plugin's device sign-in as the installation shows it (`POST /plugins/{id}/device-flow`): the
  * token never reaches the app. [state] is `pending`, `completed`, `failed` or `expired`.
  */
-@Serializable
-data class PluginDeviceFlow(
-    val id: String = "",
-    val pluginId: String = "",
-    val state: String = "pending",
-    val userCode: String = "",
-    val verificationUri: String = "",
-    val verificationUriComplete: String? = null,
-    val expiresAt: Long = 0,
-    /** Why it failed, or the service's guidance. */
-    val message: String? = null,
-) {
-    /** The page where the owner enters the code; some services prefill it. */
-    val link
-        get() = verificationUriComplete?.takeIf { it.isNotBlank() } ?: verificationUri
+typealias PluginDeviceFlow = build.cairn.contracts.PluginSigninFlow
 
-    val pending
-        get() = state == "pending" || state == "exchanging"
+/** The page where the owner enters the code; some services prefill it. */
+val PluginDeviceFlow.link
+    get() = verificationUriComplete?.takeIf { it.isNotBlank() } ?: verificationUri
 
-    val completed
-        get() = state == "completed"
-}
+val PluginDeviceFlow.pending
+    get() = state == "pending" || state == "exchanging"
+
+val PluginDeviceFlow.completed
+    get() = state == "completed"
 
 /**
  * What a form call or a save sends for the credential: a completed sign-in replaces a pasted token,

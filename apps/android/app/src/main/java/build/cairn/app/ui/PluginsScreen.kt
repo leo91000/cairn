@@ -289,6 +289,10 @@ private fun PluginInstances(
                         PluginConnection(
                             name = if (manifest.instances == null) manifest.name else "",
                             accessMode = "requests",
+                            settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                            status = PluginStatus(),
+                            usage = PluginUsage(),
+                            enabled = true,
                         )
                 }
         }
@@ -299,6 +303,10 @@ private fun PluginInstances(
                     PluginConnection(
                         name = if (manifest.instances == null) manifest.name else "",
                         accessMode = "requests",
+                        settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                        status = PluginStatus(),
+                        usage = PluginUsage(),
+                        enabled = true,
                     )
             }
         instances.forEach { connection ->
@@ -365,10 +373,7 @@ private fun PluginInstances(
             dismiss = { removing = null },
         ) {
             vm.perform {
-                api.request(
-                    "DELETE",
-                    "/plugins/${segment(id)}/connections/${segment(connection.id)}",
-                )
+                api.deletePlugin(id, connection.id)
                 removing = null
                 load()
             }
@@ -390,12 +395,11 @@ private fun InstanceCard(
     remove: () -> Unit,
     changed: suspend () -> Unit,
 ) {
-    val path = "/plugins/${segment(connection.pluginId)}/connections/${segment(connection.id)}"
     val agent = state.agents.find { it.id == connection.agentId }
     val project = state.projects.find { it.id == connection.projectId }
     val badge = connection.state()
     fun person(userId: String, action: String) = vm.perform {
-        api.request("POST", "$path/people/${segment(userId)}/$action")
+        api.pluginPerson(connection.pluginId, connection.id, userId, action)
         changed()
     }
     SignalCard(
@@ -578,7 +582,8 @@ private fun InstanceCard(
                     ActivityRow(connection, item) { openChat(item.chatId) }
                 }
             }
-            if (manifest.instanceView) PluginPanel(vm, state, path, connection.name)
+            if (manifest.instanceView)
+                PluginPanel(vm, state, connection.pluginId, connection.id, connection.name)
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Toggle(
                 if (manifest.delegates) "Accepter les nouveaux messages" else "Active",
@@ -586,11 +591,7 @@ private fun InstanceCard(
             ) { enabled ->
                 if (!state.busy)
                     vm.perform {
-                        api.request(
-                            "POST",
-                            "$path/enabled",
-                            buildJsonObject { put("enabled", enabled) },
-                        )
+                        api.enablePlugin(connection.pluginId, connection.id, enabled)
                         changed()
                     }
             }
@@ -599,11 +600,7 @@ private fun InstanceCard(
                     TextButton(
                         onClick = {
                             vm.perform {
-                                val result = api.send<JsonObject>("POST", "$path/disconnect")
-                                notify(
-                                    result["message"]?.jsonPrimitive?.contentOrNull
-                                        ?: "Compte déconnecté"
-                                )
+                                notify(api.disconnectPlugin(connection.pluginId, connection.id))
                                 changed()
                             }
                         },
@@ -615,9 +612,7 @@ private fun InstanceCard(
                     TextButton(
                         onClick = {
                             vm.perform {
-                                val result = api.pluginOperation("$path/test").jsonObject
-                                val message =
-                                    result["message"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                                val message = api.testPlugin(connection.pluginId, connection.id)
                                 notify(
                                     "${connection.name} : ${message.ifBlank { "ça fonctionne" }}"
                                 )

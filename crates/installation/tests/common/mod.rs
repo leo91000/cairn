@@ -312,3 +312,223 @@ impl McpFixture for Service {
         )?)
     }
 }
+
+/// Helpers use the revision a real editor received, while explicit revision tests
+/// call the capability directly and deliberately keep stale commands.
+pub async fn save_plugin(
+    s: &Service,
+    plugin: &str,
+    input: &Value,
+    existing: Option<&str>,
+) -> cairn_installation::error::Result<Value> {
+    let mut command = input.clone();
+    if command.get("settings").is_none() {
+        command["settings"] = serde_json::json!({});
+    }
+    if let Some(id) = existing
+        && command.get("revision").is_none()
+    {
+        command["revision"] =
+            serde_json::json!(s.store.plugin_instance(id).await?.unwrap().revision);
+    }
+    let saved = cairn_installation::plugins::connections::save(
+        s,
+        plugin,
+        serde_json::from_value(command)
+            .map_err(|error| cairn_installation::error::Error::bad(error.to_string()))?,
+        existing,
+    )
+    .await?;
+    s.instance_fixture(&saved.id).await
+}
+
+#[allow(async_fn_in_trait)]
+pub trait PluginStoreFixture {
+    async fn instance_fixture(&self, id: &str) -> cairn_installation::error::Result<Option<Value>>;
+
+    async fn status_fixture(&self, id: &str) -> cairn_installation::error::Result<Option<Value>>;
+
+    async fn instances_fixture(&self) -> cairn_installation::error::Result<Vec<Value>>;
+
+    async fn put_instance_fixture(&self, value: Value) -> cairn_installation::error::Result<Value>;
+}
+
+impl PluginStoreFixture for Store {
+    async fn instance_fixture(&self, id: &str) -> cairn_installation::error::Result<Option<Value>> {
+        self.plugin_instance(id)
+            .await?
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    async fn status_fixture(&self, id: &str) -> cairn_installation::error::Result<Option<Value>> {
+        let id = id.to_owned();
+        self.read(move |db| {
+            db.plugin_statuses()?
+                .remove(&id)
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    async fn instances_fixture(&self) -> cairn_installation::error::Result<Vec<Value>> {
+        self.plugin_instances()
+            .await?
+            .into_iter()
+            .map(|instance| Ok(serde_json::to_value(instance)?))
+            .collect()
+    }
+
+    async fn put_instance_fixture(&self, value: Value) -> cairn_installation::error::Result<Value> {
+        use cairn_installation::plugins::connections::Connection;
+        let mut draft = serde_json::to_value(Connection::draft(
+            value["id"].as_str().unwrap(),
+            value["pluginId"].as_str().unwrap_or("fixture"),
+            serde_json::json!({}),
+            Vec::new(),
+        ))?;
+        draft["name"] = serde_json::json!("Fixture");
+        draft["revision"] = serde_json::json!("fixture-revision");
+        draft["maxMessagesPerHour"] = serde_json::json!(20);
+        for (key, value) in value.as_object().unwrap() {
+            draft[key] = value.clone();
+        }
+        if let Some(access) = draft["grantedAccess"].as_object() {
+            let mut complete = serde_json::to_value(cairn_contracts::AccessPolicy::default())?;
+            for (key, value) in access {
+                complete[key] = value.clone();
+            }
+            draft["grantedAccess"] = complete;
+        }
+        let mut instance: Connection = serde_json::from_value(draft)?;
+        self.transaction(move |db| {
+            if !instance.agent_id.is_empty() && instance.granted_access.is_none() {
+                instance.granted_access = db
+                    .agent(&instance.agent_id)?
+                    .map(|agent| agent.settings.access);
+            }
+            db.save_plugin_instance(&instance)?;
+            Ok(serde_json::to_value(&instance)?)
+        })
+        .await
+    }
+}
+
+#[allow(async_fn_in_trait)]
+pub trait PluginServiceFixture {
+    async fn instance_fixture(&self, id: &str) -> cairn_installation::error::Result<Value>;
+}
+
+impl PluginServiceFixture for Service {
+    async fn instance_fixture(&self, id: &str) -> cairn_installation::error::Result<Value> {
+        self.store.instance_fixture(id).await?.ok_or_else(|| {
+            cairn_installation::error::Error::not_found("Plugin instance fixture not found")
+        })
+    }
+}
+
+pub async fn plugin_form(
+    s: &Service,
+    plugin: &str,
+    input: &Value,
+) -> cairn_installation::error::Result<Value> {
+    let mut input = input.clone();
+    if input.get("settings").is_none() {
+        input["settings"] = serde_json::json!({});
+    }
+    if input.get("secrets").is_none() {
+        input["secrets"] = serde_json::json!({});
+    }
+    Ok(serde_json::to_value(
+        cairn_installation::plugins::forms::form(s, plugin, &serde_json::from_value(input)?)
+            .await?,
+    )?)
+}
+
+pub async fn plugin_action(
+    s: &Service,
+    plugin: &str,
+    instance: &str,
+    input: &Value,
+) -> cairn_installation::error::Result<Value> {
+    let mut input = input.clone();
+    if input.get("values").is_none() {
+        input["values"] = serde_json::json!({});
+    }
+    cairn_installation::plugins::panels::action(
+        s,
+        plugin,
+        instance,
+        &serde_json::from_value(input)?,
+    )
+    .await
+}
+
+pub async fn enable_plugin(
+    s: &Service,
+    plugin: &str,
+    instance: &str,
+    input: &Value,
+) -> cairn_installation::error::Result<Value> {
+    Ok(serde_json::to_value(
+        cairn_installation::plugins::connections::set_enabled(
+            s,
+            plugin,
+            instance,
+            &serde_json::from_value(input.clone())?,
+        )
+        .await?,
+    )?)
+}
+
+pub async fn plugin_test(
+    s: &Service,
+    plugin: &str,
+    instance: &str,
+) -> cairn_installation::error::Result<Value> {
+    let message = cairn_installation::plugins::panels::test(s, plugin, instance).await?;
+    Ok(serde_json::json!({ "ok": true, "message": message }))
+}
+
+pub async fn plugin_people(
+    s: &Service,
+    plugin: &str,
+    instance: &str,
+    person: &str,
+    action: &str,
+) -> cairn_installation::error::Result<Value> {
+    let operation: cairn_contracts::PluginPersonAction =
+        serde_json::from_value(serde_json::json!(action))
+            .map_err(|error| cairn_installation::error::Error::bad(error.to_string()))?;
+    let instance =
+        cairn_installation::plugins::connections::people(s, plugin, instance, person, operation)
+            .await?;
+    Ok(serde_json::to_value(instance)?)
+}
+
+pub fn instance_configuration(
+    instance: &cairn_installation::plugins::connections::Connection,
+) -> Value {
+    serde_json::to_value(cairn_contracts::PluginConfiguration {
+        name: instance.name.clone(),
+        enabled: instance.enabled,
+        revision: Some(instance.revision.clone()),
+        settings: serde_json::from_value(instance.settings.clone()).unwrap(),
+        secrets: None,
+        token: None,
+        credential_flow: None,
+        shared_from: None,
+        agent_id: instance.agent_id.clone(),
+        project_id: instance.project_id.clone(),
+        access_mode: instance.access_mode,
+        user_ids: instance.user_ids.clone(),
+        people: instance.people.clone(),
+        max_messages_per_hour: instance.max_messages_per_hour,
+        max_per_person_per_hour: instance.max_per_person_per_hour,
+        agent_ids: None,
+    })
+    .unwrap()
+}

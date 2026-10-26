@@ -2603,7 +2603,7 @@ async fn vm_chat_protocol_runs_receive_one_frame_with_plugin_instructions() {
         .agent_fixture(json!({ "name": "Claude", "provider": "claude" }), None)
         .await
         .unwrap();
-    cairn_installation::plugins::connections::save(
+    common::save_plugin(
         &s,
         "onepassword",
         &json!({

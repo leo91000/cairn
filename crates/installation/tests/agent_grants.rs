@@ -3,6 +3,9 @@
 use common::MissionFixture;
 use common::{McpFixture, StoreAgentFixture};
 
+#[allow(unused_imports)]
+use common::{PluginServiceFixture as _, PluginStoreFixture as _};
+
 mod common;
 
 use axum::{
@@ -110,6 +113,8 @@ impl Owner {
                 .await
                 .unwrap()
                 .unwrap()
+        } else if kind == "plugin-connections" {
+            self.service.instance_fixture(id).await.unwrap()
         } else {
             self.service.store.get(kind, id).await.unwrap().unwrap()
         }
@@ -135,7 +140,7 @@ impl Owner {
     }
 
     async fn add_service_account(&self, agents: Value) -> String {
-        let saved = connections::save(
+        let saved = common::save_plugin(
             &self.service,
             "onepassword",
             &json!({
@@ -192,7 +197,7 @@ async fn the_agent_page_grants_exclusive_nodes_and_service_accounts() {
         owner.stored("nodes", NODE).await["exclusiveAgents"],
         json!([id])
     );
-    let instance = owner.stored(connections::KIND, &account).await;
+    let instance = owner.stored("plugin-connections", &account).await;
     assert_eq!(instance["agentIds"], json!([id]));
     let instance: connections::Connection = serde_json::from_value(instance).unwrap();
     assert!(instance.grants(&id));
@@ -220,7 +225,7 @@ async fn the_agent_page_grants_exclusive_nodes_and_service_accounts() {
         json!([])
     );
     assert_eq!(
-        owner.stored(connections::KIND, &account).await["agentIds"],
+        owner.stored("plugin-connections", &account).await["agentIds"],
         json!([])
     );
 }
@@ -373,7 +378,7 @@ async fn resource_configuration_cannot_write_exclusivity_and_keeps_projected_gra
     );
 
     // Editing the instance without the list keeps its agents.
-    connections::save(
+    common::save_plugin(
         &owner.service,
         "onepassword",
         &json!({ "name": "Production renamed", "enabled": true }),
@@ -382,7 +387,7 @@ async fn resource_configuration_cannot_write_exclusivity_and_keeps_projected_gra
     .await
     .unwrap();
     assert_eq!(
-        owner.stored(connections::KIND, &account).await["agentIds"],
+        owner.stored("plugin-connections", &account).await["agentIds"],
         json!([id])
     );
 
@@ -523,7 +528,7 @@ async fn deleting_an_mcp_connection_keeps_live_grants_and_marks_changed_agents()
     let (status, _) = owner.send("PUT", &path(&after), renamed).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        owner.stored(connections::KIND, &account).await["agentIds"],
+        owner.stored("plugin-connections", &account).await["agentIds"],
         json!([text(&saved, "id")])
     );
 }
@@ -542,15 +547,12 @@ async fn live_grants_do_not_expand_a_delegation_policy() {
     owner
         .service
         .store
-        .put(
-            connections::KIND,
-            json!({
-                "id": GHOST, "pluginId": "discord", "name": "#support", "enabled": true,
-                "revision": "r1", "settings": {}, "agentId": agent["id"], "projectId": null,
-                "grantedAccess": policy(&agent), "accessMode": "allowlist",
-                "userIds": ["1"], "people": [], "maxMessagesPerHour": 20, "updatedAt": 0,
-            }),
-        )
+        .put_instance_fixture(json!({
+            "id": GHOST, "pluginId": "discord", "name": "#support", "enabled": true,
+            "revision": "r1", "settings": {}, "agentId": agent["id"], "projectId": null,
+            "grantedAccess": policy(&agent), "accessMode": "allowlist",
+            "userIds": ["1"], "people": [], "maxMessagesPerHour": 20, "updatedAt": 0,
+        }))
         .await
         .unwrap();
     let id = GHOST.to_owned();
@@ -562,7 +564,7 @@ async fn live_grants_do_not_expand_a_delegation_policy() {
     let (status, granted) = owner.send("PUT", &path(&agent), granted).await;
     assert_eq!(status, StatusCode::OK, "{granted}");
 
-    let approved = owner.stored(connections::KIND, &id).await["grantedAccess"].clone();
+    let approved = owner.stored("plugin-connections", &id).await["grantedAccess"].clone();
     // Both releases compare the same policy, before and after a save by the previous
     // release, which drops the fields it does not know.
     assert_eq!(policy(&granted), approved);
@@ -583,10 +585,7 @@ async fn a_held_grant_on_an_instance_awaiting_review_does_not_block_other_edits(
     owner
         .service
         .store
-        .put(
-            connections::KIND,
-            json!({ "id": GHOST, "pluginId": "third-party", "name": "Pending" }),
-        )
+        .put_instance_fixture(json!({ "id": GHOST, "pluginId": "third-party", "name": "Pending" }))
         .await
         .unwrap();
     let mut held = owner.stored("agents", &id).await;
@@ -766,7 +765,7 @@ async fn an_incomplete_replacement_cannot_restore_a_concurrent_revocation() {
         json!([])
     );
     assert_eq!(
-        owner.stored(connections::KIND, &account).await["agentIds"],
+        owner.stored("plugin-connections", &account).await["agentIds"],
         json!([])
     );
 }
@@ -891,7 +890,7 @@ async fn selected_permissions_and_empty_tool_selections_survive_reopening() {
     }
 
     // An instance editor cannot restore a revoked grant from a stale resource list.
-    let rejected = connections::save(
+    let rejected = common::save_plugin(
         &owner.service,
         "onepassword",
         &json!({

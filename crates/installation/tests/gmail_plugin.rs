@@ -188,7 +188,7 @@ async fn oauth_form_compares_defaulted_scope_settings_without_restoring_cleared_
     .await
     .unwrap();
 
-    let completed = cairn_installation::plugins::forms::form(
+    let completed = common::plugin_form(
         &f.s,
         "gmail",
         &json!({
@@ -199,7 +199,7 @@ async fn oauth_form_compares_defaulted_scope_settings_without_restoring_cleared_
     .await
     .unwrap();
     assert_eq!(completed["values"]["email"], "alice@example.test");
-    let changed = cairn_installation::plugins::forms::form(
+    let changed = common::plugin_form(
         &f.s,
         "gmail",
         &json!({
@@ -254,7 +254,7 @@ async fn forwarding_filters_require_sharing_for_inline_and_file_bodies() {
     reduced["allowSharing"] = json!(false);
     reduced["allowSend"] = json!(false);
     account = serde_json::from_value(
-        connections::save(
+        common::save_plugin(
             &f.s,
             "gmail",
             &json!({
@@ -324,7 +324,7 @@ async fn sign_in(f: &Fixture, account: &str, instance: Option<&str>) -> Value {
 
 async fn connect(f: &Fixture, account: &str) -> Connection {
     let flow = sign_in(f, account, None).await;
-    let saved = connections::save(&f.s, "gmail", &json!({ "name": account, "enabled": true, "settings": settings(), "secrets": { "clientSecret": "fixture-secret" }, "credentialFlow": flow["id"], "agentIds": [MAIN_AGENT_ID] }), None).await.unwrap();
+    let saved = common::save_plugin(&f.s, "gmail", &json!({ "name": account, "enabled": true, "settings": settings(), "secrets": { "clientSecret": "fixture-secret" }, "credentialFlow": flow["id"], "agentIds": [MAIN_AGENT_ID] }), None).await.unwrap();
     assert!(!saved.to_string().contains("access-"));
     serde_json::from_value(saved).unwrap()
 }
@@ -416,7 +416,7 @@ async fn oauth_accounts_refresh_and_authorization_are_isolated() {
         refreshes, 3,
         "two initial exchanges, one serialized refresh"
     );
-    connections::set_enabled(&f.s, "gmail", &alice.id, &json!({ "enabled": false }))
+    common::enable_plugin(&f.s, "gmail", &alice.id, &json!({ "enabled": false }))
         .await
         .unwrap();
     assert!(
@@ -623,8 +623,8 @@ async fn sign_in_is_saved_once_and_cannot_replace_a_mailbox() {
     let flow = sign_in(&f, "alice", None).await;
     let input = json!({ "name": "Alice", "enabled": true, "settings": settings(), "secrets": { "clientSecret": "fixture-secret" }, "credentialFlow": flow["id"] });
     let (first, second) = tokio::join!(
-        connections::save(&f.s, "gmail", &input, None),
-        connections::save(&f.s, "gmail", &input, None)
+        common::save_plugin(&f.s, "gmail", &input, None),
+        common::save_plugin(&f.s, "gmail", &input, None)
     );
     assert_ne!(
         first.is_ok(),
@@ -635,7 +635,7 @@ async fn sign_in_is_saved_once_and_cannot_replace_a_mailbox() {
     let next = sign_in(&f, "bob", Some(text(&account, "id"))).await;
     let mut replace = input;
     replace["credentialFlow"] = next["id"].clone();
-    let error = connections::save(&f.s, "gmail", &replace, Some(text(&account, "id")))
+    let error = common::save_plugin(&f.s, "gmail", &replace, Some(text(&account, "id")))
         .await
         .unwrap_err();
     assert!(error.to_string().contains("different mailbox"));
@@ -700,7 +700,7 @@ async fn revocation_during_refresh_cannot_publish_new_credentials() {
     let account_id = account.id.clone();
     let revoke = async {
         started.notified().await;
-        connections::set_enabled(&f.s, "gmail", &account_id, &json!({ "enabled": false }))
+        common::enable_plugin(&f.s, "gmail", &account_id, &json!({ "enabled": false }))
             .await
             .unwrap();
         resume.notify_one();
@@ -746,7 +746,7 @@ async fn owner_disconnect_removes_tokens_and_confirms_provider_revocation() {
             .enabled
     );
     assert!(
-        connections::set_enabled(&f.s, "gmail", &account.id, &json!({ "enabled": true }))
+        common::enable_plugin(&f.s, "gmail", &account.id, &json!({ "enabled": true }))
             .await
             .is_err()
     );
@@ -852,7 +852,7 @@ async fn installation_management_revocation_during_oauth_refresh_cannot_publish_
     let resume = Arc::new(tokio::sync::Notify::new());
     *f.google.pause_refresh.lock().unwrap() = Some((started.clone(), resume.clone()));
     let app = cairn_installation::http::router(f.s.clone()).await.unwrap();
-    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": common::mcp_arguments("manage_plugin", &json!({ "pluginId": "gmail", "action": "test", "instanceId": account.id })) });
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": common::mcp_arguments("manage_plugin", &json!({ "pluginId": "gmail", "kind": "test", "instanceId": account.id })) });
     let request = common::request("POST", "/mcp-installation")
         .header("authorization", format!("Bearer {bearer}"))
         .body(Body::from(body.to_string()))
@@ -941,15 +941,13 @@ async fn a_new_mailbox_reuses_the_google_app_without_exposing_its_secret() {
 
     let mut draft = reuse.clone();
     draft["credentialFlow"] = started["id"].clone();
-    let form = cairn_installation::plugins::forms::form(&f.s, "gmail", &draft)
-        .await
-        .unwrap();
+    let form = common::plugin_form(&f.s, "gmail", &draft).await.unwrap();
     assert_eq!(form["values"]["email"], "carol@example.test", "{form}");
     assert!(!form.to_string().contains("fixture-secret"));
 
     draft["name"] = json!("carol@example.test");
     draft["enabled"] = json!(true);
-    let saved = connections::save(&f.s, "gmail", &draft, None)
+    let saved = common::save_plugin(&f.s, "gmail", &draft, None)
         .await
         .unwrap();
     assert!(!saved.to_string().contains("fixture-secret"));
@@ -975,7 +973,7 @@ async fn a_new_mailbox_reuses_the_google_app_without_exposing_its_secret() {
     assert_eq!(credential["oauth"]["clientSecret"], "fixture-secret");
 
     // An edit keeps its own setup: only a new instance reuses another one's.
-    let error = connections::save(&f.s, "gmail", &draft, Some(&carol.id))
+    let error = common::save_plugin(&f.s, "gmail", &draft, Some(&carol.id))
         .await
         .unwrap_err();
     assert!(error.to_string().contains("Only a new instance"), "{error}");
@@ -989,7 +987,7 @@ async fn a_new_mailbox_reuses_the_google_app_without_exposing_its_secret() {
     let invalid = json!({ "sharedFrom": 7, "settings": {} });
     assert!(oauth::start(&f.s, "gmail", &invalid, owner).await.is_err());
     let elsewhere = json!({ "name": "Vault", "enabled": true, "sharedFrom": alice.id, "secrets": { "token": "ops_fixture" } });
-    let error = connections::save(&f.s, "onepassword", &elsewhere, None)
+    let error = common::save_plugin(&f.s, "onepassword", &elsewhere, None)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("nothing to reuse"), "{error}");
@@ -1000,11 +998,11 @@ async fn installation_management_reuses_only_a_granted_google_app() {
     let f = fixture().await;
     let granted = connect(&f, "alice").await;
     let flow = sign_in(&f, "bob", None).await;
-    let ungranted = connections::save(&f.s, "gmail", &json!({ "name": "bob", "enabled": true, "settings": settings(), "secrets": { "clientSecret": "fixture-secret" }, "credentialFlow": flow["id"] }), None).await.unwrap();
+    let ungranted = common::save_plugin(&f.s, "gmail", &json!({ "name": "bob", "enabled": true, "settings": settings(), "secrets": { "clientSecret": "fixture-secret" }, "credentialFlow": flow["id"] }), None).await.unwrap();
 
     let refused = manage(
         &f,
-        json!({ "pluginId": "gmail", "action": "signin", "data": { "sharedFrom": ungranted["id"], "settings": {} } }),
+        json!({ "pluginId": "gmail", "kind": "signin", "data": { "sharedFrom": ungranted["id"], "settings": {}, "secrets": {} } }),
     )
     .await;
     assert_eq!(refused["result"]["isError"], true, "{refused}");
@@ -1012,14 +1010,14 @@ async fn installation_management_reuses_only_a_granted_google_app() {
 
     let started = manage(
         &f,
-        json!({ "pluginId": "gmail", "action": "signin", "data": { "sharedFrom": granted.id, "settings": {} } }),
+        json!({ "pluginId": "gmail", "kind": "signin", "data": { "sharedFrom": granted.id, "settings": {}, "secrets": {} } }),
     )
     .await;
     assert_ne!(started["result"]["isError"], true, "{started}");
     assert!(started.to_string().contains("fixture-client"), "{started}");
     assert!(!started.to_string().contains("fixture-secret"));
 
-    let setup = manage(&f, json!({ "pluginId": "gmail", "action": "setup" })).await;
+    let setup = manage(&f, json!({ "pluginId": "gmail", "kind": "setup" })).await;
     let steps = setup.to_string();
     assert!(steps.contains("Google Cloud app"), "{setup}");
     assert!(steps.contains("callbackUrl"), "{setup}");

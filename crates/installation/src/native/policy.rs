@@ -112,22 +112,27 @@ pub(crate) fn provenance(db: &Db<'_>, source: &Origin) -> Result<Value> {
         }
         Origin::Plugin(origin) => {
             let value = crate::error::required(
-                db.get(crate::plugins::connections::KIND, &origin.connection)?,
+                db.plugin_instance(&origin.connection)?,
                 "Plugin connection no longer exists.",
             )?;
-            let connection: crate::plugins::connections::Connection =
-                serde_json::from_value(value)?;
+            let connection = value;
             crate::plugins::connections::authorize(db, &connection)?;
             if connection.revision != origin.revision
                 || !crate::plugins::connections::external_id(&origin.author)
                 || !connection.allows(&origin.author)
-                || connection.native_authority["nativeProvenanceUnknown"] != false
+                || connection
+                    .native_authority
+                    .as_ref()
+                    .is_none_or(|grant| grant.native_provenance_unknown)
             {
                 return Err(Error::forbidden(
                     "This plugin has no current native delegation.",
                 ));
             }
-            let mut grant = provenance(db, &Origin::Stored(connection.native_authority))?;
+            let mut grant = provenance(
+                db,
+                &Origin::Stored(serde_json::to_value(connection.native_authority)?),
+            )?;
             let mut plugins = grant["nativePluginGrants"]
                 .as_array()
                 .cloned()
@@ -302,15 +307,14 @@ fn plugin_grants_allow(db: &Db<'_>, scope: &Value, node: &Value) -> Result<bool>
     };
     let authority = db.kv("native-authority")?.unwrap_or_default();
     for grant in grants {
-        let Some(value) = db.get(
-            crate::plugins::connections::KIND,
-            text(grant, "connectionId"),
-        )?
-        else {
+        let Some(value) = db.plugin_instance(text(grant, "connectionId"))? else {
             return Ok(false);
         };
-        let connection: crate::plugins::connections::Connection = serde_json::from_value(value)?;
-        let owner = text(&connection.native_authority, "pluginOwnerAccountId");
+        let connection = value;
+        let owner = connection
+            .native_authority
+            .as_ref()
+            .map_or("", |grant| grant.plugin_owner_account_id.as_str());
         if crate::plugins::connections::authorize(db, &connection).is_err()
             || !crate::plugins::connections::external_id(text(grant, "authorId"))
             || connection.revision != grant["revision"]
@@ -319,11 +323,16 @@ fn plugin_grants_allow(db: &Db<'_>, scope: &Value, node: &Value) -> Result<bool>
             || !current_account(db, owner)?
             || authority["accounts"][owner]["accessId"]
                 != serde_json::to_value(&connection.owner_access_id)?
-            || connection.native_authority["nativeProvenanceUnknown"] != false
-            || !explicit(
-                &connection.native_authority["nativeAuthorityNodes"],
-                text(node, "id"),
-            )
+            || connection
+                .native_authority
+                .as_ref()
+                .is_none_or(|grant| grant.native_provenance_unknown)
+            || connection.native_authority.as_ref().is_none_or(|grant| {
+                !grant
+                    .native_authority_nodes
+                    .iter()
+                    .any(|id| id == text(node, "id"))
+            })
         {
             return Ok(false);
         }

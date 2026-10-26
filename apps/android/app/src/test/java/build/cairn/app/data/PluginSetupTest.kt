@@ -42,7 +42,20 @@ class PluginSetupTest {
         assertEquals("app", entry.summary(emptyList()).effort)
         assertEquals(
             null,
-            entry.summary(listOf(PluginConnection(id = "a", pluginId = "mail"))).effort,
+            entry
+                .summary(
+                    listOf(
+                        PluginConnection(
+                            id = "a",
+                            pluginId = "mail",
+                            settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                            status = PluginStatus(),
+                            usage = PluginUsage(),
+                            enabled = true,
+                        )
+                    )
+                )
+                .effort,
         )
     }
 

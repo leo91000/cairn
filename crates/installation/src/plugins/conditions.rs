@@ -3,7 +3,7 @@
 //! and the project, schedules observations and resumes the conversation; the package
 //! only answers whether its condition is complete.
 use super::{
-    connections::{self, Connection},
+    connections::Connection,
     registry::{self, Package},
     scope::{self, Scope},
 };
@@ -31,10 +31,8 @@ pub fn is_condition(condition: &Value) -> bool {
 /// Packages with conditions and the enabled instances granting `agent_id`.
 async fn granted(s: &Service, agent_id: &str) -> Result<Vec<(Package, Vec<Connection>)>> {
     let mut by_plugin = BTreeMap::<String, Vec<Connection>>::new();
-    for value in s.store.list(connections::KIND).await? {
-        if let Ok(connection) = serde_json::from_value::<Connection>(value)
-            && connection.grants(agent_id)
-        {
+    for connection in s.store.plugin_instances().await? {
+        if connection.grants(agent_id) {
             by_plugin
                 .entry(connection.plugin_id.clone())
                 .or_default()
@@ -146,13 +144,10 @@ pub async fn normalize(s: &Service, agent_id: &str, condition: &Value) -> Result
 pub(crate) fn access(db: &Db<'_>, run: &Value, condition: &Value) -> Result<()> {
     let agent_id = text(&run["snapshot"]["agent"], "id");
     let plugin = text(condition, "pluginId");
-    let granted = db.list(connections::KIND)?.into_iter().any(|value| {
-        value["pluginId"] == plugin
-            && value["enabled"] == true
-            && value["agentIds"]
-                .as_array()
-                .is_some_and(|ids| ids.iter().any(|id| id == agent_id))
-    });
+    let granted = db
+        .plugin_instances()?
+        .into_iter()
+        .any(|instance| instance.plugin_id == plugin && instance.grants(agent_id));
     if !granted {
         return Err(Error::forbidden(
             "This agent is no longer granted the plugin of this wait.",
@@ -575,13 +570,12 @@ mod tests {
                 let target = json!({ "id": "00000000-0000-4000-8000-000000000011" });
                 let mut profile = crate::agent_fixture::profile(target.clone())?;
                 profile.settings.plugins = vec!["00000000-0000-4000-8000-000000000012".into()];
+                let mut instance = Connection::draft("00000000-0000-4000-8000-000000000012", "fixture", json!({}), Vec::new());
+                instance.name = "Fixture".into();
+                instance.revision = "r1".into();
+                instance.enabled = true;
+                db.save_plugin_instance(&instance)?;
                 db.save_agent(&profile)?;
-                db.put(
-                    connections::KIND,
-                    &json!({
-                        "id": "00000000-0000-4000-8000-000000000012", "pluginId": "fixture", "enabled": true,
-                    }),
-                )?;
                 let captured_run = json!({
                     "id": "run", "taskId": "task", "status": "succeeded", "createdAt": now(),
                     "snapshot": { "agent": source }, "chatExecution": { "messageId": "message" },

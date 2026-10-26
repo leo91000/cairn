@@ -1,8 +1,8 @@
 //! Live grants an agent holds on resources: exclusive reservations of nodes and
 //! plugin instances such as 1Password service accounts.
 //!
-//! All current permissions live in SQL. The unconverted node/plugin wire views
-//! project their agent lists from these relations; they never persist a copy.
+//! All current permissions live in SQL. Plugin instances and the unconverted node
+//! view read the same grant relations; they never persist a copy.
 //!
 //! These grants are live, outside a run's access snapshot. Changing them does not
 //! broaden its frozen policy. Delegation reapproval continues to compare the
@@ -10,7 +10,6 @@
 
 use crate::{
     error::{Error, Result, required},
-    plugins::connections::KIND as PLUGIN_INSTANCES,
     store::Db,
     validation::text,
 };
@@ -99,7 +98,7 @@ pub(crate) fn validate(
         }
     }
     for instance in &settings.plugins {
-        db.get(PLUGIN_INSTANCES, instance)?
+        db.plugin_instance(instance)?
             .ok_or_else(|| Error::bad("A selected plugin instance no longer exists."))?;
         if !accepts_agents.contains(instance) && !held.contains(instance) {
             return Err(Error::bad(
@@ -293,13 +292,13 @@ CREATE TABLE agent_mcp_tools(
  PRIMARY KEY(agent_id,mcp_id,tool), UNIQUE(agent_id,mcp_id,position),
  FOREIGN KEY(agent_id,mcp_id) REFERENCES agent_mcp_selections(agent_id,mcp_id) ON DELETE CASCADE
 ) WITHOUT ROWID;
-CREATE TABLE agent_plugins(
+CREATE TABLE instance_grants(
  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
- instance_id TEXT NOT NULL CHECK(length(instance_id)=36),
+ instance_id TEXT NOT NULL REFERENCES plugin_instances(id) CHECK(length(instance_id)=36),
  position INTEGER NOT NULL CHECK(position>=0),
  PRIMARY KEY(agent_id,instance_id), UNIQUE(agent_id,position)
 ) WITHOUT ROWID;
-CREATE INDEX agent_plugins_resource ON agent_plugins(instance_id,agent_id);
+CREATE INDEX instance_grants_resource ON instance_grants(instance_id,agent_id);
 CREATE TABLE agent_exclusive_nodes(
  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
  node_id TEXT NOT NULL CHECK(length(node_id)=36),
@@ -411,7 +410,7 @@ impl Db<'_> {
         let plugins = self
             .0
             .prepare_cached(
-                "SELECT instance_id FROM agent_plugins WHERE agent_id=? ORDER BY position",
+                "SELECT instance_id FROM instance_grants WHERE agent_id=? ORDER BY position",
             )?
             .query_map([id], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
@@ -452,7 +451,7 @@ impl Db<'_> {
                 |p| p.access.mcps.as_mut(),
             ),
             (
-                "SELECT agent_id,instance_id FROM agent_plugins ORDER BY agent_id,position",
+                "SELECT agent_id,instance_id FROM instance_grants ORDER BY agent_id,position",
                 |p| Some(&mut p.plugins),
             ),
             (
@@ -540,8 +539,8 @@ impl Db<'_> {
                 access.mcps.as_deref().unwrap_or_default(),
             ),
             (
-                "DELETE FROM agent_plugins WHERE agent_id=?",
-                "INSERT INTO agent_plugins VALUES(?,?,?)",
+                "DELETE FROM instance_grants WHERE agent_id=?",
+                "INSERT INTO instance_grants VALUES(?,?,?)",
                 &agent.settings.plugins,
             ),
             (
@@ -572,16 +571,12 @@ impl Db<'_> {
         Ok(())
     }
 
-    /// Projection for domains awaiting A9/A12. Persisted resource JSON is never an authority.
+    /// Projection for nodes awaiting A9. Persisted resource JSON is never an authority.
     pub(crate) fn resource_grants(&self, kind: &str, value: &mut Value) -> Result<()> {
         let (sql, field) = match kind {
             "nodes" => (
                 "SELECT agent_id FROM agent_exclusive_nodes WHERE node_id=? ORDER BY agent_id",
                 "exclusiveAgents",
-            ),
-            PLUGIN_INSTANCES => (
-                "SELECT agent_id FROM agent_plugins WHERE instance_id=? ORDER BY agent_id",
-                "agentIds",
             ),
             _ => return Ok(()),
         };

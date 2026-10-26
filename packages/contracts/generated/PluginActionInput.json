@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "maxLength": 40,
+      "minLength": 1,
+      "type": "string"
+    },
+    "payload": {
+      "default": null
+    },
+    "values": {
+      "additionalProperties": true,
+      "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+      "type": "object",
+      "x-cairn-json-object": true
+    }
+  },
+  "required": [
+    "action",
+    "values"
+  ],
+  "title": "PluginActionInput",
+  "type": "object"
+}

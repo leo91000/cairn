@@ -358,3 +358,78 @@ outside Git.
 changes and malformed commands in Rust, TS and Kotlin. The generator renders
 unconstrained JSON Schema values as `JsonElement` for external tool schemas; it
 does not replace any domain union or decision with dynamic JSON.
+
+
+
+## Plugin instances, grants and external delegations (#413)
+
+`crates/contracts/src/plugins.rs` defines the closed `ManagePluginInput` and
+`ManagePluginOutput` unions, instance configuration, public views, form results
+and sign-in views. `manage_plugin` is registered beside the converted project and
+agent capabilities, with both input and output schemas. `kind` selects a named
+command; each command has its own fields and typed data. The old open `action/data`
+management schema is removed from `mcp-operations.json`. No corresponding plugin
+entry existed in `inputs.json`.
+
+Web and Android consume generated models and the generated `managePlugin` client
+at `POST /plugins/manage`. The existing per-command HTTP routes are thin typed
+transport adapters to that same capability, preserving their response shapes for
+package/fixture consumers. They own no second validation, preparation or writer.
+Deferred program preparation retains the authenticated native origin and publishes
+the same typed result after the existing operation poll. No visual redesign is made.
+Both apps retain their account-bound OAuth/device sign-in flow. Manifest/package
+catalogue models belong to A13; instance models and form/sign-in envelope copies
+are removed from both apps. The shared plugin corpus qualifies dynamic nested
+manifest values, tagged variants, defaults, absent/null values, UUIDs and refusal
+of unknown envelope/policy fields in Rust, JSON Schema/TS and Kotlin.
+
+Only manifest-defined objects and contribution trees use dynamic JSON. The pinned
+Kotlin generator's supported custom-class extension maps `x-cairn-json-object` to
+`JsonObject`; unconstrained JSON values map to `JsonElement?` in the existing
+bounded templates. Business unions remain generated sealed interfaces. Required
+object fields avoid the upstream generator's unsupported object-default feature;
+clients submit explicit objects instead of inventing server policy defaults.
+
+SQLite v6 stores `plugin_instances` with checked identity, name, enabled flag,
+revision, manifest settings/secret field names, owner binding, update time and
+connection state/message. `external_delegations` holds the answering agent/project,
+access mode, limits and typed approval snapshots. `instance_people` stores ordered
+external IDs and display labels. A3's single grant authority is renamed
+`instance_grants` and gains the instance FK; agents still own grant changes. All
+four tables use `WITHOUT ROWID`. Indexes support ordering, package selection,
+agent/project references and resource grants. Secrets remain encrypted in the
+existing vault; no token, secret value, owner-access binding, approved policy or
+native authority enters an instance view.
+
+Point and list hydration use a consistent SQLite snapshot; lists load each
+relation once. Configuration writes and secret updates commit together. Expected
+revisions prevent stale replacement, and asynchronous forms/tests/actions check
+instance revisions and live management grants before returning. Shared setup
+retains and rechecks its source instance. Removal during a prepared save prevents
+both the draft and its secrets from being published. Disabling rotates the
+instance revision so an in-flight operation cannot become valid again after a
+rapid disable/enable. Removing a person retains the existing per-person admission
+checks without invalidating other people's native delegation.
+
+Owner-approved native bot authority and provenance from #450 stay at the native
+run boundary, serialized from a named Rust snapshot; their existing node ceiling,
+external author, connection revision and owner binding remain live. An agent cannot
+submit initial plugin grants, approve external people or mint native authority.
+Neither installation access nor a public manage scope is owner confirmation.
+Public and installation tools advertise the same commands and explicit refusals.
+
+Current runtime readers/writers use `Db::plugin_instance(s)` and
+`Store::plugin_instance(s)`; `records` rejects this domain. No historical reader or
+migration is shipped. Requests, activity, timers, package manifests/approvals,
+OAuth vault envelopes and native/run snapshots remain at their owning A13/A6
+boundaries; A18 removes those remaining domain adapters. Project/skill source
+instance IDs remain provenance, preserving the existing fallback when an instance
+is removed rather than cascading into retained projects or file-backed skills.
+
+The existing A1/A2 `project_measurement` harness adds `plugin_storage_layouts`,
+comparing the frozen A3 records/grants mapping at `6653951f` with the current SQL
+mapping. It uses identical complete instance values, mixed delegation modes and
+native approvals, people and live grants, with the same alternating repetitions,
+warmups, reads/writes/deletes, CPU and DB/WAL/page reporting. Supporting agent rows
+are seeded outside timing in both variants. Raw measurements stay outside Git;
+local SQLite timings do not represent production network latency.

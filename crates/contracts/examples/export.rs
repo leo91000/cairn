@@ -270,6 +270,99 @@ fn main() {
         serde_json::to_string_pretty(&clients).unwrap() + "\n",
     )
     .unwrap();
+    export::<PluginConnection>(root, &mut generator, Contract::Serialize);
+    export::<PluginConfiguration>(root, &mut generator, Contract::Deserialize);
+    export::<PluginFormInput>(root, &mut generator, Contract::Deserialize);
+    export::<PluginActionInput>(root, &mut generator, Contract::Deserialize);
+    export::<PluginEnabledInput>(root, &mut generator, Contract::Deserialize);
+    export::<PluginInstanceInput>(root, &mut generator, Contract::Deserialize);
+    export::<ManagePluginInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListPluginInstancesOutput>(root, &mut generator, Contract::Serialize);
+    export::<ManagePluginOutput>(root, &mut generator, Contract::Serialize);
+    export::<PluginFormResult>(root, &mut generator, Contract::Serialize);
+    let plugin_corpus: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/plugin-contracts.json"
+    ))
+    .unwrap();
+    let plugin_inputs: Vec<ManagePluginInput> = plugin_corpus["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| serde_json::from_value(value.clone()).unwrap())
+        .collect();
+    let plugin_instance = PluginConnection {
+        id: "00000000-0000-4000-8000-000000000013".into(),
+        plugin_id: "fixture".into(),
+        name: "Test instance".into(),
+        max_messages_per_hour: 20,
+        max_per_person_per_hour: 5,
+        enabled: true,
+        revision: "revision".into(),
+        settings: serde_json::from_value(
+            serde_json::json!({ "nested": { "ids": [1,null,false] } }),
+        )
+        .unwrap(),
+        ..Default::default()
+    };
+    let plugin_outputs = vec![
+        ManagePluginOutput::Setup {
+            manifest: serde_json::json!({ "id": "fixture" }),
+            setup: serde_json::json!({ "steps": [] }),
+            callback_url: None,
+            management_url: None,
+        },
+        ManagePluginOutput::Saved {
+            instance: plugin_instance.clone(),
+        },
+        ManagePluginOutput::Enabled {
+            instance: plugin_instance.clone(),
+        },
+        ManagePluginOutput::People {
+            instance: plugin_instance,
+        },
+        ManagePluginOutput::Form {
+            form: PluginFormResult {
+                values: serde_json::from_value(serde_json::json!({ "nested": [1,null,true] }))
+                    .unwrap(),
+                ..Default::default()
+            },
+        },
+        ManagePluginOutput::Tested {
+            ok: true,
+            message: "Ready".into(),
+        },
+        ManagePluginOutput::View {
+            view: serde_json::json!([{ "type": "text", "text": "Ready" }]),
+        },
+        ManagePluginOutput::Action {
+            result: serde_json::json!({ "notice": "Updated", "view": [] }),
+        },
+        ManagePluginOutput::Signin {
+            flow: PluginSigninFlow {
+                state: "pending".into(),
+                ..Default::default()
+            },
+        },
+        ManagePluginOutput::SigninCancelled { cancelled: true },
+        ManagePluginOutput::Disconnected {
+            disconnected: true,
+            revoked: None,
+            message: "Disconnected".into(),
+        },
+        ManagePluginOutput::Deleted { deleted: true },
+    ];
+    fs::write(
+        root.join("plugin-wire.json"),
+        serde_json::to_string_pretty(
+            &serde_json::json!({ "inputs": plugin_inputs, "outputs": plugin_outputs }),
+        )
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    fs::write(root.join("plugin-clients.json"), serde_json::to_string_pretty(&serde_json::json!([
+        { "name": "managePlugin", "input": "ManagePluginInput", "output": "ManagePluginOutput", "method": "POST", "path": "/plugins/manage", "deferred": true }
+    ])).unwrap() + "\n").unwrap();
     let clients = serde_json::json!([
         {
             "name": "setAgentAvatar",

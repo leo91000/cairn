@@ -1,6 +1,9 @@
 //! Plugin API v2 end to end, through the built-in 1Password package: an ordinary
 //! package with a secret setting, agent grants, commands, a tool, instructions, a
 //! declared program, a view, actions and a test.
+#[allow(unused_imports)]
+use common::{PluginServiceFixture as _, PluginStoreFixture as _};
+
 use common::AgentFixture;
 use common::MissionFixture;
 
@@ -78,7 +81,7 @@ fn write_program(path: &PathBuf, script: &str) {
 }
 
 async fn save(s: &Service, input: Value, existing: Option<&str>) -> Value {
-    connections::save(s, "onepassword", &input, existing)
+    common::save_plugin(s, "onepassword", &input, existing)
         .await
         .unwrap()
 }
@@ -230,7 +233,7 @@ async fn service_accounts_are_instances_with_encrypted_tokens_and_live_grants() 
     .await
     .unwrap();
     assert_eq!(
-        s.get(connections::KIND, &account).await.unwrap()["agentIds"],
+        s.instance_fixture(&account).await.unwrap()["agentIds"],
         json!([MAIN_AGENT_ID])
     );
     connections::remove(s, "onepassword", &account)
@@ -250,7 +253,7 @@ async fn service_accounts_are_instances_with_encrypted_tokens_and_live_grants() 
 async fn errors_never_echo_secrets_and_revocation_beats_slow_programs() {
     let f = fixture().await;
     let s = &f.s;
-    let error = connections::save(
+    let error = common::save_plugin(
         s,
         "onepassword",
         &json!({ "name": "Bad", "enabled": true, "secrets": { "token": "private-invalid-token" } }),
@@ -259,7 +262,7 @@ async fn errors_never_echo_secrets_and_revocation_beats_slow_programs() {
     .await
     .unwrap_err();
     assert!(!error.message.contains("private-invalid-token"));
-    let unknown_agent = connections::save(
+    let unknown_agent = common::save_plugin(
         s,
         "onepassword",
         &json!({ "name": "Bad", "enabled": true, "secrets": { "token": "ops_fixture" }, "agentIds": [id()] }),
@@ -498,7 +501,7 @@ async fn owners_see_the_package_view_run_its_actions_and_test_it() {
     let account = text(&saved, "id");
     let view = panels::view(s, "onepassword", account).await.unwrap();
     assert_eq!(view["view"][0]["type"], "section");
-    let result = panels::action(s, "onepassword", account, &json!({ "action": "vaults" }))
+    let result = common::plugin_action(s, "onepassword", account, &json!({ "action": "vaults" }))
         .await
         .unwrap();
     assert_eq!(
@@ -506,15 +509,17 @@ async fn owners_see_the_package_view_run_its_actions_and_test_it() {
         "Production"
     );
     assert!(
-        panels::action(s, "onepassword", account, &json!({ "action": "Bad name" }))
+        common::plugin_action(s, "onepassword", account, &json!({ "action": "Bad name" }))
             .await
             .is_err()
     );
-    let test = panels::test(s, "onepassword", account).await.unwrap();
+    let test = common::plugin_test(s, "onepassword", account)
+        .await
+        .unwrap();
     assert_eq!(test["message"], "Connected · 1 vault");
     write_program(&f.program, "#!/bin/sh\nexit 1\n");
     assert!(
-        panels::test(s, "onepassword", account)
+        common::plugin_test(s, "onepassword", account)
             .await
             .unwrap_err()
             .message
@@ -584,7 +589,7 @@ async fn manifest_constraints_are_checked_before_install_and_defaults_can_be_sav
         serde_json::to_value(&first.manifest).unwrap()
     );
 
-    let saved = connections::save(
+    let saved = common::save_plugin(
         s,
         "statusboard",
         &json!({ "name": "Defaults", "enabled": true }),
@@ -644,7 +649,7 @@ async fn manifest_constraints_are_checked_before_install_and_defaults_can_be_sav
         .unwrap();
     let repaired = registry::active(s, "statusboard").await.unwrap();
     assert_eq!(repaired.manifest.version, "1.0.1");
-    let updated = connections::save(
+    let updated = common::save_plugin(
         s,
         "statusboard",
         &json!({ "name": "Defaults", "enabled": true }),
@@ -753,7 +758,7 @@ async fn third_party_packages_contribute_forms_commands_tools_and_views() {
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
     registry_install_and_approve(s, status_board()).await;
-    let invalid = connections::save(
+    let invalid = common::save_plugin(
         s,
         "statusboard",
         &json!({ "name": "Main", "enabled": true, "settings": { "region": "mars" }, "secrets": { "apiKey": "k1" } }),
@@ -761,7 +766,7 @@ async fn third_party_packages_contribute_forms_commands_tools_and_views() {
     )
     .await;
     assert!(invalid.is_err(), "choices come from the manifest");
-    let board = connections::save(
+    let board = common::save_plugin(
         s,
         "statusboard",
         &json!({
@@ -821,7 +826,7 @@ async fn third_party_packages_contribute_forms_commands_tools_and_views() {
     let id = text(&board, "id");
     let view = panels::view(s, "statusboard", id).await.unwrap();
     assert_eq!(view["view"][0]["type"], "form");
-    let result = panels::action(
+    let result = common::plugin_action(
         s,
         "statusboard",
         id,
@@ -854,16 +859,13 @@ async fn live_form_completion_preserves_cleared_defaulted_fields() {
     .await;
 
     for settings in [json!({}), json!({ "note": null, "limit": null })] {
-        let completed = cairn_installation::plugins::forms::form(
-            &f.s,
-            "draftdefaults",
-            &json!({ "settings": settings }),
-        )
-        .await
-        .unwrap();
+        let completed =
+            common::plugin_form(&f.s, "draftdefaults", &json!({ "settings": settings }))
+                .await
+                .unwrap();
         assert_eq!(completed["values"], json!({}));
     }
-    let completed = cairn_installation::plugins::forms::form(
+    let completed = common::plugin_form(
         &f.s,
         "draftdefaults",
         &json!({ "settings": { "note": "Edited", "limit": 0 } }),

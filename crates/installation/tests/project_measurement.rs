@@ -38,6 +38,13 @@ trait StorageEntity:
 
     fn prepare(_db: &Db<'_>) {}
 
+    fn delete_candidate(db: &Db<'_>, id: &str) {
+        db.0.prepare_cached(&format!("DELETE FROM {} WHERE id=?", Self::TABLE))
+            .unwrap()
+            .execute([id])
+            .unwrap();
+    }
+
     fn deadlines(_db: &Db<'_>, _reference: bool) -> Option<usize> {
         None
     }
@@ -142,8 +149,20 @@ impl StorageEntity for Agent {
         db.audit(Self::SAVE, &json!({ "id": self.id })).unwrap();
     }
 
+    fn prepare(db: &Db<'_>) {
+        let mut instance = cairn_installation::plugins::connections::Connection::draft(
+            "00000000-0000-4000-8000-000000000004",
+            "fixture",
+            json!({}),
+            Vec::new(),
+        );
+        instance.name = "Qualification".into();
+        instance.revision = "r1".into();
+        db.save_plugin_instance(&instance).unwrap();
+    }
+
     fn reference_schema(db: &Connection) {
-        db.execute_batch("DROP TABLE agent_mcp_tools; DROP TABLE agent_mcp_selections; DROP TABLE agent_projects; DROP TABLE agent_skills; DROP TABLE agent_nodes; DROP TABLE agent_mcps; DROP TABLE agent_plugins; DROP TABLE agent_exclusive_nodes; DROP TABLE agent_permissions; DROP TABLE agents;").unwrap();
+        db.execute_batch("DROP TABLE agent_mcp_tools; DROP TABLE agent_mcp_selections; DROP TABLE agent_projects; DROP TABLE agent_skills; DROP TABLE agent_nodes; DROP TABLE agent_mcps; DROP TABLE instance_grants; DROP TABLE agent_exclusive_nodes; DROP TABLE agent_permissions; DROP TABLE agents;").unwrap();
         db.execute_batch(a2::SCHEMA).unwrap();
     }
 
@@ -177,6 +196,186 @@ impl StorageEntity for Agent {
 mod a2;
 
 use a2::A2Mapping;
+
+use cairn_installation::plugins::connections::Connection as PluginInstance;
+
+impl StorageEntity for PluginInstance {
+    const KIND: &'static str = "plugin_instances";
+    const SAVE: &'static str = "plugin.connection.saved";
+
+    fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    fn prepare(db: &Db<'_>) {
+        let tx =
+            rusqlite::Transaction::new_unchecked(db.0, rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+        for n in 0..1000 {
+            Db(&tx).save_agent(&Agent {
+                id: AgentId(uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | (n+10000))),
+                settings: serde_json::from_value(json!({ "name": format!("Agent {n}"), "access": cairn_contracts::AccessPolicy::default(), "exclusiveNodes": [], "plugins": [] })).unwrap(),
+                revision: "fixture".into(), created_at: 1700000000000, avatar: None,
+            }).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    fn read(db: &Db<'_>, id: &str) -> Self {
+        db.plugin_instance(id).unwrap().unwrap()
+    }
+
+    fn list(db: &Db<'_>) -> usize {
+        db.plugin_instances().unwrap().len()
+    }
+
+    fn write(&self, db: &Db<'_>, replacement: bool) {
+        if replacement {
+            assert_eq!(
+                db.plugin_instance(&self.id).unwrap().unwrap().revision,
+                self.revision
+            );
+        }
+        db.save_plugin_instance(self).unwrap();
+        db.0.prepare_cached("INSERT INTO instance_grants VALUES(?,?,0) ON CONFLICT DO NOTHING")
+            .unwrap()
+            .execute(params![self.agent_ids[0], self.id])
+            .unwrap();
+        db.audit(Self::SAVE, &json!({ "id": self.id })).unwrap();
+    }
+
+    fn delete_candidate(db: &Db<'_>, id: &str) {
+        db.0.prepare_cached("DELETE FROM instance_grants WHERE instance_id=?")
+            .unwrap()
+            .execute([id])
+            .unwrap();
+        db.remove_plugin_instance(id).unwrap();
+    }
+
+    // Frozen A3 layout at 6653951f: grant authority is already relational; only
+    // connection documents, delegated people and policy envelopes move in A12.
+    fn reference_schema(db: &Connection) {
+        db.execute_batch("DROP TABLE instance_grants; DROP TABLE instance_people; DROP TABLE external_delegations; DROP TABLE plugin_instances; DROP TABLE records;
+CREATE TABLE records(id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+CREATE INDEX records_kind ON records(kind,updated_at DESC);
+CREATE INDEX records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
+CREATE UNIQUE INDEX records_chat_slug ON records(json_extract(data,'$.slug')) WHERE kind='chats';
+CREATE TABLE agent_plugins(agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,instance_id TEXT NOT NULL CHECK(length(instance_id)=36),position INTEGER NOT NULL CHECK(position>=0),PRIMARY KEY(agent_id,instance_id),UNIQUE(agent_id,position)) WITHOUT ROWID;
+CREATE INDEX agent_plugins_resource ON agent_plugins(instance_id,agent_id);").unwrap();
+    }
+
+    fn reference_read(db: &Db<'_>, id: &str) -> Self {
+        if db.0.is_autocommit() {
+            let tx =
+                rusqlite::Transaction::new_unchecked(db.0, rusqlite::TransactionBehavior::Deferred)
+                    .unwrap();
+            return Self::reference_read(&Db(&tx), id);
+        }
+        let text: String = db
+            .0
+            .prepare_cached("SELECT data FROM records WHERE kind='plugin-connections' AND id=?")
+            .unwrap()
+            .query_row([id], |row| row.get(0))
+            .unwrap();
+        let mut value: Value = serde_json::from_str(&text).unwrap();
+        let agents =
+            db.0.prepare_cached(
+                "SELECT agent_id FROM agent_plugins WHERE instance_id=? ORDER BY agent_id",
+            )
+            .unwrap()
+            .query_map([id], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        value["agentIds"] = json!(agents);
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn reference_list(db: &Db<'_>) -> usize {
+        if db.0.is_autocommit() {
+            let tx =
+                rusqlite::Transaction::new_unchecked(db.0, rusqlite::TransactionBehavior::Deferred)
+                    .unwrap();
+            return Self::reference_list(&Db(&tx));
+        }
+        let mut values = db
+            .json_rows(
+                "SELECT data FROM records WHERE kind='plugin-connections' ORDER BY updated_at DESC",
+                [],
+            )
+            .unwrap();
+        for value in &mut values {
+            let agents =
+                db.0.prepare_cached(
+                    "SELECT agent_id FROM agent_plugins WHERE instance_id=? ORDER BY agent_id",
+                )
+                .unwrap()
+                .query_map([value["id"].as_str().unwrap()], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            value["agentIds"] = json!(agents);
+        }
+        values.len()
+    }
+
+    fn reference_write(&self, db: &Db<'_>, replacement: bool) {
+        if replacement {
+            assert_eq!(Self::reference_read(db, &self.id).revision, self.revision);
+        }
+        let mut value = serde_json::to_value(self).unwrap();
+        value.as_object_mut().unwrap().remove("agentIds");
+        db.0.prepare_cached("INSERT INTO records VALUES(?,'plugin-connections',?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at").unwrap().execute(params![self.id,serde_json::to_string(&value).unwrap(),self.updated_at]).unwrap();
+        db.0.prepare_cached("INSERT INTO agent_plugins VALUES(?,?,0) ON CONFLICT DO NOTHING")
+            .unwrap()
+            .execute(params![self.agent_ids[0], self.id])
+            .unwrap();
+    }
+
+    fn reference_delete(db: &Db<'_>, id: &str) {
+        db.0.prepare_cached("DELETE FROM agent_plugins WHERE instance_id=?")
+            .unwrap()
+            .execute([id])
+            .unwrap();
+        db.0.prepare_cached("DELETE FROM records WHERE kind='plugin-connections' AND id=?")
+            .unwrap()
+            .execute([id])
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "local measurement; run alone with --ignored --nocapture --test-threads=1"]
+async fn plugin_storage_layouts() {
+    let instances: Vec<_> = (0..1000).map(|n| {
+        let instance_id = uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | n).to_string();
+        let agent_id = uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | (n+10000)).to_string();
+        let mut instance = PluginInstance::draft(&instance_id,"fixture",json!({ "channel": format!("channel-{n}"), "description": "Deterministic instance storage qualification. ".repeat(8), "scope": true, "audiences": ["engineering","support"] }),vec!["clientSecret".into()]);
+        instance.name = format!("Instance {n:04}"); instance.revision = "revision".into(); instance.enabled = n % 3 != 0;
+        instance.updated_at = 1700000000000; instance.max_messages_per_hour = 20;
+        instance.agent_ids = vec![agent_id.clone()];
+        if n % 3 != 0 {
+            instance.agent_id = agent_id;
+            instance.owner_access_id = Some("owner-access".into());
+            let mut access = cairn_contracts::AccessPolicy::default();
+            if n % 5 == 1 {
+                access.backend = "native".into();
+                instance.native_authority = Some(cairn_installation::plugins::connections::NativeAuthority {
+                    native_principals: vec!["owner-account".into()], native_authority_nodes: vec!["00000000-0000-4000-8000-000000000002".into()],
+                    native_provenance_unknown: false, native_parent_run_id: None, native_parent_access: None, native_plugin_grants: None, plugin_owner_account_id: "owner-account".into(),
+                });
+            }
+            instance.granted_access = Some(access);
+            instance.access_mode = if n % 2 == 0 { cairn_contracts::PluginAccessMode::Everyone } else { cairn_contracts::PluginAccessMode::Requests };
+            instance.user_ids = vec!["person1".into(),"person2".into()];
+            instance.people = vec![cairn_contracts::PluginLabel { id: "person1".into(),name: "First person".into() },cairn_contracts::PluginLabel { id: "person2".into(),name: "Second person".into() }];
+        }
+        instance
+    }).collect();
+    measure(&instances);
+}
 
 impl StorageEntity for cairn_contracts::Mission {
     const KIND: &'static str = "tasks";
@@ -444,10 +643,7 @@ fn measure<E: StorageEntity>(entities: &[E]) {
                     if reference {
                         E::reference_delete(&Db(&tx), &p.id());
                     } else {
-                        tx.prepare_cached(&format!("DELETE FROM {} WHERE id=?", E::TABLE))
-                            .unwrap()
-                            .execute([p.id()])
-                            .unwrap();
+                        E::delete_candidate(&Db(&tx), &p.id());
                     }
                     Db(&tx)
                         .audit(&format!("{}.deleted", E::KIND), &json!({ "id": p.id() }))

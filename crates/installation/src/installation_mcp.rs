@@ -161,6 +161,15 @@ pub(crate) async fn operation(
     if !known {
         return Err(Error::not_found("Unknown operation"));
     }
+    if name == "manage_plugin" {
+        return crate::capabilities::MANAGE_PLUGIN
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
     if let Some(op) = crate::capabilities::mission_operation(name) {
         if name == "create_task"
             && let Some(settings) = args.get_mut("settings").and_then(Value::as_object_mut)

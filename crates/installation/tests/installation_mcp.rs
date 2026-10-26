@@ -1,3 +1,6 @@
+#[allow(unused_imports)]
+use common::{PluginServiceFixture as _, PluginStoreFixture as _};
+
 use common::AgentFixture;
 use common::McpFixture;
 use common::MissionFixture;
@@ -1179,13 +1182,15 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
                     None,
                 )?;
                 // A plugin instance (such as a 1Password service account) granting it.
-                db.put(
-                    "plugin-connections",
-                    &json!({
-                        "id": "00000000-0000-4000-8000-000000000099",
-                        "pluginId": "onepassword",
-                    }),
-                )?;
+                let mut instance = cairn_installation::plugins::connections::Connection::draft(
+                    "00000000-0000-4000-8000-000000000099",
+                    "onepassword",
+                    json!({}),
+                    Vec::new(),
+                );
+                instance.name = "Fixture".into();
+                instance.revision = "r1".into();
+                db.save_plugin_instance(&instance)?;
                 for agent_id in [id.as_str(), MAIN_AGENT_ID] {
                     let mut agent = db.agent(agent_id)?.unwrap();
                     agent
@@ -1212,7 +1217,7 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
     );
     assert_eq!(
         s.store
-            .get("plugin-connections", "00000000-0000-4000-8000-000000000099")
+            .instance_fixture("00000000-0000-4000-8000-000000000099")
             .await
             .unwrap()
             .unwrap()["agentIds"],
@@ -2145,7 +2150,7 @@ async fn plugin_setup_is_available_on_both_endpoints_without_granting_private_ac
     let s = service(&root).await;
     let main = enabled_main(&s).await;
     let (_, configuration) = active_run(&s, &main).await;
-    let saved = cairn_installation::plugins::connections::save(
+    let saved = common::save_plugin(
         &s,
         "onepassword",
         &json!({
@@ -2169,7 +2174,7 @@ async fn plugin_setup_is_available_on_both_endpoints_without_granting_private_ac
                 .any(|v| v["id"] == "gmail")
         );
         assert!(!list.to_string().contains("ops_fixture_private"));
-        let args = json!({ "pluginId": "gmail", "action": "setup" });
+        let args = json!({ "pluginId": "gmail", "kind": "setup" });
         let setup = if internal {
             call(&s, &configuration, "manage_plugin", args).await
         } else {
@@ -2181,7 +2186,7 @@ async fn plugin_setup_is_available_on_both_endpoints_without_granting_private_ac
                 .unwrap()
                 .ends_with("/plugins/oauth/callback")
         );
-        let forbidden = json!({ "pluginId": "onepassword", "action": "save", "instanceId": saved["id"], "data": { "agentIds": [MAIN_AGENT_ID] } });
+        let forbidden = json!({ "pluginId": "onepassword", "kind": "save", "instanceId": saved["id"], "data": { "agentIds": [MAIN_AGENT_ID] } });
         let denied = if internal {
             call(&s, &configuration, "manage_plugin", forbidden).await
         } else {
@@ -2193,7 +2198,7 @@ async fn plugin_setup_is_available_on_both_endpoints_without_granting_private_ac
         &s,
         &configuration,
         "manage_plugin",
-        json!({ "pluginId": "onepassword", "action": "view", "instanceId": saved["id"] }),
+        json!({ "pluginId": "onepassword", "kind": "view", "instanceId": saved["id"] }),
     )
     .await;
     assert_eq!(denied["result"]["isError"], true, "{denied}");
@@ -2201,12 +2206,12 @@ async fn plugin_setup_is_available_on_both_endpoints_without_granting_private_ac
         &s,
         &configuration,
         "manage_plugin",
-        json!({ "pluginId": "onepassword", "action": "form", "data": { "instance": saved["id"] } }),
+        json!({ "pluginId": "onepassword", "kind": "form", "data": { "instance": saved["id"] } }),
     )
     .await;
     assert_eq!(bypass["result"]["isError"], true, "{bypass}");
     assert_eq!(
-        s.get("plugin-connections", saved["id"].as_str().unwrap())
+        s.instance_fixture(saved["id"].as_str().unwrap())
             .await
             .unwrap()["agentIds"],
         json!([])
@@ -2240,7 +2245,7 @@ async fn both_mcp_endpoints_can_pause_and_delete_instances_pending_package_reapp
     registry::approve(&s, "pausable", "1.0.0", text(&installed, "digest"))
         .await
         .unwrap();
-    let saved = connections::save(
+    let saved = common::save_plugin(
         &s,
         "pausable",
         &json!({
@@ -2258,7 +2263,7 @@ async fn both_mcp_endpoints_can_pause_and_delete_instances_pending_package_reapp
     assert!(registry::active(&s, "pausable").await.is_err());
     for internal in [false, true] {
         let args = json!({
-            "pluginId": "pausable", "action": "enabled", "instanceId": saved["id"],
+            "pluginId": "pausable", "kind": "enabled", "instanceId": saved["id"],
             "data": { "enabled": false },
         });
         let paused = if internal {
@@ -2266,14 +2271,14 @@ async fn both_mcp_endpoints_can_pause_and_delete_instances_pending_package_reapp
         } else {
             public_call(&s, &["manage"], "manage_plugin", args).await
         };
-        assert_eq!(result(&paused)["enabled"], false, "{paused}");
+        assert_eq!(result(&paused)["instance"]["enabled"], false, "{paused}");
     }
     let removed = call(
         &s,
         &configuration,
         "manage_plugin",
         json!({
-            "pluginId": "pausable", "action": "delete", "instanceId": saved["id"],
+            "pluginId": "pausable", "kind": "delete", "instanceId": saved["id"],
         }),
     )
     .await;
@@ -2987,7 +2992,7 @@ async fn code_mode_isolates_scripts_bounds_resources_and_remains_usable_after_fa
 async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
-    let account = cairn_installation::plugins::connections::save(
+    let account = common::save_plugin(
         &s,
         "onepassword",
         &json!({ "name": "Production", "enabled": true, "secrets": { "token": "ops_fixture" } }),
@@ -3040,10 +3045,7 @@ async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
     }
     let instance = s
         .store
-        .get(
-            cairn_installation::plugins::connections::KIND,
-            account.as_str().unwrap(),
-        )
+        .instance_fixture(account.as_str().unwrap())
         .await
         .unwrap()
         .unwrap();
@@ -3876,4 +3878,113 @@ async fn typed_mcp_commands_share_revisions_secret_redaction_and_human_oauth_bou
     .await;
     assert_eq!(denied["result"]["isError"], true);
     assert!(s.mcps.list(&s).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn plugin_preparation_cannot_publish_after_instance_or_agent_revocation() {
+    use axum::{Json, Router, routing::get};
+    use tokio::sync::Notify;
+
+    for operation in ["form", "test", "save"] {
+        for revoke_grant in [false, true] {
+            let root = TempDir::new().unwrap();
+            let s = service(&root).await;
+            s.plugins
+                .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+            let main = enabled_main(&s).await;
+            let (_, configuration) = active_run(&s, &main).await;
+            let started = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let app = Router::new().route(
+                "/check",
+                get({
+                    let started = started.clone();
+                    let release = release.clone();
+                    move || {
+                        let started = started.clone();
+                        let release = release.clone();
+                        async move {
+                            started.notify_one();
+                            release.notified().await;
+                            Json(json!({}))
+                        }
+                    }
+                }),
+            );
+            let (origin, server) = common::serve_locally(app).await;
+            s.plugins.route_http_to(Some(origin));
+            let installed = cairn_installation::plugins::registry::install(&s,&json!({
+                "manifest": {
+                    "id": "fenced", "name": "Fenced", "version": "1", "apiVersion": 2,
+                    "capabilities": ["http"], "hosts": ["api.example.test"], "agentAccess": {},
+                    "instanceForm": true, "instanceTest": true,
+                    "settings": [
+                        { "key": "check", "title": "Check", "type": "boolean", "default": false },
+                        { "key": "apiKey", "title": "API key", "type": "secret", "required": true }
+                    ]
+                },
+                "source": "local function check() cairn.http.request({ url = 'https://api.example.test/check' }) end return { form = function(input) if input.values.check then check() end return {} end, test = function() check(); return { ok = true, message = 'Checked' } end }"
+            })).await.unwrap();
+            cairn_installation::plugins::registry::approve(
+                &s,
+                "fenced",
+                "1",
+                text(&installed, "digest"),
+            )
+            .await
+            .unwrap();
+            let initial = json!({ "name": "Initial", "enabled": true, "settings": { "check": false }, "secrets": { "apiKey": "synthetic-one" }, "agentIds": [MAIN_AGENT_ID] });
+            let saved = common::save_plugin(&s, "fenced", &initial, None)
+                .await
+                .unwrap();
+            let instance = saved["id"].as_str().unwrap();
+            let key = cairn_installation::plugins::connections::secrets_key(instance);
+            let secret_before = s.vault.get(&key).await.unwrap();
+            let mut args =
+                json!({ "kind": operation, "pluginId": "fenced", "instanceId": instance });
+            if operation == "form" {
+                args["data"] = json!({ "settings": { "check": true }, "secrets": {}, "revision": saved["revision"] });
+            }
+            if operation == "save" {
+                args["data"] = json!({ "name": "Stale edit", "enabled": true, "settings": { "check": true }, "secrets": { "apiKey": "synthetic-two" }, "revision": saved["revision"] });
+            }
+            let revoke = async {
+                started.notified().await;
+                if revoke_grant {
+                    s.agent_fixture(json!({ "plugins": [] }), Some(MAIN_AGENT_ID))
+                        .await
+                        .unwrap();
+                } else {
+                    let mut edit = initial.clone();
+                    edit.as_object_mut().unwrap().remove("agentIds");
+                    edit["name"] = json!("Owner edit");
+                    common::save_plugin(&s, "fenced", &edit, Some(instance))
+                        .await
+                        .unwrap();
+                }
+                release.notify_one();
+            };
+            let (response, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                tokio::join!(
+                    Box::pin(call(&s, &configuration, "manage_plugin", args)),
+                    Box::pin(revoke)
+                )
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                response["result"]["isError"], true,
+                "{operation}, grant={revoke_grant}: {response}"
+            );
+            let current = s.store.plugin_instance(instance).await.unwrap().unwrap();
+            assert_ne!(current.name, "Stale edit");
+            assert_eq!(current.settings["check"], false);
+            assert_eq!(
+                s.vault.get(&key).await.unwrap(),
+                secret_before,
+                "A refused save must not rotate the secret"
+            );
+            server.abort();
+        }
+    }
 }

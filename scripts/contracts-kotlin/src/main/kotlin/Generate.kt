@@ -5,6 +5,12 @@ import net.pwall.json.schema.codegen.CodeGenerator
 
 fun main(args: Array<String>) {
     val generator = CodeGenerator()
+    // Only manifest-defined JSON objects use this scalar mapping; business unions stay generated.
+    generator.addCustomClassByExtension(
+        "x-cairn-json-object",
+        true,
+        "kotlinx.serialization.json.JsonObject",
+    )
     generator.setTemplateDirectory(File("templates"))
     generator.additionalPropertiesOption = CodeGenerator.AdditionalPropertiesOption.STRICT
     generator.baseDirectoryName = args[1]

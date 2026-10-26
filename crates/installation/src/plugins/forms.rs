@@ -19,9 +19,22 @@ use std::sync::Arc;
 
 /// Unsaved values a draft's handler may use through `auth`. Never sent to scripts.
 pub struct Draft {
+    pub prepared: Vec<Connection>,
     pub management: Option<super::management::Authority>,
     pub credential: Option<String>,
     pub secrets: Map<String, Value>,
+}
+
+impl Draft {
+    pub(crate) fn authorize(&self, db: &crate::store::Db<'_>) -> Result<()> {
+        for expected in &self.prepared {
+            connections::check_revision(db, expected)?;
+        }
+        if let Some(authority) = &self.management {
+            authority.authorize(db)?;
+        }
+        Ok(())
+    }
 }
 
 /// Settings as typed so far: valid values only, nothing required yet.
@@ -66,11 +79,7 @@ async fn run(
 ) -> Result<Value> {
     let secret_keys = draft.secrets.keys().cloned().collect::<Vec<_>>();
     let previous = match instance {
-        Some(id) => s
-            .store
-            .get(connections::KIND, id)
-            .await?
-            .map(|v| v["settings"].clone()),
+        Some(id) => s.store.plugin_instance(id).await?.map(|v| v.settings),
         None => None,
     };
     let payload = json!({
@@ -89,12 +98,14 @@ async fn run(
         secret_keys,
     );
     let management = draft.management.clone();
-    let scope = Scope::Draft(Box::new(connection), Arc::new(draft));
+    let draft = Arc::new(draft);
+    let scope = Scope::Draft(Box::new(connection), draft.clone());
     let scope = match management {
         Some(authority) => Scope::Managed(Box::new(scope), authority),
         None => scope,
     };
     let result = scope::invoke(s, package, "form", payload, &scope).await?;
+    s.store.read(move |db| draft.authorize(db)).await?;
     validate_form_result(&package.manifest, &result).map_err(Error::bad_gateway)?;
     Ok(result)
 }
@@ -102,32 +113,65 @@ async fn run(
 /// `POST /api/plugins/{id}/form`:
 /// `{ instance?, settings, secrets?, token? | credentialFlow?, changed? }`
 /// → `{ options, values, errors, view }`.
-pub async fn form(s: &Service, plugin_id: &str, input: &Value) -> Result<Value> {
+pub async fn form(
+    s: &Service,
+    plugin_id: &str,
+    input: &cairn_contracts::PluginFormInput,
+) -> Result<cairn_contracts::PluginFormResult> {
     form_managed(s, plugin_id, input, None).await
 }
 
 pub(crate) async fn form_managed(
     s: &Service,
     plugin_id: &str,
-    input: &Value,
+    command: &cairn_contracts::PluginFormInput,
     management: Option<super::management::Authority>,
-) -> Result<Value> {
+) -> Result<cairn_contracts::PluginFormResult> {
     let package = registry::active(s, plugin_id).await?;
     let manifest = &package.manifest;
     if !manifest.instance_form {
         return Err(Error::not_found("This plugin has no instance form."));
     }
-    let shared_input =
-        connections::shared(s, manifest, plugin_id, input, input["instance"].is_string())
-            .await?
-            .map(|shared| shared.apply(input));
-    let input = shared_input.as_ref().unwrap_or(input);
-    let instance = match input["instance"].as_str() {
-        Some(id) => Some(connections::get(s, plugin_id, id).await?.id),
+    let source = command.shared_from.map(|id| id.to_string());
+    let shared = connections::shared_from(
+        s,
+        manifest,
+        plugin_id,
+        source.as_deref(),
+        command.instance.is_some(),
+    )
+    .await?;
+    let mut settings_input = serde_json::to_value(&command.settings)?;
+    let mut secrets_input = serde_json::to_value(&command.secrets)?;
+    if let Some(shared) = &shared {
+        shared.apply_values(&mut settings_input, &mut secrets_input);
+    }
+    let mut prepared = shared
+        .as_ref()
+        .map(|shared| shared.source.clone())
+        .into_iter()
+        .collect::<Vec<_>>();
+    let requested_instance = command.instance.map(|id| id.to_string());
+    let instance = match requested_instance.as_deref() {
+        Some(id) => {
+            let current = connections::get(s, plugin_id, id).await?;
+            if command
+                .revision
+                .as_ref()
+                .is_some_and(|revision| *revision != current.revision)
+            {
+                return Err(Error::conflict(
+                    "This instance changed. Reload it before checking the form.",
+                ));
+            }
+            prepared.push(current);
+            Some(id.to_owned())
+        }
         None => None,
     };
-    let signed_in = match input["credentialFlow"]
-        .as_str()
+    let signed_in = match command
+        .credential_flow
+        .as_deref()
         .filter(|flow| !flow.is_empty())
     {
         Some(flow) => Some(
@@ -136,7 +180,7 @@ pub(crate) async fn form_managed(
                 plugin_id,
                 flow,
                 instance.as_deref(),
-                &values(manifest, &input["settings"]),
+                &values(manifest, &settings_input),
                 false,
             )
             .await?,
@@ -146,14 +190,20 @@ pub(crate) async fn form_managed(
     let token = signed_in
         .as_ref()
         .and_then(|v| v["token"].as_str())
-        .unwrap_or_else(|| text(input, "token"))
+        .unwrap_or_else(|| command.token.as_deref().unwrap_or_default())
         .trim();
     if token.len() > 16_384 || token.chars().any(|c| c.is_whitespace() || c.is_control()) {
         let label = manifest
             .credential
             .as_ref()
             .map_or("credential", |credential| credential.label.as_str());
-        return Ok(json!({ "errors": { "credential": format!("Enter a valid {label}.") } }));
+        return Ok(cairn_contracts::PluginFormResult {
+            errors: std::collections::BTreeMap::from([(
+                "credential".into(),
+                format!("Enter a valid {label}."),
+            )]),
+            ..Default::default()
+        });
     }
     let credential = match (&instance, token.is_empty()) {
         (_, false) => Some(token.to_owned()),
@@ -172,14 +222,15 @@ pub(crate) async fn form_managed(
         None => Map::new(),
     };
     let draft = Draft {
+        prepared,
         management,
         credential: credential.filter(|_| manifest.credential.is_some()),
-        secrets: secrets(manifest, &input["secrets"], saved),
+        secrets: secrets(manifest, &secrets_input, saved),
     };
-    let changed = input["changed"].as_str().filter(|key| {
+    let changed = command.changed.as_deref().filter(|key| {
         *key == "credential" || manifest.settings.iter().any(|field| field["key"] == *key)
     });
-    let settings = values(manifest, &input["settings"]);
+    let settings = values(manifest, &settings_input);
     let result = run(
         s,
         &package,
@@ -190,12 +241,12 @@ pub(crate) async fn form_managed(
         false,
     )
     .await?;
-    Ok(json!({
+    Ok(serde_json::from_value(json!({
         "options": result.get("options").cloned().unwrap_or_else(|| json!({})),
         "values": result.get("values").cloned().unwrap_or_else(|| json!({})),
         "errors": result.get("errors").cloned().unwrap_or_else(|| json!({})),
         "view": result.get("view").cloned().unwrap_or_else(|| json!([])),
-    }))
+    }))?)
 }
 
 /// The package's last word before an instance is saved: derived values are applied
@@ -207,11 +258,7 @@ pub(crate) async fn submit(
     settings: Value,
     draft: Draft,
 ) -> Result<Value> {
-    let existing = s
-        .store
-        .get(connections::KIND, instance)
-        .await?
-        .map(|_| instance);
+    let existing = s.store.plugin_instance(instance).await?.map(|_| instance);
     let result = run(s, package, existing, settings.clone(), draft, None, true).await?;
     if let Some(errors) = result["errors"]
         .as_object()
