@@ -1,4 +1,5 @@
 use common::AgentFixture;
+use common::PluginStoreFixture;
 use common::StoreAgentFixture;
 
 mod common;
@@ -319,6 +320,10 @@ async fn delegation_checks_node_plugin_and_exclusive_reservation_grants() {
             .unwrap();
     let node = id();
     let instance = id();
+    f.s.store
+        .put_instance_fixture(json!({ "id": instance, "pluginId": "fixture" }))
+        .await
+        .unwrap();
     let changes = [
         ("plugins", json!([instance])),
         ("exclusiveNodes", json!([node])),

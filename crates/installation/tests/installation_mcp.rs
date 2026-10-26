@@ -1031,6 +1031,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "cancel_mcp_connection",
     ]);
     public_names.insert(cairn_contracts::RESUME_RUN_ID);
+    public_names.insert("manage_plugin");
     public_names.extend([
         "set_agent_avatar",
         "list_agents",
