@@ -513,6 +513,7 @@ async fn set_active(
             )
         })
         .await?;
+    s.plugins.program_caches.changed();
     s.plugins.changed.notify_one();
     Ok(summary(&package))
 }
@@ -587,6 +588,7 @@ pub async fn uninstall(s: &Service, id: &str) -> Result<Value> {
             db.audit("plugin.package.uninstalled", &json!({ "plugin": plugin }))
         })
         .await?;
+    s.plugins.program_caches.changed();
     s.plugins.changed.notify_one();
     Ok(json!({ "deleted": true }))
 }

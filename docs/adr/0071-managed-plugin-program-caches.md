@@ -33,6 +33,11 @@ Existing authorization and post-I/O checks apply on every call. Rotating or
 changing an instance, disabling/deleting/disconnecting it, replacing its approved
 package, or shutdown invalidates its daemon and cancels active calls. Draft and
 disabled-instance tests use transient daemons rather than entering the pool.
+Configuration invalidation advances a generation under the pool lock. Acquisition
+captures it before rereading authoritative state; reconciliation captures it before
+its asynchronous snapshot. Both reject stale generations. A caller cannot replace
+a different revision/package, and a different environment/executable receives a
+retryable error while the existing identity has active readers.
 
 Idle expiry is ten minutes. The installation permits 64 resident daemons and
 evicts only entries without active leases, oldest first. If all are busy, a new

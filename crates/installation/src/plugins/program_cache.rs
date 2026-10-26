@@ -7,7 +7,10 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tempfile::TempDir;
@@ -52,22 +55,57 @@ impl Entry {
 pub(crate) struct Caches {
     entries: Mutex<HashMap<(String, String), Arc<Entry>>>,
     shutdown: CancellationToken,
+    generation: AtomicU64,
 }
 
 impl Caches {
+    /// Capture before reading authoritative state; verify under the pool lock.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    pub fn changed(&self) {
+        let _entries = self.entries.lock().unwrap();
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
     pub async fn acquire(
         &self,
         identity: Identity,
         config: &ProgramCache,
         reusable: bool,
+        generation: u64,
     ) -> Result<Lease> {
         let entry = {
             let mut entries = self.entries.lock().unwrap();
             if self.shutdown.is_cancelled() {
                 return Err(Error::unavailable("The installation is shutting down."));
             }
+            if generation != self.generation() {
+                return Err(Error::conflict(
+                    "The plugin configuration changed during preparation. Retry the operation.",
+                ));
+            }
             let key = (identity.connection.clone(), identity.program.clone());
             let current = reusable.then(|| entries.get(&key)).flatten();
+            // Revision/package transitions belong to authoritative invalidation,
+            // not to callers whose preparation may have outlived that transition.
+            // In particular, a late old call must never cancel a newer reader.
+            if current.is_some_and(|entry| {
+                entry.identity.revision != identity.revision
+                    || entry.identity.package != identity.package
+            }) {
+                return Err(Error::conflict(
+                    "The program cache belongs to a different connection revision or package. Retry the operation.",
+                ));
+            }
+            if current
+                .is_some_and(|entry| entry.identity != identity && Arc::strong_count(entry) > 1)
+            {
+                return Err(Error::unavailable(
+                    "The program cache is busy with a different environment or executable. Retry the operation.",
+                ));
+            }
             if let Some(entry) = current.filter(|e| e.identity == identity && e.available()) {
                 entry.clone()
             } else {
@@ -117,7 +155,9 @@ impl Caches {
     }
 
     pub fn forget(&self, connection: &str) {
-        self.entries.lock().unwrap().retain(|(id, _), entry| {
+        let mut entries = self.entries.lock().unwrap();
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        entries.retain(|(id, _), entry| {
             if id != connection {
                 return true;
             }
@@ -127,8 +167,13 @@ impl Caches {
     }
 
     /// Reuses the plugin supervisor's authoritative enabled-instance/package snapshot.
-    pub fn reconcile(&self, valid: impl Fn(&Identity) -> bool) {
-        self.entries.lock().unwrap().retain(|_, entry| {
+    pub fn reconcile(&self, generation: u64, valid: impl Fn(&Identity) -> bool) {
+        let mut entries = self.entries.lock().unwrap();
+        if generation != self.generation() {
+            return;
+        }
+        let before = entries.len();
+        entries.retain(|_, entry| {
             let idle =
                 entry.used.lock().unwrap().elapsed() >= IDLE && Arc::strong_count(entry) == 1;
             if valid(&entry.identity) && !idle && entry.available() {
@@ -137,6 +182,9 @@ impl Caches {
             entry.stop();
             false
         });
+        if entries.len() != before {
+            self.generation.fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     /// Terminal shutdown: reject later acquisitions and cancel transient leases too.

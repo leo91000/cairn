@@ -127,6 +127,7 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
         return Err(Error::unavailable("The installation is shutting down."));
     }
     let cache = if let Some(config) = &program.cache {
+        let generation = s.plugins.program_caches.generation();
         let package = super::registry::active(s, &manifest.id).await?;
         if serde_json::to_value(&package.manifest)? != serde_json::to_value(manifest)? {
             return Err(Error::conflict("The plugin changed. Retry the command."));
@@ -140,10 +141,16 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
             environment: hex::encode(Sha256::digest(serde_json::to_vec(&resolved_environment)?)),
         };
         let reusable = context.draft.is_none() && context.connection.enabled;
+        if context.draft.is_none() {
+            let expected = context.connection.clone();
+            s.store
+                .read(move |db| super::connections::check_revision(db, &expected))
+                .await?;
+        }
         Some(tokio::select! {
             biased;
             () = s.shutdown.cancelled() => return Err(Error::unavailable("The installation is shutting down.")),
-            result = s.plugins.program_caches.acquire(identity, config, reusable) => result?,
+            result = s.plugins.program_caches.acquire(identity, config, reusable, generation) => result?,
         })
     } else {
         None

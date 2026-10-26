@@ -27,18 +27,29 @@ fn config() -> ProgramCache {
 }
 
 #[tokio::test]
-async fn replacing_an_identity_cancels_its_leases_and_stops_its_daemon() {
+async fn invalidating_an_identity_cancels_its_leases_and_stops_its_daemon() {
     let root = TempDir::new().unwrap();
     let caches = Caches::default();
     let original = identity(executable(&root));
     let lease = caches
-        .acquire(original.clone(), &config(), true)
+        .acquire(original.clone(), &config(), true, caches.generation())
         .await
         .unwrap();
     let home = lease.home().to_owned();
     let mut changed = original;
     changed.environment = "rotated digest".into();
-    let replacement = caches.acquire(changed, &config(), true).await.unwrap();
+    assert!(
+        caches
+            .acquire(changed.clone(), &config(), true, caches.generation())
+            .await
+            .is_err()
+    );
+    assert!(!lease.stop().is_cancelled());
+    caches.forget(&changed.connection);
+    let replacement = caches
+        .acquire(changed, &config(), true, caches.generation())
+        .await
+        .unwrap();
     assert!(lease.stop().is_cancelled());
     tokio::time::timeout(Duration::from_secs(2), async {
         while lease.entry.daemon.get().unwrap().alive() {
@@ -58,18 +69,76 @@ async fn replacing_an_identity_cancels_its_leases_and_stops_its_daemon() {
 }
 
 #[tokio::test]
+async fn a_delayed_old_revision_cannot_cancel_a_newer_reader() {
+    let root = TempDir::new().unwrap();
+    let caches = Caches::default();
+    let old = identity(executable(&root));
+    let first = caches
+        .acquire(old.clone(), &config(), true, caches.generation())
+        .await
+        .unwrap();
+    let stale = caches.generation();
+    caches.forget(&old.connection);
+    assert!(first.stop().is_cancelled());
+    drop(first);
+    assert!(
+        caches
+            .acquire(old.clone(), &config(), true, stale)
+            .await
+            .is_err()
+    );
+    let mut current = old.clone();
+    current.revision = "new revision".into();
+    let reader = caches
+        .acquire(current.clone(), &config(), true, caches.generation())
+        .await
+        .unwrap();
+    let home = reader.home().to_owned();
+    assert!(
+        caches
+            .acquire(old.clone(), &config(), true, stale)
+            .await
+            .is_err()
+    );
+    // A supervisor snapshot taken before the save cannot invalidate the new reader.
+    caches.reconcile(stale, |_| false);
+    assert!(!reader.stop().is_cancelled());
+    assert!(
+        caches
+            .acquire(old, &config(), true, caches.generation())
+            .await
+            .is_err()
+    );
+    let mut old_package = current.clone();
+    old_package.package = "previous approved package".into();
+    assert!(
+        caches
+            .acquire(old_package, &config(), true, caches.generation())
+            .await
+            .is_err()
+    );
+    assert!(!reader.stop().is_cancelled());
+    assert!(reader.entry.daemon.get().unwrap().alive());
+    let next = caches
+        .acquire(current, &config(), true, caches.generation())
+        .await
+        .unwrap();
+    assert_eq!(next.home(), home);
+}
+
+#[tokio::test]
 async fn idle_invalid_and_ephemeral_caches_are_removed() {
     let root = TempDir::new().unwrap();
     let caches = Caches::default();
     let identity = identity(executable(&root));
     let lease = caches
-        .acquire(identity.clone(), &config(), true)
+        .acquire(identity.clone(), &config(), true, caches.generation())
         .await
         .unwrap();
     let home = lease.home().to_owned();
     // An active reader cannot expire while it is still using the daemon.
     *lease.entry.used.lock().unwrap() = Instant::now() - IDLE;
-    caches.reconcile(|_| true);
+    caches.reconcile(caches.generation(), |_| true);
     assert!(!lease.stop().is_cancelled());
     drop(lease);
     *caches
@@ -82,16 +151,19 @@ async fn idle_invalid_and_ephemeral_caches_are_removed() {
         .used
         .lock()
         .unwrap() = Instant::now() - IDLE;
-    caches.reconcile(|_| true);
+    caches.reconcile(caches.generation(), |_| true);
     assert!(!home.exists());
     let lease = caches
-        .acquire(identity.clone(), &config(), true)
+        .acquire(identity.clone(), &config(), true, caches.generation())
         .await
         .unwrap();
-    caches.reconcile(|_| false);
+    caches.reconcile(caches.generation(), |_| false);
     assert!(lease.stop().is_cancelled());
     drop(lease);
-    let lease = caches.acquire(identity, &config(), false).await.unwrap();
+    let lease = caches
+        .acquire(identity, &config(), false, caches.generation())
+        .await
+        .unwrap();
     let home = lease.home().to_owned();
     assert!(caches.entries.lock().unwrap().is_empty());
     drop(lease);
@@ -104,7 +176,7 @@ async fn capacity_never_detaches_an_active_cache_from_invalidation() {
     let caches = Caches::default();
     let original = identity(executable(&root));
     let lease = caches
-        .acquire(original.clone(), &config(), true)
+        .acquire(original.clone(), &config(), true, caches.generation())
         .await
         .unwrap();
     let mut held = Vec::new();
@@ -127,13 +199,16 @@ async fn capacity_never_detaches_an_active_cache_from_invalidation() {
     extra.connection = "extra".into();
     assert!(
         caches
-            .acquire(extra.clone(), &config(), true)
+            .acquire(extra.clone(), &config(), true, caches.generation())
             .await
             .is_err()
     );
     assert!(!lease.stop().is_cancelled());
     held.pop();
-    let extra = caches.acquire(extra, &config(), true).await.unwrap();
+    let extra = caches
+        .acquire(extra, &config(), true, caches.generation())
+        .await
+        .unwrap();
     assert!(!lease.stop().is_cancelled());
     assert_eq!(caches.entries.lock().unwrap().len(), RESIDENT);
     caches.forget("first");
@@ -150,12 +225,15 @@ async fn failed_startup_can_be_retried_and_shutdown_removes_the_home() {
     std::fs::write(&path, "#!/bin/sh\nexit 1\n").unwrap();
     assert!(
         caches
-            .acquire(identity.clone(), &config(), true)
+            .acquire(identity.clone(), &config(), true, caches.generation())
             .await
             .is_err()
     );
     executable(&root);
-    let lease = caches.acquire(identity, &config(), true).await.unwrap();
+    let lease = caches
+        .acquire(identity, &config(), true, caches.generation())
+        .await
+        .unwrap();
     let home = lease.home().to_owned();
     drop(lease);
     drop(caches);
@@ -168,7 +246,7 @@ async fn shutdown_cancels_transient_leases_and_permanently_refuses_acquisition()
     let caches = Caches::default();
     let identity = identity(executable(&root));
     let transient = caches
-        .acquire(identity.clone(), &config(), false)
+        .acquire(identity.clone(), &config(), false, caches.generation())
         .await
         .unwrap();
     let home = transient.home().to_owned();
@@ -176,11 +254,16 @@ async fn shutdown_cancels_transient_leases_and_permanently_refuses_acquisition()
     assert!(transient.stop().is_cancelled());
     assert!(
         caches
-            .acquire(identity.clone(), &config(), true)
+            .acquire(identity.clone(), &config(), true, caches.generation())
             .await
             .is_err()
     );
-    assert!(caches.acquire(identity, &config(), false).await.is_err());
+    assert!(
+        caches
+            .acquire(identity, &config(), false, caches.generation())
+            .await
+            .is_err()
+    );
     assert!(caches.entries.lock().unwrap().is_empty());
     drop(transient);
     assert!(!home.exists());
@@ -194,20 +277,23 @@ async fn real_cli_daemons_use_separate_sockets_and_are_reaped() {
     let original = identity(executable);
     let started = Instant::now();
     let first = caches
-        .acquire(original.clone(), &config(), true)
+        .acquire(original.clone(), &config(), true, caches.generation())
         .await
         .unwrap();
     let cold = started.elapsed();
     let started = Instant::now();
     let warm = caches
-        .acquire(original.clone(), &config(), true)
+        .acquire(original.clone(), &config(), true, caches.generation())
         .await
         .unwrap();
     let warm_time = started.elapsed();
     assert_eq!(first.socket(), warm.socket());
     let mut other = original;
     other.connection = "other".into();
-    let second = caches.acquire(other, &config(), true).await.unwrap();
+    let second = caches
+        .acquire(other, &config(), true, caches.generation())
+        .await
+        .unwrap();
     assert_ne!(first.socket(), second.socket());
     eprintln!("Official CLI foreground startup {cold:?}; warm lease {warm_time:?}");
     let home = first.home().to_owned();
@@ -226,7 +312,12 @@ async fn real_cli_background_replacement_is_also_reaped() {
     let executable = PathBuf::from(std::env::var("CAIRN_TEST_OP").unwrap());
     let caches = Caches::default();
     let lease = caches
-        .acquire(identity(executable.clone()), &config(), true)
+        .acquire(
+            identity(executable.clone()),
+            &config(),
+            true,
+            caches.generation(),
+        )
         .await
         .unwrap();
     let daemon = lease.entry.daemon.get().unwrap();

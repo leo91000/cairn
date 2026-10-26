@@ -347,6 +347,10 @@ More capabilities:
   the post-I/O grant check. Changes, disabling, deletion, disconnection and installation
   shutdown invalidate caches and interrupt their active calls. The supervisor also
   reconciles enabled instances/package approvals every two seconds.
+  Acquisition and reconciliation reject snapshots superseded by configuration
+  invalidation, so a delayed old call cannot replace a current revision's cache.
+  A different environment/executable waits for active leases to finish rather than
+  interrupting their reads.
   Unused daemons expire after ten minutes; at most 64 reside in an installation,
   evicting the least recently used idle entry first. When all are busy, new instances
   receive a retryable capacity error. Cache contents and freshness are the declared
