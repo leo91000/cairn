@@ -136,7 +136,7 @@ JSON Schema's UUID format; clients never grant authority through validation.
 
 ### Development reset
 
-The fresh installation schema is now version 3. Earlier development databases
+The fresh installation schema is now version 4. Earlier development databases
 are rejected, without being rewritten. Stop the development processes, remove the
 **disposable development data directory** (SQLite, vault and related local state)
 and start with a newly empty data directory. Recreate projects/agents and rerun
@@ -179,10 +179,8 @@ Preview reads a consistent transaction without writing or notifying subscribers.
 
 The `agents` table stores identity, provider, text, timeout, revision, timestamps
 and avatar metadata in named columns with SQL checks and an ordering index.
-Permissions (`access`, `exclusive_nodes`, `plugins`) keep their current JSON
-representation until A3. Only that boundary and unconverted run/plugin/node
-consumers serialize typed profiles; writes decode them back into the authoritative
-profile. Avatar image bytes keep their existing private key/value storage. Merge
+Permissions are relational since A3 (below). Only unconverted run/plugin/node
+consumers serialize typed profiles at their snapshot boundaries. Avatar image bytes keep their existing private key/value storage. Merge
 preserves its existing run/task/chat effects and permission rules. No historical
 reader or migration is shipped. Generic records cannot store profiles.
 
@@ -212,3 +210,54 @@ nullable permissions and avatar metadata on half the rows. Pixels and transport
 are outside the measured layout. Reference and candidate serialize identical wire
 values. The candidate replacement includes the expected-revision read. PR reports
 record results and host conditions; raw measurements are never committed.
+
+## Agent permissions: one relational authority (#404)
+
+The existing generated `AccessPolicy`, `AgentSettings`, replacement and preview
+commands remain the wire contract on web, Android, HTTP, public MCP and
+`cairn_installation`. A3 removes the three JSON permission columns from `agents`.
+`agent_permissions` stores backend, sandbox, installation/delegation powers and
+four explicit wildcard flags. Ordered `agent_projects`, `agent_skills`,
+`agent_nodes`, `agent_mcps`, `agent_plugins` and `agent_exclusive_nodes` store the
+selections. `agent_mcp_selections` represents an explicit tool selection even when
+empty; `agent_mcp_tools` stores its ordered tool names. Null, an empty selection,
+and an omitted MCP tool selection keep their distinct meanings. Duplicate input
+selections normalize to their first occurrence.
+
+Agent FKs cascade on deletion; project FKs restrict deletion. CHECKs bound boolean
+flags, supported backend/sandbox values, text and list positions; unique keys
+prevent duplicate grants. Permission tables use WITHOUT ROWID so composite keys
+do not duplicate a separate rowid/primary-key index. Listing loads each relation
+once for the whole catalogue. Reads hydrate one SQLite snapshot, and profile/permission
+writes publish atomically. Revisions change on owner saves and resource revocation.
+There is no historical reader or migration: the initial schema is version 4.
+
+The A2 mirror, resource reconciliation, Value permission writer and node
+configuration's `exclusiveAgents` input are removed. Resource wire lists are
+read-only projections from the relations, attached only at the unconverted
+node/plugin boundary. The records writer drops those fields before storage.
+Enforcement and resource views therefore share one authority. Plugin setup's
+existing initial grant command and node enrollment's additive grant command write
+typed profiles in the same transaction; they do not write resource copies.
+
+Existing capabilities advertise the owner-only permission ceiling. Installation
+and public MCP agents cannot broaden permissions, add plugin/exclusive grants,
+review native admission or reapprove delegations. No boolean confirmation in an
+agent command confers owner authority; A3 adds no agent confirmation workflow.
+Live plugin/exclusive revocation and saved run/delegation policy rules stay intact.
+
+Deferred foreign keys, tracked in contraction ticket #433: node/exclusive node
+IDs (A9/A10, #410/#411), MCP server and tool selection IDs (A14, #415), plugin instance IDs (A12, #413),
+and file-backed skill keys (A16, #428). These use the existing business validators;
+node and MCP targets are checked again in the publication transaction, and only
+active agent-capable packages can receive new plugin grants. Already held grants
+remain editable while their package awaits review. Skill selections retain their
+existing named-filter semantics, including absent skills; they confer no access
+to an unselected project. No cross-database FK to Beacon is introduced.
+
+The opt-in `agent_storage_layouts` case of the shared `project_measurement` harness
+now compares the frozen A2 SQL/JSON mapping at `ff1f95ef` with A3 relations. It
+uses the same alternating repetitions, warmups, read/write/list phases and CPU,
+DB/WAL/page reporting as A1/A2, with mixed wildcard/empty/selected grants and MCP
+tool selections. The reference mapping is test-only. Raw measurements stay out
+of Git and local SQLite timings do not include production network latency.

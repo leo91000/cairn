@@ -43,6 +43,33 @@ trait StorageEntity:
     fn list(db: &Db<'_>) -> usize;
 
     fn write(&self, db: &Db<'_>, replacement: bool);
+
+    fn reference_schema(db: &Connection) {
+        db.execute_batch(&format!("DROP TABLE {}; DROP TABLE records;
+CREATE TABLE records(id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+CREATE INDEX records_kind ON records(kind,updated_at DESC);
+CREATE INDEX records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
+CREATE UNIQUE INDEX records_chat_slug ON records(json_extract(data,'$.slug')) WHERE kind='chats';", Self::KIND)).unwrap();
+    }
+
+    fn reference_read(db: &Db<'_>, id: &str) -> Self {
+        db.get_as(Self::KIND, id).unwrap().unwrap()
+    }
+
+    fn reference_list(db: &Db<'_>) -> usize {
+        db.list(Self::KIND).unwrap().len()
+    }
+
+    fn reference_write(&self, db: &Db<'_>, _replacement: bool) {
+        db.0.prepare_cached("INSERT INTO records VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at").unwrap().execute(params![self.id(), Self::KIND, serde_json::to_string(self).unwrap(), now()]).unwrap();
+    }
+
+    fn reference_delete(db: &Db<'_>, id: &str) {
+        db.0.prepare_cached("DELETE FROM records WHERE kind=? AND id=?")
+            .unwrap()
+            .execute(params![Self::KIND, id])
+            .unwrap();
+    }
 }
 
 impl StorageEntity for Project {
@@ -93,16 +120,46 @@ impl StorageEntity for Agent {
         db.save_agent(self).unwrap();
         db.audit(Self::SAVE, &json!({ "id": self.id })).unwrap();
     }
+
+    fn reference_schema(db: &Connection) {
+        db.execute_batch("DROP TABLE agent_mcp_tools; DROP TABLE agent_mcp_selections; DROP TABLE agent_projects; DROP TABLE agent_skills; DROP TABLE agent_nodes; DROP TABLE agent_mcps; DROP TABLE agent_plugins; DROP TABLE agent_exclusive_nodes; DROP TABLE agent_permissions; DROP TABLE agents;").unwrap();
+        db.execute_batch(a2::SCHEMA).unwrap();
+    }
+
+    fn reference_read(db: &Db<'_>, id: &str) -> Self {
+        db.a2_agent(id).unwrap().unwrap()
+    }
+
+    fn reference_list(db: &Db<'_>) -> usize {
+        db.a2_agents().unwrap().len()
+    }
+
+    fn reference_write(&self, db: &Db<'_>, replacement: bool) {
+        if replacement {
+            assert_eq!(
+                db.a2_agent(&self.id()).unwrap().unwrap().revision,
+                self.revision
+            );
+        }
+        db.a2_save_agent(self).unwrap();
+    }
+
+    fn reference_delete(db: &Db<'_>, id: &str) {
+        db.0.prepare_cached("DELETE FROM agents WHERE id=?")
+            .unwrap()
+            .execute([id])
+            .unwrap();
+    }
 }
+
+#[path = "project_measurement/a2.rs"]
+mod a2;
+
+use a2::A2Mapping;
 
 fn read<E: StorageEntity>(db: &Connection, reference: bool, id: &str) -> E {
     if reference {
-        let raw: String = db
-            .prepare_cached("SELECT data FROM records WHERE kind=? AND id=?")
-            .unwrap()
-            .query_row(params![E::KIND, id], |r| r.get(0))
-            .unwrap();
-        serde_json::from_str(&raw).unwrap()
+        E::reference_read(&Db(db), id)
     } else {
         E::read(&Db(db), id)
     }
@@ -112,8 +169,7 @@ fn write<E: StorageEntity>(db: &Connection, reference: bool, entity: &E, replace
     let tx =
         rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate).unwrap();
     if reference {
-        let value = serde_json::to_value(entity).unwrap();
-        tx.prepare_cached("INSERT INTO records VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at").unwrap().execute(params![entity.id(), E::KIND, value.to_string(), now()]).unwrap();
+        entity.reference_write(&Db(&tx), replacement);
         Db(&tx)
             .audit(E::SAVE, &json!({ "id": entity.id() }))
             .unwrap();
@@ -178,17 +234,17 @@ async fn agent_storage_layouts() {
             "instructions": "Inspect the current repository and preserve authorization. ".repeat(20),
             "access": {
                 "backend": "firecracker",
-                "nodes": null,
+                "nodes": if n % 3 == 0 { json!(null) } else { json!(["00000000-0000-4000-8000-000000000002"]) },
                 "projects": null,
-                "skills": [],
-                "mcps": [],
-                "mcpTools": {},
+                "skills": if n % 2 == 0 { json!(["global/review", "global/build"]) } else { json!([]) },
+                "mcps": if n % 3 == 0 { json!(null) } else { json!(["00000000-0000-4000-8000-000000000003"]) },
+                "mcpTools": { "00000000-0000-4000-8000-000000000003": if n % 2 == 0 { vec!["read", "search"] } else { vec![] } },
                 "installation": false,
                 "delegation": false,
                 "sandbox": "yolo",
             },
-            "exclusiveNodes": [],
-            "plugins": [],
+            "exclusiveNodes": ["00000000-0000-4000-8000-000000000002"],
+            "plugins": ["00000000-0000-4000-8000-000000000004"],
         })).unwrap(),
         revision: "00000000-0000-4000-8000-000000000002".into(),
         created_at: 1700000000000,
@@ -210,11 +266,7 @@ fn measure<E: StorageEntity>(entities: &[E]) {
             let path = root.path().join("manager.db");
             let db = connection(&path);
             if reference {
-                db.execute_batch(&format!("DROP TABLE {}; DROP TABLE records;
-CREATE TABLE records(id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL,updated_at INTEGER NOT NULL);
-CREATE INDEX records_kind ON records(kind,updated_at DESC);
-CREATE INDEX records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
-CREATE UNIQUE INDEX records_chat_slug ON records(json_extract(data,'$.slug')) WHERE kind='chats';", E::KIND)).unwrap();
+                E::reference_schema(&db);
             }
             let mut insert = Vec::new();
             let cpu_start = cpu();
@@ -240,7 +292,7 @@ CREATE UNIQUE INDEX records_chat_slug ON records(json_extract(data,'$.slug')) WH
             for _ in 0..50 {
                 let count = measured(&mut list, || {
                     if reference {
-                        Db(&db).list(E::KIND).unwrap().len()
+                        E::reference_list(&Db(&db))
                     } else {
                         E::list(&Db(&db))
                     }
@@ -283,15 +335,14 @@ CREATE UNIQUE INDEX records_chat_slug ON records(json_extract(data,'$.slug')) WH
                         rusqlite::TransactionBehavior::Immediate,
                     )
                     .unwrap();
-                    let sql = if reference {
-                        "DELETE FROM records WHERE kind=?1 AND id=?2".to_owned()
+                    if reference {
+                        E::reference_delete(&Db(&tx), &p.id());
                     } else {
-                        format!("DELETE FROM {} WHERE ?1=?1 AND id=?2", E::KIND)
-                    };
-                    tx.prepare_cached(&sql)
-                        .unwrap()
-                        .execute(params![E::KIND, p.id()])
-                        .unwrap();
+                        tx.prepare_cached(&format!("DELETE FROM {} WHERE id=?", E::KIND))
+                            .unwrap()
+                            .execute([p.id()])
+                            .unwrap();
+                    }
                     Db(&tx)
                         .audit(&format!("{}.deleted", E::KIND), &json!({ "id": p.id() }))
                         .unwrap();

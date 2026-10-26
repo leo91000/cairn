@@ -573,12 +573,13 @@ mod tests {
             .transaction(|db| {
                 let source = json!({ "id": "00000000-0000-4000-8000-000000000010" });
                 let target = json!({ "id": "00000000-0000-4000-8000-000000000011" });
-                db.save_agent(&crate::agent_fixture::profile(target.clone())?)?;
+                let mut profile = crate::agent_fixture::profile(target.clone())?;
+                profile.settings.plugins = vec!["00000000-0000-4000-8000-000000000012".into()];
+                db.save_agent(&profile)?;
                 db.put(
                     connections::KIND,
                     &json!({
-                        "id": "instance", "pluginId": "fixture", "enabled": true,
-                        "agentIds": ["00000000-0000-4000-8000-000000000011"],
+                        "id": "00000000-0000-4000-8000-000000000012", "pluginId": "fixture", "enabled": true,
                     }),
                 )?;
                 let captured_run = json!({

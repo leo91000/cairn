@@ -656,8 +656,6 @@ struct Configuration {
     #[serde(default)]
     slots: Option<u64>,
     accepting: bool,
-    #[serde(default, rename = "exclusiveAgents")]
-    exclusive_agents: Option<Vec<String>>,
     #[serde(default, rename = "nativeEnabled")]
     native_enabled: Option<bool>,
     #[serde(default, rename = "nativeAccounts")]
@@ -701,14 +699,6 @@ pub(crate) async fn configure_node(
         return Err(Error::bad(
             "Use at most 32 tags of 1 to 40 letters, digits or -_:./.",
         ));
-    }
-    if let Some(agents) = &request.exclusive_agents {
-        if agents.len() > 256 {
-            return Err(Error::bad("Use at most 256 exclusive node grants."));
-        }
-        for agent in agents {
-            crate::validation::uuid(agent)?;
-        }
     }
     let node = node.to_owned();
     s.store
@@ -773,14 +763,6 @@ pub(crate) async fn configure_node(
                 record["nativeAccounts"] = accounts.into();
             }
             record["accepting"] = request.accepting.into();
-            // Older clients still send this list; the grants live on each agent.
-            if let Some(agents) = request.exclusive_agents {
-                for agent in &agents {
-                    db.agent_snapshot(agent)?
-                        .ok_or_else(|| Error::bad("Exclusive agent missing."))?;
-                }
-                crate::agent_grants::set_node_agents(db, &mut record, &agents)?;
-            }
             db.put("nodes", &record)?;
             db.audit("node.configured", &json!({ "nodeId": node }))?;
             Ok(public(record))
@@ -938,8 +920,12 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
             if record["revoked"] == true {
                 return Err(Error::conflict("This node is revoked."));
             }
-            for agent in db.agent_snapshots()? {
-                let granted = request.agent_ids.iter().any(|id| agent["id"] == *id);
+            for profile in db.agents()? {
+                let agent = serde_json::to_value(&profile)?;
+                let granted = request
+                    .agent_ids
+                    .iter()
+                    .any(|id| *id == profile.id.to_string());
                 if request.add && !granted {
                     continue;
                 }
@@ -970,7 +956,7 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
                     }
                     record["nativeReviewedAgents"] = reviewed.into();
                 }
-                set_node_grant(db, agent, &node, granted)?;
+                set_node_grant(db, profile, &node, granted)?;
             }
             // Revoking placement can also release exclusive reservations on
             // this record. Persist only our admission field onto that new copy.
@@ -988,30 +974,26 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
         .await
 }
 
-fn set_node_grant(db: &Db<'_>, mut agent: Value, node: &str, granted: bool) -> Result<()> {
-    // Agents allowed on every node keep that broader grant.
-    let Some(mut nodes) = crate::service::policy(&agent)["nodes"].as_array().cloned() else {
+fn set_node_grant(
+    db: &Db<'_>,
+    mut agent: cairn_contracts::Agent,
+    node: &str,
+    granted: bool,
+) -> Result<()> {
+    let Some(nodes) = &mut agent.settings.access.nodes else {
         return Ok(());
     };
-    let present = nodes.iter().any(|id| id == node);
-    if granted == present {
+    if granted == nodes.iter().any(|id| id == node) {
         return Ok(());
     }
     if granted {
-        nodes.push(node.into());
+        nodes.push(node.to_owned());
     } else {
         nodes.retain(|id| id != node);
+        agent.settings.exclusive_nodes.retain(|id| id != node);
     }
-    if !agent["access"].is_object() {
-        agent["access"] = json!({});
-    }
-    agent["access"]["nodes"] = nodes.into();
-    // Exclusive reservations need permission to run on the node.
-    if !granted {
-        crate::agent_grants::release_node(db, &mut agent, node)?;
-    }
-    crate::service::touch(&mut agent);
-    db.save_agent_permissions(&agent)?;
+    agent.revision = crate::config::id();
+    db.save_agent(&agent)?;
     Ok(())
 }
 
@@ -1051,20 +1033,22 @@ pub(crate) async fn revoke(
                     db.delete(&key)?;
                 }
             }
-            for mut agent in db.agent_snapshots()? {
-                let Some(nodes) = agent["access"]["nodes"].as_array_mut() else {
-                    continue;
-                };
-                let before = nodes.len();
-                nodes.retain(|id| id != &node);
-                if nodes.len() != before {
-                    crate::service::touch(&mut agent);
-                    db.save_agent_permissions(&agent)?;
+            for mut agent in db.agents()? {
+                let mut changed = false;
+                if let Some(nodes) = &mut agent.settings.access.nodes {
+                    let before = nodes.len();
+                    nodes.retain(|id| id != &node);
+                    changed |= before != nodes.len();
+                }
+                let before = agent.settings.exclusive_nodes.len();
+                agent.settings.exclusive_nodes.retain(|id| id != &node);
+                changed |= before != agent.settings.exclusive_nodes.len();
+                if changed {
+                    agent.revision = crate::config::id();
+                    db.save_agent(&agent)?;
                 }
             }
-            crate::agent_grants::forget_resource(db, crate::agent_grants::EXCLUSIVE_NODES, &node)?;
-            record["exclusiveAgents"] = json!([]);
-            db.put("nodes", &record)?;
+            record = db.put("nodes", &record)?;
 
             let mut released = 0_u64;
             if request.release_placements {

@@ -171,9 +171,8 @@ impl Service {
             .adapter()
             .validate_agent(&snapshot)?;
         validate_profile(&agent)?;
-        // A3 still owns permission target lookup; pass only its typed wire view.
-        let access = serde_json::to_value(&agent.settings.access)?;
-        self.require_access_targets(&access).await?;
+        // File-backed skills are prepared before the publication transaction.
+        self.require_access_targets(&agent.settings.access).await?;
         if editor == AgentEditor::Installation
             && (!review.reapprove_delegations.is_empty() || !review.native_node_reviews.is_empty())
         {
@@ -226,9 +225,9 @@ impl Service {
                 before_access.mcp_tools.retain(|connection, _| {
                     agent.settings.access.mcps.as_ref().is_none_or(|connections| connections.contains(connection))
                 });
-                let before = json!({ "access": before_access });
-                let edited = serde_json::to_value(&agent)?;
-                let expands = !covers(&before, &edited) || !node_access_covers(&before, &edited);
+                let edited = &agent.settings.access;
+                let expands = !crate::agent_grants::covers(&before_access, edited)
+                    || !crate::agent_grants::selection_covers(before_access.nodes.as_deref(), edited.nodes.as_deref());
                 let previous_plugins = current.as_ref().map(|a| a.settings.plugins.as_slice()).unwrap_or_default();
                 let previous_exclusive = current.as_ref().map(|a| a.settings.exclusive_nodes.as_slice()).unwrap_or_default();
                 if expands || agent.settings.access.backend == "native" && current.as_ref().is_none_or(|a| a.settings.access.backend != "native")
@@ -236,19 +235,14 @@ impl Service {
                     || agent.settings.exclusive_nodes.iter().any(|id| !previous_exclusive.contains(id)) {
                     return Err(Error::forbidden("Only the installation owner can expand agent permissions."));
                 }
-                // Owner-managed live grants remain authoritative until A3; profile replacement
+                // Owner-managed live grants remain authoritative; profile replacement
                 // never revokes them through an installation agent.
                 agent.settings.plugins = previous_plugins.to_vec();
                 agent.settings.exclusive_nodes = previous_exclusive.to_vec();
                 agent.settings.validate().map_err(Error::bad)?;
             }
-            let snapshot = serde_json::to_value(&agent)?;
-            for project in agent.settings.access.projects.as_ref().into_iter().flatten() {
-                required(db.project(project)?, "Project no longer exists")?;
-            }
-            crate::agent_grants::validate(db, &snapshot, &accepts_agents)?;
-            let access = serde_json::to_value(&agent.settings.access)?;
-            let agent = crate::agent_grants::save_profile(db, agent, &access, owner_review, &review.native_node_reviews)?;
+            crate::agent_grants::validate(db, &agent, &accepts_agents)?;
+            let agent = crate::agent_grants::save_profile(db, agent, owner_review, &review.native_node_reviews)?;
             let snapshot = serde_json::to_value(&agent)?;
             for connection in &review.reapprove_delegations {
                 crate::plugins::connections::reapprove(db, connection, &snapshot, &origin)?;
@@ -324,8 +318,7 @@ impl Service {
         let mut agent = current;
         agent.settings = input.settings;
         validate_profile(&agent)?;
-        let access = serde_json::to_value(&agent.settings.access)?;
-        self.require_access_targets(&access).await?;
+        self.require_access_targets(&agent.settings.access).await?;
         let agent = serde_json::to_value(&agent)?;
         crate::provider::Provider::of_agent(&agent)?
             .adapter()
@@ -376,21 +369,25 @@ impl Service {
     }
 
     /// Every project, MCP connection and tool permission must reference an existing record.
-    async fn require_access_targets(&self, access: &Value) -> Result<()> {
-        for value in access["projects"].as_array().into_iter().flatten() {
-            self.get_project(value.as_str().unwrap_or("")).await?;
+    async fn require_access_targets(&self, access: &cairn_contracts::AccessPolicy) -> Result<()> {
+        for project in access.projects.as_ref().into_iter().flatten() {
+            self.get_project(project).await?;
         }
-        for kind in ["mcps"] {
-            for value in access[kind].as_array().into_iter().flatten() {
-                self.get(kind, value.as_str().unwrap_or("")).await?;
-            }
+        for connection in access
+            .mcps
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .chain(access.mcp_tools.keys())
+        {
+            self.get("mcps", connection).await?;
         }
-        let Some(tools) = access["mcpTools"].as_object() else {
-            return Ok(());
-        };
-        for key in tools.keys() {
-            self.get("mcps", key).await?;
-            if !allowed(&access["mcps"], key) {
+        for connection in access.mcp_tools.keys() {
+            if access
+                .mcps
+                .as_ref()
+                .is_some_and(|connections| !connections.contains(connection))
+            {
                 return Err(Error::bad(
                     "Tool permissions require access to the MCP connection.",
                 ));
@@ -940,7 +937,7 @@ pub(crate) fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> 
 pub(crate) fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
     db.delete(&format!("agent-avatar:{id}"))?;
     crate::nodes::native_mode::forget_agent(db, id)?;
-    crate::agent_grants::forget_agent(db, id)
+    Ok(())
 }
 
 /// Who edits an agent: the owner from the app, or an agent through the installation MCP.
@@ -948,11 +945,6 @@ pub(crate) fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
 pub(crate) enum AgentEditor {
     Owner,
     Installation,
-}
-
-/// Marks a changed agent record so concurrent editors can detect the change.
-pub(crate) fn touch(agent: &mut Value) {
-    agent["revision"] = id().into();
 }
 
 fn validate_profile(agent: &cairn_contracts::Agent) -> Result<()> {
@@ -997,44 +989,11 @@ pub fn policy(agent: &Value) -> Value {
 /// under `granted` continues when access is unchanged or wider, but never with access
 /// the owner has since removed. Node grants are excluded: placement follows the current ones.
 pub fn covers(current: &Value, granted: &Value) -> bool {
-    let current = policy(current);
-    let granted = policy(granted);
-
-    if current["backend"] != granted["backend"] {
-        return false;
-    }
-    let scopes = ["projects", "skills", "mcps"]
-        .iter()
-        .all(|key| within(&granted[*key], &current[*key]));
-    // A server without a tool selection allows all of its enabled tools.
-    let tools = current["mcpTools"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .all(|(server, selection)| within(&granted["mcpTools"][server], selection));
-    let installation = current["installation"] == true || granted["installation"] != true;
-    let delegation = current["delegation"] == true || granted["delegation"] != true;
-    let sandbox = sandbox_rank(&current["sandbox"]) >= sandbox_rank(&granted["sandbox"]);
-    scopes && tools && installation && delegation && sandbox
-}
-
-/// Whether a granted scope stays within the current one; `null` means everything.
-fn within(granted: &Value, current: &Value) -> bool {
-    if current.is_null() {
-        return true;
-    }
-    let (Some(granted), Some(current)) = (granted.as_array(), current.as_array()) else {
-        return false;
-    };
-    granted.iter().all(|item| current.contains(item))
-}
-
-/// Sandboxes from the most restrictive to the most permissive.
-fn sandbox_rank(sandbox: &Value) -> u8 {
-    match sandbox.as_str() {
-        Some("yolo") => 2,
-        Some("workspace-write") => 1,
-        _ => 0,
+    let current = serde_json::from_value(policy(current));
+    let granted = serde_json::from_value(policy(granted));
+    match (current, granted) {
+        (Ok(current), Ok(granted)) => crate::agent_grants::covers(&current, &granted),
+        _ => false,
     }
 }
 
@@ -1196,15 +1155,4 @@ pub(crate) fn replayed_creation(
         ));
     }
     Ok(Some(row["record"].clone()))
-}
-
-fn node_access_covers(current: &Value, edited: &Value) -> bool {
-    let current = policy(current);
-    let edited = policy(edited);
-    current["nodes"].is_null()
-        || edited["nodes"].as_array().is_some_and(|nodes| {
-            nodes
-                .iter()
-                .all(|node| allowed(&current["nodes"], node.as_str().unwrap_or("")))
-        })
 }

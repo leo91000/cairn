@@ -1,3 +1,5 @@
+use common::AgentFixture;
+
 mod common;
 
 use axum::{Json, Router, extract::State, routing::get};
@@ -61,13 +63,18 @@ impl Fixture {
                 "nodes",
                 json!({
                     "id": LOCAL_NODE_ID,
-                    "exclusiveAgents": [MAIN_AGENT_ID],
                     "exclusiveReservations": true,
                     "limits": { "memoryMiB": 4096 },
                 }),
             )
             .await
             .unwrap();
+        s.agent_fixture(
+            json!({ "exclusiveNodes": [LOCAL_NODE_ID] }),
+            Some(MAIN_AGENT_ID),
+        )
+        .await
+        .unwrap();
         let mut fixture = Self {
             root,
             s,
@@ -220,14 +227,9 @@ async fn manager_acquisition_is_idempotent_fenced_and_released_before_waiting() 
 #[tokio::test]
 async fn access_revocation_releases_but_never_grants_another_agent_permission() {
     let f = Fixture::new().await;
-    let mut node =
-        f.s.store
-            .get("nodes", LOCAL_NODE_ID)
-            .await
-            .unwrap()
-            .unwrap();
-    node["exclusiveAgents"] = json!([]);
-    f.s.store.put("nodes", node.clone()).await.unwrap();
+    f.s.agent_fixture(json!({ "exclusiveNodes": [] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
     assert_eq!(
         exclusive::acquire(&f.s, &f.token, &request())
             .await
@@ -235,14 +237,19 @@ async fn access_revocation_releases_but_never_grants_another_agent_permission() 
             .status,
         403
     );
-    node["exclusiveAgents"] = json!([MAIN_AGENT_ID]);
-    f.s.store.put("nodes", node.clone()).await.unwrap();
+    f.s.agent_fixture(
+        json!({ "exclusiveNodes": [LOCAL_NODE_ID] }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
     let acquired = exclusive::acquire(&f.s, &f.token, &request())
         .await
         .unwrap();
     assert_eq!(acquired["state"], "acquired");
-    node["exclusiveAgents"] = json!([]);
-    f.s.store.put("nodes", node).await.unwrap();
+    f.s.agent_fixture(json!({ "exclusiveNodes": [] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
     f.until(|record| record["state"] == "released").await;
     assert!(f.remote.lock().await["reservation"].is_null());
 }

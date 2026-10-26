@@ -121,7 +121,10 @@ async fn service_accounts_are_instances_with_encrypted_tokens_and_live_grants() 
     // Nothing is granted by default, including Main agent.
     assert_eq!(run(&f, read.clone()).await, Err(403));
     assert_eq!(run(&f, command("accounts", &[])).await, Err(403));
-    let mut update = json!({ "name": "Production", "enabled": true, "agentIds": [MAIN_AGENT_ID] });
+    s.agent_fixture(json!({ "plugins": [account] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
+    let mut update = json!({ "name": "Production", "enabled": true });
     save(s, update.clone(), Some(&account)).await; // an omitted token is kept
     assert_eq!(
         run(&f, command("accounts", &[])).await.unwrap()["value"]["accounts"],
@@ -176,11 +179,15 @@ async fn service_accounts_are_instances_with_encrypted_tokens_and_live_grants() 
     save(s, update.clone(), Some(&account)).await;
     assert_eq!(run(&f, read.clone()).await, Err(403));
     update["enabled"] = json!(true);
-    update["agentIds"] = json!([]);
+    s.agent_fixture(json!({ "plugins": [] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
     save(s, update.clone(), Some(&account)).await;
     assert_eq!(run(&f, read.clone()).await, Err(403));
 
-    update["agentIds"] = json!([MAIN_AGENT_ID]);
+    s.agent_fixture(json!({ "plugins": [account] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
     update["secrets"] = json!({ "token": "ops_rotated" });
     save(s, update.clone(), Some(&account)).await;
     let secrets = s
@@ -197,7 +204,12 @@ async fn service_accounts_are_instances_with_encrypted_tokens_and_live_grants() 
         .agent_fixture(json!({ "name": "Temporary" }), None)
         .await
         .unwrap();
-    update["agentIds"] = json!([MAIN_AGENT_ID, temporary["id"]]);
+    s.agent_fixture(
+        json!({ "plugins": [account] }),
+        Some(text(&temporary, "id")),
+    )
+    .await
+    .unwrap();
     update.as_object_mut().unwrap().remove("secrets");
     save(s, update.clone(), Some(&account)).await;
     cairn_installation::api::dispatch(
