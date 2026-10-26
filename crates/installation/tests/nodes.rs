@@ -1,3 +1,5 @@
+use common::StoreAgentFixture;
+
 #[path = "nodes/backend_migration.rs"]
 mod backend_migration;
 mod common;
@@ -25,7 +27,7 @@ use cairn_installation::{
     run_status::RunStatus,
     service::Service,
     storage::{Disk, LazyDisk, bootstrap, policy::Policy, remote::RemoteSource, runtime},
-    validation::{parse, text},
+    validation::text,
 };
 use common::RelayContext;
 use serde_json::{Value, json};
@@ -150,11 +152,30 @@ impl Owner {
 
     /// Calls an owner endpoint.
     async fn send(&self, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+        let body = if matches!(method, "POST" | "PUT")
+            && (path == "/api/agents" || path.starts_with("/api/agents/"))
+            && body.get("settings").is_none()
+        {
+            let existing = (method == "PUT").then(|| path.trim_start_matches("/api/agents/"));
+            common::agent_fixture::agent_command(&self.service, body, existing)
+                .await
+                .unwrap()
+        } else {
+            body
+        };
         self.call(method, path, body, None).await
     }
 
     async fn get(&self, path: &str) -> (StatusCode, Value) {
-        self.send("GET", path, Value::Null).await
+        let (status, value) = self.send("GET", path, Value::Null).await;
+        (
+            status,
+            if path == "/api/agents" {
+                value["agents"].clone()
+            } else {
+                value
+            },
+        )
     }
 
     async fn invite(&self, name: &str) -> Value {
@@ -179,11 +200,23 @@ impl Owner {
     }
 
     async fn put(&self, kind: &str, document: Value) {
-        self.service.store.put(kind, document).await.unwrap();
+        if kind == "agents" {
+            self.service
+                .store
+                .put_agent_fixture(document)
+                .await
+                .unwrap();
+        } else {
+            self.service.store.put(kind, document).await.unwrap();
+        }
     }
 
     async fn stored(&self, kind: &str, id: &str) -> Option<Value> {
-        self.service.store.get(kind, id).await.unwrap()
+        if kind == "agents" {
+            self.service.store.agent_snapshot(id).await.unwrap()
+        } else {
+            self.service.store.get(kind, id).await.unwrap()
+        }
     }
 
     async fn run(&self, id: &str) -> Value {
@@ -925,28 +958,6 @@ async fn disk_budget_uses_total_capacity_while_free_space_is_already_allocated()
 }
 
 #[tokio::test]
-async fn main_node_policy_survives_an_update_from_an_older_client() {
-    let owner = Owner::new().await;
-    let path = format!("/api/agents/{MAIN_AGENT_ID}");
-    let restricted = json!({ "name": "Main", "access": { "nodes": [] } });
-    let (status, restricted) = owner.send("PUT", &path, restricted).await;
-    assert_eq!(status, StatusCode::OK, "{restricted}");
-    let older_client = json!({
-        "name": "Renamed main",
-        "access": { "projects": null, "skills": null, "mcps": null, "github": true },
-    });
-    let (status, saved) = owner.send("PUT", &path, older_client).await;
-    assert_eq!(status, StatusCode::OK, "{saved}");
-    assert_eq!(saved["access"]["nodes"], json!([]));
-    let unknown_node = json!({
-        "name": "Main",
-        "access": { "nodes": ["10000000-0000-4000-8000-000000000000"] },
-    });
-    let (status, _) = owner.send("PUT", &path, unknown_node).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
 async fn concurrent_enrollment_has_exactly_one_winner() {
     let owner = Owner::new().await;
     let invitation = owner.invite("Race").await;
@@ -1214,24 +1225,6 @@ async fn revoking_a_replaced_node_can_release_its_conversation_placements() {
     assert_eq!(run["pinnedNodeId"], other.as_str());
     assert_eq!(run["preferredNodeId"], other.as_str());
     assert_eq!(owner.run(&kept).await["pinnedNodeId"], plain.as_str());
-}
-
-#[test]
-fn mcp_agent_updates_preserve_omitted_node_permissions() {
-    let update = parse(
-        "mcp:update_agent",
-        json!({ "id": MAIN_AGENT_ID, "agent": { "access": { "mcps": [] } } }),
-    )
-    .unwrap();
-    assert!(update["agent"]["access"].get("nodes").is_none());
-    let restricted = parse(
-        "mcp:update_agent",
-        json!({ "id": MAIN_AGENT_ID, "agent": { "access": { "nodes": [] } } }),
-    )
-    .unwrap();
-    assert_eq!(restricted["agent"]["access"]["nodes"], json!([]));
-    let created = parse("mcp:save_agent", json!({ "name": "Default" })).unwrap();
-    assert_eq!(created["access"]["nodes"], json!([LOCAL_NODE_ID]));
 }
 
 #[tokio::test]
@@ -4472,7 +4465,7 @@ async fn agents_choose_nodes_and_legacy_resource_limits_are_not_exposed() {
             "POST",
             "/api/agents",
             json!({
-                "name": "Agent", "access": { "nodes": null, "maxResources": limits(1, 128, 128) }
+                "name": "Agent", "access": { "nodes": null }
             }),
         )
         .await;

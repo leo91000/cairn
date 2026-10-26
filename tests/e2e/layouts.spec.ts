@@ -20,7 +20,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   let virtualAgents: object[] | undefined
   // Changing WebKit's interception while a background poll is in flight can cancel it.
   // Install the route before navigation and only switch the fixture it returns.
-  await page.route('**/api/agents', route => virtualAgents ? route.fulfill({ json: virtualAgents }) : route.continue())
+  await page.route('**/api/agents', route => virtualAgents ? route.fulfill({ json: { agents: virtualAgents } }) : route.continue())
   await page.goto(workspacePath('/'))
   await authenticateWorkspace(page)
   await expect(page.locator('.shell')).toBeVisible()

@@ -3,8 +3,7 @@ package build.cairn.contracts
 
 import build.cairn.app.data.CairnApi
 import build.cairn.app.data.segment
-import build.cairn.app.data.wireJson
 import kotlinx.serialization.json.encodeToJsonElement
 
 suspend fun CairnApi.replaceProject(input: ReplaceProjectInput): Project =
-    send("PUT", "/projects/${segment(input.projectId)}", wireJson.encodeToJsonElement(input))
+    send("PUT", "/projects/${segment(input.projectId)}", contractJson.encodeToJsonElement(input))

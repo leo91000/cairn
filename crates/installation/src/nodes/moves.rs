@@ -93,7 +93,7 @@ struct MoveRequest<'a> {
 
 async fn run_agent(s: &Service, run: &Value) -> Result<Value> {
     s.store
-        .get("agents", super::run_agent(run))
+        .agent_snapshot(super::run_agent(run))
         .await?
         .ok_or_else(|| Error::forbidden("Agent removed."))
 }
@@ -527,7 +527,7 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
     if super::native_mode::unconfirmed(&node) {
         return Ok(Recovery::Waiting);
     }
-    let agent = s.get("agents", super::run_agent(current)).await?;
+    let agent = s.agent_snapshot(super::run_agent(current)).await?;
     let available = super::seen_within(&node, super::HEARTBEAT_TIMEOUT_MS)
         && node["revoked"] != true
         && node["executionReady"] == true

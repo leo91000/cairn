@@ -1,7 +1,9 @@
 package build.cairn.app.data
 
 import kotlinx.coroutines.test.runTest
-import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Cookie
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.mockwebserver.MockResponse
@@ -168,49 +170,60 @@ class CairnApiTest {
     }
 
     @Test
-    fun `portraits use authenticated bounded transfers and preserve old agent compatibility`() =
-        runTest {
-            MockWebServer().use { server ->
-                server.enqueue(
-                    MockResponse()
-                        .setBody("""{"authenticated":true,"csrf":"test-csrf"}""")
-                        .addHeader(
-                            "Set-Cookie",
-                            "cairn_session=portrait-session; Path=/; HttpOnly; Max-Age=3600",
-                        )
+    fun `portraits use authenticated bounded transfers and generated commands`() = runTest {
+        val agentId = "00000000-0000-4000-8000-000000000099"
+        val uploaded =
+            newAgent()
+                .copy(
+                    id = agentId,
+                    name = "Reviewer",
+                    revision = "r1",
+                    avatar =
+                        AgentPortrait(
+                            status = "ready",
+                            revision = "new",
+                            url = "/api/agents/$agentId/avatar?v=new",
+                        ),
                 )
-                server.enqueue(MockResponse().setBody("portrait-bytes"))
-                server.enqueue(
-                    MockResponse()
-                        .setBody(
-                            """{"id":"agent-1","name":"Reviewer","avatar":{"status":"ready","revision":"new","url":"/api/agents/agent-1/avatar?v=new"}}"""
-                        )
-                )
-                server.start()
-                val api = CairnApi(server.url("/"), MemoryVault())
-                api.csrf = api.send<Session>("POST", "/account/verify").csrf.orEmpty()
-                server.takeRequest()
-                assertArrayEquals(
-                    "portrait-bytes".toByteArray(),
-                    api.agentPortrait("agent-1", "revision"),
-                )
-                val get = server.takeRequest()
-                assertEquals("/api/agents/agent-1/avatar?v=revision", get.path)
-                assertEquals("cairn_session=portrait-session", get.getHeader("Cookie"))
-                val saved = api.uploadAgentPortrait("agent-1", byteArrayOf(1, 2, 3))
-                assertEquals("ready", saved.avatar?.status)
-                val put = server.takeRequest()
-                assertEquals("PUT", put.method)
-                assertEquals("test-csrf", put.getHeader("X-CSRF-Token"))
-                assertArrayEquals(byteArrayOf(1, 2, 3), put.body.readByteArray())
-                assertNull(
-                    wireJson.decodeFromString<Agent>("""{"id":"legacy","name":"Legacy"}""").avatar
-                )
-                assertThrows(IllegalArgumentException::class.java) {
-                    readPortraitBytes(java.io.ByteArrayInputStream(ByteArray(20)), 10)
-                }
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse()
+                    .setBody("""{"authenticated":true,"csrf":"test-csrf"}""")
+                    .addHeader(
+                        "Set-Cookie",
+                        "cairn_session=portrait-session; Path=/; HttpOnly; Max-Age=3600",
+                    )
+            )
+            server.enqueue(MockResponse().setBody("portrait-bytes"))
+            server.enqueue(MockResponse().setBody(wireJson.encodeToString(uploaded)))
+            server.start()
+            val api = CairnApi(server.url("/"), MemoryVault())
+            api.csrf = api.send<Session>("POST", "/account/verify").csrf.orEmpty()
+            server.takeRequest()
+            assertArrayEquals(
+                "portrait-bytes".toByteArray(),
+                api.agentPortrait(agentId, "revision"),
+            )
+            val get = server.takeRequest()
+            assertEquals("/api/agents/$agentId/avatar?v=revision", get.path)
+            assertEquals("cairn_session=portrait-session", get.getHeader("Cookie"))
+            val saved = api.uploadAgentPortrait(agentId, byteArrayOf(1, 2, 3))
+            assertEquals("ready", saved.avatar?.status)
+            val put = server.takeRequest()
+            assertEquals("POST", put.method)
+            assertEquals("test-csrf", put.getHeader("X-CSRF-Token"))
+            assertEquals("/api/agents/$agentId/avatar/upload", put.path)
+            val command = wireJson.parseToJsonElement(put.body.readUtf8()).jsonObject
+            assertEquals(agentId, command["agentId"]!!.jsonPrimitive.content)
+            assertArrayEquals(
+                byteArrayOf(1, 2, 3),
+                java.util.Base64.getDecoder().decode(command["data"]!!.jsonPrimitive.content),
+            )
+            assertThrows(IllegalArgumentException::class.java) {
+                readPortraitBytes(java.io.ByteArrayInputStream(ByteArray(20)), 10)
             }
         }
+    }
 
     @Test
     fun `production requires a clean HTTPS origin`() {
@@ -286,10 +299,10 @@ class CairnApiTest {
                     body("challenge" to "fixture-challenge", "code" to "12345678"),
                 )
             api.csrf = session.csrf.orEmpty()
-            api.send<Agent>(
+            api.send<kotlinx.serialization.json.JsonObject>(
                 "POST",
-                "/agents",
-                wireJson.encodeToJsonElement(Agent(name = "Reviewer")),
+                "/fixture",
+                body("name" to "Reviewer"),
             )
             assertEquals("/api/account/verify", server.takeRequest().path)
             val mutation = server.takeRequest()
@@ -403,7 +416,7 @@ class CairnApiTest {
         assertTrue(run.resumeAvailable)
         val agent =
             wireJson.decodeFromString<Agent>(
-                """{"id":"agent","name":"Restricted","access":{"projects":[],"skills":null,"mcps":["mcp"],"mcpTools":{"mcp":["read"]},"installation":true,"sandbox":"read-only"}}"""
+                """{"access":{"backend":"firecracker","delegation":false,"installation":true,"mcpTools":{"mcp":["read"]},"mcps":["mcp"],"nodes":["00000000-0000-4000-8000-000000000002"],"projects":[],"sandbox":"read-only","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"d3153f9f-724b-59c3-9614-ab78f231c4d3","instructions":"","model":"","name":"Restricted","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0}"""
             )
         val edited =
             wireJson.decodeFromString<Agent>(wireJson.encodeToString(agent.copy(name = "Renamed")))
@@ -411,7 +424,6 @@ class CairnApiTest {
         assertEquals(emptyList<String>(), edited.access.projects)
         assertNull(edited.access.skills)
         assertTrue(edited.access.installation)
-        assertFalse(wireJson.decodeFromString<Agent>("""{"name":"Legacy"}""").access.installation)
     }
 
     @Test

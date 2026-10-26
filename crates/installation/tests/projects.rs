@@ -1,3 +1,5 @@
+use common::AgentFixture;
+
 mod common;
 
 use axum::{body::Body, http::StatusCode};
@@ -189,16 +191,25 @@ async fn project_deletion_keeps_current_reference_rules_and_historical_snapshots
     let project = s.create_project(input, None, |_| Ok(())).await.unwrap();
     let id = project.id.to_string();
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({ "name": "Assigned", "access": { "projects": [id] } }),
             None,
         )
         .await
         .unwrap();
     assert!(s.delete_project(project.id, |_| Ok(())).await.is_err());
-    s.remove("agents", agent["id"].as_str().unwrap())
+    assert_eq!(
+        http(
+            &s,
+            InstallationRole::Owner,
+            "DELETE",
+            &format!("/api/agents/{}", agent["id"].as_str().unwrap()),
+            Value::Null
+        )
         .await
-        .unwrap();
+        .0,
+        StatusCode::OK
+    );
     let task = s.task(json!({ "name": "Uses project", "prompt": "Work", "agentId": MAIN_AGENT_ID, "projectId": id }), None).await.unwrap();
     assert!(s.delete_project(project.id, |_| Ok(())).await.is_err());
     s.remove("tasks", task["id"].as_str().unwrap())

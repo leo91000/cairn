@@ -100,7 +100,7 @@ class WorkspaceJourneyTest {
                                         )
                                         .setBody(beaconAccountFixture("test-csrf"))
                                 "/api/installations/fixture/api/agents" ->
-                                    """[{"id":"agent","name":"Reviewer"}]"""
+                                    """{"agents":[{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"d3153f9f-724b-59c3-9614-ab78f231c4d3","instructions":"","model":"","name":"Reviewer","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0}]}"""
                                 "/api/installations/fixture/api/projects" ->
                                     """{"projects":[{"id":"46d045dd-9bce-51e3-8a99-65aa9384efc9","name":"Cairn","path":"/fixtures/cairn","description":"","baseBranch":"main","sourceMode":"remote","origin":"","source":null,"revision":"fixture-revision","createdAt":0}]}"""
                                 "/api/installations/fixture/api/mcps",
@@ -195,8 +195,32 @@ class WorkspaceJourneyTest {
                                                                                     ),
                                                                             agent =
                                                                                 Agent(
+                                                                                    exclusiveNodes =
+                                                                                        emptyList(),
+                                                                                    plugins =
+                                                                                        emptyList(),
+                                                                                    id =
+                                                                                        "00000000-0000-4000-8000-000000000000",
+                                                                                    revision = "",
+                                                                                    createdAt = 0,
+                                                                                    access =
+                                                                                        AccessPolicy(
+                                                                                            mcpTools =
+                                                                                                build
+                                                                                                    .cairn
+                                                                                                    .contracts
+                                                                                                    .McpTools(
+                                                                                                        emptyMap()
+                                                                                                    ),
+                                                                                            projects =
+                                                                                                null,
+                                                                                            skills =
+                                                                                                null,
+                                                                                            mcps =
+                                                                                                null,
+                                                                                        ),
                                                                                     name =
-                                                                                        "Reviewer"
+                                                                                        "Reviewer",
                                                                                 ),
                                                                         ),
                                                                 )
@@ -219,7 +243,7 @@ class WorkspaceJourneyTest {
                                     else "[$existingTask]"
                                 "/api/installations/fixture/api/tasks/task/run",
                                 "/api/installations/fixture/api/runs/run" ->
-                                    """{"id":"run","taskId":"task","status":"running","snapshot":{"task":$task,"agent":{"name":"Reviewer"},"project":null,"projects":[{"id":"46d045dd-9bce-51e3-8a99-65aa9384efc9","name":"Cairn","path":"/fixtures/cairn","origin":"","revision":"fixture","createdAt":0}]}}"""
+                                    """{"id":"run","taskId":"task","status":"running","snapshot":{"task":$task,"agent":${wireJson.encodeToString(newAgent().copy(name = "Reviewer"))},"project":null,"projects":[{"id":"46d045dd-9bce-51e3-8a99-65aa9384efc9","name":"Cairn","path":"/fixtures/cairn","origin":"","revision":"fixture","createdAt":0}]}}"""
                                 "/api/installations/fixture/api/runs/run/events" ->
                                     """[{"id":1,"createdAt":1789315200000,"type":"run.started","text":"Le worker démarre la mission"}]"""
                                 else ->

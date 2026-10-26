@@ -571,14 +571,14 @@ mod tests {
         let store = crate::store::Store::open(root.path()).unwrap();
         store
             .transaction(|db| {
-                let source = json!({ "id": "source" });
-                let target = json!({ "id": "target" });
-                db.put("agents", &target)?;
+                let source = json!({ "id": "00000000-0000-4000-8000-000000000010" });
+                let target = json!({ "id": "00000000-0000-4000-8000-000000000011" });
+                db.save_agent(&crate::agent_fixture::profile(target.clone())?)?;
                 db.put(
                     connections::KIND,
                     &json!({
                         "id": "instance", "pluginId": "fixture", "enabled": true,
-                        "agentIds": ["target"],
+                        "agentIds": ["00000000-0000-4000-8000-000000000011"],
                     }),
                 )?;
                 let captured_run = json!({
@@ -589,7 +589,7 @@ mod tests {
                 let chat = db.put(
                     "chats",
                     &json!({
-                        "id": "chat", "agentId": "target", "runId": "run",
+                        "id": "chat", "agentId": "00000000-0000-4000-8000-000000000011", "runId": "run",
                         "wakeup": {
                             "messageId": "message", "wakeAt": now() + 60_000,
                             "condition": { "type": "fixture_ready", "pluginId": "fixture" },

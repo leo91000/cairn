@@ -1,6 +1,6 @@
+import type { Agent } from './generated/typescript/Agent'
 import type { Project } from './generated/typescript/Project'
 import { z } from 'zod'
-import { LOCAL_NODE_ID } from './nodes'
 
 export const name = z.string().trim().min(1).max(100)
 export const id = z.string().uuid()
@@ -10,58 +10,6 @@ export const reasoningEffort = z.string().max(40).regex(/^(?:[a-z][a-z0-9_-]*)?$
 // Tiers are catalog strings too, so a new speed needs no app release.
 export const serviceSpeed = z.string().max(40).regex(/^(?:[a-z][a-z0-9_-]*)?$/)
 export { MAIN_AGENT_ID } from './constants'
-export const accessPolicy = z.object({
-  backend: z.enum(['firecracker', 'native']).default('firecracker'),
-  nodes: z.array(id).max(100).nullable().default(() => [LOCAL_NODE_ID]),
-  projects: z.array(id).max(100).nullable().default(null),
-  skills: z.array(z.string().max(160)).max(100).nullable().default(null),
-  mcps: z.array(id).max(100).nullable().default(null),
-  mcpTools: z.record(id, z.array(z.string().min(1).max(200)).max(500)).default({}),
-  installation: z.boolean().default(false),
-  // Hands tasks to conversations of agents it covers, on any coding agent and model.
-  delegation: z.boolean().default(false),
-  sandbox: z.enum(['yolo', 'workspace-write', 'read-only']).default('yolo'),
-})
-export const agentInput = z.object({
-  name,
-  provider: z.enum(['codex', 'claude', 'opencode']).default('codex'),
-  description: z.string().max(500).default(''),
-  model: z.string().max(100).default(''),
-  reasoning: reasoningEffort.default('high'),
-  speed: serviceSpeed.default(''),
-  instructions: z.string().max(20000).default(''),
-  // Zero means no time limit; positive values are an optional execution budget.
-  timeoutMinutes: z.number().int().min(0).max(720).default(0),
-  access: accessPolicy.default(() => accessPolicy.parse({})),
-  // Live grants, checked on every use rather than captured with a run, and kept out of
-  // `access` so earlier releases compare the same policy: nodes this agent may reserve
-  // exclusively (suspending other conversations) and plugin instances such as 1Password
-  // service accounts.
-  exclusiveNodes: z.array(id).max(100).default([]),
-  plugins: z.array(id).max(100).default([]),
-  // An acknowledgement for this save, removed before persistence; never a profile mode.
-  nativeNodeReviews: z.array(id).max(100).optional().describe('Owner confirmation of specifically reviewed administrator node IDs already covered by access.nodes, including wildcard access. Reviews only these nodes while preserving the placement selection. These grant unrestricted passwordless sudo on the real host, including access to locally present credentials and services. Never infer confirmation from an all-node grant or conversion. Not saved on the agent; delegated installation agents cannot approve it.'),
-})
-export const agentUpdate = z.object({
-  provider: agentInput.shape.provider.removeDefault().optional(),
-  name: agentInput.shape.name.optional(),
-  description: agentInput.shape.description.removeDefault().optional(),
-  model: agentInput.shape.model.removeDefault().optional(),
-  reasoning: agentInput.shape.reasoning.removeDefault().optional(),
-  speed: agentInput.shape.speed.removeDefault().optional(),
-  instructions: agentInput.shape.instructions.removeDefault().optional(),
-  timeoutMinutes: agentInput.shape.timeoutMinutes.removeDefault().optional(),
-  access: accessPolicy.extend({
-    // A partial update from an older client must not restore local-runner access.
-    nodes: accessPolicy.shape.nodes.removeDefault().optional(),
-    backend: accessPolicy.shape.backend.removeDefault().optional(),
-    installation: accessPolicy.shape.installation.removeDefault().optional(),
-    delegation: accessPolicy.shape.delegation.removeDefault().optional(),
-  }).optional(),
-  exclusiveNodes: agentInput.shape.exclusiveNodes.removeDefault().optional(),
-  plugins: agentInput.shape.plugins.removeDefault().optional(),
-  nativeNodeReviews: agentInput.shape.nativeNodeReviews,
-})
 export const taskInput = z.object({
   name,
   prompt: z.string().trim().min(1).max(50000),
@@ -75,19 +23,8 @@ export const taskInput = z.object({
   archived: z.boolean().default(false),
   worktree: z.boolean().default(true),
 })
-export interface AgentAvatar {
-  status: 'generating' | 'ready' | 'failed'
-  revision: string
-  url?: string | null
-  error?: string
-}
-export type Agent = z.infer<typeof agentInput> & {
-  avatar?: AgentAvatar
-  id: string
-  createdAt: number
-  // Changes on every save; sent back so a stale editor cannot overwrite newer access.
-  revision?: string
-}
+export type { Agent } from './generated/typescript/Agent'
+export type { AgentAvatar } from './generated/typescript/AgentAvatar'
 export type { Project } from './generated/typescript/Project'
 export type Task = z.infer<typeof taskInput> & {
   id: string

@@ -593,7 +593,7 @@ async fn empty_and_converted_chats_start_their_inactivity_clock_at_creation() {
             let agent = app
                 .service
                 .store
-                .get("agents", cairn_installation::config::MAIN_AGENT_ID)
+                .agent_snapshot(cairn_installation::config::MAIN_AGENT_ID)
                 .await
                 .unwrap()
                 .unwrap();

@@ -1,3 +1,4 @@
+use common::AgentFixture;
 use common::ProjectFixture;
 
 mod common;
@@ -62,6 +63,8 @@ async fn creation_replays_survive_restart_without_overwriting_later_edits() {
                 .into_iter()
                 .map(|project| serde_json::to_value(project).unwrap())
                 .collect::<Vec<_>>()
+        } else if kind == "agents" {
+            restarted.store.agent_snapshots().await.unwrap()
         } else {
             restarted.store.list(kind).await.unwrap()
         };
@@ -87,7 +90,7 @@ async fn creation_identity_is_validated_and_cannot_replace_an_update_identity() 
     ] {
         assert!(
             service
-                .agent(json!({ "name": "Agent", "creationId": invalid }), None)
+                .agent_fixture(json!({ "name": "Agent", "creationId": invalid }), None)
                 .await
                 .is_err()
         );
@@ -116,12 +119,12 @@ async fn creation_identity_is_validated_and_cannot_replace_an_update_identity() 
         );
     }
     let original = service
-        .agent(json!({ "name": "Original" }), None)
+        .agent_fixture(json!({ "name": "Original" }), None)
         .await
         .unwrap();
     let replacement_id = id();
     let updated = service
-        .agent(
+        .agent_fixture(
             json!({ "name": "Updated", "creationId": replacement_id }),
             original["id"].as_str(),
         )
@@ -131,7 +134,7 @@ async fn creation_identity_is_validated_and_cannot_replace_an_update_identity() 
     assert!(
         service
             .store
-            .get("agents", &replacement_id)
+            .agent_snapshot(&replacement_id)
             .await
             .unwrap()
             .is_none()
@@ -173,7 +176,7 @@ async fn creation_identity_cannot_overwrite_another_resource_kind() {
     let service = Service::new(common::config(root.path())).await.unwrap();
     let creation_id = id();
     let original = service
-        .agent(json!({ "name": "Agent", "creationId": creation_id }), None)
+        .agent_fixture(json!({ "name": "Agent", "creationId": creation_id }), None)
         .await
         .unwrap();
     assert!(
@@ -199,7 +202,10 @@ async fn creation_identity_cannot_overwrite_another_resource_kind() {
             .await
             .is_err()
     );
-    assert_eq!(service.get("agents", &creation_id).await.unwrap(), original);
+    assert_eq!(
+        service.agent_snapshot(&creation_id).await.unwrap(),
+        original
+    );
     assert!(service.store.projects().await.unwrap().is_empty());
     assert!(service.store.list("tasks").await.unwrap().is_empty());
 }
@@ -211,7 +217,7 @@ async fn save(
     existing: Option<&str>,
 ) -> Value {
     match kind {
-        "agents" => service.agent(input, existing).await,
+        "agents" => service.agent_fixture(input, existing).await,
         "projects" => service.project_fixture(input, existing).await,
         _ => service.task(input, existing).await,
     }

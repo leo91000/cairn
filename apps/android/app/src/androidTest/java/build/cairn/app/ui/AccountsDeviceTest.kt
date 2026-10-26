@@ -63,6 +63,11 @@ class AccountsDeviceTest {
                                             ?.endsWith("/api/projects") == true
                                     )
                                         """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
                                     else "[]"
                             }
                         return MockResponse().setBody(result)
@@ -108,10 +113,8 @@ class AccountsDeviceTest {
     }
 
     @Test
-    fun providerSerializationPreservesExistingAgents() {
-        val old = wireJson.decodeFromString<Agent>("""{"name":"Existing"}""")
-        assertEquals("codex", old.provider)
-        val claude = old.copy(provider = "claude", model = "sonnet", reasoning = "high")
+    fun generatedProviderSerializationPreservesTheCompleteProfile() {
+        val claude = newAgent().copy(provider = "claude", model = "sonnet", reasoning = "high")
         assertEquals(claude, wireJson.decodeFromString<Agent>(wireJson.encodeToString(claude)))
     }
 }

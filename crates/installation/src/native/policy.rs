@@ -153,7 +153,9 @@ pub(crate) fn task_grant(
     previous: Option<&Value>,
     source: &Origin,
 ) -> Result<Value> {
-    let agent = db.get("agents", text(task, "agentId"))?.unwrap_or_default();
+    let agent = db
+        .agent_snapshot(text(task, "agentId"))?
+        .unwrap_or_default();
     let mut grant = provenance(db, source)?;
     let mut people = principals(&grant).as_array().cloned().unwrap_or_default();
     if let Some(previous) = previous {
@@ -205,7 +207,7 @@ pub(crate) fn task_grant(
 /// Parent node limits are a ceiling; descendants cannot add a node or caller.
 pub fn allows(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
     let agent = db
-        .get("agents", crate::nodes::run_agent(run))?
+        .agent_snapshot(crate::nodes::run_agent(run))?
         .unwrap_or_default();
     allows_agent(db, run, node, &agent, Admission::Execution)
 }
@@ -217,7 +219,7 @@ pub(crate) fn allows_migration_source(db: &Db<'_>, run: &Value, node: &Value) ->
         return Ok(false);
     }
     let mut agent = db
-        .get("agents", crate::nodes::run_agent(run))?
+        .agent_snapshot(crate::nodes::run_agent(run))?
         .unwrap_or_default();
     agent["access"]["backend"] = "native".into();
     agent["access"]["nodes"] = json!([node["id"]]);
@@ -228,7 +230,7 @@ pub(crate) fn allows_migration_source(db: &Db<'_>, run: &Value, node: &Value) ->
 
 fn authority_allows(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
     let agent = db
-        .get("agents", crate::nodes::run_agent(run))?
+        .agent_snapshot(crate::nodes::run_agent(run))?
         .unwrap_or_default();
     allows_agent(db, run, node, &agent, Admission::Authority)
 }
@@ -296,7 +298,7 @@ fn allows_agent(
             return Ok(false);
         };
         let current = db
-            .get("agents", crate::nodes::run_agent(&parent))?
+            .agent_snapshot(crate::nodes::run_agent(&parent))?
             .unwrap_or_default();
         // Historical and management-created edges retain the installation requirement.
         // Only delegate_task records the narrower capability on its own parent edge.
@@ -350,7 +352,9 @@ pub fn authorize_caller(db: &Db<'_>, agent: &Value, caller: Option<&str>) -> Res
 }
 
 pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<Value> {
-    let agent = db.get("agents", text(chat, "agentId"))?.unwrap_or_default();
+    let agent = db
+        .agent_snapshot(text(chat, "agentId"))?
+        .unwrap_or_default();
     let run = db.run(text(chat, "runId"))?.unwrap_or_default();
     if run["backendMigration"].is_object() {
         return Err(Error::conflict(
@@ -535,7 +539,7 @@ pub async fn refresh(s: &Service) -> Result<()> {
 }
 
 pub async fn refresh_agent(s: &Service, agent: &str) -> Result<()> {
-    if native(&s.get("agents", agent).await?) {
+    if native(&s.agent_snapshot(agent).await?) {
         refresh(s).await?;
     }
     Ok(())
@@ -571,14 +575,14 @@ pub async fn authorize_request(s: &Service, input: &crate::http::Input) -> Resul
     let agent = match parts.as_slice() {
         ["chats", id, ..] => {
             let chat = s.get("chats", id).await?;
-            s.get("agents", text(&chat, "agentId")).await?
+            s.agent_snapshot(text(&chat, "agentId")).await?
         }
         ["runs", id, ..] | ["nodes", "placement", id, ..] => {
             let run = s.store.run(id).await?;
             if !native(&run["snapshot"]["agent"]) {
                 return Ok(());
             }
-            s.get("agents", crate::nodes::run_agent(&run)).await?
+            s.agent_snapshot(crate::nodes::run_agent(&run)).await?
         }
         _ => return Ok(()),
     };

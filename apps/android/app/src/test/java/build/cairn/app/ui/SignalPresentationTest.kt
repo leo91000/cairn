@@ -100,7 +100,11 @@ class SignalPresentationTest {
             )
         val tasks =
             listOf(
-                Task("daily", "Revue quotidienne", agentId = "agent"),
+                Task(
+                    "daily",
+                    "Revue quotidienne",
+                    agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                ),
                 Task("old", "Archivée", archived = true),
             )
         val activity =
@@ -111,7 +115,25 @@ class SignalPresentationTest {
                     status = "failed",
                     trigger = "manual",
                     finishedAt = 50,
-                    snapshot = Snapshot(agent = Agent("agent", "Reviewer")),
+                    snapshot =
+                        Snapshot(
+                            agent =
+                                Agent(
+                                    exclusiveNodes = emptyList(),
+                                    plugins = emptyList(),
+                                    revision = "",
+                                    createdAt = 0,
+                                    access =
+                                        AccessPolicy(
+                                            mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                                            projects = null,
+                                            skills = null,
+                                            mcps = null,
+                                        ),
+                                    id = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                                    name = "Reviewer",
+                                )
+                        ),
                 ),
                 Run("t2", taskId = "old", status = "failed", trigger = "manual"),
                 Run("t3", taskId = "chat-task", status = "failed", trigger = "chat"),
@@ -494,8 +516,38 @@ class SignalPresentationTest {
             Workspace(
                 agents =
                     listOf(
-                        Agent("rev", "Revue de code", description = "Relit les PR"),
-                        Agent("ops", "Ops", description = "Revue des déploiements"),
+                        Agent(
+                            exclusiveNodes = emptyList(),
+                            plugins = emptyList(),
+                            revision = "",
+                            createdAt = 0,
+                            access =
+                                AccessPolicy(
+                                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                                    projects = null,
+                                    skills = null,
+                                    mcps = null,
+                                ),
+                            id = "5ca9d6c5-caa1-5234-8069-c22f7aa2da85",
+                            name = "Revue de code",
+                            description = "Relit les PR",
+                        ),
+                        Agent(
+                            exclusiveNodes = emptyList(),
+                            plugins = emptyList(),
+                            revision = "",
+                            createdAt = 0,
+                            access =
+                                AccessPolicy(
+                                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                                    projects = null,
+                                    skills = null,
+                                    mcps = null,
+                                ),
+                            id = "ae334e0d-2067-57a0-8791-222ba70e89e8",
+                            name = "Ops",
+                            description = "Revue des déploiements",
+                        ),
                     ),
                 projects =
                     listOf(
@@ -514,7 +566,12 @@ class SignalPresentationTest {
             )
         val chats =
             listOf(
-                Chat("c", "Relecture PR", agentName = "Revue de code", agentId = "rev"),
+                Chat(
+                    "c",
+                    "Relecture PR",
+                    agentName = "Revue de code",
+                    agentId = "5ca9d6c5-caa1-5234-8069-c22f7aa2da85",
+                ),
                 Chat("d", "Autre", agentName = "Cairn"),
             )
         val hits = searchWorkspace("revue", chats, state)
@@ -530,7 +587,10 @@ class SignalPresentationTest {
         )
         assertTrue(hits.none { it.id == "z" || it.id == "d" })
         // Title matches first: the agent named "Revue de code" before "Ops" (description only).
-        assertTrue(hits.indexOfFirst { it.id == "rev" } < hits.indexOfFirst { it.id == "ops" })
+        assertTrue(
+            hits.indexOfFirst { it.id == "5ca9d6c5-caa1-5234-8069-c22f7aa2da85" } <
+                hits.indexOfFirst { it.id == "ae334e0d-2067-57a0-8791-222ba70e89e8" }
+        )
         assertEquals("Chaque lundi · 09:00", hits.first { it.kind == SearchKind.MISSION }.detail)
         assertEquals("Revue de code", hits.first { it.kind == SearchKind.CHAT }.avatar)
         assertTrue(searchWorkspace("   ", chats, state).isEmpty())

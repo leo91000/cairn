@@ -1512,7 +1512,7 @@ async fn resident_logs_in_and_releases_managed_account_for_each_native_turn() {
             "cwd": root.path(), "sandbox": "yolo", "reasoning": "low",
             "output": root.path().join("reply.md"), "inputDirectory": root.path(),
             "writableRoots": [],
-            "execution": { "messageId": format!("message-{index}"), "text": "fixture:auth-refresh", "attachments": [], },
+            "execution": { "messageId": format!("message-{index}"), "text": "fixture:auth-refresh", "attachments": [] },
         });
         let (events, mut received) = tokio::sync::mpsc::channel::<Value>(64);
         let output = tokio::spawn(async move {

@@ -1,5 +1,9 @@
 //! Test-only manager for the disposable native-runtime/S3 qualification.
 //! JSONL stays on private pipes: responses include synthetic scoped read grants.
+#[path = "../tests/common/agent_fixture.rs"]
+mod agent_fixture;
+
+use agent_fixture::{AgentFixture, StoreAgentFixture};
 use cairn_installation::{
     config::{Config, id, now},
     error::{Error, Result},
@@ -33,13 +37,13 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
     match command["op"].as_str().unwrap_or("") {
         "create" => {
             cairn_installation::validation::uuid(run_id)?;
-            let mut agent = s.agent(json!({ "name": "Fixture" }), None).await?;
+            let mut agent = s.agent_fixture(json!({ "name": "Fixture" }), None).await?;
             // The reserved local ID is a VM runner in production. Only this
             // disposable manager seeds it as native to route through the private
             // fixture bridge; do not weaken the real agent-save prohibition.
             agent["access"]["backend"] = "native".into();
             agent["access"]["nodes"] = json!([nodes::LOCAL_NODE_ID]);
-            s.store.put("agents", agent.clone()).await?;
+            s.store.put_agent_fixture(agent.clone()).await?;
             let run = json!({
                 "id": run_id, "taskId": id(), "projectId": "", "status": "succeeded", "createdAt": now(),
                 "isolated": true, "nodeId": nodes::LOCAL_NODE_ID, "executionBackend": "native",

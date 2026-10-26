@@ -1,4 +1,8 @@
 //! Test-only stdin/stdout bridge to the native fixture APIs. Never shipped in the image.
+#[path = "../tests/common/agent_fixture.rs"]
+mod agent_fixture;
+
+use agent_fixture::AgentFixture;
 use cairn_installation::{
     config::Config,
     error::{Error, Result},
@@ -32,7 +36,7 @@ async fn main() -> Result<()> {
             let service = open_service(config).await?;
             let existing = args.get(1).and_then(Value::as_str);
             match operation {
-                "agent" => service.agent(arg(0), existing).await?,
+                "agent" => service.agent_fixture(arg(0), existing).await?,
                 "project" => {
                     let settings = serde_json::from_value(arg(0))?;
                     let project = if let Some(id) = existing {
@@ -89,9 +93,16 @@ async fn main() -> Result<()> {
             let string = |index: usize| args.get(index).and_then(Value::as_str).unwrap_or("");
             let arg = |index: usize| args.get(index).cloned().unwrap_or(Value::Null);
             let result = match operation {
+                "get" if string(0) == "agents" => {
+                    db.agent_snapshot(string(1))?.unwrap_or(Value::Null)
+                }
                 "get" => db.get(string(0), string(1))?.unwrap_or(Value::Null),
+                "list" if string(0) == "agents" => db.agent_snapshots()?.into(),
                 "list" => db.list(string(0))?.into(),
                 "projects" => serde_json::to_value(db.projects()?)?,
+                "put" if string(0) == "agents" => {
+                    serde_json::to_value(db.save_agent(&serde_json::from_value(arg(1))?)?)?
+                }
                 "put" => db.put(string(0), &arg(1))?,
                 "run" => db.run(string(0))?.unwrap_or(Value::Null),
                 "runs" => db.runs(None, None, 10000, 0, true)?.into(),
