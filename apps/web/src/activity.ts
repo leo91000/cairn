@@ -886,7 +886,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     // Codex lists the selected speed for the turn's model, possibly after an earlier attempt did not.
     if (event.type === 'status' && record(data.speed).confirmed === true) {
       artifact.title = 'Selected speed requested for this turn'
-      artifact.subtitle = 'Codex lists it for this model here'
+      artifact.subtitle = 'Codex lists it for this model here; the account’s plan decides whether it applies'
       artifact.status = 'info'
       artifact.attention = true
     }

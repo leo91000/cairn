@@ -145,9 +145,8 @@ test('keeps the Codex speed across models, for agents and queued chat turns', as
   await page.keyboard.press('Escape')
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Then go faster')
   await page.getByRole('button', { name: 'Queue', exact: true }).click()
-  await expect(page.getByTestId('queued-message')).toContainText('Fast speed')
-  // Every account confirms Fast for this model, so the queue claims it rather than requesting it.
-  await expect(page.getByTestId('queued-message')).not.toContainText('requested')
+  // A faster speed is a request: the turn says how it runs.
+  await expect(page.getByTestId('queued-message')).toContainText('Fast speed requested')
   await expect.poll(() => workspace.service.chats.detail(chatId).messages.find(m => m.status === 'queued')).toMatchObject({ model: 'fixture-fast', speed: 'priority' })
   await page.getByRole('button', { name: /^Queued message options/ }).first().click()
   await page.getByRole('dialog', { name: 'Queued message' }).getByRole('button', { name: 'Edit', exact: true }).click()

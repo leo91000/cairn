@@ -962,19 +962,21 @@ impl Chat<'_> {
         self.turn_submitted = true;
         let started = self.request("turn/start", params).await?;
         self.turn = text(&started["turn"], "id").to_owned();
-        // Only an attempt Codex accepted says how it asks for the speed.
+        self.acknowledge(text(&plan["execution"], "messageId"))
+            .await?;
+        // Only an attempt Codex accepted says how it asks for the speed, after its message.
         if let Some(notice) = speed_notice {
             self.emit(notice).await?;
         }
-        self.acknowledge(text(&plan["execution"], "messageId"))
-            .await
+        Ok(())
     }
 
     /// The tier sent with the turn, and the speed notice to record once Codex accepts it. Codex
     /// silently runs Standard for a tier its own catalog lacks, so a faster tier is checked against
-    /// this process's model list first. Codex falls back to its built-in list when it cannot fetch
-    /// the account's, so a listed tier is confirmed only when the account's own recent catalog
-    /// lists it for the same model too; otherwise it stays unconfirmed.
+    /// this process's model list first, and against the account's recent cached catalog. Codex
+    /// silently answers both with its built-in list, which offers Fast, when it cannot fetch the
+    /// account's: a list naming the model without the tier is the account's, and decides Standard;
+    /// a list naming the tier is only a request, which the account's plan may still not run.
     async fn service_tier(&mut self, plan: &Value) -> Result<(String, Option<Value>)> {
         let tier = text(plan, "serviceTier").to_owned();
         if tier.is_empty() || tier == crate::models::CODEX_STANDARD_TIER {
@@ -996,11 +998,16 @@ impl Chat<'_> {
                 check = crate::models::check_tier(self.session, &model, &tier) => check,
             }
         };
-        let account_offers = plan["accountTiers"][&model]
+        let account = plan["accountTiers"][&model]
             .as_array()
-            .is_some_and(|tiers| tiers.iter().any(|listed| listed == tier.as_str()));
+            .map(|tiers| tiers.iter().any(|listed| listed == tier.as_str()));
+        let check = match (check, account) {
+            (_, Some(false)) => crate::models::TierCheck::Lacking,
+            (crate::models::TierCheck::Offered, None) => crate::models::TierCheck::Unconfirmed,
+            (check, _) => check,
+        };
         let speed = match check {
-            crate::models::TierCheck::Offered if account_offers => json!({
+            crate::models::TierCheck::Offered => json!({
                 "requested": tier,
                 "confirmed": true,
             }),
@@ -1008,7 +1015,7 @@ impl Chat<'_> {
                 "requested": tier,
                 "applied": crate::models::STANDARD_SPEED,
             }),
-            _ => json!({
+            crate::models::TierCheck::Unconfirmed => json!({
                 "requested": tier,
                 "unconfirmed": true,
             }),

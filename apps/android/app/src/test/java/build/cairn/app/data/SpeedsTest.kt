@@ -22,7 +22,8 @@ class SpeedsTest {
     fun namesAQueuedSpeedAsItsModelRunsIt() {
         val fast = astra.copy(model = "fast")
         val deep = astra.copy(model = "deep", serviceTiers = emptyList())
-        assertEquals("vitesse Fast", speedNote("priority", "fast", listOf(fast, deep)))
+        // A faster speed is a request: each turn says how it runs.
+        assertEquals("vitesse Fast demandée", speedNote("priority", "fast", listOf(fast, deep)))
         assertEquals(
             "vitesse Standard (Fast non proposée)",
             speedNote("priority", "deep", listOf(fast, deep)),

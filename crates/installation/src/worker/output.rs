@@ -469,11 +469,11 @@ async fn speed_notice(s: &Service, id: &str, event: &Value) -> Result<Option<&'s
 
     Ok(match (outcome, earlier.as_deref()) {
         (outcome, Some(earlier)) if outcome == earlier => None,
-        ("confirmed", None) => {
-            Some("Codex lists the selected speed for this model here, so this turn asks for it.")
-        }
+        ("confirmed", None) => Some(
+            "Codex lists the selected speed for this model here, so this turn asks for it. The account’s plan decides whether it applies.",
+        ),
         ("confirmed", Some(_)) => Some(
-            "Codex now lists the selected speed for this model here, so this turn asks for it.",
+            "Codex now lists the selected speed for this model here, so this turn asks for it. The account’s plan decides whether it applies.",
         ),
         ("standard", _) => Some(
             "Codex doesn’t list the selected speed for this model here, so this turn runs at Standard speed.",

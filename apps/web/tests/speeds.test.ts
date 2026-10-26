@@ -36,7 +36,8 @@ describe('codex speeds', () => {
   it('names a queued speed as its model runs it', () => {
     const deep = model({ model: 'deep', serviceTiers: [] })
     const fast = model({ model: 'fast', serviceTiers: [{ id: 'priority', name: 'Fast', description: '' }] })
-    expect(speedNote('priority', 'fast', [fast, deep])).toBe('Fast speed')
+    // A faster speed is a request: each turn says how it runs.
+    expect(speedNote('priority', 'fast', [fast, deep])).toBe('Fast speed requested')
     expect(speedNote('priority', 'deep', [fast, deep])).toBe('Standard speed (Fast not offered)')
     // An empty model is the catalog's default.
     expect(speedNote('priority', '', [{ ...fast, isDefault: false }, { ...deep, isDefault: true }])).toBe('Standard speed (Fast not offered)')

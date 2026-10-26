@@ -402,7 +402,7 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                 else if (event.type == "status" && speedFallback(data))
                     "Codex ne liste pas la vitesse choisie pour ce modèle ici : Cairn demande Standard"
                 else if (event.type == "status" && speedConfirmed(data))
-                    "Codex la liste pour ce modèle ici"
+                    "Codex la liste pour ce modèle ici ; l’offre du compte décide si elle s’applique"
                 else if (event.type == "status" && speedUnconfirmed(data))
                     "Codex ne peut pas confirmer qu’il propose la vitesse choisie pour ce modèle ici ; ce tour peut passer en Standard"
                 else if (event.type == "engine.retry") engineRetryDetail(data)

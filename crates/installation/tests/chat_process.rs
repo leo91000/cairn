@@ -528,14 +528,14 @@ async fn a_faster_tier_is_checked_against_codex_own_model_list_before_the_turn()
         // Without a chosen model, Codex runs the one its configuration sets, not the catalog's
         // default: fixture-deep lists no Fast.
         ("", "priority", false, "default", Some("applied")),
-        // The process lists Fast, but the account's own catalog lacks it: Codex may have fallen
-        // back to its built-in list, so the speed stays unconfirmed.
+        // The process lists Fast, but the account's own catalog names the model without it: the
+        // process fell back to Codex's built-in list, and the account runs Standard.
         (
             "fixture-fast",
             "priority",
             false,
-            "priority",
-            Some("unconfirmed"),
+            "default",
+            Some("applied"),
         ),
         // Without the account's recent catalog, the process list alone confirms nothing.
         (
