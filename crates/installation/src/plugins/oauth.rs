@@ -35,6 +35,10 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
+mod configuration;
+
+pub(in crate::plugins) use configuration::ConfiguredAuthorization;
+
 mod external;
 mod setup;
 
@@ -1217,10 +1221,25 @@ pub async fn status(
     name: &str,
     account: &str,
 ) -> Result<Value> {
-    let resource = resources::get(s, plugin, instance, collection, resource).await?;
-    let connection = connections::get(s, plugin, instance).await?;
-    let package = registry::active(s, plugin).await?;
-    let provider = provider(&package.manifest, name, collection)?;
+    let target = resources::target::Target::active(s, plugin, instance).await?;
+    let provider = provider(target.manifest(), name, collection)?;
+    if provider.personal.is_none() {
+        let owner = Arc::new(super::operations::Owner::for_account(s, account).await?);
+        return ConfiguredAuthorization::select(
+            s,
+            target,
+            collection,
+            resource,
+            name,
+            resources::configuration::Configuration::owner(owner),
+        )
+        .await?
+        .status(s)
+        .await;
+    }
+    let resource = resources::get_for(s, target.clone(), collection, resource).await?;
+    let connection = target.connection();
+    let package = target.package();
     let (_, actor) = authority(s, provider, account).await?;
     let Some(value) = s
         .vault
@@ -1285,8 +1304,22 @@ pub async fn revoke(
     name: &str,
     account: &str,
 ) -> Result<Value> {
-    let package = registry::active(s, plugin).await?;
-    let provider = provider(&package.manifest, name, collection)?;
+    let target = resources::target::Target::active(s, plugin, instance).await?;
+    let provider = provider(target.manifest(), name, collection)?;
+    if provider.personal.is_none() {
+        let owner = Arc::new(super::operations::Owner::for_account(s, account).await?);
+        return ConfiguredAuthorization::select(
+            s,
+            target,
+            collection,
+            resource,
+            name,
+            resources::configuration::Configuration::owner(owner),
+        )
+        .await?
+        .revoke(s)
+        .await;
+    }
     let (_, actor) = authority(s, provider, account).await?;
     status(s, plugin, instance, collection, resource, name, account).await?;
     let resource = resources::get(s, plugin, instance, collection, resource).await?;

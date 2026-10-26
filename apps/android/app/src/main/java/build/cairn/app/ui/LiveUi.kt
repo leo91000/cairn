@@ -1067,9 +1067,11 @@ internal fun timelineEntries(
                         event.type in ENGINE_EVENTS &&
                             event.id !in hiddenEngine &&
                             engineAttention(event.type, presentation.data)
+                    // A speed Codex does not offer for the model runs at Standard, which it says.
+                    val speed = event.type == "status" && speedFallback(presentation.data)
                     if (
                         event.id !in recovered &&
-                            (presentation.failed || interrupted || connection || engine)
+                            (presentation.failed || interrupted || connection || engine || speed)
                     ) {
                         flushActivity()
                         if (connection) {

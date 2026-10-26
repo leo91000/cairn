@@ -254,3 +254,78 @@ pub async fn replace_owner_access(
         .unwrap();
     server
 }
+
+/// Calibrated remote-owner barrier for configuration publication tests.
+/// Only a synthetic fixture identity may be redirected to this local server.
+pub struct OwnerLookups {
+    pub calls: Arc<std::sync::atomic::AtomicUsize>,
+    pub hold_at: Arc<std::sync::atomic::AtomicUsize>,
+    pub entered: Arc<tokio::sync::Notify>,
+    pub release: Arc<tokio::sync::Notify>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for OwnerLookups {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+pub async fn owner_lookups(service: &Service) -> OwnerLookups {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let hold_at = Arc::new(AtomicUsize::new(usize::MAX));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (count, gate, ready, resume) = (
+        calls.clone(),
+        hold_at.clone(),
+        entered.clone(),
+        release.clone(),
+    );
+    let app = Router::new().route(
+        "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+        get(move || {
+            let (count, gate, ready, resume) =
+                (count.clone(), gate.clone(), ready.clone(), resume.clone());
+            async move {
+                if count.fetch_add(1, Ordering::SeqCst) + 1 == gate.load(Ordering::SeqCst) {
+                    ready.notify_one();
+                    resume.notified().await;
+                }
+                Json(TaskAuthorPolicy {
+                    owner: TaskAuthorGrant {
+                        account_id: "fixture-owner".into(),
+                        access_id: "fixture-owner".into(),
+                    },
+                    members: Vec::new(),
+                })
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let path = service
+        .config
+        .data_dir
+        .join("installation-relay/identity.json");
+    let mut identity: Value =
+        serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+    assert_eq!(identity["token"], "fixture-only");
+    assert_eq!(
+        identity["installationId"],
+        "00000000-0000-4000-8000-000000000055"
+    );
+    identity["origin"] = origin.into();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::fs::write(path, serde_json::to_vec(&identity).unwrap())
+        .await
+        .unwrap();
+    OwnerLookups {
+        calls,
+        hold_at,
+        entered,
+        release,
+        server,
+    }
+}

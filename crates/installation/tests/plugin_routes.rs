@@ -215,6 +215,9 @@ async fn configured_fixture_with_runner(
                 end
             end,
             interaction = function(event)
+                if event.controlBarrier then
+                    cairn.http.request({url = 'https://api.example.test/control-barrier'})
+                end
                 if event.reset then
                     local ok, result = pcall(function()
                         return cairn.conversations.reset({conversation = event.chat, thread = event.context.thread, shared = true})

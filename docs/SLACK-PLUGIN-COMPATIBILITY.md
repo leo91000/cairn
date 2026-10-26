@@ -1,6 +1,6 @@
 # Slack foundations: current data contracts
 
-The integration follows Main `85f9e805`, retaining the data contract introduced
+The integration follows Main `978faf70`, retaining the data contract introduced
 by `40a59561`: the installation reads only database version **2**. Previous installation versions are not
 migrated or opened as current data. Manager, runner, nodes and guests must use the
 same release. The next production release requires an owner-authorized complete

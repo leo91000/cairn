@@ -329,7 +329,8 @@ impl Driver for Opencode {
         false
     }
 
-    async fn supports(&self, s: &Service, id: &str, model: &str) -> Result<bool> {
+    // OpenCode exposes no speed choice.
+    async fn supports(&self, s: &Service, id: &str, model: &str, _speed: &str) -> Result<bool> {
         if model.is_empty() {
             return Ok(true);
         }

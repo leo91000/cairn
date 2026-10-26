@@ -966,6 +966,16 @@ this API remain in the delivery checklist.
 
 ### Host-managed resource OAuth
 
+`manage_plugin_oauth` exposes redacted `status` and local `revoke` for a named
+nonpersonal resource provider on an active instance through public owner MCP and
+`cairn_installation`. It uses the same captured owner/target/resource checks as the
+web and Android controls. Status reveals scopes and expiry, never credentials.
+Native revocation requires the agent's separate existing instance grant, retained
+through the deletion transaction; installation management cannot grant itself one.
+Revocation also retires in-flight resource consent. Starting/finishing consent,
+personal authorizations and inert drafts remain outside this operation's current
+slice and are still required for complete management parity.
+
 The `oauth` capability declares up to eight providers for resource collections.
 The host captures token responses; scripts receive neither authorization codes,
 client secrets, access tokens nor refresh tokens. Providers connect either an
@@ -1880,7 +1890,9 @@ The transport worker follows Discord's Gateway lifecycle, checked against
   instances, and Identify writes are paced five seconds apart without blocking
   heartbeats. Failed budget lookups retry without identifying, and resets trigger a
   fresh lookup. Observation expiry includes the time spent dialing and waiting for
-  Hello, so an old window never lowers the new window’s balance. Resumes use the session's `resume_gateway_url`;
+  Hello, so an old window never lowers the new window’s balance. An unused bot's
+  positive budget with `reset_after: 0` can identify immediately, with a bounded
+  daily reservation until Discord reports its reset countdown. Resumes use the session's `resume_gateway_url`;
 - Hello must arrive within 60 seconds and READY within 15 seconds of Identify,
   otherwise it reconnects (starting over after a missing READY);
 - heartbeats start after a random part of the interval and carry the last sequence;

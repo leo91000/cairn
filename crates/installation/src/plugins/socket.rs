@@ -409,10 +409,15 @@ pub async fn deliver(
     event: Value,
 ) -> Result<Value> {
     let digest = super::registry::digest(session.manifest(), session.sources())?;
-    super::registry::require_digest(s, &connection.plugin_id, &digest).await?;
+    let approved = super::registry::approved(s, &connection.plugin_id).await?;
+    if approved.package.digest != digest {
+        return Err(Error::forbidden("The loaded plugin package changed."));
+    }
     let context = Context {
         management: None,
-        local_authority: None,
+        local_authority: Some(Arc::new(super::scope::LocalAuthority::for_package(
+            &approved,
+        ))),
         connection: connection.clone(),
         manifest: session.manifest().clone(),
         event: json!({ "name": "socket", "revision": connection.revision }),

@@ -244,9 +244,11 @@ hour, and refresh tokens after 30 days. Browser sessions are separate credential
 
 | Scope | Operations |
 | --- | --- |
-| `read` | `list_agents`, `list_projects`, `list_tasks`, `list_runs`, `get_run`, `read_run_content`, `list_skills`, `read_skill`, `list_mcps` |
+| `read` | `list_agents`, `list_models`, `list_projects`, `list_tasks`, `list_runs`, `get_run`, `read_run_content`, `list_skills`, `read_skill`, `list_mcps` |
 | `manage` | `save_agent`, `update_agent`, `save_project`, `create_task`, `update_task`, `save_skill`, `edit_skill_files`, `create_mcp`, `update_mcp`, `test_mcp`, `disconnect_mcp`, `delete_mcp` |
 | `run` | `run_task`, `cancel_run` |
+
+`list_models` returns a coding agent's catalog as the app's picker shows it, including each Codex model's `serviceTiers` (speed id, Codex's name and usage description, `limited` when some enabled accounts lack it) and Codex's catalog `defaultServiceTier`, which Cairn does not apply. Agents (`save_agent`, `update_agent`) and messages (`send_chat_message`, `edit_chat_message`) accept `speed`: a tier id, `standard`, or empty to inherit the agent's or conversation's speed, otherwise Standard. A message naming the coding agent of the conversation's latest turn keeps that turn's speed, as the apps show it, while an omitted model and reasoning come from the agent; an edit that omits `speed` keeps the queued one. A speed is rejected when the turn runs with Claude Code or OpenCode, named by the message or inherited from the queue or conversation; `update_agent` that switches to one of them without sending `speed` clears it.
 
 `save_agent` and `save_project` create new records. `update_task` replaces the
 existing task configuration; `save_skill` creates or replaces its SKILL.md;
@@ -360,3 +362,12 @@ An explicit owner may adopt the existing conversation into their native grant;
 installation agents retain their bounded parent grant. Web and Android expose the
 same confirmed operation from execution-node details. See
 [the migration decision](adr/0054-explicit-conversation-backend-migration.md).
+
+### Resource OAuth management slice
+
+`manage_plugin_oauth` (manage scope) selects `pluginId`, `instanceId`, `collection`,
+`resourceId` and `provider`, with `action: status | revoke`. It returns redacted
+scope/expiry status or disconnects a nonpersonal active-resource authorization,
+matching the owner web/Android controls. The native installation tool additionally
+requires its existing private instance grant to revoke. Consent start/finish,
+personal authorization and inert setup remain incomplete tool surfaces.

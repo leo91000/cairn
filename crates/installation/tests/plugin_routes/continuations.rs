@@ -2,6 +2,12 @@
 //! is proved separately by slack::recovery, without seeded execution results.
 #[path = "agent_effects.rs"]
 mod agent_effects;
+#[path = "controls_approval.rs"]
+mod controls_approval;
+#[path = "entry_points.rs"]
+mod entry_points;
+#[path = "task_mutations.rs"]
+mod task_mutations;
 
 use super::*;
 use cairn_installation::{chats::wait_for, plugins::work};
@@ -23,13 +29,17 @@ impl Started {
     }
 
     async fn with_runner(origin: Option<String>, runner: &str) -> Self {
+        Self::with_access(origin, runner, false).await
+    }
+
+    async fn with_access(origin: Option<String>, runner: &str, installation: bool) -> Self {
         let (root, s, instance, resource, app) = configured_fixture_with_runner(None, runner).await;
         s.plugins.route_http_to(origin.clone());
         let agent = s
             .agent(
                 json!({
                     "name": "Dedicated helper",
-                    "access": { "projects": [], "installation": false },
+                    "access": { "projects": [], "installation": installation },
                 }),
                 None,
             )
@@ -626,4 +636,129 @@ async fn a_delayed_progress_result_cannot_resurrect_a_replaced_reservation() {
     assert_eq!(deliveries.len(), 20);
     assert!(!deliveries.iter().any(|row| row["id"] == original["id"]));
     assert!(deliveries.iter().any(|row| row["id"] == replaced["id"]));
+}
+
+#[tokio::test]
+async fn upstream_mcp_retains_authentication_before_body_read_and_mutex_wait() {
+    use std::{
+        convert::Infallible,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+    for phase in ["body", "mutex"] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let upstream = axum::Router::new().fallback(axum::routing::post(
+            move |axum::Json(input): axum::Json<Value>| {
+                let count = count.clone();
+                async move {
+                    let result = match text(&input, "method") {
+                        "server/discover" => json!({
+                            "supportedVersions": [cairn_installation::mcp_client::MODERN],
+                            "capabilities": {"tools": {}},
+                        }),
+                        "tools/call" => {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            json!({"content": [{"type": "text", "text": "entry-private-result"}]})
+                        }
+                        method => panic!("Unexpected fixture method: {method}"),
+                    };
+                    axum::Json(json!({"jsonrpc": "2.0", "id": input["id"], "result": result}))
+                }
+            },
+        ));
+        let (origin, upstream) = common::serve_locally(upstream).await;
+        let f = Started::new(None).await;
+        let connection =
+            f.s.mcps
+                .save(
+                    &f.s,
+                    json!({
+                        "name": "Entry-bound upstream", "url": origin, "allowPrivateNetwork": true,
+                    }),
+                    None,
+                )
+                .await
+                .unwrap();
+        let configuration = f.s.mcps.run_configuration(&f.s, &f.run).await.unwrap();
+        let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
+        let app = cairn_installation::http::router(f.s.clone()).await.unwrap();
+        let path = format!("/mcp-gateway/{}", text(&connection, "id"));
+        let frame = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "probe", "arguments": {}}}).to_string();
+        let invoke = |app: axum::Router, bearer: String, path: String, body: Body| async move {
+            let response = common::send(
+                &app,
+                common::request("POST", &path)
+                    .header("authorization", format!("Bearer {bearer}"))
+                    .header(
+                        "mcp-protocol-version",
+                        cairn_installation::mcp_client::MODERN,
+                    )
+                    .header("mcp-method", "tools/call")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await;
+            (response.status(), common::read_json(response).await)
+        };
+        let first = invoke(
+            app.clone(),
+            bearer.clone(),
+            path.clone(),
+            Body::from(frame.clone()),
+        )
+        .await;
+        assert_eq!(first.0, StatusCode::OK, "{first:?}");
+        assert!(first.1.to_string().contains("entry-private-result"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let locked = if phase == "mutex" {
+            Some(f.s.mcps.lock(text(&connection, "id")).await)
+        } else {
+            None
+        };
+        let body_entered = Arc::new(Notify::new());
+        let body_release = Arc::new(Notify::new());
+        let (entered, release, packet) =
+            (body_entered.clone(), body_release.clone(), frame.clone());
+        let body = Body::from_stream(futures_util::stream::once(async move {
+            // respond() authenticates before it polls the request body. This is
+            // a real transport boundary proving the old caller was admitted.
+            entered.notify_one();
+            if phase == "body" {
+                release.notified().await;
+            }
+            Ok::<_, Infallible>(axum::body::Bytes::from(packet))
+        }));
+        let pending = tokio::spawn(invoke(app.clone(), bearer.clone(), path.clone(), body));
+        tokio::time::timeout(std::time::Duration::from_secs(5), body_entered.notified())
+            .await
+            .unwrap();
+        let was_pending = !pending.is_finished();
+        let package = registry::active(&f.s, "router").await.unwrap();
+        registry::approve(&f.s, "router", "1", &package.digest)
+            .await
+            .unwrap();
+        body_release.notify_one();
+        drop(locked);
+        let result = pending.await.unwrap();
+        assert!(
+            was_pending,
+            "The original request did not reach the held {phase} boundary"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "A retired authentication started upstream I/O after {phase}: {result:?}"
+        );
+        assert!(
+            !result.1.to_string().contains("entry-private-result"),
+            "{result:?}"
+        );
+        // A new invocation gets its own current approval; rejection is scoped to
+        // the operation that already captured the retired proof.
+        let fresh = invoke(app, bearer, path, Body::from(frame)).await;
+        assert_eq!(fresh.0, StatusCode::OK, "{fresh:?}");
+        assert!(fresh.1.to_string().contains("entry-private-result"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        upstream.abort();
+    }
 }

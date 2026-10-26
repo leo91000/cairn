@@ -128,6 +128,7 @@ fn same_content(a: &Value, b: &Value) -> bool {
         && text(a, "provider") == text(b, "provider")
         && a["model"] == b["model"]
         && text(a, "reasoning") == text(b, "reasoning")
+        && text(a, "speed") == text(b, "speed")
         && crate::attachments::same(a, b)
 }
 
@@ -239,15 +240,78 @@ pub(crate) fn history_run(db: &Db<'_>, id: &str) -> Result<String> {
     })
 }
 
-/// Steering joins the running turn, whose provider, model and reasoning are fixed.
+/// Steering joins the running turn, whose provider, model, reasoning and speed are fixed.
 fn changes_running_agent(message: &Value, run: &Value) -> Result<bool> {
     let agent = &run["snapshot"]["agent"];
     let provider = Value::from(Provider::of_run(run)?.as_str());
-    let differs =
-        |key: &str, current: &Value| !text(message, key).is_empty() && message[key] != *current;
+    let differs = |key: &str, current: &Value| {
+        !text(message, key).is_empty() && text(message, key) != current.as_str().unwrap_or("")
+    };
+    // A turn without a speed runs at Standard, so asking for Standard changes nothing.
+    let speed = |value: &str| {
+        if value.is_empty() {
+            crate::models::STANDARD_SPEED.to_owned()
+        } else {
+            value.to_owned()
+        }
+    };
+    let changes_speed = !text(message, "speed").is_empty()
+        && speed(text(message, "speed")) != speed(text(agent, "speed"));
     Ok(differs("provider", &provider)
         || differs("model", &agent["model"])
-        || differs("reasoning", &agent["reasoning"]))
+        || differs("reasoning", &agent["reasoning"])
+        || changes_speed)
+}
+
+/// The coding agent a message's turn runs with: the one it names, else the running turn's
+/// for a steering message, else the one the queued messages ahead of it, the conversation's
+/// latest turn or its agent select.
+fn message_provider(db: &Db<'_>, chat: &Value, message: &Value) -> Result<String> {
+    if !text(message, "provider").is_empty() {
+        return Ok(text(message, "provider").to_owned());
+    }
+    let run = db.run(text(chat, "runId"))?;
+    if message["mode"] == MessageMode::Steer
+        && let Some(run) = run.as_ref().filter(|run| run_is_active(run))
+    {
+        return Ok(Provider::of_run(run)?.as_str().to_owned());
+    }
+
+    let ahead = db
+        .messages(text(chat, "id"))?
+        .into_iter()
+        .take_while(|queued| queued["id"] != message["id"])
+        .filter(|queued| {
+            queued["status"] == MessageStatus::Queued || queued["status"] == MessageStatus::Sending
+        })
+        .filter(|queued| !text(queued, "provider").is_empty())
+        .last();
+    if let Some(queued) = ahead {
+        return Ok(text(&queued, "provider").to_owned());
+    }
+
+    if let Some(run) = run {
+        return Ok(Provider::of_run(&run)?.as_str().to_owned());
+    }
+    let agent = required(
+        db.get("agents", text(chat, "agentId"))?,
+        "This agent is no longer available.",
+    )?;
+    Ok(Provider::of_agent(&agent)?.as_str().to_owned())
+}
+
+/// Only Codex offers a speed choice; a turn with another coding agent cannot ask for one.
+fn validate_speed(db: &Db<'_>, chat: &Value, message: &Value) -> Result<()> {
+    if text(message, "speed").is_empty() {
+        return Ok(());
+    }
+    crate::models::validate_speed(text(message, "speed"))?;
+    if message_provider(db, chat, message)? != Provider::Codex.as_str() {
+        return Err(Error::bad(
+            "Speed applies only to Codex. Remove it or choose Codex for this message.",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_steer(db: &Db<'_>, chat: &Value, message: &Value) -> Result<()> {
@@ -259,7 +323,7 @@ fn validate_steer(db: &Db<'_>, chat: &Value, message: &Value) -> Result<()> {
     };
     if run_is_active(&run) && changes_running_agent(message, &run)? {
         return Err(Error::conflict(
-            "Queue this message to change provider, model or reasoning on the next turn.",
+            "Queue this message to change provider, model, reasoning or speed on the next turn.",
         ));
     }
     Ok(())
@@ -349,6 +413,7 @@ pub(crate) fn send(
         return Ok(existing.clone());
     }
     require_sendable(db, &chat, &messages, text(&values, "id"))?;
+    validate_speed(db, &chat, &values)?;
     validate_steer(db, &chat, &values)?;
     if messages.is_empty() {
         let private_answer = answer
@@ -400,6 +465,16 @@ fn withdraw(db: &Db<'_>, chat_id: &str, message: &Value) -> Result<Value> {
     Ok(json!({ "deleted": true }))
 }
 
+/// Parses an edited message. A speed the editor did not send stays as stored.
+pub(crate) fn parse_edit(input: Value) -> Result<Value> {
+    let sends_speed = input.get("speed").is_some();
+    let mut values = parse("message", input)?;
+    if !sends_speed && let Some(values) = values.as_object_mut() {
+        values.remove("speed");
+    }
+    Ok(values)
+}
+
 pub(crate) fn edit_as(
     db: &Db<'_>,
     chat_id: &str,
@@ -425,8 +500,16 @@ pub(crate) fn edit_as(
         return Err(Error::conflict("A submitted answer cannot be edited."));
     }
     crate::attachments::message(db, chat_id, &mut values)?;
-    validate_steer(db, &chat, &values)?;
+    // An edit without a speed, from an editor predating speeds, keeps the stored one while the
+    // message still goes to Codex.
+    let kept_speed = values.get("speed").is_none();
     crate::store::merge(&mut current, &values);
+    if kept_speed && message_provider(db, &chat, &current)? != Provider::Codex.as_str() {
+        set_speed(&mut current, "");
+    }
+    // Steering joins the running turn with the message as edited, including a kept speed.
+    validate_steer(db, &chat, &current)?;
+    validate_speed(db, &chat, &current)?;
     db.delete(&crate::plugins::turns::key(chat_id, message_id))?;
     crate::plugins::work::retire_queued_input(db, chat_id, message_id)?;
     db.put_message(&current)
@@ -709,7 +792,8 @@ pub(crate) fn request_next_turn_in(db: &Db<'_>, chat_id: &str, run_id: &str) -> 
     Ok(true)
 }
 
-/// Applies the provider, model and reasoning chosen for this message.
+/// Applies the provider, model, reasoning and speed chosen for this message. The speed is
+/// independent of the model: it carries over model changes, not a change of coding agent.
 pub(crate) fn select_agent(
     snapshot: &mut Value,
     run: Option<&Value>,
@@ -728,6 +812,8 @@ pub(crate) fn select_agent(
     .to_owned();
     let inherited_model = text(previous, "model").to_owned();
     let inherited_reasoning = text(previous, "reasoning").to_owned();
+    let inherited_speed = text(previous, "speed").to_owned();
+    let continues = provider == Provider::of_agent(previous)?.as_str();
 
     let switched = provider != Provider::of_run(snapshot)?.as_str();
     let agent = &mut snapshot["snapshot"]["agent"];
@@ -746,8 +832,20 @@ pub(crate) fn select_agent(
             String::new()
         }
         .into();
+        set_speed(
+            agent,
+            if implicit_provider {
+                &inherited_speed
+            } else {
+                ""
+            },
+        );
     }
-    agent["provider"] = provider.into();
+    // Naming the coding agent of the latest turn keeps that turn's speed, as both clients
+    // show it, rather than a default the agent's profile gained since.
+    if !implicit_provider && continues {
+        set_speed(agent, &inherited_speed);
+    }
     if !text(message, "model").is_empty() {
         agent["model"] = message["model"].clone();
         agent["reasoning"] = text(message, "reasoning").into();
@@ -755,7 +853,24 @@ pub(crate) fn select_agent(
     if !text(message, "reasoning").is_empty() {
         agent["reasoning"] = message["reasoning"].clone();
     }
+    if !text(message, "speed").is_empty() {
+        set_speed(agent, text(message, "speed"));
+    }
+    // Another coding agent's run has no speed to keep, even one inherited from its profile.
+    if provider != Provider::Codex.as_str() {
+        set_speed(agent, "");
+    }
+    agent["provider"] = provider.into();
     Ok(())
+}
+
+/// Snapshots without a speed, including every earlier one, run at Standard.
+fn set_speed(agent: &mut Value, speed: &str) {
+    if !speed.is_empty() {
+        agent["speed"] = speed.into();
+    } else if let Some(agent) = agent.as_object_mut() {
+        agent.remove("speed");
+    }
 }
 
 /// Reuses the chat's run for the next turn, handing the transcript to a fresh
@@ -1077,7 +1192,7 @@ pub(crate) fn edit_in(
     let values = input
         .map(|mut input| {
             input["id"] = message.into();
-            parse("message", input)
+            parse_edit(input)
         })
         .transpose()?;
     let attribution = values
@@ -1256,7 +1371,7 @@ impl Service {
         let values = input
             .map(|mut input| {
                 input["id"] = message.clone().into();
-                parse("message", input)
+                parse_edit(input)
             })
             .transpose()?;
         let result = self
@@ -1281,18 +1396,42 @@ impl Service {
     }
 
     pub async fn chat_pause(&self, id: &str, paused: bool) -> Result<Value> {
-        self.set_chat_pause(id, paused, false).await
+        self.set_chat_pause(id, paused, false, |_| Ok(())).await
     }
 
     pub(crate) async fn chat_pause_by_user(&self, id: &str, paused: bool) -> Result<Value> {
-        self.set_chat_pause(id, paused, true).await
+        self.set_chat_pause(id, paused, true, |_| Ok(())).await
     }
 
-    async fn set_chat_pause(&self, id: &str, paused: bool, by_user: bool) -> Result<Value> {
+    pub(crate) async fn chat_pause_authorized<F>(
+        &self,
+        id: &str,
+        paused: bool,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
+        self.set_chat_pause(id, paused, false, authorize).await
+    }
+
+    async fn set_chat_pause<F>(
+        &self,
+        id: &str,
+        paused: bool,
+        by_user: bool,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         let id = id.to_owned();
         let result = self
             .store
-            .write(move |db| set_pause_in(db, &id, paused, by_user))
+            .write(move |db| {
+                authorize(db)?;
+                set_pause_in(db, &id, paused, by_user)
+            })
             .await?;
         self.worker.notify();
         Ok(result)
@@ -1815,11 +1954,158 @@ mod tests {
         message["provider"] = "codex".into();
         message["model"] = "gpt-6-sol".into();
         validate_steer(&db, &chat, &message).unwrap();
+
+        // The running turn keeps its speed; the run has none, so only an explicit one differs.
+        message["speed"] = "priority".into();
+        assert_eq!(
+            validate_steer(&db, &chat, &message).unwrap_err().status,
+            409
+        );
+        message["speed"] = "".into();
+        validate_steer(&db, &chat, &message).unwrap();
+        // Asking for Standard does not change a turn without a speed: it runs at Standard.
+        message["speed"] = "standard".into();
+        validate_steer(&db, &chat, &message).unwrap();
+        message["speed"] = "".into();
+
         let unknown = json!({
             "id": id(),
             "text": "Continue",
             "provider": "unknown"
         });
         assert!(parse("message", unknown).is_err());
+    }
+
+    #[test]
+    fn speed_is_independent_of_the_model_but_belongs_to_codex() {
+        let codex = |speed: Option<&str>| {
+            let mut agent =
+                json!({ "provider": "codex", "model": "gpt-6-sol", "reasoning": "high" });
+            if let Some(speed) = speed {
+                agent["speed"] = speed.into();
+            }
+            json!({ "snapshot": { "agent": agent } })
+        };
+        let select = |previous: &Value, message: Value| {
+            let mut snapshot = codex(None);
+            select_agent(&mut snapshot, Some(previous), &message).unwrap();
+            snapshot["snapshot"]["agent"].clone()
+        };
+
+        // A model change resets the reasoning level, not the speed.
+        let previous = codex(Some("priority"));
+        let agent = select(&previous, json!({ "model": "gpt-6-astra" }));
+        assert_eq!(agent["model"], "gpt-6-astra");
+        assert_eq!(agent["reasoning"], "");
+        assert_eq!(agent["speed"], "priority");
+
+        // Reasoning changes keep it too, and an explicit speed replaces it.
+        let agent = select(&previous, json!({ "reasoning": "low" }));
+        assert_eq!(agent["speed"], "priority");
+        let agent = select(&previous, json!({ "speed": "standard" }));
+        assert_eq!(agent["speed"], "standard");
+        assert_eq!(agent["reasoning"], "high");
+
+        // Earlier runs and messages without a speed keep none.
+        let agent = select(&codex(None), json!({ "text": "Continue" }));
+        assert!(agent.get("speed").is_none());
+
+        // Naming the conversation's coding agent keeps its latest turn's speed, even after the
+        // agent's profile gained another default.
+        let mut faster_profile = codex(Some("priority"));
+        let continued = json!({ "provider": "codex", "model": "gpt-6-sol", "reasoning": "high" });
+        select_agent(&mut faster_profile, Some(&codex(None)), &continued).unwrap();
+        assert!(faster_profile["snapshot"]["agent"].get("speed").is_none());
+        let mut standard_profile = codex(None);
+        select_agent(&mut standard_profile, Some(&previous), &continued).unwrap();
+        assert_eq!(standard_profile["snapshot"]["agent"]["speed"], "priority");
+
+        // Another coding agent has no speed, and returning to Codex starts from its default.
+        let agent = select(&previous, json!({ "provider": "claude" }));
+        assert!(agent.get("speed").is_none());
+        let claude = json!({ "snapshot": { "agent": { "provider": "claude", "model": "opus", "speed": "priority" } } });
+        let agent = select(&claude, json!({ "text": "Continue" }));
+        assert!(agent.get("speed").is_none());
+        let agent = select(&claude, json!({ "provider": "codex" }));
+        assert!(agent.get("speed").is_none());
+        let agent = select(&claude, json!({ "provider": "codex", "speed": "priority" }));
+        assert_eq!(agent["speed"], "priority");
+    }
+
+    #[tokio::test]
+    async fn a_speed_is_refused_for_turns_another_coding_agent_runs() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.put("agents", &json!({ "id": "codex", "provider": "codex" }))?;
+                db.put("agents", &json!({ "id": "claude", "provider": "claude" }))?;
+                let run = json!({
+                    "id": "claude-run",
+                    "taskId": "switched",
+                    "createdAt": 0,
+                    "status": "succeeded",
+                    "snapshot": { "agent": { "provider": "claude" } },
+                });
+                db.add_run(&run, None)?;
+                let new_codex = json!({ "id": "new-codex", "runId": null, "agentId": "codex" });
+                let new_claude = json!({ "id": "new-claude", "runId": null, "agentId": "claude" });
+                let switched = json!({ "id": "switched", "runId": "claude-run", "agentId": "codex" });
+                let fast = |provider: &str| json!({ "id": id(), "provider": provider, "speed": "priority" });
+                let refused = |chat: &Value, message: &Value| {
+                    validate_speed(db, chat, message).unwrap_err().status == 400
+                };
+
+                // Without a provider, the message runs with the conversation's coding agent.
+                validate_speed(db, &new_codex, &fast(""))?;
+                assert!(refused(&new_claude, &fast("")));
+                assert!(refused(&switched, &fast("")));
+                validate_speed(db, &switched, &fast("codex"))?;
+                assert!(refused(&new_codex, &fast("opencode")));
+                validate_speed(db, &new_claude, &json!({ "id": id(), "speed": "" }))?;
+                // Codex's name for Standard is not a speed choice.
+                assert!(refused(&new_codex, &json!({ "id": id(), "speed": "default" })));
+
+                // A queued message switching coding agent decides for the ones after it.
+                let mut ahead = json!({
+                    "id": "ahead",
+                    "chatId": "switched",
+                    "createdAt": 1,
+                    "status": "queued",
+                    "provider": "codex",
+                });
+                db.put_message(&ahead)?;
+                validate_speed(db, &switched, &fast(""))?;
+                ahead["status"] = "delivered".into();
+                db.put_message(&ahead)?;
+                assert!(refused(&switched, &fast("")));
+
+                // A steering message joins the running turn, whatever the queue switches to next.
+                let running = json!({
+                    "id": "codex-run",
+                    "taskId": "steering",
+                    "createdAt": 0,
+                    "status": "running",
+                    "snapshot": { "agent": { "provider": "codex", "speed": "priority" } },
+                });
+                db.add_run(&running, None)?;
+                let steering = json!({ "id": "steering", "runId": "codex-run", "agentId": "codex" });
+                let switching = json!({
+                    "id": "switching",
+                    "chatId": "steering",
+                    "createdAt": 1,
+                    "status": "queued",
+                    "provider": "claude",
+                });
+                db.put_message(&switching)?;
+                let mut steer = fast("");
+                steer["mode"] = "steer".into();
+                validate_speed(db, &steering, &steer)?;
+                steer["mode"] = "queue".into();
+                assert!(refused(&steering, &steer));
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 }

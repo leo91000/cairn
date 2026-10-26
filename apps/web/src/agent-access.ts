@@ -15,6 +15,8 @@ export interface AgentDraft {
   provider: Agent['provider']
   model: string
   reasoning: string
+  /** Codex speed; empty runs at Standard. */
+  speed: string
   timeoutMinutes: number
   access: AgentAccess
   // Live grants, kept beside `access` rather than inside it: nodes the agent may reserve
@@ -91,6 +93,7 @@ export function newAgentDraft(): AgentDraft {
     provider: 'codex',
     model: '',
     reasoning: '',
+    speed: '',
     timeoutMinutes: 0,
     access: {
       backend: 'firecracker',
@@ -118,6 +121,7 @@ export function draftOf(agent: Agent): AgentDraft {
     provider: agent.provider ?? 'codex',
     model: agent.model ?? '',
     reasoning: agent.reasoning ?? '',
+    speed: agent.speed ?? '',
     timeoutMinutes: agent.timeoutMinutes ?? 0,
     access: {
       backend: access.backend ?? 'firecracker',
@@ -194,6 +198,7 @@ export function rebaseDraft(base: AgentDraft, mine: AgentDraft, theirs: AgentDra
     provider: pick(base.provider, mine.provider, theirs.provider),
     model: pick(base.model, mine.model, theirs.model),
     reasoning: pick(base.reasoning, mine.reasoning, theirs.reasoning),
+    speed: pick(base.speed, mine.speed, theirs.speed),
     timeoutMinutes: pick(base.timeoutMinutes, mine.timeoutMinutes, theirs.timeoutMinutes),
     access: access as unknown as AgentAccess,
     exclusiveNodes: backendChanged
@@ -441,7 +446,7 @@ export function changes(saved: AgentDraft, draft: AgentDraft) {
 
   for (const key of ['name', 'description', 'instructions'] as const)
     add('identity', Number(saved[key] !== draft[key]))
-  for (const key of ['provider', 'model', 'reasoning'] as const)
+  for (const key of ['provider', 'model', 'reasoning', 'speed'] as const)
     add('model', Number(saved[key] !== draft[key]))
   add('advanced', Number(saved.timeoutMinutes !== draft.timeoutMinutes))
   add('projects', listCount(saved.access.projects, draft.access.projects))
@@ -717,7 +722,7 @@ export function errorSection(message: string): SectionId | undefined {
     ['mcps', /mcp|tool/],
     ['skills', /skill/],
     ['projects', /project/],
-    ['model', /model|provider|reasoning|codex|claude|opencode/],
+    ['model', /model|provider|reasoning|speed|codex|claude|opencode/],
     ['advanced', /time limit|timeout/],
     ['identity', /name|description|instruction/],
   ]

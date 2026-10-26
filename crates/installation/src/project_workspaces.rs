@@ -59,6 +59,11 @@ pub(crate) struct Authority {
 }
 
 impl Authority {
+    /// The original authenticated source, for nested native calls on this request.
+    pub(crate) fn requester(&self) -> Option<crate::plugins::requesters::RunRequester> {
+        self.requester.clone()
+    }
+
     pub(crate) async fn capture(s: &Service, bearer: &str) -> Result<Self> {
         let token = bearer.to_owned();
         let run = s.store.read(move |db| authorize_in(db, &token)).await?;
@@ -367,7 +372,16 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
 }
 
 pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Result<Value> {
-    let authority = Authority::capture(s, bearer).await?;
+    let authority = match Authority::capture(s, bearer).await {
+        Ok(authority) => authority,
+        // Direct library discovery remains useful without a live execution.
+        // This fallback is pure: never inspect plugins, delegation or conditions
+        // under failed authority. HTTP authenticates before reaching this API.
+        Err(_) if method == "tools/list" => {
+            return Ok(json!({ "tools": builtin_tools(&[], false) }));
+        }
+        Err(error) => return Err(error),
+    };
     let result = crate::plugins::requesters::CURRENT
         .scope(
             authority.requester.clone(),
@@ -408,26 +422,8 @@ async fn rpc_inner(s: &Service, bearer: &str, method: &str, params: &Value) -> R
         .read(move |db| Ok(crate::delegation::offered(db, &token)))
         .await
         .unwrap_or(false);
-    let mut tools = vec![
-        open_project_tool(),
-        crate::artifacts::tool(),
-        crate::nodes::moves::list_tool(),
-        crate::nodes::moves::tool(),
-        crate::artifacts::sharing::tool(),
-        crate::outcome::tool(),
-        crate::chats::questions::list_tool(),
-        crate::chats::questions::cancel_tool(),
-        crate::waits::tool(&conditions, delegates),
-        crate::nodes::exclusive::acquire_tool(),
-        crate::nodes::exclusive::release_tool(),
-        crate::nodes::exclusive::status_tool(),
-        crate::nodes::exclusive::renew_tool(),
-    ];
-    if delegates {
-        tools.extend(crate::delegation::tools());
-    }
+    let mut tools = builtin_tools(&conditions, delegates);
     // Package tools never shadow Cairn's own.
-    // Listing stays available without a live run; calls authorize on their own.
     let granted = crate::plugins::agents::tools(s, bearer)
         .await
         .unwrap_or_default();
@@ -440,4 +436,27 @@ async fn rpc_inner(s: &Service, bearer: &str, method: &str, params: &Value) -> R
         }
     }
     Ok(json!({ "tools": tools }))
+}
+
+/// Static definitions only; additional tools require a live requesting run.
+fn builtin_tools(conditions: &[Value], delegates: bool) -> Vec<Value> {
+    let mut tools = vec![
+        open_project_tool(),
+        crate::artifacts::tool(),
+        crate::nodes::moves::list_tool(),
+        crate::nodes::moves::tool(),
+        crate::artifacts::sharing::tool(),
+        crate::outcome::tool(),
+        crate::chats::questions::list_tool(),
+        crate::chats::questions::cancel_tool(),
+        crate::waits::tool(conditions, delegates),
+        crate::nodes::exclusive::acquire_tool(),
+        crate::nodes::exclusive::release_tool(),
+        crate::nodes::exclusive::status_tool(),
+        crate::nodes::exclusive::renew_tool(),
+    ];
+    if delegates {
+        tools.extend(crate::delegation::tools());
+    }
+    tools
 }

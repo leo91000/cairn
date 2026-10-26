@@ -46,20 +46,42 @@ pub struct Agent {
 /// It cannot be supplied by a package or reconstructed from its arguments.
 #[derive(Clone)]
 pub struct LocalAuthority {
-    agent: Agent,
+    agent: Option<Agent>,
     approval: registry::Approval,
+    digest: String,
 }
 
 impl LocalAuthority {
+    pub(super) fn for_package(approved: &registry::ApprovedPackage) -> Self {
+        Self {
+            agent: None,
+            approval: approved.snapshot(),
+            digest: approved.package.digest.clone(),
+        }
+    }
+
+    pub(super) async fn recheck_loaded(&self, s: &Service, digest: &str) -> Result<()> {
+        if self.digest != digest {
+            return Err(Error::forbidden("The loaded plugin package changed."));
+        }
+        self.recheck(s).await
+    }
+
     pub(super) async fn recheck(&self, s: &Service) -> Result<()> {
-        self.agent.recheck(s).await?;
+        if let Some(agent) = &self.agent {
+            agent.recheck(s).await?;
+        }
+        self.approval.recheck(s, &self.digest).await?;
         let expected = self.clone();
         s.store.read(move |db| expected.recheck_in(db)).await
     }
 
     pub(super) fn recheck_in(&self, db: &crate::store::Db<'_>) -> Result<()> {
         self.approval.recheck_in(db)?;
-        self.agent.recheck_in(db)
+        if let Some(agent) = &self.agent {
+            agent.recheck_in(db)?;
+        }
+        Ok(())
     }
 }
 
@@ -369,8 +391,9 @@ pub async fn call(
         management: management.clone(),
         local_authority: match scope {
             Scope::Agent(agent) => Some(Arc::new(LocalAuthority {
-                agent: agent.as_ref().clone(),
+                agent: Some(agent.as_ref().clone()),
                 approval: approved.snapshot(),
+                digest: approved.package.digest.clone(),
             })),
             _ => None,
         },

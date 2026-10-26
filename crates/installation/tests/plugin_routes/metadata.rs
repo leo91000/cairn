@@ -1,6 +1,7 @@
 use super::*;
 
 use super::management;
+use std::sync::atomic::Ordering;
 
 #[tokio::test]
 async fn plugin_metadata_keeps_the_routed_turns_original_participant_authority() {
@@ -176,51 +177,47 @@ async fn after_revocation(surface: Surface, during_read: bool, change: Change) {
             ("create_chat", json!({ "agentId": agent["id"] })),
         ],
     };
+    let operation = match surface {
+        Surface::PluginMetadata => "list_plugin_instance_access",
+        Surface::Installation => "list_agents",
+        Surface::TypedProject => "list_projects",
+        Surface::TypedProjectWrite => "save_project",
+    };
+    let gate = if during_read {
+        Some(common::relay_fixture::owner_lookups(&s).await)
+    } else {
+        None
+    };
+    let authentication_lookups = if let Some(gate) = &gate {
+        let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+        let (status, reply) = management::request(&s, bearer, "ping", json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        gate.calls.swap(0, Ordering::SeqCst)
+    } else {
+        0
+    };
+    let mut operation_lookups = 0;
     for (name, args) in &reads {
+        if let Some(gate) = &gate {
+            gate.calls.store(0, Ordering::SeqCst);
+        }
         let positive = management::call(&s, &configuration, name, args.clone()).await;
         management::result(&positive);
+        if *name == operation
+            && let Some(gate) = &gate
+        {
+            operation_lookups = gate.calls.load(Ordering::SeqCst);
+        }
     }
     let projects_before_pending = s.store.projects().await.unwrap();
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let mut authority_server = None;
     let mut pending = None;
-    if during_read {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let (entering, releasing) = (entered.clone(), release.clone());
-        let calls = Arc::new(AtomicUsize::new(0));
-        // The common installation wrapper captures source before invoking the
-        // metadata operation, adding one lookup ahead of its own source check.
-        let authority_lookup = match surface {
-            Surface::PluginMetadata => 2,
-            Surface::Installation | Surface::TypedProject => 1,
-            Surface::TypedProjectWrite => 0,
-        };
-        let authority = axum::Router::new().route(
-            "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
-            axum::routing::get(move || {
-                let (entered, release, calls) = (entering.clone(), releasing.clone(), calls.clone());
-                async move {
-                    if calls.fetch_add(1, Ordering::SeqCst) == authority_lookup {
-                        entered.notify_one();
-                        release.notified().await;
-                    }
-                    axum::Json(json!({"owner": {"account_id": "fixture-owner", "access_id": "fixture-owner"}, "members": []}))
-                }
-            }),
-        );
-        let (origin, server) = common::serve_locally(authority).await;
-        authority_server = Some(server);
-        let path = s.config.data_dir.join("installation-relay/identity.json");
-        let mut identity: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        identity["origin"] = json!(origin);
-        std::fs::write(path, serde_json::to_vec(&identity).unwrap()).unwrap();
-        let operation = match surface {
-            Surface::PluginMetadata => "list_plugin_instance_access",
-            Surface::Installation => "list_agents",
-            Surface::TypedProject => "list_projects",
-            Surface::TypedProjectWrite => "save_project",
-        };
+    if let Some(gate) = &gate {
+        // Calibrate the final operation lookup after a successful request. The
+        // ping baseline includes HTTP authentication, so this gate must reach
+        // the operation's own authority check rather than initial admission.
+        assert!(operation_lookups > authentication_lookups);
+        gate.calls.store(0, Ordering::SeqCst);
+        gate.hold_at.store(operation_lookups, Ordering::SeqCst);
         let args = reads
             .iter()
             .find(|(name, _)| *name == operation)
@@ -228,12 +225,18 @@ async fn after_revocation(surface: Surface, during_read: bool, change: Change) {
             .1
             .clone();
         let (s, configuration) = (s.clone(), configuration.clone());
-        let mut reading =
-            tokio::spawn(
-                async move { management::call(&s, &configuration, operation, args).await },
-            );
+        let mut reading = tokio::spawn(async move {
+            let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+            management::request(
+                &s,
+                bearer,
+                "tools/call",
+                common::mcp_arguments(operation, &args),
+            )
+            .await
+        });
         tokio::select! {
-            () = entered.notified() => {},
+            () = gate.entered.notified() => {},
             result = &mut reading => panic!("Metadata returned without its post-read source check: {result:?}"),
             () = tokio::time::sleep(std::time::Duration::from_secs(10)) => panic!("The source check was not reached"),
         }
@@ -269,11 +272,12 @@ async fn after_revocation(surface: Surface, during_read: bool, change: Change) {
         common::read_json(response).await
     };
     if let Some(pending) = pending {
-        release.notify_one();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(10), pending)
+        gate.as_ref().unwrap().release.notify_one();
+        let (status, result) = tokio::time::timeout(std::time::Duration::from_secs(10), pending)
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(status, StatusCode::OK, "{result}");
         assert_eq!(
             result["result"]["isError"], true,
             "A late source revocation returned metadata"
@@ -302,9 +306,6 @@ async fn after_revocation(surface: Surface, during_read: bool, change: Change) {
     );
 
     if matches!(change, Change::Package) {
-        if let Some(server) = authority_server {
-            server.abort();
-        }
         return;
     }
 
@@ -331,8 +332,5 @@ async fn after_revocation(surface: Surface, during_read: bool, change: Change) {
             refused(&s, &configuration, name, args.clone()).await,
             "Reapproval revived the old turn: {name}"
         );
-    }
-    if let Some(server) = authority_server {
-        server.abort();
     }
 }

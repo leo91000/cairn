@@ -1,7 +1,7 @@
 //! Durable work for delegated connections: admission of external messages, the event
 //! queue plugins consume, conversation submission and correlated replies.
 use super::{
-    capabilities::Context,
+    capabilities::{Caller, Context},
     connections::{AccessMode, Connection, Label, authorize, ensure_owner, external_id, label},
     registry,
 };
@@ -122,7 +122,7 @@ pub async fn accept(s: &Service, connection: &Connection, inbound: Inbound) -> R
 
 /// An HTTP or socket transport must only acknowledge temporary saturation as a retry.
 pub async fn deliver(s: &Service, connection: &Connection, inbound: Inbound) -> Result<Admission> {
-    deliver_approved(s, connection, inbound, None).await
+    deliver_approved(s, connection, inbound, None, Caller::default()).await
 }
 
 async fn deliver_approved(
@@ -130,6 +130,7 @@ async fn deliver_approved(
     connection: &Connection,
     inbound: Inbound,
     digest: Option<&str>,
+    caller: Caller,
 ) -> Result<Admission> {
     // Allowlists only change with a new revision (or shrink), so this snapshot is a
     // superset: strangers are dropped without touching storage or owner authority.
@@ -158,6 +159,7 @@ async fn deliver_approved(
         .transaction(move |db| {
             // Approval and admission commit together, including after slow
             // membership checks or a wait for the store transaction.
+            caller.authorize(db)?;
             approval.recheck_in(db)?;
             let current = authorize(db, &expected)?;
             let author = json!({ "id": inbound.author.id, "name": label(&inbound.author.name) });
@@ -354,11 +356,13 @@ pub(crate) async fn inbound(
             .as_str()
             .ok_or_else(|| Error::bad("Name the resource that received this event."))?;
         match super::routes::select(s, &context.connection, resource, &inbound.context).await? {
-            Some(connection) => deliver_approved(s, &connection, inbound, digest).await?,
+            Some(connection) => {
+                deliver_approved(s, &connection, inbound, digest, context.caller()).await?
+            }
             None => Admission::Denied,
         }
     } else {
-        deliver_approved(s, &context.connection, inbound, digest).await?
+        deliver_approved(s, &context.connection, inbound, digest, context.caller()).await?
     };
     Ok(if detailed {
         json!({ "status": result })
@@ -633,10 +637,12 @@ async fn submission_authority(
     ensure_owner(s, &context.connection).await?;
     registry::require_digest(s, &context.manifest.id, &package.package.digest).await?;
     let approval = package.snapshot();
+    let caller = context.caller();
     let expected = context.connection.clone();
     let event = context.event.clone();
     s.store
         .transaction(move |db| {
+            caller.authorize(db)?;
             approval.recheck_in(db)?;
             admit(db, &expected, &event).map(|_| ())
         })
@@ -1003,6 +1009,7 @@ pub async fn check(s: &Service, context: &Context, args: &Value) -> Result<Value
         return Err(Error::forbidden("Only a person can control the agent."));
     }
     ensure_owner(s, &context.connection).await?;
+    let caller = context.caller();
     let (expected, event, input) = (
         context.connection.clone(),
         context.event.clone(),
@@ -1010,6 +1017,7 @@ pub async fn check(s: &Service, context: &Context, args: &Value) -> Result<Value
     );
     s.store
         .read(move |db| {
+            caller.authorize(db)?;
             let (connection, author) = admit(db, &expected, &event)?;
             let chat = conversation(db, &connection, &author, &input)?;
             Ok(json!({ "conversation": chat }))
@@ -1024,6 +1032,7 @@ pub async fn answer(s: &Service, context: &Context, args: &Value) -> Result<Valu
         return Err(Error::forbidden("Only a person can answer the agent."));
     }
     ensure_owner(s, &context.connection).await?;
+    let caller = context.caller();
     let (expected, event, input) = (
         context.connection.clone(),
         context.event.clone(),
@@ -1032,6 +1041,7 @@ pub async fn answer(s: &Service, context: &Context, args: &Value) -> Result<Valu
     let (chat, principal) = s
         .store
         .read(move |db| {
+            caller.authorize(db)?;
             let (connection, author) = admit(db, &expected, &event)?;
             let chat = conversation(db, &connection, &author, &input)?;
             Ok((
@@ -1056,6 +1066,7 @@ pub async fn answer(s: &Service, context: &Context, args: &Value) -> Result<Valu
         args.clone(),
         chat.clone(),
     );
+    let caller = context.caller();
     let answered = s
         .question_answer_authorized(
             &chat,
@@ -1064,6 +1075,7 @@ pub async fn answer(s: &Service, context: &Context, args: &Value) -> Result<Valu
             principal,
             false,
             move |db, question| {
+                caller.authorize(db)?;
                 let (connection, author) = admit(db, &expected, &event)?;
                 if conversation(db, &connection, &author, &input)? != chat_id {
                     return Err(Error::forbidden("The controlled conversation changed."));
@@ -1094,6 +1106,7 @@ pub async fn cancel(s: &Service, context: &Context, args: &Value) -> Result<Valu
         return Err(Error::forbidden("Only a person can stop the agent."));
     }
     ensure_owner(s, &context.connection).await?;
+    let caller = context.caller();
     let (expected, event, input) = (
         context.connection.clone(),
         context.event.clone(),
@@ -1102,6 +1115,7 @@ pub async fn cancel(s: &Service, context: &Context, args: &Value) -> Result<Valu
     let chat = s
         .store
         .read(move |db| {
+            caller.authorize(db)?;
             let (connection, author) = admit(db, &expected, &event)?;
             conversation(db, &connection, &author, &input)
         })
@@ -1110,6 +1124,7 @@ pub async fn cancel(s: &Service, context: &Context, args: &Value) -> Result<Valu
     if context.connection.routing.is_some() {
         let run = text(&detail, "runId").to_owned();
         let expected_run = run.clone();
+        let caller = context.caller();
         let (expected, event, input, chat_id) = (
             context.connection.clone(),
             context.event.clone(),
@@ -1118,6 +1133,7 @@ pub async fn cancel(s: &Service, context: &Context, args: &Value) -> Result<Valu
         );
         s.worker
             .cancel_authorized(s, &run, move |db| {
+                caller.authorize(db)?;
                 let (connection, author) = admit(db, &expected, &event)?;
                 if conversation(db, &connection, &author, &input)? != chat_id {
                     return Err(Error::forbidden("The controlled conversation changed."));
@@ -1140,12 +1156,28 @@ pub async fn cancel(s: &Service, context: &Context, args: &Value) -> Result<Valu
             .await?;
         return Ok(json!({ "stopped": true, "conversation": chat }));
     }
-    s.chat_pause(&chat, true).await?;
+    let (caller, expected, event, input, chat_id) = (
+        context.caller(),
+        context.connection.clone(),
+        context.event.clone(),
+        args.clone(),
+        chat.clone(),
+    );
+    let authorize = move |db: &Db<'_>| {
+        caller.authorize(db)?;
+        let (connection, author) = admit(db, &expected, &event)?;
+        if conversation(db, &connection, &author, &input)? != chat_id {
+            return Err(Error::forbidden("The controlled conversation changed."));
+        }
+        Ok(())
+    };
+    s.chat_pause_authorized(&chat, true, authorize.clone())
+        .await?;
     if let Some(run) = detail["runId"].as_str()
         && crate::run_status::RunStatus::of(&s.store.run(run).await?)
             .is_some_and(crate::run_status::RunStatus::is_active)
         // The run may finish between the check and the request; that is still stopped.
-        && let Err(error) = s.worker.cancel(s, run).await
+        && let Err(error) = s.worker.cancel_authorized(s, run, authorize).await
         && error.status != 409
     {
         return Err(error);
@@ -1174,6 +1206,7 @@ pub async fn reset(s: &Service, context: &Context, args: &Value) -> Result<Value
     }
     let shared = args["shared"] != false;
     ensure_owner(s, &context.connection).await?;
+    let caller = context.caller();
     let (expected, event, expected_chat) = (
         context.connection.clone(),
         context.event.clone(),
@@ -1184,6 +1217,7 @@ pub async fn reset(s: &Service, context: &Context, args: &Value) -> Result<Value
     let initial = s
         .store
         .read(move |db| {
+            caller.authorize(db)?;
             admit(db, &expected, &event)?;
             if let Some(receipt) = db.kv(&lookup_key)? {
                 return Ok(Err(receipt));
@@ -1213,8 +1247,10 @@ pub async fn reset(s: &Service, context: &Context, args: &Value) -> Result<Value
         ));
     }
     let (expected, event) = (context.connection.clone(), context.event.clone());
+    let caller = context.caller();
     s.store
         .transaction(move |db| {
+            caller.authorize(db)?;
             let (connection, author) = admit(db, &expected, &event)?;
             if let Some(receipt) = db.kv(&receipt_key)? {
                 return Ok(receipt);
@@ -1672,11 +1708,13 @@ pub(crate) async fn checkpoint(
         return Err(Error::forbidden("The reply package approval changed."));
     }
     let approval = package.snapshot();
+    let caller = context.caller();
     let expected = context.connection.clone();
     let author = context.event["authorId"].clone();
     let routing = serde_json::to_value(&expected.routing)?;
     s.store
         .transaction(move |db| {
+            caller.authorize(db)?;
             approval.recheck_in(db)?;
             let connection = authorize(db, &expected)?;
             if !connection.allows(author.as_str().unwrap_or("")) {

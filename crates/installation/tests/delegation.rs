@@ -879,3 +879,46 @@ async fn deleting_a_task_redacts_recorded_group_progress_and_final_results() {
         assert!(!prompt.contains(diagnostic));
     }
 }
+
+#[tokio::test]
+async fn library_discovery_without_a_live_grant_is_static_and_http_still_requires_authority() {
+    let f = Fixture::new(true).await;
+    let turn = f.conversation(MAIN_AGENT_ID).await;
+    assert!(f.tools(&turn).await.contains(&"delegate_task".to_owned()));
+    let listing = project_workspaces::rpc(&f.s, "no-live-native-grant", "tools/list", &json!({}))
+        .await
+        .unwrap();
+    let tools = listing["tools"].as_array().unwrap();
+    assert!(tools.iter().any(|tool| tool["name"] == "open_project"));
+    assert!(tools.iter().any(|tool| tool["name"] == "wait_for"));
+    assert!(!tools.iter().any(|tool| tool["name"] == "delegate_task"));
+    let wait = tools
+        .iter()
+        .find(|tool| tool["name"] == "wait_for")
+        .unwrap();
+    let conditions = wait["inputSchema"]["properties"]["conditions"]["items"]["oneOf"]
+        .as_array()
+        .unwrap();
+    assert!(
+        !conditions
+            .iter()
+            .any(|condition| condition["properties"]["type"]["const"] == "task_finished")
+    );
+    let app = cairn_installation::http::router(f.s.clone()).await.unwrap();
+    let response = common::send(
+        &app,
+        common::request("POST", "/mcp-workspace")
+            .header("authorization", "Bearer no-live-native-grant")
+            .body(axum::body::Body::from(
+                json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    let body = common::read_json(response).await;
+    assert!(
+        body.get("tools").is_none() && body.get("result").is_none(),
+        "{body}"
+    );
+}

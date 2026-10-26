@@ -21,11 +21,8 @@ impl Worker {
     }
 
     pub(crate) async fn cancel_from_run(&self, s: &Service, id: &str, bearer: &str) -> Result<()> {
-        let bearer = bearer.to_owned();
-        self.cancel_authorized(s, id, move |db| {
-            crate::installation_mcp::authorize_in(db, &bearer).map(|_| ())
-        })
-        .await
+        let authorize = crate::installation_mcp::management_authorization(Some(bearer));
+        self.cancel_authorized(s, id, authorize).await
     }
 
     pub(crate) async fn cancel_authorized<F>(

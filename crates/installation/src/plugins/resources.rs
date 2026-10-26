@@ -411,6 +411,7 @@ pub(super) async fn remove_configured(
     if let Some(configuration) = &configuration {
         configuration.recheck(s).await?;
     }
+    target.recheck_package(s).await?;
     s.store
         .transaction(move |db| {
             if let Some(configuration) = &configuration {

@@ -9,6 +9,7 @@ use crate::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+pub(crate) mod authorizations;
 pub(crate) mod resources;
 pub(crate) mod routes;
 pub(crate) mod setup;

@@ -173,25 +173,45 @@ async fn resource_metadata(s: &Service) -> String {
     )
 }
 
-/// Checks the bearer for the endpoint. Management clients without a valid token
-/// get the OAuth challenge that starts their sign-in.
-async fn authenticate(s: &Service, endpoint: &Endpoint, bearer: &str) -> Result<Option<Response>> {
-    match endpoint {
+/// Authentication precedes request-body I/O. A gateway keeps that original
+/// source/server proof through parsing, queueing and the eventual upstream call.
+struct AuthenticatedEndpoint {
+    endpoint: Endpoint,
+    gateway: Option<Box<crate::mcps::GatewayAuthority>>,
+    requester: Option<crate::plugins::requesters::RunRequester>,
+}
+
+async fn authenticate(
+    s: &Service,
+    endpoint: Endpoint,
+    bearer: &str,
+) -> Result<AuthenticatedEndpoint> {
+    let mut authenticated = AuthenticatedEndpoint {
+        endpoint,
+        gateway: None,
+        requester: None,
+    };
+    match &authenticated.endpoint {
         Endpoint::Installation => {
-            crate::installation_mcp::authorize(s, bearer).await?;
+            let run = crate::installation_mcp::authorize(s, bearer).await?;
+            authenticated.requester = crate::plugins::requesters::for_run(s, &run).await?;
         }
         Endpoint::Workspace => {
-            crate::project_workspaces::authorize(s, bearer).await?;
+            let authority = crate::project_workspaces::Authority::capture(s, bearer).await?;
+            authority.recheck(s).await?;
+            authenticated.requester = authority.requester();
         }
         Endpoint::Gateway(id) => {
             crate::validation::uuid(id)?;
-            s.mcps.grant(s, id, bearer).await?;
+            let authority = crate::mcps::GatewayAuthority::capture(s, id, bearer).await?;
+            authority.recheck(s).await?;
+            authenticated.gateway = Some(Box::new(authority));
         }
         Endpoint::Management => {
             return Err(Error::unauthorized("Use the beacon MCP endpoint."));
         }
     }
-    Ok(None)
+    Ok(authenticated)
 }
 
 fn bad_request(id: Value, message: &str) -> Response {
@@ -257,19 +277,54 @@ async fn respond(s: &Arc<Service>, request: Request) -> Result<Response> {
         .get::<crate::auth::InstallationIdentity>()
         .and_then(|identity| identity.mcp_scopes.clone());
     let relayed_management = request.uri().path() == "/api/mcp";
-    if relayed_management {
-        if scopes.is_none() {
-            return Err(Error::unauthorized(
-                "A verified beacon MCP grant is required.",
-            ));
-        }
-    } else if let Some(challenge) = authenticate(s, &endpoint, &bearer).await? {
-        return Ok(challenge);
+    if relayed_management && scopes.is_none() {
+        return Err(Error::unauthorized(
+            "A verified beacon MCP grant is required.",
+        ));
     }
+    let endpoint = Box::new(if relayed_management {
+        AuthenticatedEndpoint {
+            endpoint,
+            gateway: None,
+            requester: None,
+        }
+    } else {
+        authenticate(s, endpoint, &bearer).await?
+    });
+    crate::plugins::requesters::CURRENT
+        .scope(
+            endpoint.requester.clone(),
+            Box::pin(respond_authenticated(
+                s,
+                request,
+                &endpoint,
+                &bearer,
+                scopes.as_deref(),
+                started,
+            )),
+        )
+        .await
+}
+
+async fn respond_authenticated(
+    s: &Arc<Service>,
+    request: Request,
+    endpoint: &AuthenticatedEndpoint,
+    bearer: &str,
+    scopes: Option<&[String]>,
+    started: std::time::Instant,
+) -> Result<Response> {
+    let relayed_management = matches!(endpoint.endpoint, Endpoint::Management);
     if request.method() != "POST" {
         return Err(Error::method_not_allowed("Method not allowed."));
     }
     let input = Input::read(request).await?;
+    if let Some(authority) = &endpoint.gateway {
+        authority.recheck(s).await?;
+    }
+    if let Some(requester) = &endpoint.requester {
+        crate::plugins::requesters::recheck(s, requester).await?;
+    }
     let body = &input.body;
     let id = body.get("id").cloned().unwrap_or(Value::Null);
     let method = text(body, "method");
@@ -315,19 +370,11 @@ async fn respond(s: &Arc<Service>, request: Request) -> Result<Response> {
     let dispatched = crate::backend_migration::OWNER
         .scope(
             migration_owner,
-            dispatch(
-                s,
-                &endpoint,
-                &bearer,
-                scopes.as_deref(),
-                method,
-                &body["params"],
-                modern,
-            ),
+            dispatch(s, endpoint, bearer, scopes, method, &body["params"], modern),
         )
         .await;
     if matches!(method, "initialize" | "tools/list") {
-        let (endpoint, connection_id) = match &endpoint {
+        let (endpoint, connection_id) = match &endpoint.endpoint {
             Endpoint::Management => ("management", "unknown"),
             Endpoint::Workspace => ("workspace", "unknown"),
             Endpoint::Installation => ("installation", "unknown"),
@@ -379,14 +426,14 @@ fn finish_result(mut result: Value, method: &str, modern: bool) -> Value {
 
 async fn dispatch(
     s: &Arc<Service>,
-    endpoint: &Endpoint,
+    endpoint: &AuthenticatedEndpoint,
     bearer: &str,
     scopes: Option<&[String]>,
     method: &str,
     params: &Value,
     modern: bool,
 ) -> Result<Value> {
-    let gateway = matches!(endpoint, Endpoint::Gateway(_));
+    let gateway = matches!(&endpoint.endpoint, Endpoint::Gateway(_));
     let name = if gateway {
         "cairn-mcp-gateway"
     } else {
@@ -425,9 +472,14 @@ async fn dispatch(
             }))
         }
         "ping" => Ok(json!({})),
-        _ => match endpoint {
+        _ => match &endpoint.endpoint {
             Endpoint::Workspace => crate::project_workspaces::rpc(s, bearer, method, params).await,
-            Endpoint::Gateway(id) => proxy(s, id, bearer, method, params.clone()).await,
+            Endpoint::Gateway(id) => {
+                let authority = endpoint.gateway.as_deref().ok_or_else(|| {
+                    Error::forbidden("The gateway request has no original authentication.")
+                })?;
+                proxy(s, id, authority, method, params.clone()).await
+            }
             Endpoint::Management => management(s, scopes, method, params).await,
             Endpoint::Installation => crate::installation_mcp::rpc(s, bearer, method, params).await,
         },
@@ -502,7 +554,6 @@ pub(crate) fn operations() -> Vec<Value> {
         })
         .collect();
     operations.push(crate::capabilities::RESUME_RUN.descriptor());
-    operations.push(cairn_contracts::beacon::list_account_methods_descriptor());
     operations.extend(
         crate::capabilities::PROJECT_OPERATIONS
             .iter()
@@ -538,12 +589,6 @@ pub(crate) async fn operation(
     name: &str,
     args: Value,
 ) -> Result<Value> {
-    if name == cairn_contracts::beacon::LIST_ACCOUNT_METHODS_ID {
-        let input = serde_json::from_value(args).map_err(|error| Error::bad(error.to_string()))?;
-        return Ok(serde_json::to_value(
-            cairn_contracts::beacon::account_methods_proof_required(input),
-        )?);
-    }
     if let Some(op) = crate::capabilities::project_operation(name) {
         return op
             .invoke(
@@ -751,6 +796,12 @@ pub(crate) async fn invoke(
         | "stop_chat"
         | "delete_chat" => chat_tools::invoke(s, name, args, bearer).await,
         "list_agents" => Ok(s.store.list("agents").await?.into()),
+        "list_models" => {
+            crate::provider::Provider::parse(text(&args, "provider"))?
+                .adapter()
+                .model_catalog(s)
+                .await
+        }
         "list_tasks" => Ok(s.store.list("tasks").await?.into()),
         "save_agent" => {
             s.agent_authorized(args, None, AgentEditor::Installation, authorize)
@@ -760,7 +811,15 @@ pub(crate) async fn invoke(
         "update_agent" => {
             let id = text(&args, "id");
             let mut agent = s.get("agents", id).await?;
-            crate::store::merge(&mut agent, &args["agent"]);
+            let patch = &args["agent"];
+            crate::store::merge(&mut agent, patch);
+            // Moving to a coding agent without speeds drops Codex's unless one is sent.
+            if patch.get("provider").is_some()
+                && patch.get("speed").is_none()
+                && text(&agent, "provider") != "codex"
+            {
+                agent["speed"] = "".into();
+            }
             s.agent_authorized(agent, Some(id), AgentEditor::Installation, authorize)
                 .await
         }
@@ -808,6 +867,12 @@ pub(crate) async fn invoke(
         }
         "manage_plugin_route" => {
             Box::pin(crate::plugins::management::routes::invoke(s, &args, bearer)).await
+        }
+        "manage_plugin_oauth" => {
+            Box::pin(crate::plugins::management::authorizations::invoke(
+                s, &args, bearer,
+            ))
+            .await
         }
         "manage_plugin_resource" => {
             Box::pin(crate::plugins::management::resources::invoke(
@@ -934,12 +999,11 @@ async fn connection_tool(
 async fn proxy(
     s: &Arc<Service>,
     id: &str,
-    bearer: &str,
+    authority: &crate::mcps::GatewayAuthority,
     method: &str,
     params: Value,
 ) -> Result<Value> {
     let _guard = s.mcps.lock(id).await;
-    let authority = crate::mcps::GatewayAuthority::capture(s, id, bearer).await?;
     let (server, scope) = authority.recheck(s).await?;
     if method == "tools/call" && !scope.allows(text(&params, "name")) {
         return Err(Error::forbidden("This tool is unavailable to this agent."));
@@ -985,6 +1049,7 @@ async fn proxy(
     .await;
     authority.recheck(s).await?;
     if let Err(error) = &result {
+        let authority = authority.clone();
         s.mcps
             .failure_authorized(s, server, error, move |db| {
                 authority.current(db).map(|_| ())

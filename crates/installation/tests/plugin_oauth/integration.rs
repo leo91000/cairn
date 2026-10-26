@@ -270,10 +270,12 @@ async fn plugin_management_retains_the_chat_members_original_access_generation()
     assert_ne!(before["result"]["isError"], true, "{before}");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     revoked.store(true, Ordering::SeqCst);
-    let after = common::read_json(common::send(&app, invoke()).await).await;
-    assert_eq!(
-        after["result"]["isError"], true,
-        "A revoked member's management call escaped: {after}"
+    let after = common::send(&app, invoke()).await;
+    assert_eq!(after.status(), StatusCode::FORBIDDEN);
+    let after = common::read_json(after).await;
+    assert!(
+        after["error"].is_string() && after["result"].is_null(),
+        "A revoked member's management call escaped HTTP authentication: {after}"
     );
     assert_eq!(
         calls.load(Ordering::SeqCst),

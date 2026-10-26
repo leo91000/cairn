@@ -646,6 +646,80 @@ fn closes(commands: &[socket::Command]) -> Vec<u16> {
 }
 
 #[tokio::test]
+async fn unused_session_budget_connects_and_identifies() {
+    let (_root, s, agent) = service().await;
+    let saved = save(&s, &agent, json!({ "guildId": "100", "channelId": "200" }))
+        .await
+        .unwrap();
+    let connection: Connection = serde_json::from_value(saved).unwrap();
+    let (origin, server, gateway) = rest_with_gateway().await;
+
+    // A bot that has never identified has its full budget and no reset countdown.
+    gateway.remaining(1000, 0);
+    s.plugins.route_http_to(Some(origin));
+    let package = registry::active(&s, "discord").await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    let (link, mut commands) = socket::Link::channel();
+    let mut on = async |event: Value| {
+        handle(&s, &connection, &mut session, &link, &mut commands, event).await
+    };
+    on(json!({ "type": "start", "settings": connection.settings })).await;
+    let issued = on(json!({ "type": "tick", "name": "connect" })).await;
+    assert_eq!(
+        connected_to(&issued).0,
+        "wss://gateway-test.discord.gg/?v=10&encoding=json"
+    );
+    on(json!({ "type": "open" })).await;
+    let issued = on(frame(
+        &json!({ "op": 10, "d": { "heartbeat_interval": 41250 } }),
+    ))
+    .await;
+    assert_eq!(sent(&issued)[0]["op"], 2);
+    on(frame(&json!({
+        "op": 0,
+        "s": 1,
+        "t": "READY",
+        "d": {
+            "session_id": "synthetic_session",
+            "user": { "id": "400", "username": "Cairn", "bot": true },
+            "resume_gateway_url": "wss://gateway-test.discord.gg",
+        },
+    })))
+    .await;
+    let status = s
+        .store
+        .kv(&format!("plugin-status:{}", connection.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status["state"], "connected");
+
+    // Zero reset time never grants a session when the balance is exhausted.
+    gateway.remaining(0, 0);
+    let issued = on(json!({ "type": "close", "code": 1000, "reason": "" })).await;
+    assert_eq!(
+        timer(&issued, "connect"),
+        Some((Duration::from_secs(1), None))
+    );
+    assert!(
+        !issued
+            .iter()
+            .any(|command| matches!(command, socket::Command::Connect { .. }))
+    );
+    session.stop().await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn gateway_lifecycle_matches_discord_and_discord_js() {
     let (_root, s, agent) = service().await;
     let saved = save(&s, &agent, json!({ "guildId": "100", "channelId": "200" }))

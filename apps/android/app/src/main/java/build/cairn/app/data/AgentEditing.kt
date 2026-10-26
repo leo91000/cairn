@@ -141,7 +141,8 @@ fun agentChanges(original: Agent, draft: AgentDraft): List<AgentSection> {
         if (
             edited.provider != original.provider ||
                 edited.model != original.model ||
-                edited.reasoning != original.reasoning
+                edited.reasoning != original.reasoning ||
+                edited.speed != original.speed
         )
             add(AgentSection.Engine)
         if (draft.timeout.trim() != original.timeoutMinutes.toString()) add(AgentSection.Advanced)
@@ -183,7 +184,9 @@ fun agentErrors(draft: AgentDraft): Map<AgentSection, String> = buildMap {
     if (
         agent.model.length > 100 ||
             agent.reasoning.length > 40 ||
-            !Regex("(?:[a-z][a-z0-9_-]*)?").matches(agent.reasoning)
+            !Regex("(?:[a-z][a-z0-9_-]*)?").matches(agent.reasoning) ||
+            agent.speed.length > 40 ||
+            !Regex("(?:[a-z][a-z0-9_-]*)?").matches(agent.speed)
     )
         put(AgentSection.Engine, "Choisissez un modèle et un niveau de réflexion valides.")
     if (draft.timeout.trim().toIntOrNull() !in 0..720)
@@ -201,7 +204,8 @@ fun sectionOfError(message: String): AgentSection? {
         "project" in text -> AgentSection.Projects
         "sandbox" in text -> AgentSection.Sandbox
         "installation" in text -> AgentSection.Powers
-        "model" in text || "reasoning" in text || "provider" in text -> AgentSection.Engine
+        "model" in text || "reasoning" in text || "provider" in text || "speed" in text ->
+            AgentSection.Engine
         "timeout" in text -> AgentSection.Advanced
         "name" in text || "instructions" in text || "description" in text -> AgentSection.Identity
         else -> null
@@ -876,6 +880,7 @@ fun rebaseAgent(
         description = pick(base.description, mine.description, theirs.description),
         model = pick(base.model, mine.model, theirs.model),
         reasoning = pick(base.reasoning, mine.reasoning, theirs.reasoning),
+        speed = pick(base.speed, mine.speed, theirs.speed),
         provider = pick(base.provider, mine.provider, theirs.provider),
         instructions = pick(base.instructions, mine.instructions, theirs.instructions),
         timeoutMinutes = pick(base.timeoutMinutes, mine.timeoutMinutes, theirs.timeoutMinutes),

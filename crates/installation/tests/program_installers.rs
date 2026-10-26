@@ -71,6 +71,10 @@ async fn serve(
     assert!(headers.get("authorization").is_none());
     publisher.requests.fetch_add(1, Ordering::SeqCst);
     let path = request.uri().path();
+    // The opt-in feed can advertise a prerelease even when a stable release exists.
+    if path == "/check/1/0/CLI2/en/2.0.0/Y" {
+        return Json(json!({ "available": "1", "version": "2.43.0-beta.02" })).into_response();
+    }
     if path == "/latest" || path.starts_with("/check/") {
         return Json(publisher.release.lock().await.clone()).into_response();
     }

@@ -4,7 +4,6 @@ extern crate sqlx_core as sqlx;
 
 mod account;
 mod audit;
-mod capabilities;
 mod fcm;
 mod hosts;
 pub mod html;

@@ -456,9 +456,13 @@ async fn dispatch(
 ) -> std::result::Result<Value, DispatchError> {
     let digest = registry::digest(session.manifest(), session.sources())
         .map_err(|e| InvocationError::Failed(e.message))?;
-    registry::require_digest(s, &connection.plugin_id, &digest)
+    let approved = registry::approved(s, &connection.plugin_id)
         .await
         .map_err(|e| InvocationError::Failed(e.message))?;
+    if approved.package.digest != digest {
+        return Err(InvocationError::Failed("The loaded plugin package changed.".into()).into());
+    }
+    let authority = Arc::new(super::scope::LocalAuthority::for_package(&approved));
     let connection = super::routes::bound(s, connection, &event["routing"])
         .await
         .map_err(|error| {
@@ -486,7 +490,7 @@ async fn dispatch(
     let context = Context {
         connection,
         management: None,
-        local_authority: None,
+        local_authority: Some(authority),
         manifest: session.manifest().clone(),
         event: event.clone(),
         link: None,
@@ -506,14 +510,15 @@ async fn dispatch(
     let authority_ref = &authority_failure;
     let result = session
         .dispatch(name, payload, |method, args| async move {
-            let result = capabilities::approved_with_effects(
+            // Keep capability state off the supervisor's polling stack.
+            let result = Box::pin(capabilities::approved_with_effects(
                 s,
                 context,
                 digest_ref,
                 &method,
                 args,
                 Some(effects_ref),
-            )
+            ))
             .await;
             if let Err(error) = &result
                 && error.is_authority_unavailable()

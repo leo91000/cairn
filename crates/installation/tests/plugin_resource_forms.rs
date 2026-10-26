@@ -1,4 +1,7 @@
 mod common;
+#[allow(dead_code)]
+#[path = "common/management.rs"]
+mod management;
 #[path = "plugin_resource_forms/oauth.rs"]
 mod oauth;
 
@@ -1229,5 +1232,96 @@ async fn installed_files_are_rechecked_after_the_last_configuration_owner_lookup
                 "A refused configuration changed its setup"
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn resource_deletion_rechecks_files_after_its_last_owner_lookup() {
+    use std::sync::atomic::Ordering;
+    for inert in [false, true] {
+        let f = Fixture::new(inert).await;
+        let mut children = Vec::new();
+        for _ in 0..2 {
+            let response = request(
+                &f.app,
+                &format!("{}/channels", f.path),
+                "POST",
+                f.input(),
+                InstallationRole::Owner,
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{}",
+                common::read_text(response).await
+            );
+            children.push(common::read_json(response).await);
+        }
+        let gate = common::relay_fixture::owner_lookups(&f._service).await;
+        let path = |child: &Value| format!("{}/channels/{}", f.path, text(child, "id"));
+        let args = |child: &Value| {
+            let mut args = json!({
+                "pluginId": "resourceforms", "collection": "channels", "action": "delete",
+                "resourceId": child["id"], "data": f.body(json!({"revision": child["revision"]})),
+            });
+            args[if inert { "draftId" } else { "instanceId" }] = f.root["id"].clone();
+            args
+        };
+        let baseline = management::public_call(
+            &f._service,
+            &["manage"],
+            "manage_plugin_resource",
+            args(&children[0]),
+        )
+        .await;
+        management::result(&baseline);
+        let lookups = gate.calls.swap(0, Ordering::SeqCst);
+        assert!(lookups > 0);
+        gate.hold_at.store(lookups, Ordering::SeqCst);
+        let selected_path = path(&children[1]);
+        let (service, input) = (f._service.clone(), args(&children[1]));
+        let pending = tokio::spawn(async move {
+            management::public_call(&service, &["manage"], "manage_plugin_resource", input).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), gate.entered.notified())
+            .await
+            .unwrap();
+        let source = f
+            ._service
+            .config
+            .data_dir
+            .join("plugins/resourceforms/1/main.luau");
+        let original = std::fs::read(&source).unwrap();
+        let mut changed = original.clone();
+        changed.extend_from_slice(b"\n-- edited during final owner lookup\n");
+        std::fs::write(&source, changed).unwrap();
+        gate.release.notify_one();
+        let reply = pending.await.unwrap();
+        // Restore only this fixture's own file so the public resource API can
+        // observe the mutation result independently of package load refusal.
+        std::fs::write(&source, original).unwrap();
+        let selected = request(
+            &f.app,
+            &selected_path,
+            "GET",
+            Value::Null,
+            InstallationRole::Owner,
+        )
+        .await;
+        let selected_status = selected.status();
+        let current = common::read_json(selected).await;
+        f.server.abort();
+        f._service.shutdown.cancel();
+        assert_eq!(
+            selected_status,
+            StatusCode::OK,
+            "A delayed delete removed the resource after its files changed: {reply}"
+        );
+        assert_eq!(current, children[1]);
+        assert!(
+            reply["result"]["isError"] == true || reply.get("error").is_some(),
+            "inert={inert}: {reply}"
+        );
     }
 }

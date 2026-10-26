@@ -133,6 +133,7 @@ export function chatFixture() {
           items: [],
           model: params.model,
           effort: params.effort,
+          serviceTier: params.serviceTier,
         }
         thread.turns.push(active)
         notify('turn/started', { threadId: thread.id, turn: active })

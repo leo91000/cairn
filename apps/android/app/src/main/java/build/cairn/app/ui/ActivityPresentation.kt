@@ -368,6 +368,7 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                     "status" ->
                         when {
                             account != null -> "Compte ${account.first} sélectionné"
+                            speedFallback(data) -> "Ce tour passe en vitesse Standard"
                             event.text.lowercase() in
                                 listOf(
                                     "succeeded",
@@ -396,6 +397,8 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
             val usage = data?.get("usage").asObject()
             val subtitle =
                 if (account != null) account.second
+                else if (event.type == "status" && speedFallback(data))
+                    "Codex ne propose pas la vitesse choisie pour ce modèle ici"
                 else if (event.type == "engine.retry") engineRetryDetail(data)
                 else if (event.type == "provider.limit") usageLimitDetail(data)
                 else if (backgroundTasks.isNotEmpty()) backgroundTasks.joinToString(" · ")
@@ -543,3 +546,7 @@ private fun accountUsed(text: String): Pair<String, String>? =
         ->
         agent to name.trim()
     }
+
+/** A turn whose selected speed Codex does not offer for its model runs at Standard. */
+internal fun speedFallback(data: JsonObject?): Boolean =
+    data?.get("speed").asObject().string("applied").isNotEmpty()

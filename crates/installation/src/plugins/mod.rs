@@ -177,8 +177,14 @@ impl Plugins {
 
     /// Run-scoped CLI commands declared by any package the run's agent is granted.
     pub async fn command(&self, s: &Service, bearer: &str, input: &Value) -> Result<Value> {
-        crate::project_workspaces::authorize(s, bearer).await?;
-        agents::command(s, bearer, input).await
+        let authority = crate::project_workspaces::Authority::capture(s, bearer).await?;
+        authority.recheck(s).await?;
+        requesters::CURRENT
+            .scope(
+                authority.requester(),
+                Box::pin(agents::command(s, bearer, input)),
+            )
+            .await
     }
 
     pub async fn start(self: Arc<Self>, s: Arc<Service>) {
@@ -203,8 +209,18 @@ pub(crate) async fn command_response(s: &Service, request: Request) -> Result<Re
         .and_then(|value| value.strip_prefix("Bearer "))
         .unwrap_or("")
         .to_owned();
-    let input = Input::read(request).await?;
-    let value = s.plugins.command(s, &bearer, &input.body).await?;
+    let authority = crate::project_workspaces::Authority::capture(s, &bearer).await?;
+    authority.recheck(s).await?;
+    let value = requesters::CURRENT
+        .scope(
+            authority.requester(),
+            Box::pin(async {
+                let input = Input::read(request).await?;
+                authority.recheck(s).await?;
+                s.plugins.command(s, &bearer, &input.body).await
+            }),
+        )
+        .await?;
     let mut response = Json(value).into_response();
     response
         .headers_mut()

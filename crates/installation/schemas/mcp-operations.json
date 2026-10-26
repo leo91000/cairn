@@ -12,6 +12,29 @@
     }
   },
   {
+    "name": "list_models",
+    "description": "List the models a coding agent offers on its enabled accounts: reasoning levels and, for Codex, the speeds (service tiers) each model offers with Codex's own description of their usage. Use a serviceTiers id, or \"standard\", as an agent or message speed. A tier marked limited is missing from some accounts; runs that ask for it prefer an account that offers it and otherwise run at Standard with a notice.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "codex",
+            "claude",
+            "opencode"
+          ],
+          "default": "codex"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "save_agent",
     "description": "Create an agent profile. Execution access is explicit.",
     "scope": "manage",
@@ -46,6 +69,12 @@
         },
         "reasoning": {
           "default": "high",
+          "type": "string",
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
+        },
+        "speed": {
+          "default": "",
           "type": "string",
           "maxLength": 40,
           "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
@@ -220,6 +249,7 @@
         "description",
         "model",
         "reasoning",
+        "speed",
         "instructions",
         "timeoutMinutes",
         "access"
@@ -266,6 +296,11 @@
               "maxLength": 100
             },
             "reasoning": {
+              "type": "string",
+              "maxLength": 40,
+              "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
+            },
+            "speed": {
               "type": "string",
               "maxLength": 40,
               "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
@@ -1031,7 +1066,7 @@
   },
   {
     "name": "run_task",
-    "description": "Queue a task using its agent\u2019s resource access and execution mode. YOLO is the default inside a private agent VM. Unattended runs never prompt for approval. May modify allowed code and external services as instructed.",
+    "description": "Queue a task using its agent’s resource access and execution mode. YOLO is the default inside a private agent VM. Unattended runs never prompt for approval. May modify allowed code and external services as instructed.",
     "scope": "run",
     "destructive": false,
     "inputSchema": {
@@ -1521,6 +1556,12 @@
               "type": "string",
               "maxLength": 40,
               "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
+            },
+            "speed": {
+              "default": "",
+              "type": "string",
+              "maxLength": 40,
+              "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
             }
           },
           "required": [
@@ -1530,7 +1571,8 @@
             "mode",
             "provider",
             "model",
-            "reasoning"
+            "reasoning",
+            "speed"
           ],
           "additionalProperties": false
         }
@@ -1604,6 +1646,11 @@
             },
             "reasoning": {
               "default": "",
+              "type": "string",
+              "maxLength": 40,
+              "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
+            },
+            "speed": {
               "type": "string",
               "maxLength": 40,
               "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
@@ -2795,6 +2842,56 @@
           ]
         }
       ]
+    }
+  },
+  {
+    "name": "manage_plugin_oauth",
+    "description": "Read the redacted OAuth status or disconnect a nonpersonal resource authorization on an active plugin instance, using the same owner UI validation. Status includes granted/requested scopes and expiry, never tokens. Revoking saved authorization requires the native agent's separate existing instance grant; installation management cannot grant itself private access. Disconnect also invalidates in-flight consent. Personal and inert authorization, starting consent and finishing consent are not available through this operation.",
+    "scope": "manage",
+    "destructive": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "pluginId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "instanceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "collection": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "resourceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "status",
+            "revoke"
+          ]
+        }
+      },
+      "required": [
+        "pluginId",
+        "instanceId",
+        "collection",
+        "resourceId",
+        "provider",
+        "action"
+      ],
+      "additionalProperties": false
     }
   },
   {

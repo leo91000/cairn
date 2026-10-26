@@ -1,6 +1,8 @@
 mod common;
 #[path = "plugin_oauth/integration.rs"]
 mod integration;
+#[path = "plugin_oauth/management.rs"]
+mod management;
 #[path = "plugin_oauth/receipts.rs"]
 mod receipts;
 

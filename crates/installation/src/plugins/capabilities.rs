@@ -141,10 +141,18 @@ pub(crate) async fn approved_with_effects(
     args: Value,
     effects: Option<&InvocationEffects>,
 ) -> Result<Value> {
-    super::registry::require_digest(s, &context.manifest.id, digest).await?;
+    require_loaded(s, context, digest).await?;
     let result = checked_approval(s, context, Some(digest), method, args, effects).await?;
-    super::registry::require_digest(s, &context.manifest.id, digest).await?;
+    require_loaded(s, context, digest).await?;
     Ok(result)
+}
+
+async fn require_loaded(s: &Service, context: &Context, digest: &str) -> Result<()> {
+    if let Some(authority) = &context.local_authority {
+        authority.recheck_loaded(s, digest).await
+    } else {
+        super::registry::require_digest(s, &context.manifest.id, digest).await
+    }
 }
 
 /// A long-lived worker's call, after rechecking the owner and the instance.

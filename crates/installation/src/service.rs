@@ -303,9 +303,14 @@ impl Service {
         }
         let mut agent = parse("agent", input)?;
         crate::agent_grants::normalize(&mut agent);
-        crate::provider::Provider::of_agent(&agent)?
-            .adapter()
-            .validate_agent(&agent)?;
+        let provider = crate::provider::Provider::of_agent(&agent)?;
+        crate::models::validate_speed(text(&agent, "speed"))?;
+        if provider != crate::provider::Provider::Codex && !text(&agent, "speed").is_empty() {
+            return Err(Error::bad(
+                "Speed applies only to Codex agents. Remove it or choose Codex.",
+            ));
+        }
+        provider.adapter().validate_agent(&agent)?;
         agent["id"] = existing_id
             .map(str::to_owned)
             .or(creation_id.clone())
@@ -435,6 +440,7 @@ impl Service {
         bearer: Option<String>,
         reduces_execution: bool,
     ) -> Result<Value> {
+        let authorize = crate::installation_mcp::management_authorization(bearer.as_deref());
         let creation_id = creation_id(&input, existing)?;
         let mut task = parse("task", input)?;
         let agent = self.get("agents", text(&task, "agentId")).await?;
@@ -479,6 +485,7 @@ impl Service {
         let existing = existing.map(str::to_owned);
         self.store
             .transaction(move |db| {
+                authorize(db)?;
                 required(
                     db.get("agents", text(&task, "agentId"))?,
                     "Agent no longer exists",
@@ -696,6 +703,7 @@ impl Service {
         dedupe: Option<String>,
         bearer: Option<String>,
     ) -> Result<Value> {
+        let authorize = crate::installation_mcp::management_authorization(bearer.as_deref());
         let mut run = run;
         let origin = if run["trigger"] == "schedule" {
             crate::native::policy::Origin::Stored(run["snapshot"]["task"].clone())
@@ -708,6 +716,7 @@ impl Service {
         let result = self
             .store
             .transaction(move |db| {
+                authorize(db)?;
                 required(
                     db.get("agents", text(&run["snapshot"]["agent"], "id"))?,
                     "Agent no longer exists",
@@ -982,6 +991,11 @@ fn inherit_agent_settings(input: &mut Value, existing: &Value) {
     }
     if input.get("provider").is_none() {
         input["provider"] = existing["provider"].clone();
+    }
+    // Editors predating speeds keep the saved one while the coding agent stays the same.
+    let same_provider = input["provider"] == *existing.get("provider").unwrap_or(&json!("codex"));
+    if input.get("speed").is_none() && same_provider && existing.get("speed").is_some() {
+        input["speed"] = existing["speed"].clone();
     }
     if input.is_object() {
         for key in [

@@ -35,6 +35,7 @@ impl Service {
         identity: Option<&InstallationIdentity>,
         bearer: Option<String>,
     ) -> Result<Value> {
+        let authorize = crate::installation_mcp::management_authorization(bearer.as_deref());
         let _guard = self.task_author_lock.lock().await;
         let creation_id = creation_id(&input, existing)?;
         let mut input = parse("task", input)?;
@@ -61,6 +62,7 @@ impl Service {
             return self
                 .store
                 .read(move |db| {
+                    authorize(db)?;
                     let task = crate::error::required(db.get("tasks", &id)?, "Task not found")?;
                     if let Some(bearer) = bearer {
                         crate::installation_mcp::authorize_task_in(db, &bearer, &task, Some(&id))?;

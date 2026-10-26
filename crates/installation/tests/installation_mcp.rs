@@ -662,6 +662,129 @@ async fn agent_updates_preserve_omitted_settings_and_accept_new_engine_settings(
 }
 
 #[tokio::test]
+async fn model_speeds_and_agent_speeds_match_public_mcp_and_installation_tools() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let config = cairn_installation::config::Config {
+        codex_bin: common::fixture("codex.mjs"),
+        ..common::config(root.path())
+    };
+    let s = Service::new(config).await.unwrap();
+    common::relay_fixture::claimed(&s).await.unwrap();
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+
+    let internal = call(&s, &configuration, "list_models", json!({})).await;
+    let public = public_call(&s, &["read"], "list_models", json!({ "provider": "codex" })).await;
+    assert_eq!(result(&internal), result(&public));
+    let fast = result(&public)["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["model"] == "fixture-fast")
+        .unwrap()
+        .clone();
+    assert_eq!(fast["serviceTiers"][0]["id"], "priority");
+    assert_eq!(fast["serviceTiers"][0]["name"], "Fast");
+    let denied = public_call(&s, &["run"], "list_models", json!({})).await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+
+    let saved = call(
+        &s,
+        &configuration,
+        "save_agent",
+        json!({ "name": "Fast reviewer", "speed": "priority" }),
+    )
+    .await;
+    let agent = result(&saved).clone();
+    assert_eq!(agent["speed"], "priority");
+    let kept = public_call(
+        &s,
+        &["manage"],
+        "update_agent",
+        json!({ "id": agent["id"], "agent": { "description": "Keeps its speed" } }),
+    )
+    .await;
+    assert_eq!(result(&kept)["speed"], "priority");
+    let standard = call(
+        &s,
+        &configuration,
+        "update_agent",
+        json!({ "id": agent["id"], "agent": { "speed": "standard" } }),
+    )
+    .await;
+    assert_eq!(result(&standard)["speed"], "standard");
+
+    // Speed belongs to Codex: other coding agents reject it, and switching drops it.
+    let rejected = public_call(
+        &s,
+        &["manage"],
+        "save_agent",
+        json!({ "name": "Claude", "provider": "claude", "speed": "priority" }),
+    )
+    .await;
+    assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+    let rejected = call(
+        &s,
+        &configuration,
+        "update_agent",
+        json!({ "id": agent["id"], "agent": { "provider": "claude", "speed": "priority" } }),
+    )
+    .await;
+    assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+    let switched = call(
+        &s,
+        &configuration,
+        "update_agent",
+        json!({ "id": agent["id"], "agent": { "provider": "claude", "reasoning": "max" } }),
+    )
+    .await;
+    assert_eq!(result(&switched)["provider"], "claude");
+    assert_eq!(result(&switched)["speed"], "");
+
+    // A queued message keeps its speed through edits that do not send one, on both tools.
+    let chat = s.chat_create(json!({})).await.unwrap();
+    let chat_id = chat["id"].as_str().unwrap();
+    s.chat_pause(chat_id, true).await.unwrap();
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let sent = public_call(
+        &s,
+        &["run"],
+        "send_chat_message",
+        json!({
+            "chatId": chat_id,
+            "message": { "id": message_id, "text": "Next", "provider": "codex", "speed": "priority" },
+        }),
+    )
+    .await;
+    assert_eq!(result(&sent)["speed"], "priority", "{sent}");
+    let edited = public_call(
+        &s,
+        &["run"],
+        "edit_chat_message",
+        json!({ "chatId": chat_id, "messageId": message_id, "message": { "text": "Reworded" } }),
+    )
+    .await;
+    assert_eq!(result(&edited)["speed"], "priority", "{edited}");
+    let edited = call(
+        &s,
+        &configuration,
+        "edit_chat_message",
+        json!({ "chatId": chat_id, "messageId": message_id, "message": { "text": "Again" } }),
+    )
+    .await;
+    assert_eq!(result(&edited)["speed"], "priority", "{edited}");
+    let standard = call(
+        &s,
+        &configuration,
+        "edit_chat_message",
+        json!({ "chatId": chat_id, "messageId": message_id, "message": { "text": "Again", "speed": "standard" } }),
+    )
+    .await;
+    assert_eq!(result(&standard)["speed"], "standard", "{standard}");
+}
+
+#[tokio::test]
 async fn installation_access_is_opt_in_and_older_profile_updates_preserve_it() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
@@ -788,7 +911,6 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
     public_names.insert(cairn_contracts::RESUME_RUN_ID);
-    public_names.insert(cairn_contracts::beacon::LIST_ACCOUNT_METHODS_ID);
     public_names.extend([
         "list_projects",
         "get_project",
@@ -3710,14 +3832,13 @@ async fn concurrent_resume_run_publishes_once_and_a_revoked_grant_cannot_resume(
 }
 
 #[tokio::test]
-async fn account_methods_never_derive_account_authority_from_installation_grants() {
-    use cairn_contracts::beacon::{LIST_ACCOUNT_METHODS_ID, ListAccountMethodsOutput};
+async fn beacon_account_methods_are_absent_from_both_tools() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let main = enabled_main(&s).await;
-    let (run, configuration) = active_run(&s, &main).await;
+    let (_, configuration) = active_run(&s, &main).await;
     let token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
-    let public = common::relay_fixture::grant(&s, &["read", "write", "run"]).await;
+    let public = common::relay_fixture::grant(&s, &["read", "write", "run", "manage"]).await;
     let app = common::relay_fixture::router(s.clone()).await.unwrap();
     for (endpoint, bearer) in [("/mcp", public.as_str()), ("/mcp-installation", token)] {
         let (_, discovery) = node_management_call(
@@ -3725,51 +3846,17 @@ async fn account_methods_never_derive_account_authority_from_installation_grants
             endpoint,
             bearer,
             "search",
-            json!({ "names": [LIST_ACCOUNT_METHODS_ID], "detail": "schema" }),
+            json!({ "names": ["list_account_methods"], "detail": "schema" }),
         )
         .await;
         let operations = result(&discovery)["operations"].as_array().unwrap();
-        assert_eq!(operations.len(), 1);
-        assert_eq!(
-            operations[0]["inputSchema"],
-            cairn_contracts::schema_for::<cairn_contracts::beacon::ListAccountMethodsInput>(
-                cairn_contracts::Contract::Deserialize
-            )
-        );
-        assert_eq!(
-            operations[0]["outputSchema"],
-            cairn_contracts::schema_for::<ListAccountMethodsOutput>(
-                cairn_contracts::Contract::Serialize
-            )
-        );
+        assert!(operations.is_empty(), "{discovery}");
+
         let (_, denied) =
-            node_management_call(&app, endpoint, bearer, LIST_ACCOUNT_METHODS_ID, json!({})).await;
-        let denied: ListAccountMethodsOutput =
-            serde_json::from_value(result(&denied).clone()).unwrap();
-        assert!(matches!(
-            denied,
-            ListAccountMethodsOutput::AccountProofRequired { .. }
-        ));
-        for args in [
-            json!({ "owner": true }),
-            json!({ "confirmed": true }),
-            json!({ "accountId": "owner" }),
-        ] {
-            let (_, invalid) =
-                node_management_call(&app, endpoint, bearer, LIST_ACCOUNT_METHODS_ID, args).await;
-            assert_eq!(invalid["result"]["isError"], true, "{invalid}");
-        }
+            node_management_call(&app, endpoint, bearer, "list_account_methods", json!({})).await;
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+        assert!(denied.to_string().contains("Unknown operation"), "{denied}");
     }
-    s.mcps.revoke_run(&s, text(&run, "id")).await.unwrap();
-    let (status, _) = node_management_call(
-        &app,
-        "/mcp-installation",
-        token,
-        LIST_ACCOUNT_METHODS_ID,
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

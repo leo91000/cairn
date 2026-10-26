@@ -16,6 +16,10 @@
   granted installation access. When adding or changing a UI capability, update
   both tool interfaces in the same change, preserve their authorization checks,
   and verify equivalent behavior across the UI, public MCP and agent tool.
+  Beacon-managed Cairn account actions (sessions, sign-in methods, invitations,
+  members, MCP authorizations and notification devices) are UI-only: keep web/Android
+  parity, but exclude them from public MCP and `cairn_installation`. They act on a
+  person's Cairn account, whose authority an installation grant does not confer.
 - Separate logical steps with blank lines. Give complex expressions descriptive
   intermediate names when that makes the flow easier to follow. Avoid arbitrary
   function-size limits or extracting helpers solely to reduce line counts.
