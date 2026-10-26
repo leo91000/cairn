@@ -40,6 +40,14 @@ async fn forget_disk_grants(
         .await
 }
 
+async fn forget_deleted_disk(s: &Service, run: &str, node: &str) -> Result<()> {
+    forget_disk_grants(s, run, node, true, Vec::new()).await?;
+    let id = format!("{run}:{node}");
+    s.store
+        .write(move |db| db.remove("node-volumes", &id))
+        .await
+}
+
 async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -> Result<()> {
     if run.is_empty() {
         return Ok(());
@@ -83,18 +91,14 @@ async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -
     }
     let value: Value = response.json().await.map_err(Error::internal)?;
     let deleted = action == "delete";
-    if deleted || action == "prune" {
+    if deleted {
+        forget_deleted_disk(s, run, node).await?;
+    } else if action == "prune" {
         let retired = value["retiredGrants"]
             .as_array()
             .cloned()
             .unwrap_or_default();
-        forget_disk_grants(s, run, node, deleted, retired).await?;
-    }
-    if deleted {
-        let id = format!("{run}:{node}");
-        s.store
-            .write(move |db| db.remove("node-volumes", &id))
-            .await?;
+        forget_disk_grants(s, run, node, false, retired).await?;
     }
     Ok(())
 }
@@ -121,6 +125,34 @@ pub async fn discard_stale_disk(s: &Service, run: &str, node: &str, whole: bool)
     Ok(())
 }
 
+/// Irreversible conversation deletion must also release its published data when
+/// a permanently revoked machine can never acknowledge local disk erasure.
+async fn delete_disk_for_purge(s: &Service, run: &str, destination: Option<&str>) -> Result<()> {
+    if run.is_empty() {
+        return Ok(());
+    }
+    let checkpoint = crate::nodes::checkpoint(s, run).await?;
+    let node = destination
+        .or(checkpoint["nodeId"].as_str())
+        .unwrap_or(crate::nodes::LOCAL_NODE_ID);
+    let revoked = node != crate::nodes::LOCAL_NODE_ID
+        && s.store
+            .get("nodes", node)
+            .await?
+            .is_some_and(|record| record["revoked"] == true);
+    if revoked {
+        forget_deleted_disk(s, run, node).await?;
+        tracing::info!(
+            run,
+            node,
+            remote_erasure_confirmed = false,
+            "Released deleted conversation references on a permanently revoked node"
+        );
+        return Ok(());
+    }
+    disk(s, run, "delete", destination).await
+}
+
 async fn delete_disks(s: &Service, run: &str) -> Result<()> {
     let volumes = s
         .store
@@ -130,10 +162,10 @@ async fn delete_disks(s: &Service, run: &str) -> Result<()> {
         .filter(|v| v["runId"] == run)
         .collect::<Vec<_>>();
     if volumes.is_empty() {
-        return disk(s, run, "delete", None).await;
+        return delete_disk_for_purge(s, run, None).await;
     }
     for volume in volumes {
-        disk(s, run, "delete", Some(text(&volume, "nodeId"))).await?;
+        delete_disk_for_purge(s, run, Some(text(&volume, "nodeId"))).await?;
     }
     Ok(())
 }

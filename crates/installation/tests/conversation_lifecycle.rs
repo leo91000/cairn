@@ -20,8 +20,16 @@ struct App {
 
 impl App {
     async fn new() -> Self {
+        Self::with_public_url(None).await
+    }
+
+    async fn with_public_url(public_url: Option<String>) -> Self {
         let root = TempDir::new().unwrap();
-        let service = Service::new(common::config(root.path())).await.unwrap();
+        let mut config = common::config(root.path());
+        if let Some(public_url) = public_url {
+            config.public_url = public_url;
+        }
+        let service = Service::new(config).await.unwrap();
         let router = router(service.clone()).await.unwrap();
         let session = RelayContext::new(&common::relay_fixture::context(&service).await);
         Self {
@@ -479,6 +487,177 @@ async fn immediate_deletion_removes_files_and_records_without_archival() {
     app.service.cleanup_conversations().await.unwrap();
     assert_eq!(app.get(&path).await.0, StatusCode::NOT_FOUND);
     assert!(!directory.exists());
+}
+
+#[tokio::test]
+async fn permanent_revocation_does_not_block_requested_conversation_erasure() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for (revoked, recorded_volume) in [
+        (Some(true), true),
+        (Some(true), false),
+        (Some(false), true),
+        (None, true),
+    ] {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let public_url = format!("http://{}", listener.local_addr().unwrap());
+        let backend = Router::new().fallback(move || {
+            let observed = observed.clone();
+            async move {
+                observed.fetch_add(1, Ordering::SeqCst);
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, backend).await.unwrap() });
+        let app = App::with_public_url(Some(public_url)).await;
+        let mut chat = app.create_chat().await;
+        let run = id();
+        let node = id();
+        let grant = id();
+        app.add_finished_run(
+            &run,
+            RunStatus::Succeeded,
+            json!({ "isolated": true }),
+            "retired work",
+        )
+        .await;
+        chat["runId"] = run.clone().into();
+        app.service.store.put("chats", chat.clone()).await.unwrap();
+        if let Some(revoked) = revoked {
+            app.service
+                .store
+                .put(
+                    "nodes",
+                    json!({ "id": node, "revoked": revoked, "local": false }),
+                )
+                .await
+                .unwrap();
+        }
+        app.service
+            .store
+            .set(
+                &format!("run-checkpoint:{run}"),
+                json!({ "nodeId": node }),
+                None,
+            )
+            .await
+            .unwrap();
+        app.service
+            .store
+            .put(
+                "node-disk-grants",
+                json!({ "id": grant, "runId": run, "nodeId": node }),
+            )
+            .await
+            .unwrap();
+        if recorded_volume {
+            app.service
+                .store
+                .put(
+                    "node-volumes",
+                    json!({ "id": format!("{run}:{node}"), "runId": run, "nodeId": node }),
+                )
+                .await
+                .unwrap();
+        }
+        let publication = id();
+        let kept_publication = id();
+        let unique = id();
+        let shared = id();
+        let (owned, kept, exclusive, reused, owner) = (
+            publication.clone(),
+            kept_publication.clone(),
+            unique.clone(),
+            shared.clone(),
+            run.clone(),
+        );
+        app.service.store.transaction(move |db| {
+            db.0.execute("INSERT INTO shared_publications VALUES(?1,?2)", rusqlite::params![owned, owner])?;
+            db.0.execute("INSERT INTO shared_publications VALUES(?1,'other-retained-run')", [&kept])?;
+            for (object, hash) in [(&exclusive, "exclusive"), (&reused, "shared")] {
+                db.0.execute("INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES(?1,'fixture',?2,4096,'{}','ready')", rusqlite::params![object, hash])?;
+                db.0.execute("INSERT INTO shared_references VALUES(?1,?2)", rusqlite::params![owned, object])?;
+            }
+            db.0.execute("INSERT INTO shared_references VALUES(?1,?2)", rusqlite::params![kept, reused])?;
+            Ok(())
+        }).await.unwrap();
+        let directory = app.service.config.data_dir.join("runs").join(&run);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("private.txt"),
+            "deleted conversation contents",
+        )
+        .unwrap();
+        let path = chat_path(&chat);
+        assert_eq!(
+            app.request("DELETE", &path, json!({})).await.0,
+            StatusCode::OK
+        );
+        app.service.cleanup_conversations().await.unwrap();
+
+        if revoked == Some(true) {
+            assert_eq!(app.get(&path).await.0, StatusCode::NOT_FOUND);
+            assert!(!directory.exists());
+            assert!(
+                app.service
+                    .store
+                    .get("node-disk-grants", &grant)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                app.service
+                    .store
+                    .get("node-volumes", &format!("{run}:{node}"))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(requests.load(Ordering::SeqCst), 0);
+        } else {
+            assert_eq!(app.get(&path).await.0, StatusCode::OK);
+            assert!(directory.join("private.txt").exists());
+            assert!(
+                app.service
+                    .store
+                    .get("node-disk-grants", &grant)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                app.service
+                    .store
+                    .get("node-volumes", &format!("{run}:{node}"))
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(requests.load(Ordering::SeqCst) > 0);
+        }
+        let (exclusive, reused) = (unique.clone(), shared.clone());
+        let (unique_unused, shared_unused) = app
+            .service
+            .store
+            .read(move |db| {
+                let unused = |object: &str| {
+                    db.0.query_row(
+                        "SELECT unused_at IS NOT NULL FROM shared_objects WHERE id=?1",
+                        [object],
+                        |row| row.get::<_, bool>(0),
+                    )
+                };
+                Ok((unused(&exclusive)?, unused(&reused)?))
+            })
+            .await
+            .unwrap();
+        assert_eq!(unique_unused, revoked == Some(true));
+        assert!(!shared_unused, "Another conversation still owns this block");
+        server.abort();
+    }
 }
 
 #[tokio::test]
