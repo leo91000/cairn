@@ -337,6 +337,10 @@ class WorkspaceJourneyTest {
                     .jsonObject["settings"]!!
                     .jsonObject
             assertEquals("Nouvelle mission", saved["name"]?.jsonPrimitive?.content)
+            assertEquals(
+                java.time.ZoneId.systemDefault().id,
+                saved["timezone"]?.jsonPrimitive?.content,
+            )
             assertTrue(
                 saved["projectId"] == null ||
                     saved["projectId"] == kotlinx.serialization.json.JsonNull

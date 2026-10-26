@@ -42,7 +42,13 @@ internal fun TaskEditor(
         rememberForm(
             initial?.settings()
                 ?: draft
-                ?: MissionSettings(name = "", prompt = "", agentId = MAIN_AGENT_ID, skills = null)
+                ?: MissionSettings(
+                    name = "",
+                    prompt = "",
+                    agentId = MAIN_AGENT_ID,
+                    skills = null,
+                    timezone = java.time.ZoneId.systemDefault().id,
+                )
         )
     var revision by rememberSaveable { mutableStateOf(initial?.revision.orEmpty()) }
     val saving = rememberResourceSave(initial?.id.orEmpty())
