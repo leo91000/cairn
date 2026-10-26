@@ -217,7 +217,7 @@ pub async fn refresh_from_session(s: &Service, source: &str, session: &mut Sessi
 /// Combines one model listed by several accounts: only effort levels supported by
 /// every account, hidden only when hidden everywhere, default when default anywhere.
 /// Speeds are offered when any account offers them, since runs prefer an account that
-/// does; `limited` marks a speed that some of these accounts lack.
+/// does; `limited` marks a speed that some of these accounts lack or do not confirm.
 fn intersect(existing: &mut Value, model: &Value) {
     let supported = model["supportedReasoningEfforts"]
         .as_array()
@@ -265,6 +265,46 @@ fn merge_tiers(existing: &mut Value, model: &Value) {
     }
 }
 
+/// Marks `limited` a speed that some account able to run the model does not confirm: one whose
+/// catalog is unknown, outdated or silent about the model's speeds. A run there asks for it
+/// without knowing whether Codex applies it.
+fn mark_unconfirmed(model: &mut Value, catalogs: &[Value]) {
+    let name = text(model, "model").to_owned();
+    let is_default = model["isDefault"] == true;
+    // As routing: an account whose fresh catalog lacks the model runs it only when no other
+    // fresh catalog lists the model.
+    let listed_fresh = catalogs
+        .iter()
+        .any(|catalog| fresh(catalog) && catalog_row(catalog, &name).is_some());
+    let runs_elsewhere =
+        |catalog: &Value| listed_fresh && fresh(catalog) && catalog_row(catalog, &name).is_none();
+    let Some(tiers) = model["serviceTiers"].as_array_mut() else {
+        return;
+    };
+    for tier in tiers {
+        let id = text(tier, "id").to_owned();
+        // Without an account a run can land on, nothing confirms the speed.
+        // The catalog default is also what a run without a model gets on each account, which
+        // routing never excludes: that account's own default must confirm the speed too.
+        let unconfirmed = catalogs.is_empty()
+            || catalogs.iter().any(|catalog| {
+                (!runs_elsewhere(catalog) && offers_tier(catalog, &name, &id) != Some(true))
+                    || (is_default && offers_tier(catalog, "", &id) != Some(true))
+            });
+        if unconfirmed {
+            tier["limited"] = true.into();
+        }
+    }
+}
+
+/// Whether a catalog is recent enough to route models, as the picker's own freshness.
+fn fresh(catalog: &Value) -> bool {
+    catalog["checkedAt"]
+        .as_i64()
+        .and_then(|at| now().checked_sub(at))
+        .is_some_and(|age| (0..=TTL).contains(&age))
+}
+
 async fn discover_local(s: &Service) -> Result<Value> {
     let mut session = Session::codex(&s.config, &s.config.home.join(".codex"), &[], None).await?;
     let result = discover(&mut session).await;
@@ -290,6 +330,7 @@ impl Models {
             accounts.iter().map(|a| text(a, "id").to_owned()).collect()
         };
         let mut models = BTreeMap::<String, Value>::new();
+        let mut catalogs = Vec::new();
         let mut stale = false;
         let mut checked_at: Option<i64> = None;
         for source in &sources {
@@ -317,8 +358,24 @@ impl Models {
                     }
                 }
             }
+            // Only accounts a run can land on decide whether a speed is confirmed.
+            let signed_in = source.is_empty()
+                || accounts
+                    .iter()
+                    .any(|a| text(a, "id") == source && a["state"] == "ready");
+            if signed_in {
+                catalogs.push(cached);
+            }
         }
-        let models = models.into_values().collect::<Vec<_>>();
+        let mut models = models.into_values().collect::<Vec<_>>();
+        for model in &mut models {
+            for tier in model["serviceTiers"].as_array_mut().into_iter().flatten() {
+                if let Some(tier) = tier.as_object_mut() {
+                    tier.remove("limited");
+                }
+            }
+            mark_unconfirmed(model, &catalogs);
+        }
         let error = if sources.is_empty() {
             "Connect a Codex account to load available models."
         } else if models.is_empty() {
@@ -367,13 +424,45 @@ fn catalog_row<'a>(cached: &'a Value, model: &str) -> Option<&'a Value> {
     })
 }
 
-/// Whether a fresh catalog offers `tier` for `model`, or `None` when it cannot tell.
+/// Whether a fresh catalog offers `tier` for `model`, or `None` when it cannot tell. An empty
+/// model is the catalog default, which only orders accounts: the turn checks the model it runs.
 fn offers_tier(cached: &Value, model: &str, tier: &str) -> Option<bool> {
     if !speeds_known(cached) {
         return None;
     }
-    let tiers = catalog_row(cached, model)?["serviceTiers"].as_array()?;
+    tier_listed(cached, model, tier)
+}
+
+/// Whether a catalog lists `tier` for `model`, or `None` when it does not list the model or its
+/// speeds.
+fn tier_listed(catalog: &Value, model: &str, tier: &str) -> Option<bool> {
+    let tiers = catalog_row(catalog, model)?["serviceTiers"].as_array()?;
     Some(tiers.iter().any(|offered| offered["id"] == tier))
+}
+
+/// What the Codex process running a turn says about the `tier` it is asked for.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TierCheck {
+    /// Its catalog lists the tier for the model.
+    Offered,
+    /// Its catalog lists the model without the tier: Codex would silently run Standard.
+    Lacking,
+    /// Its catalog could not be read, or does not list the model exactly. Codex applies a listed
+    /// model's tiers to some other names, such as dated versions, and drops them for the rest.
+    Unconfirmed,
+}
+
+/// Checks `tier` against the model list of the Codex process about to run the turn, the
+/// catalog Codex itself applies, rather than Cairn's cached copy of an account's.
+pub async fn check_tier(session: &mut Session, model: &str, tier: &str) -> TierCheck {
+    let Ok(models) = discover(session).await else {
+        return TierCheck::Unconfirmed;
+    };
+    match tier_listed(&json!({ "models": models }), model, tier) {
+        Some(true) => TierCheck::Offered,
+        Some(false) => TierCheck::Lacking,
+        None => TierCheck::Unconfirmed,
+    }
 }
 
 async fn account_offers_speed(
@@ -405,6 +494,27 @@ async fn account_offers_speed(
     Ok(true)
 }
 
+/// The speeds `account`'s recent cached catalog lists, by model, or `None` when it has none. The
+/// turn needs them as well as its Codex process's list to confirm a tier: Codex answers with its
+/// built-in list when it cannot fetch the account's.
+pub async fn account_tiers(s: &Service, account: &str) -> Result<Option<Value>> {
+    let Some(cached) = s.store.kv(&format!("codex-models:{account}")).await? else {
+        return Ok(None);
+    };
+    if !speeds_known(&cached) {
+        return Ok(None);
+    }
+
+    let mut tiers = serde_json::Map::new();
+    for row in cached["models"].as_array().into_iter().flatten() {
+        if let Some(listed) = row["serviceTiers"].as_array() {
+            let ids = listed.iter().map(|tier| tier["id"].clone()).collect();
+            tiers.insert(text(row, "model").to_owned(), Value::Array(ids));
+        }
+    }
+    Ok(Some(Value::Object(tiers)))
+}
+
 /// Codex's own name for Standard is not a speed choice: `standard` asks for it.
 pub fn validate_speed(speed: &str) -> Result<()> {
     if speed == CODEX_STANDARD_TIER {
@@ -415,35 +525,15 @@ pub fn validate_speed(speed: &str) -> Result<()> {
     Ok(())
 }
 
-/// The `serviceTier` sent to Codex for a run's speed.
-#[derive(Debug, PartialEq, Eq)]
-pub enum ServiceTierChoice {
-    /// The account's fresh catalog does not offer the chosen speed for this model.
-    Unavailable,
-    /// Sent as is; Codex itself omits a tier its own catalog does not offer.
-    Send(String),
-}
-
-/// Resolves a run's speed with this account's fresh capabilities; cache misses keep it.
-pub async fn service_tier(
-    s: &Service,
-    account: &str,
-    model: &str,
-    speed: &str,
-) -> Result<ServiceTierChoice> {
-    let cached = s.store.kv(&format!("codex-models:{account}")).await?;
-    Ok(resolve_tier(cached.as_ref(), model, speed))
-}
-
-fn resolve_tier(cached: Option<&Value>, model: &str, speed: &str) -> ServiceTierChoice {
+/// The `serviceTier` a run asks Codex for. A faster tier is then checked by the turn itself,
+/// against the Codex process that runs it ([`check_tier`]) and the account's recent cached
+/// catalog ([`account_tiers`]), which together decide and report it.
+pub fn service_tier(speed: &str) -> &str {
     match speed {
         // Codex's app server applies no model default and keeps a thread's earlier tier:
         // a turn without a chosen speed asks for Standard, as it runs.
-        "" | STANDARD_SPEED => ServiceTierChoice::Send(CODEX_STANDARD_TIER.to_owned()),
-        tier if cached.and_then(|cached| offers_tier(cached, model, tier)) == Some(false) => {
-            ServiceTierChoice::Unavailable
-        }
-        tier => ServiceTierChoice::Send(tier.to_owned()),
+        "" | STANDARD_SPEED => CODEX_STANDARD_TIER,
+        tier => tier,
     }
 }
 
@@ -637,7 +727,43 @@ mod tests {
     }
 
     #[test]
-    fn speeds_resolve_with_fresh_account_capabilities_and_keep_unknown_ones() {
+    fn limited_speeds_follow_the_accounts_routing_can_use() {
+        let fast = json!({ "model": "fast", "serviceTiers": [{ "id": "priority" }] });
+        let confirming = |age: i64| json!({ "checkedAt": now() - age, "models": [fast.clone()] });
+        let without_model =
+            json!({ "checkedAt": now(), "models": [{ "model": "other", "serviceTiers": [] }] });
+        let limited = |catalogs: &[Value]| {
+            let mut model = fast.clone();
+            mark_unconfirmed(&mut model, catalogs);
+            model["serviceTiers"][0]["limited"] == true
+        };
+
+        // A fresh catalog listing the model keeps the run off an account that lacks it.
+        assert!(!limited(&[confirming(0), without_model.clone()]));
+        // Once that catalog is past routing's freshness, the other account can take the run, so
+        // the speed it cannot confirm is limited.
+        assert!(limited(&[confirming(TTL + 60_000), without_model]));
+        // Without a signed-in account, nothing confirms it.
+        assert!(limited(&[]));
+
+        // A run without a model gets each account's own default: one whose default lacks the
+        // speed makes the catalog default's speed limited.
+        let mut default = fast.clone();
+        default["isDefault"] = true.into();
+        let other_default = json!({ "checkedAt": now(), "models": [
+            { "model": "other", "isDefault": true, "serviceTiers": [] },
+        ] });
+        let confirming_default = json!({ "checkedAt": now(), "models": [default.clone()] });
+        mark_unconfirmed(&mut default, &[confirming_default.clone(), other_default]);
+        assert_eq!(default["serviceTiers"][0]["limited"], true);
+        let mut default = fast.clone();
+        default["isDefault"] = true.into();
+        mark_unconfirmed(&mut default, &[confirming_default]);
+        assert!(default["serviceTiers"][0].get("limited").is_none());
+    }
+
+    #[test]
+    fn speeds_map_to_tiers_and_only_known_catalogs_route_them() {
         let cached = json!({
             "checkedAt": now(),
             "models": [
@@ -650,46 +776,32 @@ mod tests {
                 { "model": "gpt-5.5" },
             ],
         });
-        let send = |tier: &str| ServiceTierChoice::Send(tier.to_owned());
-        let resolve = |model: &str, speed: &str| resolve_tier(Some(&cached), model, speed);
-
         // Without a chosen speed, including older messages and agents, a turn runs at Standard
         // even after one at another speed, and whatever the model's catalog default.
-        assert_eq!(resolve("gpt-6-astra", ""), send("default"));
-        assert_eq!(resolve("custom-alias", ""), send("default"));
-        assert_eq!(resolve("gpt-6-luna", "standard"), send("default"));
-        assert_eq!(resolve("gpt-6-astra", "priority"), send("priority"));
-        assert_eq!(resolve("", "priority"), send("priority"));
-        assert_eq!(
-            resolve("gpt-6-astra", "ultrafast"),
-            ServiceTierChoice::Unavailable
-        );
-        assert_eq!(
-            resolve("gpt-6-luna", "priority"),
-            ServiceTierChoice::Unavailable
-        );
+        assert_eq!(service_tier(""), "default");
+        assert_eq!(service_tier("standard"), "default");
+        assert_eq!(service_tier("priority"), "priority");
 
+        // Routing prefers accounts whose recent catalog confirms a tier.
+        assert_eq!(offers_tier(&cached, "gpt-6-astra", "priority"), Some(true));
+        assert_eq!(
+            offers_tier(&cached, "gpt-6-astra", "ultrafast"),
+            Some(false)
+        );
+        assert_eq!(offers_tier(&cached, "gpt-6-luna", "priority"), Some(false));
         // A catalog past the picker's freshness still knows its speeds between usage polls.
         let mut lapsed = cached.clone();
         lapsed["checkedAt"] = (now() - TTL - 60_000).into();
-        assert_eq!(
-            resolve_tier(Some(&lapsed), "gpt-6-luna", "priority"),
-            ServiceTierChoice::Unavailable
-        );
+        assert_eq!(offers_tier(&lapsed, "gpt-6-luna", "priority"), Some(false));
 
-        // Unknown capabilities are left to Codex: a model or speed list it did not report,
-        // an outdated catalog, or none at all.
-        assert_eq!(resolve("gpt-5.5", "priority"), send("priority"));
-        assert_eq!(resolve("custom-alias", "priority"), send("priority"));
+        // Unknown capabilities: a model or speeds the catalog does not list, no model (Codex
+        // runs the one its configuration sets), or an outdated catalog.
+        assert_eq!(offers_tier(&cached, "gpt-5.5", "priority"), None);
+        assert_eq!(offers_tier(&cached, "custom-alias", "priority"), None);
+        // An empty model is the catalog default, for ordering accounts only.
+        assert_eq!(offers_tier(&cached, "", "ultrafast"), Some(false));
         let mut stale = cached.clone();
         stale["checkedAt"] = (now() - SPEEDS_TTL - 1).into();
-        assert_eq!(
-            resolve_tier(Some(&stale), "gpt-6-luna", "priority"),
-            send("priority")
-        );
-        assert_eq!(
-            resolve_tier(None, "gpt-6-luna", "priority"),
-            send("priority")
-        );
+        assert_eq!(offers_tier(&stale, "gpt-6-luna", "priority"), None);
     }
 }

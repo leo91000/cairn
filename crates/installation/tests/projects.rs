@@ -1,4 +1,5 @@
 use common::AgentFixture;
+use common::MissionFixture;
 
 mod common;
 
@@ -210,9 +211,9 @@ async fn project_deletion_keeps_current_reference_rules_and_historical_snapshots
         .0,
         StatusCode::OK
     );
-    let task = s.task(json!({ "name": "Uses project", "prompt": "Work", "agentId": MAIN_AGENT_ID, "projectId": id }), None).await.unwrap();
+    let task = s.task_fixture(json!({ "name": "Uses project", "prompt": "Work", "agentId": MAIN_AGENT_ID, "projectId": id }), None).await.unwrap();
     assert!(s.delete_project(project.id, |_| Ok(())).await.is_err());
-    s.remove("tasks", task["id"].as_str().unwrap())
+    s.remove_mission_fixture(task["id"].as_str().unwrap())
         .await
         .unwrap();
     let run = json!({ "id": cairn_installation::config::id(), "taskId": "snapshot", "status": "running", "createdAt": 0, "snapshot": { "projects": [project] } });

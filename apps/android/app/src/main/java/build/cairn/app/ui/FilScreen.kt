@@ -29,8 +29,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import build.cairn.app.R
 import build.cairn.app.data.*
+import build.cairn.contracts.MissionStateInput
+import build.cairn.contracts.setMissionState
 import kotlinx.coroutines.delay
-import kotlinx.serialization.json.encodeToJsonElement
 
 internal enum class FeedKind {
     QUESTION,
@@ -467,11 +468,16 @@ fun FilScreen(
     fun archive(item: FeedItem) {
         val task = state.tasks.find { it.id == item.taskId } ?: return
         vm.perform {
-            save(
-                "tasks",
-                task.id,
-                wireJson.encodeToJsonElement(task.copy(archived = true, enabled = false)),
+            api.setMissionState(
+                MissionStateInput(
+                    taskId = task.id,
+                    revision = task.revision,
+                    enabled = false,
+                    archived = true,
+                )
             )
+            refresh()
+            notify("Modifications enregistrées")
         }
     }
     fun open(item: FeedItem) {

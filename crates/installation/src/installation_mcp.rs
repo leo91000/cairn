@@ -78,7 +78,7 @@ pub(crate) fn authorize_task_in(
     let caller = authorize_in(db, bearer)?;
 
     if let Some(id) = existing {
-        required(db.get("tasks", id)?, "Task not found")?;
+        required(db.mission(id)?, "Task not found")?;
     }
 
     required(db.agent_snapshot(text(task, "agentId"))?, "Agent not found")?;
@@ -130,9 +130,15 @@ pub(crate) async fn operations(s: &Service, bearer: &str) -> Result<Vec<Value>> 
         .into_iter()
         .map(|mut tool| {
             tool.as_object_mut().unwrap().remove("_meta");
+            if tool["name"] == "create_task" {
+                let settings = &mut tool["inputSchema"]["definitions"]["MissionSettings"];
+                settings["properties"]["agentId"]["default"] = agent_id.clone();
+                if let Some(required) = settings["required"].as_array_mut() {
+                    required.retain(|field| field != "agentId");
+                }
+            }
             let properties = match text(&tool, "name") {
-                "create_task" | "create_chat" => Some(&mut tool["inputSchema"]["properties"]),
-                "update_task" => Some(&mut tool["inputSchema"]["properties"]["task"]["properties"]),
+                "create_chat" => Some(&mut tool["inputSchema"]["properties"]),
                 _ => None,
             };
             if let Some(properties) = properties {
@@ -156,6 +162,26 @@ pub(crate) async fn operation(
         .any(|tool| text(tool, "name") == name);
     if !known {
         return Err(Error::not_found("Unknown operation"));
+    }
+    if let Some(op) = crate::capabilities::mission_operation(name) {
+        if name == "create_task"
+            && let Some(settings) = args.get_mut("settings").and_then(Value::as_object_mut)
+        {
+            settings
+                .entry("agentId")
+                .or_insert_with(|| run["snapshot"]["agent"]["id"].clone());
+        }
+        let origin = crate::validation::text(&run, "id").to_owned();
+        return crate::native::policy::PARENT
+            .scope(
+                origin,
+                op.invoke(
+                    s,
+                    args,
+                    crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+                ),
+            )
+            .await;
     }
     if let Some(op) = crate::capabilities::agent_operation(name) {
         return op
@@ -184,8 +210,7 @@ pub(crate) async fn operation(
         return Ok(serde_json::to_value(output)?);
     }
     let input = match name {
-        "create_task" | "create_chat" => Some(&mut args),
-        "update_task" => args.get_mut("task"),
+        "create_chat" => Some(&mut args),
         _ => None,
     };
     if let Some(input) = input.and_then(Value::as_object_mut) {
@@ -223,7 +248,6 @@ async fn invoke_inner(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -
             authorize_in(db, &token)?;
 
             let result = match operation.as_str() {
-                "list_tasks" => Some(db.list("tasks")?.into()),
                 "list_runs" => Some(
                     db.runs(
                         input["status"].as_str(),
@@ -252,11 +276,6 @@ async fn invoke_inner(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -
     }
 
     match name {
-        "create_task" => s.task_from_run(args, None, bearer).await,
-        "update_task" => {
-            s.task_from_run(args["task"].clone(), Some(text(&args, "id")), bearer)
-                .await
-        }
         "run_task" => s.enqueue_from_run(text(&args, "taskId"), bearer).await,
         "cancel_run" => {
             s.worker

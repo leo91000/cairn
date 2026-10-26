@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Task } from '../../../../packages/contracts/contracts'
+import type { MissionSettings } from '../../../../packages/contracts/generated/typescript/MissionSettings'
 import {
   computed,
   nextTick,
@@ -7,6 +8,9 @@ import {
   watch,
 } from 'vue'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
+import { createMission } from '../../../../packages/contracts/generated/createMission'
+import { previewSchedule } from '../../../../packages/contracts/generated/previewSchedule'
+import { replaceMission } from '../../../../packages/contracts/generated/replaceMission'
 import {
   api,
   notify,
@@ -30,7 +34,7 @@ import VirtualSelect from './VirtualSelect.vue'
 
 const props = defineProps<{ task?: Task }>()
 const emit = defineEmits<{ close: [], saved: [task: Task] }>()
-const form = ref({
+const form = ref<MissionSettings>({
   name: props.task?.name ?? '',
   prompt: props.task?.prompt ?? '',
   agentId: props.task?.agentId ?? MAIN_AGENT_ID,
@@ -106,6 +110,7 @@ const busy = ref(false)
 const error = ref('')
 const resourceSave = useResourceSave(props.task?.id)
 const savedId = resourceSave.savedId
+const revision = ref(props.task?.revision ?? '')
 const saveAlert = ref<InstanceType<typeof UiAlert>>()
 const occurrences = ref<number[]>([])
 const available = computed(() =>
@@ -147,16 +152,21 @@ watch(cadence, (value) => {
 async function preview() {
   error.value = ''
   try {
-    occurrences.value = (
-      await api('/schedule/preview', {
-        method: 'POST',
-        body: JSON.stringify(form.value),
-      })
-    ).occurrences
+    occurrences.value = (await previewSchedule(api, { cron: form.value.cron ?? '', timezone: form.value.timezone })).occurrences
   }
   catch (e) {
     error.value = (e as Error).message
   }
+}
+
+async function missionRequest<T>(_path: string, options: RequestInit): Promise<T> {
+  const payload = JSON.parse(options.body as string)
+  const { creationId, ...settings } = payload
+  const saved = options.method === 'PUT'
+    ? await replaceMission(api, { taskId: savedId.value!, revision: revision.value, settings: form.value })
+    : await createMission(api, { creationId, settings })
+  revision.value = saved.revision
+  return saved as T
 }
 
 async function save() {
@@ -167,7 +177,10 @@ async function save() {
   error.value = ''
   let refreshing = false
   try {
-    const saved = await resourceSave.save<Task>('/tasks', { body: () => form.value })
+    const saved = await resourceSave.save<Task>('/tasks', {
+      body: () => form.value,
+      request: missionRequest,
+    })
     refreshing = true
     await refresh()
     emit('saved', saved)

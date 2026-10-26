@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Presentation of task settings in a run snapshot. Chats synthesize the same typed\nsettings without creating a mission or a scheduled commitment.",
+  "properties": {
+    "agentId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "archived": {
+      "default": false,
+      "type": "boolean"
+    },
+    "cron": {
+      "default": null,
+      "maxLength": 100,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "enabled": {
+      "default": true,
+      "type": "boolean"
+    },
+    "id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "name": {
+      "maxLength": 100,
+      "minLength": 1,
+      "type": "string"
+    },
+    "projectId": {
+      "default": null,
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "prompt": {
+      "maxLength": 50000,
+      "minLength": 1,
+      "type": "string"
+    },
+    "skills": {
+      "default": null,
+      "items": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "maxItems": 100,
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "tags": {
+      "default": [],
+      "items": {
+        "maxLength": 30,
+        "type": "string"
+      },
+      "maxItems": 10,
+      "type": "array"
+    },
+    "timezone": {
+      "default": "Europe/Paris",
+      "maxLength": 100,
+      "minLength": 1,
+      "type": "string"
+    },
+    "worktree": {
+      "default": true,
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "prompt",
+    "agentId",
+    "projectId",
+    "skills",
+    "tags",
+    "cron",
+    "timezone",
+    "enabled",
+    "archived",
+    "worktree"
+  ],
+  "title": "RunTaskSnapshot",
+  "type": "object"
+}

@@ -15,7 +15,7 @@ export function effectiveSpeed(speed: string, inherited: string) {
 
 /**
  * Whether the model offers `speed`. A catalog without speeds, cached before they were
- * listed or from an older Codex, cannot tell: the run then leaves the check to Codex.
+ * listed, cannot tell: the turn then checks with Codex.
  */
 export function offersSpeed(model: CodingAgentModel | undefined, speed: string) {
   if (!speed || speed === STANDARD_SPEED || !model?.serviceTiers)
@@ -29,9 +29,9 @@ export function showsSpeed(provider: Provider, model: CodingAgentModel | undefin
 }
 
 /**
- * A queued or saved speed as it runs: one its model lacks runs at Standard. An empty model is the
- * catalog's default. Without the model's speeds, such as before the catalog loads, the speed is
- * only requested: Codex decides.
+ * A queued or saved faster speed is a request, which each turn reports on, since Codex may answer
+ * with its built-in list and an account's plan decides; one the model's catalog lacks says so. An
+ * empty model is the catalog's default.
  */
 export function speedNote(speed: string, model: string, models: CodingAgentModel[]) {
   if (!speed)
@@ -40,9 +40,9 @@ export function speedNote(speed: string, model: string, models: CodingAgentModel
   if (speed === STANDARD_SPEED)
     return `${label} speed`
   const row = models.find(item => model ? item.model === model : item.isDefault)
-  if (!row?.serviceTiers)
-    return `${label} speed requested`
-  return offersSpeed(row, speed) ? `${label} speed` : `Standard speed (${label} not offered)`
+  if (row?.serviceTiers && !offersSpeed(row, speed))
+    return `${label} speed requested (not listed for this model)`
+  return `${label} speed requested`
 }
 
 export function speedTier(model: CodingAgentModel | undefined, speed: string): ServiceTier | undefined {

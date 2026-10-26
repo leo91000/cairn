@@ -78,7 +78,7 @@ abstract class ResourceSaveCases {
         malformedResponse: Boolean = false,
         editBranch: Boolean = false,
     ) {
-        val savedId = if (kind == "tasks") "saved" else "00000000-0000-4000-8000-000000000005"
+        val savedId = "00000000-0000-4000-8000-000000000005"
         val uncertainResponse = loseResponse || malformedResponse
         val resourceKind = if (kind == "import") "projects" else kind
         val mutations = CopyOnWriteArrayList<Pair<String, JsonObject>>()
@@ -132,6 +132,7 @@ abstract class ResourceSaveCases {
                             val settings =
                                 if (
                                     kind == "projects" ||
+                                        kind == "tasks" ||
                                         request.method == "PUT" && resourceKind == "projects"
                                 )
                                     stored["settings"]!!.jsonObject
@@ -161,7 +162,25 @@ abstract class ResourceSaveCases {
                                                         ?: JsonPrimitive("remote")),
                                             )
                                     )
-                                else JsonObject(stored + ("id" to JsonPrimitive(savedId)))
+                                else
+                                    JsonObject(
+                                        wireJson
+                                            .encodeToJsonElement(
+                                                Task(
+                                                    id = savedId,
+                                                    name = "Fixture",
+                                                    agentId =
+                                                        "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                                                )
+                                            )
+                                            .jsonObject +
+                                            settings +
+                                            mapOf(
+                                                "id" to JsonPrimitive(savedId),
+                                                "revision" to
+                                                    JsonPrimitive("revision-${mutations.size}"),
+                                            )
+                                    )
                             return json(output.toString())
                         }
                         if (loseResponse && created.get() && request.method == "GET") {
@@ -205,6 +224,11 @@ abstract class ResourceSaveCases {
                                             true
                                     )
                                         """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
                                     else "[]"
                             }
                         )
@@ -238,7 +262,14 @@ abstract class ResourceSaveCases {
                                 TaskEditor(
                                     vm,
                                     state,
-                                    Task(name = "Original", prompt = "Brief", agentId = "agent"),
+                                    null,
+                                    draft =
+                                        build.cairn.contracts.MissionSettings(
+                                            name = "Original",
+                                            prompt = "Brief",
+                                            agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                                            skills = null,
+                                        ),
                                     close = { closed.set(true) },
                                 )
                             "projects",
@@ -379,7 +410,7 @@ abstract class ResourceSaveCases {
                 assertEquals(expected, mutations.map { it.first })
                 assertEquals(
                     "Modifié",
-                    (if (resourceKind == "projects")
+                    (if (resourceKind == "projects" || resourceKind == "tasks")
                             mutations.last().second["settings"]!!.jsonObject
                         else mutations.last().second)["name"]!!
                         .jsonPrimitive

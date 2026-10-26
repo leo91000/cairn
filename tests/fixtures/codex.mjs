@@ -146,6 +146,11 @@ async function main() {
         }
       }
 
+      if (request.method === 'model/list' && existsSync(path.join(process.env.CODEX_HOME, 'fixture-model-list-error'))) {
+        process.stdout.write(`${JSON.stringify({ id: request.id, error: { code: -32000, message: 'Model list unavailable' } })}\n`)
+        continue
+      }
+
       if (request.method === 'model/list') {
         const fast = {
           id: 'fast-id',

@@ -482,7 +482,7 @@ impl Accounts {
         }
 
         // A speed only some accounts offer puts them first, but never holds a run back: when
-        // none of them can take it, the run goes at Standard on another one, with a notice.
+        // none of them can take it, the run goes to another one, whose turn says how it runs.
         let mut lacking = HashSet::new();
         if !speed.is_empty() {
             for account in &candidates {

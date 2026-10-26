@@ -35,6 +35,7 @@ pub mod mcp_oauth;
 pub mod mcp_server;
 pub mod mcps;
 pub mod microvm;
+pub mod missions;
 pub mod models;
 pub mod native;
 pub mod network;
@@ -65,7 +66,6 @@ pub mod skills;
 pub mod storage;
 pub mod store;
 pub mod supervisor;
-mod task_authors;
 pub mod tls;
 pub mod toolkit;
 pub mod validation;
@@ -81,3 +81,7 @@ extern crate self as cairn_installation;
 #[cfg(test)]
 #[path = "../tests/common/agent_fixture.rs"]
 pub(crate) mod agent_fixture;
+
+#[cfg(test)]
+#[path = "../tests/common/mission_fixture.rs"]
+pub(crate) mod mission_fixture;

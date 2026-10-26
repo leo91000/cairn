@@ -138,3 +138,7 @@ pub use projects::*;
 mod agents;
 
 pub use agents::*;
+
+mod missions;
+
+pub use missions::*;

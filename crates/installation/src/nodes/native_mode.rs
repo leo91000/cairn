@@ -232,10 +232,10 @@ fn snapshot(db: &Db<'_>, node: &Value, mode: Mode) -> Result<Value> {
         }
     }
     let tasks = db
-        .list("tasks")?
+        .missions()?
         .into_iter()
-        .filter(|task| agents.iter().any(|agent| agent["id"] == task["agentId"]))
-        .map(|task| json!({ "id": task["id"], "name": task["name"], "agentId": task["agentId"] }))
+        .filter(|task| agents.iter().any(|agent| agent["id"] == task.settings.agent_id.to_string()))
+        .map(|task| json!({ "id": task.id, "name": task.settings.name, "agentId": task.settings.agent_id }))
         .collect::<Vec<_>>();
     Ok(json!({
         "nodeId": node_id, "mode": mode, "request": requested(node),

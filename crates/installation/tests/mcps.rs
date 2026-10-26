@@ -1,3 +1,5 @@
+use common::MissionFixture;
+
 mod common;
 
 use common::relay_fixture::router;
@@ -50,7 +52,7 @@ async fn manual_run(s: &Service, name: &str, prompt: &str) -> Value {
         "prompt": prompt,
         "worktree": false,
     });
-    let task = s.task(task, None).await.unwrap();
+    let task = s.task_fixture(task, None).await.unwrap();
     s.enqueue(task["id"].as_str().unwrap(), "manual", None)
         .await
         .unwrap()

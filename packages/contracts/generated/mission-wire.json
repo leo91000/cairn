@@ -1,0 +1,113 @@
+{
+  "creates": [
+    {
+      "settings": {
+        "agentId": "00000000-0000-4000-8000-000000000001",
+        "archived": false,
+        "cron": null,
+        "enabled": true,
+        "name": "Mission",
+        "projectId": null,
+        "prompt": "Do the work",
+        "skills": null,
+        "tags": [],
+        "timezone": "Europe/Paris",
+        "worktree": true
+      }
+    },
+    {
+      "creationId": "7bbc74e2-a443-4a4c-a62d-a05ca6cf858c",
+      "settings": {
+        "agentId": "00000000-0000-4000-8000-000000000001",
+        "archived": true,
+        "cron": "0 9 * * *",
+        "enabled": false,
+        "name": "Scheduled",
+        "projectId": null,
+        "prompt": "Check",
+        "skills": [],
+        "tags": [
+          "code",
+          "code"
+        ],
+        "timezone": "UTC",
+        "worktree": false
+      }
+    }
+  ],
+  "views": [
+    {
+      "agentId": "00000000-0000-4000-8000-000000000001",
+      "archived": false,
+      "authorAccessId": "membership",
+      "authorId": "owner",
+      "authorRemoved": false,
+      "createdAt": 9007199254740991,
+      "cron": null,
+      "enabled": true,
+      "id": "00000000-0000-4000-8000-000000000002",
+      "name": "Mission",
+      "nativeAuthorityNodes": [],
+      "nativeParentAccess": null,
+      "nativeParentRunId": null,
+      "nativePluginGrants": null,
+      "nativePrincipals": [],
+      "nativeProvenanceUnknown": true,
+      "nextRun": null,
+      "projectId": null,
+      "prompt": "Do the work",
+      "revision": "revision",
+      "scheduleFailure": {
+        "at": 9007199254740991,
+        "message": "Unavailable",
+        "scheduledFor": 1
+      },
+      "scheduleWaitReason": null,
+      "skills": null,
+      "tags": [],
+      "timezone": "Europe/Paris",
+      "worktree": true
+    },
+    {
+      "agentId": "00000000-0000-4000-8000-000000000001",
+      "archived": true,
+      "authorAccessId": "membership",
+      "authorId": "owner",
+      "authorRemoved": false,
+      "createdAt": 9007199254740991,
+      "cron": "0 9 * * *",
+      "enabled": false,
+      "id": "00000000-0000-4000-8000-000000000002",
+      "name": "Scheduled",
+      "nativeAuthorityNodes": [],
+      "nativeParentAccess": null,
+      "nativeParentRunId": null,
+      "nativePluginGrants": [
+        {
+          "authorId": "external-person",
+          "connectionId": "00000000-0000-4000-8000-000000000003",
+          "revision": "connection-revision"
+        }
+      ],
+      "nativePrincipals": [],
+      "nativeProvenanceUnknown": true,
+      "nextRun": null,
+      "projectId": null,
+      "prompt": "Check",
+      "revision": "revision",
+      "scheduleFailure": {
+        "at": 9007199254740991,
+        "message": "Unavailable",
+        "scheduledFor": 1
+      },
+      "scheduleWaitReason": null,
+      "skills": [],
+      "tags": [
+        "code",
+        "code"
+      ],
+      "timezone": "UTC",
+      "worktree": false
+    }
+  ]
+}

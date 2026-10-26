@@ -42,7 +42,7 @@ impl Fixture {
         .await
         .unwrap();
         let task = service
-            .task(
+            .task_fixture(
                 json!({
                     "name": "Tool activity test",
                     "prompt": "Fixture only",
@@ -153,6 +153,54 @@ async fn runtime_disk_notice_preserves_publication_metadata_and_redacts_all_payl
             .unwrap()
             .contains("sensitive-tool-credential")
     );
+}
+
+#[tokio::test]
+async fn speed_checks_before_a_turn_become_conversation_notices() {
+    let mut fixture = Fixture::new().await;
+    let standard = json!({ "requested": "priority", "applied": "standard" });
+    let fast = json!({ "requested": "priority", "confirmed": true });
+    let unconfirmed = json!({ "requested": "priority", "unconfirmed": true });
+    // Every outcome is stated once per message: a retry repeating it adds nothing, a later
+    // attempt getting the speed after all says so, and another message starts over.
+    for (message, speed) in [
+        ("first", &fast),
+        ("second", &standard),
+        ("second", &standard),
+        ("second", &fast),
+        ("third", &unconfirmed),
+    ] {
+        fixture
+            .event(json!({ "type": "turn.speed", "messageId": message, "speed": speed }))
+            .await;
+    }
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events(&id, 0, 100))
+        .await
+        .unwrap();
+    let notices = events
+        .iter()
+        .filter(|event| event["type"] == "status" && event["payload"]["speed"].is_object())
+        .map(|event| {
+            (
+                event["payload"]["messageId"].clone(),
+                event["text"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 4, "{events:#?}");
+    assert_eq!(notices[0].0, "first");
+    assert!(notices[0].1.contains("Codex lists the selected speed"));
+    assert!(notices[0].1.contains("asks for it"));
+    assert_eq!(notices[1].0, "second");
+    assert!(notices[1].1.contains("runs at Standard speed"));
+    assert_eq!(notices[2].0, "second");
+    assert!(notices[2].1.contains("now lists the selected speed"));
+    assert_eq!(notices[3].0, "third");
+    assert!(notices[3].1.contains("may run at Standard speed"));
 }
 
 #[tokio::test]
@@ -961,3 +1009,6 @@ async fn terminal_styling_and_utf8_survive_long_diagnostic_fragments() {
         assert_eq!(diagnostics, expected);
     }
 }
+
+#[cfg(test)]
+use crate::mission_fixture::MissionFixture;

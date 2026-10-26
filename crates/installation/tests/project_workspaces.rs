@@ -1,4 +1,5 @@
 use common::AgentFixture;
+use common::MissionFixture;
 use common::ProjectFixture;
 use common::StoreAgentFixture;
 
@@ -53,7 +54,7 @@ async fn run(s: &Service, project: Value, agent: &str) -> Value {
         "projectId": project,
         "prompt": "Hello",
     });
-    let task = s.task(task, None).await.unwrap();
+    let task = s.task_fixture(task, None).await.unwrap();
     s.enqueue(text(&task, "id"), "manual", None).await.unwrap()
 }
 

@@ -188,6 +188,8 @@ struct Chat<'a> {
     events: mpsc::Sender<Value>,
     cancel: CancellationToken,
     thread: String,
+    /// The model Codex reports for the thread, which a plan without one runs.
+    thread_model: String,
     turn: String,
     completed: Option<Value>,
     last_message: String,
@@ -762,6 +764,7 @@ impl Chat<'_> {
         };
         let result = self.request(method, serde_json::to_value(params)?).await?;
         self.thread = text(&result["thread"], "id").to_owned();
+        self.thread_model = text(&result, "model").to_owned();
         if self.thread.is_empty() {
             return Err(Error::bad_gateway(
                 "Codex returned an invalid conversation.",
@@ -946,20 +949,88 @@ impl Chat<'_> {
         };
         let input =
             crate::attachments::input(&message, &plan["execution"]["attachments"], inbox(plan));
+        let (service_tier, speed_notice) = self.service_tier(plan).await?;
         let params = TurnParams {
             thread_id: &self.thread,
             input,
             effort: (!effort.is_empty()).then_some(effort),
             client_user_message_id: (!continuing).then(|| &plan["execution"]["messageId"]),
             model: model(plan),
-            service_tier: Some(text(plan, "serviceTier")).filter(|tier| !tier.is_empty()),
+            service_tier: Some(service_tier.as_str()).filter(|tier| !tier.is_empty()),
         };
         let params = serde_json::to_value(params)?;
         self.turn_submitted = true;
         let started = self.request("turn/start", params).await?;
         self.turn = text(&started["turn"], "id").to_owned();
         self.acknowledge(text(&plan["execution"], "messageId"))
-            .await
+            .await?;
+        // Only an attempt Codex accepted says how it asks for the speed, after its message.
+        if let Some(notice) = speed_notice {
+            self.emit(notice).await?;
+        }
+        Ok(())
+    }
+
+    /// The tier sent with the turn, and the speed notice to record once Codex accepts it. Codex
+    /// silently runs Standard for a tier its own catalog lacks, so a faster tier is checked against
+    /// this process's model list first, and against the account's recent cached catalog. Codex
+    /// silently answers both with its built-in list, which offers Fast, when it cannot fetch the
+    /// account's: a list naming the model without the tier is the account's, and decides Standard;
+    /// a list naming the tier is only a request, which the account's plan may still not run.
+    async fn service_tier(&mut self, plan: &Value) -> Result<(String, Option<Value>)> {
+        let tier = text(plan, "serviceTier").to_owned();
+        if tier.is_empty() || tier == crate::models::CODEX_STANDARD_TIER {
+            return Ok((tier, None));
+        }
+
+        // Without a chosen model, Codex runs the thread's, which its configuration may set
+        // rather than the catalog's default.
+        let model = match text(plan, "model") {
+            "" => self.thread_model.clone(),
+            model => model.to_owned(),
+        };
+        let check = if model.is_empty() {
+            // No model is known for the turn, so its catalog row cannot be found.
+            crate::models::TierCheck::Unconfirmed
+        } else {
+            tokio::select! {
+                () = self.cancel.cancelled() => return Err(Error::conflict(STOPPED)),
+                check = crate::models::check_tier(self.session, &model, &tier) => check,
+            }
+        };
+        let account = plan["accountTiers"][&model]
+            .as_array()
+            .map(|tiers| tiers.iter().any(|listed| listed == tier.as_str()));
+        let check = match (check, account) {
+            (_, Some(false)) => crate::models::TierCheck::Lacking,
+            (crate::models::TierCheck::Offered, None) => crate::models::TierCheck::Unconfirmed,
+            (check, _) => check,
+        };
+        let speed = match check {
+            crate::models::TierCheck::Offered => json!({
+                "requested": tier,
+                "confirmed": true,
+            }),
+            crate::models::TierCheck::Lacking => json!({
+                "requested": tier,
+                "applied": crate::models::STANDARD_SPEED,
+            }),
+            crate::models::TierCheck::Unconfirmed => json!({
+                "requested": tier,
+                "unconfirmed": true,
+            }),
+        };
+        let notice = json!({
+            "type": "turn.speed",
+            "messageId": plan["execution"]["messageId"],
+            "speed": speed,
+        });
+        let sent = if check == crate::models::TierCheck::Lacking {
+            crate::models::CODEX_STANDARD_TIER.to_owned()
+        } else {
+            tier
+        };
+        Ok((sent, Some(notice)))
     }
 
     /// Steers the turn with the user's new messages until it completes.
@@ -1155,6 +1226,7 @@ async fn run_session(
         events,
         cancel,
         thread: String::new(),
+        thread_model: String::new(),
         turn: String::new(),
         completed: None,
         last_message: String::new(),

@@ -1,9 +1,7 @@
 use crate::{
-    config::now,
     error::{Error, Result},
     http::Input,
-    service::{Service, next_occurrences},
-    store::RUN_SUMMARY,
+    service::Service,
     validation::text,
 };
 use serde_json::{Value, json};
@@ -84,7 +82,7 @@ async fn overview(s: &Service) -> Result<Value> {
                 "counts": db.stats()?,
                 "agents": db.agent_snapshots()?.len(),
                 "projects": db.projects()?.len(),
-                "tasks": db.list("tasks")?,
+                "tasks": db.missions()?,
                 "runs": db.runs(None, None, 8, 0, false)?,
                 "concurrency": concurrency,
             }))
@@ -160,6 +158,45 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
             .await?;
         return Ok(Some(output));
     }
+    let mission_command = match route {
+        ("GET", ["tasks"]) => Some(("list_tasks", json!({}))),
+        ("GET", ["tasks", "activity"]) => Some(("list_task_activity", json!({}))),
+        ("GET", ["tasks", id]) => Some(("get_task", json!({ "taskId": id }))),
+        ("POST", ["tasks"]) => Some(("create_task", input.body.clone())),
+        ("PUT", ["tasks", id]) | ("POST", ["tasks", id, "state"]) => {
+            if input.body["taskId"] != *id {
+                return Err(Error::bad("Mission identity does not match the path."));
+            }
+            Some((
+                if route.0 == "PUT" {
+                    "replace_task"
+                } else {
+                    "set_task_state"
+                },
+                input.body.clone(),
+            ))
+        }
+        ("DELETE", ["tasks", id]) => Some(("delete_task", json!({ "taskId": id }))),
+        ("POST", ["schedule", "preview"]) => Some(("preview_schedule", input.body.clone())),
+        _ => None,
+    };
+    if let Some((name, body)) = mission_command {
+        let operation = crate::capabilities::mission_operation(name).expect("mission operation");
+        let identity = input
+            .identity
+            .as_ref()
+            .ok_or_else(|| Error::unauthorized("A verified identity is required."))?;
+        let result = if identity.mcp_scopes.is_some() {
+            operation
+                .invoke(s, body, crate::capabilities::ResumeContext::http(input)?)
+                .await?
+        } else {
+            operation
+                .invoke_as(s, body, crate::missions::Actor::Human(identity.clone()))
+                .await?
+        };
+        return Ok(Some(result));
+    }
     let result = match route {
         ("POST", ["projects", "import"]) => {
             static IMPORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -169,58 +206,14 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
             crate::plugins::projects::import(s, &input.body).await?
         }
         ("GET", ["overview"]) => overview(s).await?,
-        ("GET", [kind @ "tasks"]) => s.store.list(kind).await?.into(),
         ("POST", ["task-authors", "refresh"]) => {
             s.synchronize_task_authors().await?;
             json!({ "updated": true })
         }
-        ("POST", ["tasks"]) => {
-            s.task_as(input.body.clone(), None, input.identity.as_ref())
-                .await?
-        }
-        ("PUT", ["tasks", id]) => {
-            s.task_as(input.body.clone(), Some(id), input.identity.as_ref())
-                .await?
-        }
-        ("DELETE", [kind @ "tasks", id]) => {
-            s.remove(kind, id).await?;
-            json!({ "deleted": true })
-        }
         ("POST", ["tasks", id, "run"]) => s.enqueue(id, "manual", None).await?,
-        ("POST", ["schedule", "preview"]) => {
-            let occurrences = next_occurrences(
-                input.string("cron", 500)?,
-                input.string("timezone", 100)?,
-                now(),
-                3,
-            )?;
-            json!({ "occurrences": occurrences })
-        }
-        ("GET", ["tasks", "activity"]) => task_activity(s, crate::reads::account(input)?).await?,
         _ => return Ok(None),
     };
     Ok(Some(result))
-}
-
-/// The latest run of every task, with what the account has not read yet.
-async fn task_activity(s: &Service, account: &str) -> Result<Value> {
-    let query = format!(
-        "SELECT {RUN_SUMMARY} FROM runs
-         WHERE id IN (
-           SELECT (SELECT id FROM runs WHERE task_id=records.id ORDER BY created_at DESC,id DESC LIMIT 1)
-           FROM records WHERE kind='tasks'
-         )
-         ORDER BY created_at DESC,id DESC"
-    );
-    crate::reads::begin(s, account).await?;
-    let account = account.to_owned();
-    s.store
-        .read(move |db| {
-            let mut runs = db.json_rows(&query, [])?;
-            crate::reads::Reads::load(db, &account)?.runs(db, &mut runs)?;
-            Ok(runs.into())
-        })
-        .await
 }
 
 async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
@@ -511,10 +504,11 @@ async fn delete_skill(
     project: Option<&Path>,
 ) -> Result<Value> {
     let key = format!("{scope}/{name}");
-    let selected = s.store.list("tasks").await?.iter().any(|task| {
-        task["skills"]
-            .as_array()
-            .is_some_and(|skills| skills.iter().any(|skill| skill == &key))
+    let selected = s.store.missions().await?.iter().any(|task| {
+        task.settings
+            .skills
+            .as_ref()
+            .is_some_and(|skills| skills.contains(&key))
     });
     if selected {
         return Err(Error::conflict(

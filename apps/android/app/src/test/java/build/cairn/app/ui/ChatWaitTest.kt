@@ -793,13 +793,13 @@ class ChatWaitTest {
                 listOf(
                     Run(
                         "watch-1",
-                        taskId = "watch",
+                        taskId = "77bb521a-0c2b-572d-b168-a7ad40ba98eb",
                         status = "waiting",
                         trigger = "manual",
                         wakeup = wakeup(wakeAt = 5000),
                     )
                 ),
-                listOf(Task("watch", "Surveiller la CI")),
+                listOf(Task("77bb521a-0c2b-572d-b168-a7ad40ba98eb", "Surveiller la CI")),
             )
         assertTrue(feed.running.isEmpty())
         assertEquals(listOf("run:watch-1", "chat:later"), feed.waiting.map { it.key })

@@ -245,23 +245,17 @@ hour, and refresh tokens after 30 days. Browser sessions are separate credential
 | Scope | Operations |
 | --- | --- |
 | `read` | `list_agents`, `list_models`, `list_projects`, `list_tasks`, `list_runs`, `get_run`, `read_run_content`, `list_skills`, `read_skill`, `list_mcps` |
-| `manage` | `save_agent`, `update_agent`, `save_project`, `create_task`, `update_task`, `save_skill`, `edit_skill_files`, `create_mcp`, `update_mcp`, `test_mcp`, `disconnect_mcp`, `delete_mcp` |
+| `manage` | `save_agent`, `update_agent`, `save_project`, `create_task`, `replace_task`, `set_task_state`, `delete_task`, `save_skill`, `edit_skill_files`, `create_mcp`, `update_mcp`, `test_mcp`, `disconnect_mcp`, `delete_mcp` |
 | `run` | `run_task`, `cancel_run` |
 
-`list_models` returns a coding agent's catalog as the app's picker shows it, including each Codex model's `serviceTiers` (speed id, Codex's name and usage description, `limited` when some enabled accounts lack it) and Codex's catalog `defaultServiceTier`, which Cairn does not apply. Agents (`save_agent`, `update_agent`) and messages (`send_chat_message`, `edit_chat_message`) accept `speed`: a tier id, `standard`, or empty to inherit the agent's or conversation's speed, otherwise Standard. A message naming the coding agent of the conversation's latest turn keeps that turn's speed, as the apps show it, while an omitted model and reasoning come from the agent; an edit that omits `speed` keeps the queued one. A speed is rejected when the turn runs with Claude Code or OpenCode, named by the message or inherited from the queue or conversation; `update_agent` that switches to one of them without sending `speed` clears it.
+`list_models` returns a coding agent's catalog as the app's picker shows it, including each Codex model's `serviceTiers` (speed id, Codex's name and usage description, `limited` when some signed-in account able to run the model lacks it or cannot confirm it) and Codex's catalog `defaultServiceTier`, which Cairn does not apply. Agents (`save_agent`, `replace_agent`) and messages (`send_chat_message`, `edit_chat_message`) accept `speed`: a tier id, `standard`, or empty to inherit the agent's or conversation's speed, otherwise Standard. A message naming the coding agent of the conversation's latest turn keeps that turn's speed, as the apps show it, while an omitted model and reasoning come from the agent; an edit that omits `speed` keeps the queued one. Before each Codex turn with a faster speed, the run checks it against the model list of the Codex process running the turn; `get_run` events then include a `status` event when its outcome changes for the message: `payload.speed.applied` is `standard` when the turn runs at Standard, `payload.speed.confirmed` is `true` when both the Codex process and the account's recent catalog list the tier for the model and the turn asks for it (a request: the account's plan decides), and `payload.speed.unconfirmed` is `true` when the speed cannot be confirmed for the account and model (a model list could not be read or does not name the model exactly, or the account's catalog is unknown or older than 30 minutes), as the apps show it. Use a `serviceTiers` id from `list_models` or `standard`; Cairn sends Standard for another id, such as Codex's own `fast` alias, since Codex's list does not name it for the model, and the notice says so. A speed is rejected when the turn runs with Claude Code or OpenCode, named by the message or inherited from the queue or conversation. `replace_agent` replaces every setting: send the agent's `speed` to keep it, since an omitted or empty one runs at Standard, and a speed is rejected for a Claude Code or OpenCode agent.
 
-`save_agent` and `save_project` create new records. `update_task` replaces the
-existing task configuration; `save_skill` creates or replaces its SKILL.md;
-`edit_skill_files` applies a batch of file changes (see [skills](SKILLS.md)).
-`update_agent` preserves omitted top-level fields; an explicit access policy
-replaces the complete policy. MCP connection tools share the UI's validation,
-encrypted credential storage and run-grant enforcement. See
-[connection management](MCP-CONNECTIONS.md#managing-connections-through-mcp)
-for configuration, OAuth sign-in and agent assignments.
-`list_runs` is paginated and omits full instructions/results. `get_run` returns
-the run record and an incremental event page, bounded by serialized bytes as well
-as the 100-event maximum. Start with `after: 0`, then pass `nextAfter` while
-`hasMore` is true. A short page does **not** mean the history is exhausted.
+`create_task` accepts `{creationId?, settings}`. `replace_task` accepts
+`{taskId, revision, settings}` and replaces all mission settings. `set_task_state`
+changes only `enabled` and `archived` at that revision. Authorship and membership
+come from verified authority, never command JSON. `get_task`, `list_tasks`,
+`preview_schedule` and `list_task_activity` use the read scope; `list_tasks` returns
+`{tasks: [...]}`. These definitions are shared with HTTP and `cairn_installation`.
 
 A run or event too large for a page is returned as a preview with `truncated: true`
 and `totalBytes`. The stored content is unchanged. Use `read_run_content` with

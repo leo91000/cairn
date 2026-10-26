@@ -1,4 +1,5 @@
 use common::AgentFixture;
+use common::MissionFixture;
 use common::StoreAgentFixture;
 
 mod common;
@@ -135,7 +136,7 @@ impl Fixture {
             "worktree": false,
             "agentId": MAIN_AGENT_ID,
         });
-        let task = self.service.task(task, None).await.unwrap();
+        let task = self.service.task_fixture(task, None).await.unwrap();
         self.service
             .enqueue(text(&task, "id"), "manual", None)
             .await
@@ -759,7 +760,7 @@ async fn preparing_runs_keep_their_original_cancellation_reservation() {
     .unwrap();
     common::relay_fixture::claimed(&service).await.unwrap();
     let task = service
-        .task(
+        .task_fixture(
             json!({
                 "name": "Preparing run",
                 "prompt": "Inspect the workspace.",
@@ -2614,7 +2615,7 @@ async fn vm_chat_protocol_runs_receive_one_frame_with_plugin_instructions() {
     let task = json!({
         "name": "Scheduled", "prompt": brief, "worktree": false, "agentId": agent["id"],
     });
-    let task = s.task(task, None).await.unwrap();
+    let task = s.task_fixture(task, None).await.unwrap();
     let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
     let finished = fixture.until_finished(text(&run, "id")).await;
     assert_eq!(finished["status"], RunStatus::Succeeded, "{finished}");
