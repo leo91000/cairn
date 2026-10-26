@@ -882,7 +882,7 @@ impl StorageEntity for MeasuredRun {
     }
 
     fn id(&self) -> String {
-        self.state().id
+        self.0["id"].as_str().unwrap().to_owned()
     }
 
     fn read(db: &Db<'_>, id: &str) -> Self {
@@ -894,19 +894,23 @@ impl StorageEntity for MeasuredRun {
     }
 
     fn write(&self, db: &Db<'_>, replacement: bool) {
-        let state = self.state();
+        let id = self.id();
         if replacement {
             db.change_run(
-                &state.id,
+                &id,
                 cairn_installation::runs::RunChanges {
-                    status: Some(state.status),
-                    summary: Some(state.summary),
-                    finished_at: Some(state.finished_at),
+                    status: Some(
+                        cairn_contracts::RunStatus::parse(self.0["status"].as_str().unwrap())
+                            .unwrap(),
+                    ),
+                    summary: Some(self.0["summary"].as_str().unwrap().to_owned()),
+                    finished_at: Some(self.0["finishedAt"].as_i64()),
                     ..Default::default()
                 },
             )
             .unwrap();
         } else {
+            let state = self.state();
             let snapshot: cairn_contracts::RunSnapshot =
                 serde_json::from_value(self.0["snapshot"].clone()).unwrap();
             let mut boundary = self.0.clone();
@@ -916,7 +920,7 @@ impl StorageEntity for MeasuredRun {
             db.admit_run(&state, Some(&snapshot), &boundary, None)
                 .unwrap();
         }
-        db.audit(Self::SAVE, &json!({"id": state.id})).unwrap();
+        db.audit(Self::SAVE, &json!({"id": id})).unwrap();
     }
 
     fn reference_schema(db: &Connection) {
@@ -949,22 +953,20 @@ CREATE UNIQUE INDEX runs_active_task ON runs(task_id) WHERE status IN ('queued',
     }
 
     fn reference_write(&self, db: &Db<'_>, replacement: bool) {
-        let state = self.state();
+        let id = self.id();
         if replacement {
-            let mut current = Self::reference_read(db, &state.id).0;
-            current["status"] = state.status.into();
-            current["summary"] = state.summary.into();
-            current["finishedAt"] = state.finished_at.into();
+            let mut current = Self::reference_read(db, &id).0;
+            for field in ["status", "summary", "finishedAt"] {
+                current[field] = self.0[field].clone();
+            }
             db.0.prepare_cached("UPDATE runs SET status=?,data=? WHERE id=?")
                 .unwrap()
-                .execute(params![
-                    state.status.as_str(),
-                    current.to_string(),
-                    state.id
-                ])
+                .execute(params![self.0["status"].as_str(), current.to_string(), id])
                 .unwrap();
         } else {
-            db.0.prepare_cached("INSERT INTO runs(id,task_id,project_id,status,created_at,data,dedupe) VALUES(?,?,?,?,?,?,NULL)").unwrap().execute(params![state.id,state.task_id,state.project_id.unwrap_or_default(),state.status.as_str(),state.created_at,self.0.to_string()]).unwrap();
+            db.0.prepare_cached("INSERT INTO runs(id,task_id,project_id,status,created_at,data,dedupe) VALUES(?,?,?,?,?,?,NULL)").unwrap().execute(params![id,self.0["taskId"].as_str(),self.0["projectId"].as_str().unwrap_or_default(),self.0["status"].as_str(),self.0["createdAt"].as_i64(),self.0.to_string()]).unwrap();
+            // The original add_run returned the caller's full document clone.
+            std::hint::black_box(self.0.clone());
         }
     }
 
