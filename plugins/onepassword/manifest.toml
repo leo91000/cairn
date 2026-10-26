@@ -1,6 +1,6 @@
 id = "onepassword"
 name = "1Password"
-version = "1.1.0"
+version = "1.2.0"
 description = "Agents pipe secrets straight into commands. Values never appear in the conversation."
 apiVersion = 2
 capabilities = [
@@ -17,8 +17,13 @@ hosts = [
 
 [[programs]]
 name = "op"
-description = "The 1Password CLI, signed in with each service account's token for one command at a time."
+description = "The 1Password CLI with an isolated encrypted in-memory cache per connection, shared by its authorized agents and cleared after ten idle minutes."
 installer = "programs/op.luau"
+cache = { daemonArgs = [
+  "daemon",
+  "--timeout",
+  "0"
+], socketEnv = "OP_SOCK" }
 
 [instances]
 singular = "Service account"
@@ -93,7 +98,7 @@ arguments = [
 
 [[commands]]
 name = "read-fields"
-description = "Write selected fields of one item as secret JSON for a pipe, with one item read and no cache. TOTP fields require read."
+description = "Write selected fields of one item as secret JSON for a pipe, with one item read and no plaintext cache. TOTP fields require read."
 output = "secret"
 arguments = [
   { name = "account", flag = "--account", required = true, maxLength = 100 },

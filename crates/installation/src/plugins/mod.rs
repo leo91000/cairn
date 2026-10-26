@@ -16,6 +16,7 @@ mod mime;
 pub mod oauth;
 pub mod operations;
 pub mod panels;
+mod program_cache;
 pub mod program_installation;
 pub mod programs;
 pub mod projects;
@@ -56,6 +57,7 @@ pub struct Plugins {
     worker: Mutex<Option<std::path::PathBuf>>,
     programs: Mutex<HashMap<(String, String), PathBuf>>,
     pub(crate) program_installation: tokio::sync::Mutex<()>,
+    pub(crate) program_caches: program_cache::Caches,
     pub(crate) installer_host: Host,
     pub operations: operations::Operations,
     pub device_flows: device_flow::Flows,
@@ -81,6 +83,7 @@ impl Default for Plugins {
             worker: Mutex::new(None),
             programs: Mutex::new(HashMap::new()),
             program_installation: tokio::sync::Mutex::new(()),
+            program_caches: program_cache::Caches::default(),
             installer_host: Host::with_limits(4, std::time::Duration::from_secs(120)),
             operations: operations::Operations::default(),
             device_flows: device_flow::Flows::default(),

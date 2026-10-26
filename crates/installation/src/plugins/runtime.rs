@@ -68,6 +68,14 @@ pub async fn maintain(s: Arc<Service>) {
             );
             wanted.insert(connection.id.clone(), (key, connection, package));
         }
+        s.plugins.program_caches.reconcile(|identity| {
+            wanted
+                .get(&identity.connection)
+                .is_some_and(|(_, connection, package)| {
+                    connection.revision == identity.revision
+                        && package.as_ref().is_ok_and(|p| p.digest == identity.package)
+                })
+        });
         let stale = active
             .iter()
             .filter(|(id, (key, _, _))| wanted.get(*id).is_none_or(|(wanted, _, _)| wanted != key))
@@ -88,6 +96,7 @@ pub async fn maintain(s: Arc<Service>) {
             active.insert(id, (key, stop, task));
         }
     }
+    s.plugins.program_caches.clear();
     for (_, (_, stop, task)) in active {
         stop.cancel();
         let _ = task.await;

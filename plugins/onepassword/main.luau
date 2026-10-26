@@ -1,6 +1,6 @@
 -- 1Password through its CLI. Each instance is a service account: Cairn keeps its token
 -- and hands it to `op` only through the environment, for one command at a time.
--- Values from `read` go to the agent's command stdout and are never stored.
+-- Plaintext values from `read` go only to the consuming command's stdout.
 
 local FAILED = "1Password request failed. Check the token, vault permissions, reference, and service account limits."
 
@@ -12,8 +12,8 @@ local function run_op(account, args)
         args = args,
         env = {
             OP_SERVICE_ACCOUNT_TOKEN = { secret = "token" },
-            -- No desktop session, Connect server or persistent cache.
-            OP_CACHE = "false",
+            -- Cairn owns a private encrypted in-memory cache daemon per connection.
+            OP_CACHE = "true",
         },
     })
 end
@@ -170,7 +170,7 @@ function operations.read(input)
     return op(account(input), { "read", "--no-newline", input.arguments.reference })
 end
 
--- One item read for related credentials, without a cache or unrequested fields.
+-- One item read for related credentials, without retaining plaintext or unrequested fields.
 operations["read-fields"] = function(input)
     local encoded = input.arguments.fields
     local ok, fields = pcall(cairn.json.decode, encoded)

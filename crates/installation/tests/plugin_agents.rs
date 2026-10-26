@@ -24,7 +24,7 @@ use tempfile::TempDir;
 const OP: &str = "#!/bin/sh\n\
 [ \"$OP_SERVICE_ACCOUNT_TOKEN\" = ops_fixture ] || exit 1\n\
 [ -z \"$OP_CONNECT_TOKEN\" ] || exit 2\n\
-[ \"$OP_CACHE\" = false ] || exit 3\n\
+[ \"$OP_CACHE\" = true ] || exit 3\n\
 case \"$1\" in\n\
 read) printf 'secret-with-no-newline' ;;\n\
 item) [ \"$2\" = get ] && printf '{\"fields\":[{\"id\":\"password\",\"label\":\"password\",\"value\":\"hidden-secret\",\"reference\":\"op://vault/item/password\"}],\"args\":\"%s\"}' \"$*\" || printf '[{\"id\":\"vault\"}]' ;;\n\
@@ -49,9 +49,19 @@ async fn fixture() -> Fixture {
     let program = root.path().join("op");
     write_program(&program, OP);
     s.plugins.use_program("onepassword", "op", program.clone());
+    let bearer = bearer_for_agent(&s, MAIN_AGENT_ID).await;
+    Fixture {
+        root,
+        s,
+        bearer,
+        program,
+    }
+}
+
+async fn bearer_for_agent(s: &Service, agent: &str) -> String {
     let task = s
         .task_fixture(
-            json!({ "name": "Probe", "agentId": MAIN_AGENT_ID, "prompt": "Hello" }),
+            json!({ "name": "Probe", "agentId": agent, "prompt": "Hello" }),
             None,
         )
         .await
@@ -65,17 +75,32 @@ async fn fixture() -> Fixture {
         )
         .await
         .unwrap();
-    let config = s.mcps.run_configuration(&s, &run).await.unwrap();
-    let bearer = text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
-    Fixture {
-        root,
-        s,
-        bearer,
-        program,
-    }
+    let config = s.mcps.run_configuration(s, &run).await.unwrap();
+    text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned()
 }
 
 fn write_program(path: &PathBuf, script: &str) {
+    let daemon = path.with_extension("daemon.py");
+    let trace = path.with_extension("daemons.jsonl");
+    let source = format!(
+        r#"import json,os,socket
+with open({trace:?},'a') as trace:
+ trace.write(json.dumps({{'pid':os.getpid(),'home':os.environ['HOME'],'socket':os.environ['OP_SOCK'],'hasToken':'OP_SERVICE_ACCOUNT_TOKEN' in os.environ}})+'\n')
+server=socket.socket(socket.AF_UNIX)
+server.bind(os.environ['OP_SOCK'])
+server.listen(128)
+while True:
+ client,_=server.accept()
+ client.close()
+"#,
+        trace = trace.to_str().unwrap()
+    );
+    std::fs::write(&daemon, source).unwrap();
+    let prefix = format!(
+        "#!/bin/sh\nif [ \"$1\" = daemon ]; then exec /usr/bin/python3 '{daemon}'; fi\n",
+        daemon = daemon.display()
+    );
+    let script = script.replacen("#!/bin/sh\n", &prefix, 1);
     std::fs::write(path, script).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
@@ -88,6 +113,225 @@ async fn save(s: &Service, input: Value, existing: Option<&str>) -> Value {
 
 fn command(name: &str, args: &[&str]) -> Value {
     json!({ "plugin": "onepassword", "command": name, "args": args })
+}
+
+fn daemons(f: &Fixture) -> Vec<Value> {
+    std::fs::read_to_string(f.program.with_extension("daemons.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn caches_are_shared_by_authorized_agents_and_isolated_between_connections() {
+    let f = fixture().await;
+    let other =
+        f.s.agent_fixture(json!({"name":"Other"}), None)
+            .await
+            .unwrap();
+    let first = save(
+        &f.s,
+        json!({
+            "name": "First", "enabled": true,
+            "secrets": { "token": "ops_fixture" },
+            "agentIds": [MAIN_AGENT_ID, other["id"]],
+        }),
+        None,
+    )
+    .await;
+    let second = save(
+        &f.s,
+        json!({
+            "name": "Second", "enabled": true,
+            "secrets": { "token": "ops_fixture" }, "agentIds": [MAIN_AGENT_ID],
+        }),
+        None,
+    )
+    .await;
+    let other_bearer = bearer_for_agent(&f.s, text(&other, "id")).await;
+    write_program(
+        &f.program,
+        "#!/bin/sh\nprintf '{\"home\":\"%s\",\"socket\":\"%s\"}' \"$HOME\" \"$OP_SOCK\"\n",
+    );
+    let read = command(
+        "read",
+        &["--account", text(&first, "id"), "op://vault/item/password"],
+    );
+    let (a, b) = tokio::join!(
+        f.s.plugins.command(&f.s, &f.bearer, &read),
+        f.s.plugins.command(&f.s, &other_bearer, &read)
+    );
+    assert_eq!(a.as_ref().unwrap(), b.as_ref().unwrap());
+    let first_value: Value = serde_json::from_str(a.unwrap()["value"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        daemons(&f).len(),
+        1,
+        "Concurrent callers must share one foreground daemon"
+    );
+    let second_value = run(
+        &f,
+        command(
+            "read",
+            &["--account", text(&second, "id"), "op://vault/item/password"],
+        ),
+    )
+    .await
+    .unwrap();
+    let second_value: Value =
+        serde_json::from_str(second_value["value"].as_str().unwrap()).unwrap();
+    assert_ne!(first_value["home"], second_value["home"]);
+    assert_ne!(first_value["socket"], second_value["socket"]);
+    for entry in daemons(&f) {
+        assert_eq!(
+            entry["hasToken"], false,
+            "The long-lived daemon must never inherit the service token"
+        );
+        let permissions = std::fs::metadata(entry["home"].as_str().unwrap())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(permissions & 0o777, 0o700);
+    }
+    f.s.agent_fixture(json!({"plugins":[]}), Some(text(&other, "id")))
+        .await
+        .unwrap();
+    let error =
+        f.s.plugins
+            .command(&f.s, &other_bearer, &read)
+            .await
+            .unwrap_err();
+    assert_eq!(error.status, 403);
+    assert_eq!(
+        run(&f, read).await.unwrap()["value"],
+        first_value.to_string()
+    );
+    assert_eq!(
+        daemons(&f).len(),
+        2,
+        "Revoking one agent cannot grant access or require a different cache for another"
+    );
+}
+
+#[tokio::test]
+async fn rotating_disabling_and_removing_connections_destroy_their_cache_homes() {
+    let f = fixture().await;
+    let saved = save(
+        &f.s,
+        json!({
+            "name": "Production", "enabled": true,
+            "secrets": { "token": "ops_fixture" }, "agentIds": [MAIN_AGENT_ID],
+        }),
+        None,
+    )
+    .await;
+    let account = text(&saved, "id");
+    let read = command("read", &["--account", account, "op://vault/item/password"]);
+    assert!(run(&f, read.clone()).await.is_ok());
+    let old = daemons(&f)[0]["home"].as_str().unwrap().to_owned();
+    save(
+        &f.s,
+        json!({"name":"Production","enabled":true,"secrets":{"token":"ops_rotated"}}),
+        Some(account),
+    )
+    .await;
+    assert!(!std::path::Path::new(&old).exists());
+    assert_eq!(run(&f, read.clone()).await, Err(502));
+    let rotated = daemons(&f)[1]["home"].as_str().unwrap().to_owned();
+    assert_ne!(old, rotated);
+    connections::set_enabled(
+        &f.s,
+        "onepassword",
+        account,
+        &cairn_contracts::PluginEnabledInput { enabled: false },
+    )
+    .await
+    .unwrap();
+    assert!(!std::path::Path::new(&rotated).exists());
+    assert_eq!(run(&f, read.clone()).await, Err(403));
+    // Owner tests on disabled instances have an ephemeral cache, never a resident one.
+    save(
+        &f.s,
+        json!({"name":"Production","enabled":false,"secrets":{"token":"ops_fixture"}}),
+        Some(account),
+    )
+    .await;
+    assert!(
+        !panels::test(&f.s, "onepassword", account)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let transient = daemons(&f).last().unwrap()["home"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!std::path::Path::new(&transient).exists());
+    connections::set_enabled(
+        &f.s,
+        "onepassword",
+        account,
+        &cairn_contracts::PluginEnabledInput { enabled: true },
+    )
+    .await
+    .unwrap();
+    assert!(run(&f, read.clone()).await.is_ok());
+    let active = daemons(&f).last().unwrap()["home"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    connections::remove(&f.s, "onepassword", account)
+        .await
+        .unwrap();
+    assert!(!std::path::Path::new(&active).exists());
+    assert_eq!(run(&f, read).await, Err(403));
+}
+
+#[tokio::test]
+async fn disabling_a_connection_interrupts_cached_reads_without_delivering_the_secret() {
+    let f = fixture().await;
+    let saved = save(
+        &f.s,
+        json!({
+            "name": "Production", "enabled": true,
+            "secrets": { "token": "ops_fixture" }, "agentIds": [MAIN_AGENT_ID],
+        }),
+        None,
+    )
+    .await;
+    let account = text(&saved, "id");
+    let started = f.root.path().join("read-started");
+    write_program(
+        &f.program,
+        &format!(
+            "#!/bin/sh\n/usr/bin/touch '{}'\n/bin/sleep 2\nprintf 'never-release-this-secret'\n",
+            started.display()
+        ),
+    );
+    let read = command("read", &["--account", account, "op://vault/item/password"]);
+    let disable = async {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        connections::set_enabled(
+            &f.s,
+            "onepassword",
+            account,
+            &cairn_contracts::PluginEnabledInput { enabled: false },
+        )
+        .await
+        .unwrap();
+    };
+    let (result, ()) = tokio::join!(f.s.plugins.command(&f.s, &f.bearer, &read), disable);
+    let error = result.unwrap_err();
+    assert!(!error.message.contains("never-release-this-secret"));
+    assert!(matches!(error.status, 403 | 409));
+    let home = daemons(&f)[0]["home"].as_str().unwrap().to_owned();
+    assert!(!std::path::Path::new(&home).exists());
 }
 
 #[tokio::test]
