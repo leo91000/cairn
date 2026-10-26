@@ -149,6 +149,7 @@ abstract class QueueStripCases {
                                     wireJson.encodeToString(chat)
                                 "/api/installations/fixture/api/projects" -> """{"projects":[]}"""
                                 "/api/installations/fixture/api/tasks" -> """{"tasks":[]}"""
+                                "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
                                 else ->
                                     if (path.endsWith("/models")) """{"models":[]}"""
                                     else if (request.method == "GET") "[]" else "{}"

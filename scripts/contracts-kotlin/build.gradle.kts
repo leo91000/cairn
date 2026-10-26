@@ -26,6 +26,8 @@ tasks.test {
     inputs.file(accountMethods)
     systemProperty("cairn.accountMethodsFixtures", accountMethods.absolutePath)
     val wire = rootProject.file("../../packages/contracts/generated/qualification-wire.json")
+    inputs.file(rootProject.file("../../packages/contracts/generated/mcp-wire.json"))
+    inputs.file(rootProject.file("../../tests/fixtures/mcp-contracts.json"))
     inputs.file(rootProject.file("../../packages/contracts/generated/project-wire.json"))
     inputs.file(rootProject.file("../../packages/contracts/generated/agent-wire.json"))
     inputs.file(rootProject.file("../../tests/fixtures/agent-contracts.json"))

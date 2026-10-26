@@ -3,13 +3,12 @@
 use crate::{
     error::{Error, Result, required},
     mcp_server::empty_listing,
-    mcps::{grant_key, record::RunGrant},
+    mcps::grant_key,
     run_status::RunStatus,
     service::{Service, allowed, covers, policy},
     store::Db,
     validation::{parse, text},
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -20,11 +19,10 @@ pub(crate) async fn authorize(s: &Service, bearer: &str) -> Result<Value> {
 
 pub(crate) fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
     let denied = || Error::unauthorized("Installation access expired or was revoked.");
-    let grant = db.kv(&grant_key(bearer))?.ok_or_else(denied)?;
-    let grant = RunGrant::deserialize(&grant)?;
+    let grant = db.mcp_run_grant(&grant_key(bearer))?.ok_or_else(denied)?;
     let run = db.run(&grant.run_id)?.ok_or_else(denied)?;
     if !grant.installation
-        || grant.message_id != *crate::waits::execution_id(&run)
+        || grant.message_id.as_deref() != crate::waits::execution_id(&run).as_str()
         || run["status"] != RunStatus::Running
         || !run["cancelRequestedAt"].is_null()
     {
@@ -180,6 +178,16 @@ pub(crate) async fn operation(
                     args,
                     crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
                 ),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::mcp_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+                None,
             )
             .await;
     }

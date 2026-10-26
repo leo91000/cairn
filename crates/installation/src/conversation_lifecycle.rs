@@ -161,7 +161,10 @@ fn unshare_artifacts(db: &Db<'_>, run: &str) -> Result<()> {
 
 /// Drops pending push notifications and MCP grants tied to the chat or its run.
 fn revoke_chat_access(db: &Db<'_>, chat: &Value, id: &str) -> Result<()> {
-    for prefix in ["push-outbox:", "mcp-grant:"] {
+    if let Some(run) = chat["runId"].as_str() {
+        db.revoke_mcp_run(run)?;
+    }
+    for prefix in ["push-outbox:"] {
         for (key, value) in db.keys(prefix)? {
             let same_run = chat["runId"].is_string() && value["runId"] == chat["runId"];
             if value["chatId"] == id || same_run {

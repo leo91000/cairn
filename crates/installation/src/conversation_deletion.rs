@@ -271,13 +271,14 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
     ] {
         db.delete(&key)?;
     }
-    for prefix in ["push-outbox:", "mcp-grant:"] {
+    for prefix in ["push-outbox:"] {
         for (key, value) in db.keys(prefix)? {
             if value["runId"] == run || value["chatId"] == cid {
                 db.delete(&key)?;
             }
         }
     }
+    db.revoke_mcp_run(run)?;
     db.0.execute("DELETE FROM chat_messages WHERE chat_id=?", [cid])?;
     db.0.execute("DELETE FROM runs WHERE id=?", [run])?;
     db.remove("chats", cid)?;

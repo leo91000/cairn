@@ -44,6 +44,54 @@ class ContractsTest {
     }
 
     @Test
+    fun mcpSettingsMatchRustDefaultsAndKeepSecretChangesOutOfViews() {
+        val root = File(System.getProperty("cairn.contractWire")).parentFile
+        val corpus =
+            json
+                .parseToJsonElement(
+                    File(root.parentFile.parentFile.parentFile, "tests/fixtures/mcp-contracts.json")
+                        .readText()
+                )
+                .jsonObject
+        val wire = json.parseToJsonElement(File(root, "mcp-wire.json").readText()).jsonObject
+        val decoder = Json { explicitNulls = false }
+        corpus.getValue("creates").jsonArray.forEachIndexed { index, value ->
+            val model = decoder.decodeFromJsonElement<McpInput>(value)
+            assertEquals(wire.getValue("creates").jsonArray[index], json.encodeToJsonElement(model))
+        }
+        wire.getValue("replacements").jsonArray.forEach { value ->
+            val model = json.decodeFromJsonElement<UpdateMcpInput>(value)
+            assertEquals(value, json.encodeToJsonElement(model))
+            for (field in
+                listOf(
+                    "name",
+                    "transport",
+                    "url",
+                    "command",
+                    "args",
+                    "auth",
+                    "clientId",
+                    "scopes",
+                    "allowPrivateNetwork",
+                    "enabled",
+                    "enabledTools",
+                )) {
+                val command = value.jsonObject
+                val incomplete =
+                    JsonObject(
+                        command +
+                            ("connection" to
+                                JsonObject(command.getValue("connection").jsonObject - field))
+                    )
+                assertFails(field) { json.decodeFromJsonElement<UpdateMcpInput>(incomplete) }
+            }
+        }
+        corpus.getValue("invalidCreates").jsonArray.forEach { value ->
+            assertFails(value.toString()) { decoder.decodeFromJsonElement<McpInput>(value) }
+        }
+    }
+
+    @Test
     fun agentsMatchRustWireAndDefaults() {
         val root = File(System.getProperty("cairn.contractWire")).parentFile
         val corpus =

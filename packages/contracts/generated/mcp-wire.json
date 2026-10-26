@@ -1,0 +1,120 @@
+{
+  "creates": [
+    {
+      "allowPrivateNetwork": false,
+      "args": [],
+      "auth": "none",
+      "clientId": "",
+      "command": "",
+      "enabled": true,
+      "enabledTools": null,
+      "name": "HTTP connection",
+      "removeEnv": [],
+      "scopes": "",
+      "transport": "http",
+      "url": "https://example.test/mcp"
+    },
+    {
+      "allowPrivateNetwork": false,
+      "args": [
+        "server.js",
+        "",
+        "line one\nline two"
+      ],
+      "auth": "none",
+      "clientId": "",
+      "command": "node",
+      "enabled": true,
+      "enabledTools": [],
+      "env": {
+        "TOKEN": "fixture"
+      },
+      "name": "Command connection",
+      "removeEnv": [],
+      "scopes": "",
+      "transport": "stdio",
+      "url": ""
+    },
+    {
+      "allowPrivateNetwork": false,
+      "args": [],
+      "auth": "oauth",
+      "clientId": "registered-client",
+      "command": "",
+      "enabled": true,
+      "enabledTools": [
+        "echo"
+      ],
+      "name": "OAuth connection",
+      "removeEnv": [],
+      "scopes": "read write",
+      "transport": "http",
+      "url": "https://example.test/mcp"
+    }
+  ],
+  "replacements": [
+    {
+      "connection": {
+        "allowPrivateNetwork": false,
+        "args": [],
+        "auth": "none",
+        "clientId": "",
+        "command": "",
+        "enabled": true,
+        "enabledTools": null,
+        "name": "HTTP connection",
+        "removeEnv": [],
+        "scopes": "",
+        "transport": "http",
+        "url": "https://example.test/mcp"
+      },
+      "id": "00000000-0000-4000-8000-000000000001",
+      "revision": 1
+    },
+    {
+      "connection": {
+        "allowPrivateNetwork": false,
+        "args": [
+          "server.js",
+          "",
+          "line one\nline two"
+        ],
+        "auth": "none",
+        "clientId": "",
+        "command": "node",
+        "enabled": true,
+        "enabledTools": [],
+        "env": {
+          "TOKEN": "fixture"
+        },
+        "name": "Command connection",
+        "removeEnv": [],
+        "scopes": "",
+        "transport": "stdio",
+        "url": ""
+      },
+      "id": "00000000-0000-4000-8000-000000000001",
+      "revision": 1
+    },
+    {
+      "connection": {
+        "allowPrivateNetwork": false,
+        "args": [],
+        "auth": "oauth",
+        "clientId": "registered-client",
+        "command": "",
+        "enabled": true,
+        "enabledTools": [
+          "echo"
+        ],
+        "name": "OAuth connection",
+        "removeEnv": [],
+        "scopes": "read write",
+        "transport": "http",
+        "url": "https://example.test/mcp"
+      },
+      "id": "00000000-0000-4000-8000-000000000001",
+      "revision": 1
+    }
+  ]
+}

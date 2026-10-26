@@ -249,8 +249,8 @@ class BlockedMissionJourneyTest {
                             }
                             path == "$api/accounts" -> json("{\"accounts\":[],\"required\":[]}")
                             path == "$api/projects" -> json("""{"projects":[]}""")
+                            path == "$api/mcps" -> json("""{"mcps":[]}""")
                             path == "$api/skills" ||
-                                path == "$api/mcps" ||
                                 path == "$api/onepassword" ||
                                 path == "$api/runs" -> json("[]")
                             else -> json("{}")

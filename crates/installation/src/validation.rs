@@ -81,10 +81,8 @@ pub fn parse(kind: &str, mut value: Value) -> Result<Value> {
     if let Err(error) = VALIDATORS[kind].validate(&value) {
         return Err(Error::bad(format!("{}: {}", error.instance_path(), error)));
     }
-    match kind {
-        "questions" => unique_question_ids(&value)?,
-        "mcp" => mcp_transport(&value)?,
-        _ => {}
+    if kind == "questions" {
+        unique_question_ids(&value)?;
     }
     Ok(value)
 }
@@ -93,7 +91,6 @@ fn trim_text(kind: &str, value: &mut Value) {
     let trims: &[&str] = match kind {
         "agent" => &["name"],
         "message" => &["text", "model"],
-        "mcp" => &["name", "command", "clientId", "scopes"],
         _ => &[],
     };
     for key in trims {
@@ -122,27 +119,6 @@ fn unique_question_ids(fields: &Value) -> Result<()> {
         if !ids.insert(text(field, "id")) {
             return Err(Error::bad("Question identifiers must be unique"));
         }
-    }
-    Ok(())
-}
-
-fn mcp_transport(value: &Value) -> Result<()> {
-    if value["transport"] != "http" {
-        if value["command"] == "" || value["auth"] != "none" {
-            return Err(Error::bad(
-                "Command servers require an executable and use environment variables for authentication.",
-            ));
-        }
-        return Ok(());
-    }
-    let invalid = || Error::bad("Enter an HTTP(S) URL without embedded credentials or a fragment.");
-    let url = url::Url::parse(text(value, "url")).map_err(|_| invalid())?;
-    if !["http", "https"].contains(&url.scheme())
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(invalid());
     }
     Ok(())
 }

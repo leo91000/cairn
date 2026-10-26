@@ -97,6 +97,11 @@ abstract class SavedConversationCases {
                                             true
                                     )
                                         """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
                                     else "[]"
                             }
                         return MockResponse().setBody(body)

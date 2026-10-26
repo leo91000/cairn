@@ -499,6 +499,35 @@
       ],
       "type": "object"
     },
+    "BeginMcpInput": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "native": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "native"
+      ],
+      "type": "object"
+    },
+    "BeginMcpOutput": {
+      "properties": {
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
     "CreateAgentInput": {
       "additionalProperties": false,
       "properties": {
@@ -621,6 +650,24 @@
       ],
       "type": "object"
     },
+    "ListMcpsInput": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ListMcpsOutput": {
+      "properties": {
+        "mcps": {
+          "items": {
+            "$ref": "#/definitions/McpView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "mcps"
+      ],
+      "type": "object"
+    },
     "ListMissionsInput": {
       "additionalProperties": false,
       "type": "object"
@@ -656,6 +703,457 @@
       },
       "required": [
         "projects"
+      ],
+      "type": "object"
+    },
+    "McpConnectionStatus": {
+      "properties": {
+        "pending": {
+          "type": "boolean"
+        },
+        "result": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "pending"
+      ],
+      "type": "object"
+    },
+    "McpEnvironment": {
+      "additionalProperties": {
+        "maxLength": 10000,
+        "type": "string"
+      },
+      "propertyNames": {
+        "pattern": "^[A-Za-z_]\\w*$",
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "McpIdInput": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "McpInput": {
+      "additionalProperties": false,
+      "properties": {
+        "allowPrivateNetwork": {
+          "default": false,
+          "type": "boolean"
+        },
+        "args": {
+          "default": [],
+          "items": {
+            "maxLength": 4000,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "auth": {
+          "default": "none",
+          "pattern": "^(none|bearer|oauth)$",
+          "type": "string"
+        },
+        "clientId": {
+          "default": "",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "clientSecret": {
+          "maxLength": 10000,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "default": "",
+          "maxLength": 1000,
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "enabledTools": {
+          "default": null,
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 500,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "env": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/McpEnvironment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "removeEnv": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "scopes": {
+          "default": "",
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "token": {
+          "maxLength": 10000,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transport": {
+          "default": "http",
+          "pattern": "^(http|stdio)$",
+          "type": "string"
+        },
+        "url": {
+          "default": "",
+          "maxLength": 2000,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "transport",
+        "url",
+        "command",
+        "args",
+        "auth",
+        "clientId",
+        "scopes",
+        "allowPrivateNetwork",
+        "enabled",
+        "enabledTools",
+        "removeEnv"
+      ],
+      "type": "object"
+    },
+    "McpMutationOutput": {
+      "properties": {
+        "completed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "completed"
+      ],
+      "type": "object"
+    },
+    "McpReplacementInput": {
+      "additionalProperties": false,
+      "properties": {
+        "allowPrivateNetwork": {
+          "type": "boolean"
+        },
+        "args": {
+          "items": {
+            "maxLength": 4000,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "auth": {
+          "pattern": "^(none|bearer|oauth)$",
+          "type": "string"
+        },
+        "clientId": {
+          "maxLength": 500,
+          "type": "string"
+        },
+        "clientSecret": {
+          "maxLength": 10000,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "maxLength": 1000,
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "enabledTools": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 500,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "env": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/McpEnvironment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "removeEnv": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "scopes": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "token": {
+          "maxLength": 10000,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transport": {
+          "pattern": "^(http|stdio)$",
+          "type": "string"
+        },
+        "url": {
+          "maxLength": 2000,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "transport",
+        "url",
+        "command",
+        "args",
+        "auth",
+        "clientId",
+        "scopes",
+        "allowPrivateNetwork",
+        "enabled",
+        "enabledTools",
+        "removeEnv"
+      ],
+      "type": "object"
+    },
+    "McpTool": {
+      "description": "Public projection of a third-party tool. Schemas remain opaque JSON.",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inputSchema": true,
+        "name": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "description",
+        "inputSchema"
+      ],
+      "type": "object"
+    },
+    "McpView": {
+      "description": "Current connection state. Tool descriptors are third-party protocol JSON.",
+      "properties": {
+        "allowPrivateNetwork": {
+          "default": false,
+          "type": "boolean"
+        },
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "auth": {
+          "default": "none",
+          "pattern": "^(none|bearer|oauth)$",
+          "type": "string"
+        },
+        "callbackUrl": {
+          "default": "",
+          "type": "string"
+        },
+        "checkedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "clientId": {
+          "default": "",
+          "type": "string"
+        },
+        "command": {
+          "default": "",
+          "type": "string"
+        },
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "enabledTools": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "envKeys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "error": {
+          "default": "",
+          "type": "string"
+        },
+        "hasClientSecret": {
+          "default": false,
+          "type": "boolean"
+        },
+        "hasToken": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "revision": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scopes": {
+          "default": "",
+          "type": "string"
+        },
+        "state": {
+          "default": "untested",
+          "pattern": "^(untested|connected|needs-auth|error)$",
+          "type": "string"
+        },
+        "tools": {
+          "default": [],
+          "description": "Tool catalog as returned by the server.",
+          "items": {
+            "$ref": "#/definitions/McpTool"
+          },
+          "type": "array"
+        },
+        "transport": {
+          "default": "http",
+          "pattern": "^(http|stdio)$",
+          "type": "string"
+        },
+        "url": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "transport",
+        "url",
+        "command",
+        "args",
+        "auth",
+        "clientId",
+        "scopes",
+        "allowPrivateNetwork",
+        "enabled",
+        "enabledTools",
+        "createdAt",
+        "revision",
+        "state",
+        "tools",
+        "checkedAt",
+        "error",
+        "hasToken",
+        "hasClientSecret",
+        "envKeys",
+        "callbackUrl"
       ],
       "type": "object"
     },
@@ -1564,6 +2062,30 @@
       "required": [
         "agentId",
         "data"
+      ],
+      "type": "object"
+    },
+    "UpdateMcpInput": {
+      "additionalProperties": false,
+      "properties": {
+        "connection": {
+          "$ref": "#/definitions/McpReplacementInput"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "connection"
       ],
       "type": "object"
     }

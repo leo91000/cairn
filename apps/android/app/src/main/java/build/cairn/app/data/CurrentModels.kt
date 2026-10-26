@@ -2,7 +2,6 @@ package build.cairn.app.data
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
 @Serializable
@@ -243,37 +242,33 @@ data class ModelCatalog(
     val error: String = "",
 )
 
-@Serializable
-data class McpTool(
-    val name: String,
-    val title: String? = null,
-    val description: String? = null,
-    val inputSchema: JsonElement? = null,
-)
+typealias Mcp = build.cairn.contracts.McpView
 
-@Serializable
-data class Mcp(
-    val id: String = "",
-    val name: String = "",
-    val transport: String = "http",
-    val url: String = "",
-    val command: String = "",
-    val args: List<String> = emptyList(),
-    val auth: String = "none",
-    val clientId: String = "",
-    val scopes: String = "",
-    val allowPrivateNetwork: Boolean = false,
-    val enabled: Boolean = true,
-    val enabledTools: List<String>? = null,
-    val state: String = "untested",
-    val error: String = "",
-    val tools: List<McpTool> = emptyList(),
-    val checkedAt: Long? = null,
-    val hasToken: Boolean = false,
-    val hasClientSecret: Boolean = false,
-    val envKeys: List<String> = emptyList(),
-    val callbackUrl: String = "",
-)
+typealias McpTool = build.cairn.contracts.McpTool
+
+fun Mcp.settings(
+    token: String? = null,
+    clientSecret: String? = null,
+    env: Map<String, String>? = null,
+    removeEnv: List<String> = emptyList(),
+) =
+    build.cairn.contracts.McpInput(
+        name = name,
+        transport = transport,
+        url = url,
+        command = command,
+        args = args,
+        auth = auth,
+        clientId = clientId,
+        scopes = scopes,
+        allowPrivateNetwork = allowPrivateNetwork,
+        enabled = enabled,
+        enabledTools = enabledTools,
+        token = token,
+        clientSecret = clientSecret,
+        env = env?.let { build.cairn.contracts.McpEnvironment(it) },
+        removeEnv = removeEnv,
+    )
 
 @Serializable data class UrlResult(val url: String)
 
@@ -325,3 +320,22 @@ fun artifactPathForLink(
         }
     return path.takeIf { Regex("/runs/[A-Za-z0-9_-]+/artifacts/[A-Za-z0-9_-]+").matches(it) }
 }
+
+fun build.cairn.contracts.McpInput.replacement() =
+    build.cairn.contracts.McpReplacementInput(
+        name = name,
+        transport = transport,
+        url = url,
+        command = command,
+        args = args,
+        auth = auth,
+        clientId = clientId,
+        scopes = scopes,
+        allowPrivateNetwork = allowPrivateNetwork,
+        enabled = enabled,
+        enabledTools = enabledTools,
+        token = token,
+        clientSecret = clientSecret,
+        env = env,
+        removeEnv = removeEnv,
+    )

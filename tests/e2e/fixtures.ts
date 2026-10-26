@@ -230,7 +230,7 @@ export const test = base.extend<object, { workspace: Workspace }>({
       const response = await fetch(`${url}${apiPath(route)}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
       const result = await response.json()
       expect(response.ok, JSON.stringify(result)).toBe(true)
-      return route === '/api/agents' && method === 'GET' ? result.agents : result
+      return route === '/api/agents' && method === 'GET' ? result.agents : route === '/api/mcps' && method === 'GET' ? result.mcps : result
     }
 
     const signIn = async (page: Page) => {

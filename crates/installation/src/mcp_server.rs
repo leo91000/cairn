@@ -505,6 +505,11 @@ pub(crate) fn operations() -> Vec<Value> {
             .iter()
             .map(crate::capabilities::AgentOperation::descriptor),
     );
+    operations.extend(
+        crate::capabilities::MCP_OPERATIONS
+            .iter()
+            .map(crate::capabilities::McpOperation::descriptor),
+    );
     operations.push(crate::capabilities::RESUME_RUN.descriptor());
     operations.extend(
         crate::capabilities::PROJECT_OPERATIONS
@@ -552,6 +557,16 @@ pub(crate) async fn operation(
                 s,
                 args,
                 crate::capabilities::ResumeContext::Public(scopes.to_vec()),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::mcp_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(scopes.to_vec()),
+                None,
             )
             .await;
     }
@@ -806,8 +821,7 @@ pub(crate) async fn invoke(
         "list_plugins" | "manage_plugin" => {
             Box::pin(crate::plugins::management::invoke(s, name, &args, bearer)).await
         }
-        "list_mcps" | "create_mcp" | "update_mcp" | "test_mcp" | "disconnect_mcp"
-        | "delete_mcp" => connection_tool(s, name, args, bearer).await,
+
         _ => Err(Error::not_found("Unknown tool")),
     }
 }
@@ -869,55 +883,6 @@ async fn skills_tool(s: &Service, name: &str, args: &Value, bearer: Option<&str>
     }
 }
 
-async fn connection_tool(
-    s: &Service,
-    name: &str,
-    args: Value,
-    bearer: Option<&str>,
-) -> Result<Value> {
-    let authorize = crate::installation_mcp::management_authorization(bearer);
-    let management_url = crate::relay::beacon_address(&s.config.data_dir)
-        .await?
-        .map(|(origin, installation)| format!("{origin}/installations/{installation}/mcps"));
-    let with_management_url = |mut result: Value| {
-        if let Some(url) = &management_url {
-            result["managementUrl"] = url.clone().into();
-        }
-        result
-    };
-    match name {
-        "list_mcps" => return Ok(s.mcps.list(s).await?.into()),
-        "create_mcp" => {
-            return Ok(with_management_url(
-                s.mcps.save_authorized(s, args, None, authorize).await?,
-            ));
-        }
-        _ => {}
-    }
-    let id = text(&args, "id");
-    s.mcps.assert_management(s, id).await?;
-    match name {
-        "update_mcp" => {
-            let saved = s
-                .mcps
-                .save_authorized(s, args["connection"].clone(), Some(id), authorize)
-                .await?;
-            Ok(with_management_url(saved))
-        }
-        "test_mcp" => s.mcps.test_authorized(s, id, authorize).await,
-        "delete_mcp" => {
-            s.mcps.disconnect_authorized(s, id, true, authorize).await?;
-            Ok(json!({ "deleted": true }))
-        }
-        _ => {
-            s.mcps
-                .disconnect_authorized(s, id, false, authorize)
-                .await?;
-            Ok(json!({ "disconnected": true }))
-        }
-    }
-}
-
 /// Forwards an allowed request to the granted connection.
 async fn proxy(
     s: &Arc<Service>,
@@ -928,11 +893,21 @@ async fn proxy(
 ) -> Result<Value> {
     let _guard = s.mcps.lock(id).await;
     let (server, scope) = s.mcps.grant(s, id, bearer).await?;
+    let authorize = {
+        let id = id.to_owned();
+        let bearer = bearer.to_owned();
+        move |db: &crate::store::Db<'_>| {
+            crate::mcps::grant_in(db, &id, &bearer)?;
+            Ok(())
+        }
+    };
     if method == "tools/call" && !scope.allows(text(&params, "name")) {
         return Err(Error::forbidden("This tool is unavailable to this agent."));
     }
     let result = async {
-        let mut client = crate::mcp_client::Client::connect_server(s, &server).await?;
+        let mut client =
+            crate::mcp_client::Client::connect_server_authorized(s, &server, authorize.clone())
+                .await?;
         let unsupported = match method {
             "resources/list" | "resources/templates/list" => {
                 client.capabilities.get("resources").is_none()
@@ -962,7 +937,10 @@ async fn proxy(
     }
     .await;
     if let Err(error) = &result {
-        s.mcps.failure(s, server, error).await?;
+        // Recheck the same gateway grant before publishing a failure after network work.
+        s.mcps
+            .record_discovery_authorized(s, server, &Err(error.clone()), authorize)
+            .await?;
     }
     result
 }
@@ -983,7 +961,6 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         .split('/')
         .collect::<Vec<_>>();
     match (input.method.as_str(), segments.as_slice()) {
-        ("GET", ["mcps"]) => Ok(s.mcps.list(s).await?.into()),
         ("POST", ["mcps", "oauth", "callback"]) => {
             let parameters = serde_json::from_value(input.body.clone())?;
             if s.mcps.capture_native_callback(s, &parameters).await? {
@@ -995,40 +972,48 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 .await?;
             Ok(json!({ "result": result }))
         }
-        ("POST", ["mcps"]) => s.mcps.save(s, input.body.clone(), None).await,
-        ("PUT", ["mcps", id]) => {
-            crate::validation::uuid(id)?;
-            s.mcps.get(s, id).await?;
-            s.mcps.save(s, input.body.clone(), Some(id)).await
-        }
-        ("DELETE", ["mcps", id]) => {
-            crate::validation::uuid(id)?;
-            s.mcps.disconnect(s, id, true).await?;
-            Ok(json!({ "ok": true }))
-        }
-        ("POST", ["mcps", id, "test"]) => {
-            crate::validation::uuid(id)?;
-            s.mcps.test(s, id).await
-        }
-        ("POST", ["mcps", id, "connect"]) => {
-            crate::validation::uuid(id)?;
-            let binding = oauth_binding(input)?;
-            if input.body["native"] == true {
-                s.mcps.connect_native(s, id, binding).await
+        _ => {
+            let (name, body) = match (input.method.as_str(), segments.as_slice()) {
+                ("GET", ["mcps"]) => ("list_mcps", json!({})),
+                ("POST", ["mcps"]) => ("create_mcp", input.body.clone()),
+                ("PUT", ["mcps", id]) => {
+                    let command: cairn_contracts::UpdateMcpInput =
+                        serde_json::from_value(input.body.clone())
+                            .map_err(|e| Error::bad(e.to_string()))?;
+                    if command.id != *id {
+                        return Err(Error::bad("Connection identity does not match the path."));
+                    }
+                    ("update_mcp", input.body.clone())
+                }
+                ("DELETE", ["mcps", id]) => ("delete_mcp", json!({"id":id})),
+                ("POST", ["mcps", id, "test"]) => ("test_mcp", json!({"id":id})),
+                ("POST", ["mcps", id, "disconnect"]) => ("disconnect_mcp", json!({"id":id})),
+                ("POST", ["mcps", id, "connect"]) => {
+                    let mut body = input.body.clone();
+                    if !body.is_object() {
+                        body = json!({});
+                    }
+                    body["id"] = (*id).into();
+                    ("begin_mcp_connection", body)
+                }
+                ("POST", ["mcps", id, "callback"]) => ("mcp_connection_status", json!({"id":id})),
+                ("POST", ["mcps", id, "cancel"]) => ("cancel_mcp_connection", json!({"id":id})),
+                _ => return Err(Error::not_found("Not found")),
+            };
+            let context = crate::capabilities::ResumeContext::http(input)?;
+            let binding = if input
+                .identity
+                .as_ref()
+                .is_some_and(|identity| identity.mcp_scopes.is_none())
+            {
+                Some(oauth_binding(input)?.to_owned())
             } else {
-                s.mcps.connect(s, id, binding).await
-            }
+                None
+            };
+            crate::capabilities::mcp_operation(name)
+                .unwrap()
+                .invoke(s, body, context, binding)
+                .await
         }
-        ("POST", ["mcps", id, "callback"]) => {
-            crate::validation::uuid(id)?;
-            let binding = oauth_binding(input)?;
-            s.mcps.finish_native_callback(s, id, binding).await
-        }
-        ("POST", ["mcps", id, "disconnect"]) => {
-            crate::validation::uuid(id)?;
-            s.mcps.disconnect(s, id, false).await?;
-            Ok(json!({ "ok": true }))
-        }
-        _ => Err(Error::not_found("Not found")),
     }
 }

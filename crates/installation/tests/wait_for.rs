@@ -979,13 +979,13 @@ async fn git_suffixes_and_installation_grant_flags_cannot_change_the_target_scop
         "repos/fixture/repo.git/actions/runs/42"
     );
     let target = f.target().await;
-    let key = format!(
-        "mcp-grant:{}",
-        cairn_installation::auth::hex_digest(&f.token)
-    );
-    let mut grant = f.s.store.kv(&key).await.unwrap().unwrap();
-    grant["installation"] = false.into();
-    f.s.store.set(&key, grant, None).await.unwrap();
+    let key = cairn_installation::auth::hex_digest(&f.token);
+    let mut grant = f.s.store.mcp_run_grant(&key).await.unwrap().unwrap();
+    grant.installation = false;
+    f.s.store
+        .transaction(move |db| db.save_mcp_run_grant(&key, &grant, None))
+        .await
+        .unwrap();
     let result = wait_for::schedule(
         &f.s,
         &f.token,

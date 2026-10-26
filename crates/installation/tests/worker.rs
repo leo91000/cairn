@@ -1235,16 +1235,18 @@ async fn sleeping_chat_survives_worker_restart_and_releases_capacity_before_waki
     // this same turn-bound grant through run_configuration.
     let token = "synthetic-sleep-token";
     s.store
-        .set(
-            &format!("mcp-grant:{}", cairn_installation::auth::hex_digest(token)),
-            json!({
+        .transaction({
+            let grant: cairn_installation::mcps::record::RunGrant = serde_json::from_value(json!({
                 "runId": run,
                 "messageId": current["chatExecution"]["messageId"],
                 "servers": {},
-                "workspace": true,
-            }),
-            None,
-        )
+                "installation": false, "workspace": true,
+            }))
+            .unwrap();
+            move |db| {
+                db.save_mcp_run_grant(&cairn_installation::auth::hex_digest(token), &grant, None)
+            }
+        })
         .await
         .unwrap();
     let wake = cairn_installation::chats::wait_for::schedule(
@@ -1346,13 +1348,15 @@ async fn waiting_mission_survives_restart_and_releases_capacity_without_finishin
         .await;
     let token = "synthetic-mission-wait-token";
     s.store
-        .set(
-            &format!("mcp-grant:{}", cairn_installation::auth::hex_digest(token)),
-            json!({
-                "runId": run_id, "messageId": null, "servers": {}, "workspace": true,
-            }),
-            None,
-        )
+        .transaction({
+            let grant: cairn_installation::mcps::record::RunGrant = serde_json::from_value(json!({
+                "runId": run_id, "messageId": null, "servers": {}, "workspace": true, "installation": false,
+            }))
+            .unwrap();
+            move |db| {
+                db.save_mcp_run_grant(&cairn_installation::auth::hex_digest(token), &grant, None)
+            }
+        })
         .await
         .unwrap();
     let wait = cairn_installation::waits::schedule(
@@ -1463,13 +1467,15 @@ async fn stopped_waiting_mission_manual_resume_starts_a_new_provider_turn() {
         .await;
     let token = "synthetic-manual-mission-token";
     s.store
-        .set(
-            &format!("mcp-grant:{}", cairn_installation::auth::hex_digest(token)),
-            json!({
-                "runId": run_id, "messageId": null, "servers": {}, "workspace": true,
-            }),
-            None,
-        )
+        .transaction({
+            let grant: cairn_installation::mcps::record::RunGrant = serde_json::from_value(json!({
+                "runId": run_id, "messageId": null, "servers": {}, "workspace": true, "installation": false,
+            }))
+            .unwrap();
+            move |db| {
+                db.save_mcp_run_grant(&cairn_installation::auth::hex_digest(token), &grant, None)
+            }
+        })
         .await
         .unwrap();
     cairn_installation::waits::schedule(&s, token, &json!({
@@ -1542,17 +1548,19 @@ async fn condition_wait_yields_the_only_slot_to_its_dependency_and_resumes_the_s
         .await;
     let token = "synthetic-condition-token";
     s.store
-        .set(
-            &format!("mcp-grant:{}", cairn_installation::auth::hex_digest(token)),
-            json!({
+        .transaction({
+            let grant: cairn_installation::mcps::record::RunGrant = serde_json::from_value(json!({
                 "runId": run,
                 "messageId": current["chatExecution"]["messageId"],
                 "servers": {},
                 "workspace": true,
                 "installation": true,
-            }),
-            None,
-        )
+            }))
+            .unwrap();
+            move |db| {
+                db.save_mcp_run_grant(&cairn_installation::auth::hex_digest(token), &grant, None)
+            }
+        })
         .await
         .unwrap();
     let wait = cairn_installation::chats::wait_for::schedule(
