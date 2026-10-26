@@ -818,11 +818,10 @@ def main():
                 for name in ('.cairn-identity.transition.json', '.cairn-identity.pending.json'):
                     (docker_data / name).chmod(0o600)
                 auth_target.chmod(0o600)
-                api('/runs/' + fresh, method='DELETE')
-                fenced(docker_run, fresh)
                 # Model a crash between directory creation and metadata save,
                 # alongside an individually corrupt container. Healthy saved
                 # binds, cache and volumes must survive both resume and restore.
+                # Seed while the disk is mounted: fencing below unmounts it.
                 containers = docker_data / 'docker/containers'
                 owner = containers.stat()
                 for digit in ['d', 'e']:
@@ -834,6 +833,8 @@ def main():
                         host_config.write_text('{')
                         host_config.chmod(0o600)
                         os.chown(host_config, owner.st_uid, owner.st_gid)
+                api('/runs/' + fresh, method='DELETE')
+                fenced(docker_run, fresh)
                 progress('docker-publish-resume')
                 point = manager('publish', run=docker_run)
                 resumed_docker = start(docker_run, lease=300000, docker_script=docker_script('resume'))
