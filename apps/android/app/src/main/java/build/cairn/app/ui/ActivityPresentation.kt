@@ -404,7 +404,7 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                 else if (event.type == "status" && speedConfirmed(data))
                     "Codex la liste pour ce modèle ici ; l’offre du compte décide si elle s’applique"
                 else if (event.type == "status" && speedUnconfirmed(data))
-                    "Codex ne peut pas confirmer qu’il propose la vitesse choisie pour ce modèle ici ; ce tour peut passer en Standard"
+                    "Elle n’a pas pu être confirmée pour ce compte et ce modèle ; ce tour peut passer en Standard"
                 else if (event.type == "engine.retry") engineRetryDetail(data)
                 else if (event.type == "provider.limit") usageLimitDetail(data)
                 else if (backgroundTasks.isNotEmpty()) backgroundTasks.joinToString(" · ")

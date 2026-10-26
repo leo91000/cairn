@@ -479,7 +479,7 @@ async fn speed_notice(s: &Service, id: &str, event: &Value) -> Result<Option<&'s
             "Codex doesn’t list the selected speed for this model here, so this turn runs at Standard speed.",
         ),
         _ => Some(
-            "Codex couldn’t confirm it offers the selected speed for this model here. This turn asks for it but may run at Standard speed.",
+            "The selected speed couldn’t be confirmed for this account and model. This turn asks for it but may run at Standard speed.",
         ),
     })
 }

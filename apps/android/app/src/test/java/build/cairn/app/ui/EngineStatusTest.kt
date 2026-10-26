@@ -270,7 +270,7 @@ class EngineStatusTest {
                         },
                     )
                 }
-                .copy(text = "Codex couldn’t confirm it offers the selected speed.")
+                .copy(text = "The selected speed couldn’t be confirmed for this account and model.")
         assertEquals(listOf(unconfirmed.id), notices(listOf(unconfirmed, step())).map { it.id })
         assertEquals("Vitesse non confirmée pour ce tour", presentActivity(unconfirmed).title)
 

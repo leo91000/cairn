@@ -179,10 +179,10 @@ describe('engine status', () => {
     // Codex could not confirm the speed for this model: the turn may run at Standard.
     const unconfirmed = {
       ...event('status', { speed: { requested: 'priority', unconfirmed: true } }),
-      text: 'Codex couldn’t confirm it offers the selected speed for this model here.',
+      text: 'The selected speed couldn’t be confirmed for this account and model.',
     }
     expect(notices([unconfirmed, step()]).map(notice => [notice.title, notice.subtitle])).toEqual([
-      ['Speed not confirmed for this turn', 'Codex couldn’t confirm it offers the selected speed for this model here; this turn may run at Standard'],
+      ['Speed not confirmed for this turn', 'It couldn’t be confirmed for this account and model; this turn may run at Standard'],
     ])
 
     // A later attempt, on another account, gets the speed after all.
