@@ -501,6 +501,11 @@ struct Turn<'a> {
     compaction: Option<String>,
     /// Compactions Claude Code reported during this execution.
     compactions: usize,
+    /// Compactions Claude Code started or reported during this execution, each with its own
+    /// item: a resumed or retried compaction never reuses an earlier attempt's divider.
+    compaction_attempts: usize,
+    /// Identifies this launch's compaction items.
+    attempt: String,
 }
 
 impl Turn<'_> {
@@ -614,11 +619,20 @@ impl Turn<'_> {
         Ok(true)
     }
 
+    /// A new compaction item's ID, unique to this attempt.
+    fn compaction_id(&mut self) -> String {
+        self.compaction_attempts += 1;
+        format!(
+            "{}-compaction-{}-{}",
+            self.initial_id, self.attempt, self.compaction_attempts
+        )
+    }
+
     /// `status` while Claude Code compacts, and the `compact_boundary` that ends it.
     async fn on_compaction(&mut self, value: &Value) -> Result<()> {
         if value["subtype"] == "status" {
             if value["status"] == "compacting" && self.compaction.is_none() {
-                let id = format!("{}-compaction-{}", self.initial_id, self.compactions + 1);
+                let id = self.compaction_id();
                 self.compaction = Some(id.clone());
                 let item =
                     json!({ "id": id, "type": "context_compaction", "status": "in_progress" });
@@ -637,10 +651,10 @@ impl Turn<'_> {
         }
 
         self.compactions += 1;
-        let id = self
-            .compaction
-            .take()
-            .unwrap_or_else(|| format!("{}-compaction-{}", self.initial_id, self.compactions));
+        let id = match self.compaction.take() {
+            Some(id) => id,
+            None => self.compaction_id(),
+        };
         let metadata = &value["compact_metadata"];
         let mut item = json!({
             "id": id,
@@ -1683,6 +1697,8 @@ pub async fn run(
         context: None,
         compaction: None,
         compactions: 0,
+        compaction_attempts: 0,
+        attempt: crate::config::id(),
     };
     let operation = turn.execute(&mut stdout, auth.as_mut(), &cancel).await;
     // Closes Claude Code's stdin.

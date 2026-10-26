@@ -2237,6 +2237,33 @@ async fn automatic_compaction_shows_without_rewriting_the_reply() {
 }
 
 #[tokio::test]
+async fn a_resumed_compaction_shows_as_its_own_divider() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    run_to_end(&c, plan(&root, "Inspect the workspace"))
+        .await
+        .0
+        .unwrap();
+
+    // The same execution, attempted again after a stop or failure, compacts again.
+    let mut attempts = Vec::new();
+    for _ in 0..2 {
+        let (result, events) = run_to_end(&c, compaction_plan(&root)).await;
+        result.unwrap();
+        let items = events
+            .iter()
+            .filter(|e| e["item"]["type"] == "context_compaction")
+            .map(|e| e["item"]["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        // Its start and end update one divider.
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], items[1]);
+        attempts.push(items[0].clone());
+    }
+    assert_ne!(attempts[0], attempts[1]);
+}
+
+#[tokio::test]
 async fn compaction_completes_when_its_context_report_never_answers() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);

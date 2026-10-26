@@ -3327,6 +3327,23 @@ async fn chat_compaction_matches_public_mcp_and_installation_tools() {
         assert_eq!(denied["result"]["isError"], true);
         assert_eq!(s.store.run(run_id).await.unwrap()["status"], "succeeded");
 
+        // The turn's worker still owns the run while it saves its checkpoint: compaction
+        // waits for it rather than resetting that checkpoint underneath it.
+        s.worker.active.lock().await.insert(
+            run_id.to_owned(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let busy = invoke("compact_chat", json!({ "chatId": chat_id })).await;
+        assert_eq!(busy["result"]["isError"], true, "{busy}");
+        assert!(
+            busy.to_string().contains("Wait for the current turn"),
+            "{busy}"
+        );
+        let untouched = s.store.run(run_id).await.unwrap();
+        assert_eq!(untouched["status"], "succeeded");
+        assert!(untouched["chatExecution"]["operation"].is_null());
+        s.worker.active.lock().await.remove(run_id);
+
         let compacted = invoke("compact_chat", json!({ "chatId": chat_id })).await;
         assert_eq!(result(&compacted)["compaction"]["running"], true);
         let run = s.store.run(run_id).await.unwrap();

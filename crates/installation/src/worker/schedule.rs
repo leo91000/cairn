@@ -760,7 +760,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compaction_completed_before_restart_keeps_the_last_reply() {
+    async fn compaction_completed_before_restart_keeps_the_last_reply_and_outcome() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
         store
@@ -776,14 +776,15 @@ mod tests {
                     "sessionId": "saved",
                     "summary": "Last reply",
                     "finishedAt": 500,
-                    "outcome": outcome,
+                    // Resuming the interrupted compaction cleared the run's outcome.
+                    "outcome": null,
                     "chatExecution": {
                         "messageId": "compact:fixture",
                         "text": "",
                         "attachments": [],
                         "recovery": false,
                         "operation": "compact",
-                        "previous": { "summary": "Last reply", "finishedAt": 500 },
+                        "previous": { "summary": "Last reply", "finishedAt": 500, "outcome": outcome },
                     },
                 });
                 db.add_run(&record, None)?;

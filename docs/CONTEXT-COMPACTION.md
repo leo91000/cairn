@@ -53,7 +53,9 @@ reply or a finished task. Claude Code's injected summary message is not shown.
 A coding agent can fail or be stopped without closing the compaction it started: Codex then
 fails its turn without completing the item. A divider still running when its run's turn ends
 or fails, or the run stops, therefore ends too: failed with the turn or run, otherwise
-"stopped". It never shows as completed without the coding agent's confirmation.
+"stopped". It never shows as completed without the coding agent's confirmation. Each
+attempt has its own item: a resumed or retried Claude Code compaction adds a divider rather
+than reusing the earlier one.
 
 ## Explicit compaction
 
@@ -69,7 +71,9 @@ it is not queued, acknowledged or added to the transcript.
   - no queued or sending messages;
   - no scheduled continuation;
   - no pending fresh-session request;
-  - a workspace that has not been cleaned.
+  - a workspace that has not been cleaned;
+  - no worker still finishing the previous turn: a compaction starts only once that worker
+    released the run, like resuming it.
   Codex `thread/compact/start` replaces any running turn with its compaction turn
   (`compact()` aborts all tasks in `codex-rs/core/src/session/handlers.rs`), so Cairn never
   overlaps a compaction with a turn.
@@ -93,7 +97,8 @@ it is not queued, acknowledged or added to the transcript.
   queue.
 - **Result.**
   - Success leaves the run `succeeded`, with its previous summary, outcome and `finishedAt`
-    restored. It does not mark the conversation unread or newly finished.
+    restored, including after the compaction was stopped and resumed. It does not mark the
+    conversation unread or newly finished.
   - Failure shows its reason like a failed turn.
 - **Recovery.** A compaction interrupted by a restart runs again: it has no external effect.
   Claude Code writes no completion receipt for it, so no empty reply is ever replayed. One

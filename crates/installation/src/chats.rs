@@ -99,7 +99,9 @@ pub(crate) fn is_compaction(run: &Value) -> bool {
 }
 
 /// A compaction is not a reply: once it succeeds, the conversation keeps its last reply and
-/// does not become newly finished. Failures and stops still show why it ended.
+/// its outcome, and does not become newly finished. Resuming an interrupted compaction clears
+/// the run's outcome, so it comes from what the compaction saved. Failures and stops still show
+/// why it ended.
 pub(crate) fn keep_reply_after_compaction(run: &Value, patch: &mut Value) {
     if !is_compaction(run) {
         return;
@@ -107,6 +109,7 @@ pub(crate) fn keep_reply_after_compaction(run: &Value, patch: &mut Value) {
     let previous = &run["chatExecution"]["previous"];
     patch["summary"] = previous["summary"].clone();
     patch["finishedAt"] = previous["finishedAt"].clone();
+    patch["outcome"] = previous["outcome"].clone();
 }
 
 /// Payload of the `chat.user` event recorded when a message reaches the agent.
@@ -254,7 +257,12 @@ fn compaction_blocker(db: &Db<'_>, chat: &Value, run: Option<&Value>) -> Result<
     let Some(run) = run else {
         return Ok(Some("Send a first message before compacting.".into()));
     };
-    let provider = Provider::of_run(run)?;
+    // The view of a run that names no coding agent still opens: it just cannot compact.
+    let Ok(provider) = Provider::of_run(run) else {
+        return Ok(Some(
+            "This conversation's coding agent does not support context compaction.".into(),
+        ));
+    };
     if !provider.compacts_context() {
         return Ok(Some(format!(
             "{} does not support context compaction in Cairn.",
@@ -333,6 +341,7 @@ fn compact(db: &Db<'_>, chat_id: &str, origin: &crate::native::policy::Origin) -
         previous: Some(json!({
             "summary": run["summary"],
             "finishedAt": run["finishedAt"],
+            "outcome": run["outcome"],
         })),
     };
     continue_run(db, &chat, &run, &run, execution)?;
@@ -1276,6 +1285,22 @@ impl Service {
             crate::native::policy::refresh_chat(self, id).await?;
         }
         let id = id.to_owned();
+
+        // A succeeded run's worker may still be saving its checkpoint: the compaction resets
+        // it, so it waits for that worker to release the run, like resuming does.
+        let active = self.worker.active.lock().await;
+        let run_id = self
+            .store
+            .read({
+                let id = id.clone();
+                move |db| Ok(text(&chat(db, &id)?, "runId").to_owned())
+            })
+            .await?;
+        if active.contains_key(&run_id) {
+            return Err(Error::conflict(
+                "Wait for the current turn to finish before compacting.",
+            ));
+        }
         let result = self
             .store
             .transaction(move |db| {
@@ -1283,6 +1308,7 @@ impl Service {
                 compact(db, &id, &origin)
             })
             .await?;
+        drop(active);
         self.worker.notify();
         Ok(result)
     }
@@ -1567,7 +1593,10 @@ mod tests {
                 assert_eq!(compacting["status"], "queued");
                 assert_eq!(compacting["recoveryPending"], true);
                 assert_eq!(compacting["chatExecution"]["operation"], COMPACT);
-                assert_eq!(compacting["chatExecution"]["previous"], json!({ "summary": "Last reply", "finishedAt": 500 }));
+                assert_eq!(
+                    compacting["chatExecution"]["previous"],
+                    json!({ "summary": "Last reply", "finishedAt": 500, "outcome": outcome })
+                );
                 // The previous reply and its outcome are not replaced by a compaction.
                 assert_eq!(compacting["summary"], "Last reply");
                 assert_eq!(compacting["outcome"], outcome);
@@ -1649,6 +1678,25 @@ mod tests {
                 let state = view(db, chat(db, "empty")?)?["compaction"].clone();
                 assert_eq!(state["supported"], false);
                 assert!(text(&state, "reason").contains("first message"));
+
+                // A run that names no coding agent still shows its conversation.
+                db.add_run(
+                    &json!({ "id": "unnamed", "taskId": "unnamed", "createdAt": 0, "status": "succeeded" }),
+                    None,
+                )?;
+                db.put(
+                    "chats",
+                    &json!({
+                        "id": "unnamed",
+                        "runId": "unnamed",
+                        "agentId": "agent",
+                        "nativeProvenanceUnknown": false,
+                    }),
+                )?;
+                let state = view(db, chat(db, "unnamed")?)?["compaction"].clone();
+                assert_eq!(state["supported"], false);
+                assert_eq!(state["available"], false);
+                assert!(text(&state, "reason").contains("does not support"));
                 Ok(())
             })
             .await
