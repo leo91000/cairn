@@ -973,7 +973,8 @@ impl Chat<'_> {
     /// The tier sent with the turn, and the speed notice to record once Codex accepts it. Codex
     /// silently runs Standard for a tier its own catalog lacks, so a faster tier is checked against
     /// this process's model list first. Codex falls back to its built-in list when it cannot fetch
-    /// the account's, so a tier the account's own catalog lacks stays unconfirmed even when listed.
+    /// the account's, so a listed tier is confirmed only when the account's own recent catalog
+    /// lists it for the same model too; otherwise it stays unconfirmed.
     async fn service_tier(&mut self, plan: &Value) -> Result<(String, Option<Value>)> {
         let tier = text(plan, "serviceTier").to_owned();
         if tier.is_empty() || tier == crate::models::CODEX_STANDARD_TIER {
@@ -995,9 +996,11 @@ impl Chat<'_> {
                 check = crate::models::check_tier(self.session, &model, &tier) => check,
             }
         };
-        let account_lacks = plan["accountTier"] == "lacking";
+        let account_offers = plan["accountTiers"][&model]
+            .as_array()
+            .is_some_and(|tiers| tiers.iter().any(|listed| listed == tier.as_str()));
         let speed = match check {
-            crate::models::TierCheck::Offered if !account_lacks => json!({
+            crate::models::TierCheck::Offered if account_offers => json!({
                 "requested": tier,
                 "confirmed": true,
             }),

@@ -1153,21 +1153,22 @@ async fn queued_speed_is_kept_and_planned_as_asked() {
     ] {
         assert_eq!(configure(model, speed).await["serviceTier"], tier);
     }
-    // The account's cached catalog goes with the plan, so a fallback list in the Codex process
-    // cannot confirm a tier the account lacks.
-    service.models.list(&service).await.unwrap();
-    assert_eq!(
-        configure("fixture-deep", "priority").await["accountTier"],
-        "lacking"
-    );
-    assert_eq!(
-        configure("fixture-fast", "priority").await["accountTier"],
-        "offered"
-    );
+    // The account's recent catalog goes with a faster plan, so a fallback list in the Codex
+    // process cannot confirm a tier on its own, whichever model the turn runs.
     assert!(
-        configure("custom-alias", "priority")
+        configure("fixture-fast", "priority")
             .await
-            .get("accountTier")
+            .get("accountTiers")
+            .is_none()
+    );
+    service.models.list(&service).await.unwrap();
+    let planned = configure("", "priority").await;
+    assert_eq!(planned["accountTiers"]["fixture-fast"], json!(["priority"]));
+    assert_eq!(planned["accountTiers"]["fixture-deep"], json!([]));
+    assert!(
+        configure("fixture-fast", "standard")
+            .await
+            .get("accountTiers")
             .is_none()
     );
 

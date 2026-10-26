@@ -537,6 +537,14 @@ async fn a_faster_tier_is_checked_against_codex_own_model_list_before_the_turn()
             "priority",
             Some("unconfirmed"),
         ),
+        // Without the account's recent catalog, the process list alone confirms nothing.
+        (
+            "fixture-fast",
+            "priority",
+            false,
+            "priority",
+            Some("unconfirmed"),
+        ),
     ];
     for (index, (model, tier, list_fails, sent, notice)) in cases.into_iter().enumerate() {
         let configured = home.join("fixture-config-model");
@@ -552,9 +560,12 @@ async fn a_faster_tier_is_checked_against_codex_own_model_list_before_the_turn()
         let mut plan = plan(&root, "Check the speed");
         plan["model"] = model.into();
         plan["serviceTier"] = tier.into();
-        if index == 9 {
-            plan["accountTier"] = "lacking".into();
-        }
+        // The account's recent catalog, as planning passes it: Fast for fixture-fast only.
+        plan["accountTiers"] = match index {
+            9 => json!({ "fixture-fast": [] }),
+            10 => Value::Null,
+            _ => json!({ "fixture-fast": ["priority"], "fixture-deep": [] }),
+        };
         plan["execution"]["messageId"] = format!("speed-{index}").into();
         if index > 0 {
             plan["sessionId"] = "fixture-chat".into();

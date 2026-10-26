@@ -407,10 +407,10 @@ fn catalog_row<'a>(cached: &'a Value, model: &str) -> Option<&'a Value> {
     })
 }
 
-/// Whether a fresh catalog offers `tier` for `model`, or `None` when it cannot tell. Without a
-/// model, Codex runs the one its configuration sets, which only the turn itself learns.
+/// Whether a fresh catalog offers `tier` for `model`, or `None` when it cannot tell. An empty
+/// model is the catalog default, which only orders accounts: the turn checks the model it runs.
 fn offers_tier(cached: &Value, model: &str, tier: &str) -> Option<bool> {
-    if !speeds_known(cached) || model.is_empty() {
+    if !speeds_known(cached) {
         return None;
     }
     tier_listed(cached, model, tier)
@@ -477,22 +477,25 @@ async fn account_offers_speed(
     Ok(true)
 }
 
-/// What `account`'s cached catalog says about `tier` for `model`: `offered`, `lacking`, or `None`
-/// when it cannot tell. The turn compares it with the model list of the Codex process running it.
-pub async fn account_tier(
-    s: &Service,
-    account: &str,
-    model: &str,
-    tier: &str,
-) -> Result<Option<&'static str>> {
-    let cached = s.store.kv(&format!("codex-models:{account}")).await?;
-    Ok(
-        match cached.and_then(|cached| offers_tier(&cached, model, tier)) {
-            Some(true) => Some("offered"),
-            Some(false) => Some("lacking"),
-            None => None,
-        },
-    )
+/// The speeds `account`'s recent cached catalog lists, by model, or `None` when it has none. The
+/// turn needs them as well as its Codex process's list to confirm a tier: Codex answers with its
+/// built-in list when it cannot fetch the account's.
+pub async fn account_tiers(s: &Service, account: &str) -> Result<Option<Value>> {
+    let Some(cached) = s.store.kv(&format!("codex-models:{account}")).await? else {
+        return Ok(None);
+    };
+    if !speeds_known(&cached) {
+        return Ok(None);
+    }
+
+    let mut tiers = serde_json::Map::new();
+    for row in cached["models"].as_array().into_iter().flatten() {
+        if let Some(listed) = row["serviceTiers"].as_array() {
+            let ids = listed.iter().map(|tier| tier["id"].clone()).collect();
+            tiers.insert(text(row, "model").to_owned(), Value::Array(ids));
+        }
+    }
+    Ok(Some(Value::Object(tiers)))
 }
 
 /// Codex's own name for Standard is not a speed choice: `standard` asks for it.
@@ -741,7 +744,8 @@ mod tests {
         // runs the one its configuration sets), or an outdated catalog.
         assert_eq!(offers_tier(&cached, "gpt-5.5", "priority"), None);
         assert_eq!(offers_tier(&cached, "custom-alias", "priority"), None);
-        assert_eq!(offers_tier(&cached, "", "ultrafast"), None);
+        // An empty model is the catalog default, for ordering accounts only.
+        assert_eq!(offers_tier(&cached, "", "ultrafast"), Some(false));
         let mut stale = cached.clone();
         stale["checkedAt"] = (now() - SPEEDS_TTL - 1).into();
         assert_eq!(offers_tier(&stale, "gpt-6-luna", "priority"), None);
