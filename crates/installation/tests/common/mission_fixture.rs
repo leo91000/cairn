@@ -90,14 +90,11 @@ impl MissionFixture for Service {
             body["creationId"] = creation;
         }
         let identity = identity.cloned().unwrap_or_else(|| {
-            let caller = cairn_installation::native::policy::caller();
             let mut identity = InstallationIdentity::trusted(
                 cairn_installation::auth::InstallationRole::Owner,
-                caller.as_deref().unwrap_or("fixture-owner"),
+                "fixture-owner",
             );
-            if caller.is_none() {
-                identity.mcp_scopes = Some(vec!["manage".into()]);
-            }
+            identity.mcp_scopes = Some(vec!["manage".into()]);
             identity
         });
         Box::pin(cairn_installation::api::dispatch(

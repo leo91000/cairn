@@ -2092,25 +2092,72 @@ async fn changing_the_parent_permission_or_node_ceiling_revokes_descendants() {
     );
 }
 
+// This installation has one owner (TRUSTED) and two current members. Native
+// directing principals and authenticated mission roles are supplied independently.
+async fn mission_authority(f: &Fixture) -> tokio::task::JoinHandle<()> {
+    let policy = serde_json::to_value(cairn_protocol::TaskAuthorPolicy {
+        owner: cairn_protocol::TaskAuthorGrant {
+            account_id: TRUSTED.into(),
+            access_id: "one".into(),
+        },
+        members: [(OTHER, "two"), ("fixture-owner", "fixture-owner")]
+            .into_iter()
+            .map(|(account, access)| cairn_protocol::TaskAuthorGrant {
+                account_id: account.into(),
+                access_id: access.into(),
+            })
+            .collect(),
+    })
+    .unwrap();
+    let app = Router::new().route(
+        "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+        axum::routing::get(move || {
+            let policy = policy.clone();
+            async move { axum::Json(policy) }
+        }),
+    );
+    let (origin, server) = common::serve_locally(app).await;
+    let path = f
+        .service
+        .config
+        .data_dir
+        .join("installation-relay/identity.json");
+    let mut identity: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    identity["origin"] = origin.into();
+    std::fs::write(path, serde_json::to_vec(&identity).unwrap()).unwrap();
+    server
+}
+
 #[tokio::test]
 async fn editing_a_vm_task_cannot_replace_its_authors_with_a_native_trusted_editor() {
     let f = Fixture::new().await;
+    let _authority = mission_authority(&f).await;
+    let author = auth::InstallationIdentity::trusted(auth::InstallationRole::Member, OTHER);
+    let editor = auth::InstallationIdentity::trusted(auth::InstallationRole::Owner, TRUSTED);
     let vm = f
         .service
         .agent_fixture(json!({ "name": "VM task agent" }), None)
         .await
         .unwrap();
-    let task = policy::CALLER.scope(Some(OTHER.into()), f.service.task_fixture(
-        json!({ "name": "Retained commitment", "prompt": "Original brief", "agentId": vm["id"] }), None
-    )).await.unwrap();
-    assert_eq!(task["authorId"], "fixture-owner");
+    let task = f
+        .service
+        .task_as_fixture(
+            json!({
+                "name": "Retained commitment",
+                "prompt": "Original brief",
+                "agentId": vm["id"],
+            }),
+            None,
+            Some(&author),
+        )
+        .await
+        .unwrap();
+    assert_eq!(task["authorId"], OTHER);
     let mut edited = task.clone();
     edited["agentId"] = f.agent["id"].clone();
-    let error = policy::CALLER
-        .scope(
-            Some(TRUSTED.into()),
-            f.service.task_fixture(edited, task["id"].as_str()),
-        )
+    let error = f
+        .service
+        .task_as_fixture(edited, task["id"].as_str(), Some(&editor))
         .await
         .unwrap_err();
     assert_eq!(error.status, 403);
@@ -2147,18 +2194,31 @@ async fn trust_owner(f: &Fixture) {
 async fn native_tasks_retain_previous_directing_editors_and_current_author_rights() {
     let f = Fixture::new().await;
     trust_owner(&f).await;
-    let task = policy::CALLER.scope(Some("fixture-owner".into()), f.service.task_fixture(
-        json!({ "name": "Native commitment", "prompt": "Original brief", "agentId": f.agent["id"] }), None
-    )).await.unwrap();
-    let mut edited = task.clone();
-    edited["prompt"] = "Updated brief".into();
-    let saved = policy::CALLER
-        .scope(
-            Some(TRUSTED.into()),
-            f.service.task_fixture(edited, task["id"].as_str()),
+    let _authority = mission_authority(&f).await;
+    let author =
+        auth::InstallationIdentity::trusted(auth::InstallationRole::Member, "fixture-owner");
+    let editor = auth::InstallationIdentity::trusted(auth::InstallationRole::Owner, TRUSTED);
+    let task = f
+        .service
+        .task_as_fixture(
+            json!({
+                "name": "Native commitment",
+                "prompt": "Original brief",
+                "agentId": f.agent["id"],
+            }),
+            None,
+            Some(&author),
         )
         .await
         .unwrap();
+    let mut edited = task.clone();
+    edited["prompt"] = "Updated brief".into();
+    let saved = f
+        .service
+        .task_as_fixture(edited, task["id"].as_str(), Some(&editor))
+        .await
+        .unwrap();
+    assert_eq!(saved["authorId"], "fixture-owner");
     assert!(
         saved["nativePrincipals"]
             .as_array()
@@ -2172,11 +2232,9 @@ async fn native_tasks_retain_previous_directing_editors_and_current_author_right
             .contains(&json!("fixture-owner"))
     );
     f.service.store.put("nodes", f.node.clone()).await.unwrap();
-    let error = policy::CALLER
-        .scope(
-            Some(TRUSTED.into()),
-            f.service.task_fixture(saved, task["id"].as_str()),
-        )
+    let error = f
+        .service
+        .task_as_fixture(saved, task["id"].as_str(), Some(&editor))
         .await
         .unwrap_err();
     assert_eq!(error.status, 403);
@@ -2192,10 +2250,10 @@ async fn revoked_native_permissions_still_allow_disabling_but_never_reenabling_a
             &owner,
             "POST",
             "/api/tasks",
-            json!({
+            json!({ "settings": {
                 "name": "Native schedule", "prompt": "Build", "agentId": f.agent["id"],
                 "cron": "0 * * * *", "timezone": "UTC"
-            }),
+            } }),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{task}");
@@ -2210,10 +2268,9 @@ async fn revoked_native_permissions_still_allow_disabling_but_never_reenabling_a
         )
         .await
         .unwrap();
-    let mut disabled = task.clone();
-    disabled["enabled"] = false.into();
-    let path = format!("/api/tasks/{}", task["id"].as_str().unwrap());
-    let (status, saved) = f.call(&owner, "PUT", &path, disabled).await;
+    let path = format!("/api/tasks/{}/state", task["id"].as_str().unwrap());
+    let disabled = json!({ "taskId": task["id"], "revision": task["revision"], "enabled": false, "archived": false });
+    let (status, saved) = f.call(&owner, "POST", &path, disabled).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(saved["enabled"], false);
     assert_eq!(saved["nativePrincipals"], task["nativePrincipals"]);
@@ -2230,9 +2287,8 @@ async fn revoked_native_permissions_still_allow_disabling_but_never_reenabling_a
         )
         .await
         .unwrap();
-    let mut enabled = saved;
-    enabled["enabled"] = true.into();
-    let (status, _) = f.call(&owner, "PUT", &path, enabled).await;
+    let enabled = json!({ "taskId": saved["id"], "revision": saved["revision"], "enabled": true, "archived": false });
+    let (status, _) = f.call(&owner, "POST", &path, enabled).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
@@ -2240,32 +2296,35 @@ async fn revoked_native_permissions_still_allow_disabling_but_never_reenabling_a
 async fn a_native_task_without_recorded_provenance_says_how_to_schedule_it_again() {
     let f = Fixture::new().await;
     trust_owner(&f).await;
-    // A task saved before its agent moved to the native backend.
-    let task = json!({
-        "id": id(),
-        "name": "Older commitment",
-        "prompt": "Original brief",
-        "agentId": f.agent["id"],
-        "cron": "0 9 * * *",
-        "timezone": "Europe/Paris",
-        "enabled": true,
-        "authorId": "fixture-owner",
-        "authorAccessId": "fixture-owner",
-        "createdAt": now(),
-        "nextRun": now(),
-        "nativeProvenanceUnknown": true,
-    });
+    // A complete current mission whose agent subsequently moves to native.
+    let vm = f
+        .service
+        .agent_fixture(json!({ "name": "VM before native" }), None)
+        .await
+        .unwrap();
+    let mut task = f
+        .service
+        .task_fixture(
+            json!({
+                "name": "Existing commitment", "prompt": "Original brief", "agentId": vm["id"],
+                "cron": "0 9 * * *", "timezone": "Europe/Paris"
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    task["agentId"] = f.agent["id"].clone();
+    let author =
+        auth::InstallationIdentity::trusted(auth::InstallationRole::Owner, "fixture-owner");
     f.service
         .store
         .put_mission_fixture(task.clone())
         .await
         .unwrap();
 
-    let error = policy::CALLER
-        .scope(
-            Some("fixture-owner".into()),
-            f.service.task_fixture(task.clone(), task["id"].as_str()),
-        )
+    let error = f
+        .service
+        .task_as_fixture(task.clone(), task["id"].as_str(), Some(&author))
         .await
         .unwrap_err();
     assert_eq!(error.status, 403, "{}", error.message);
@@ -2277,11 +2336,9 @@ async fn a_native_task_without_recorded_provenance_says_how_to_schedule_it_again
 
     let mut duplicate = task.clone();
     duplicate.as_object_mut().unwrap().remove("id");
-    let saved = policy::CALLER
-        .scope(
-            Some("fixture-owner".into()),
-            f.service.task_fixture(duplicate, None),
-        )
+    let saved = f
+        .service
+        .task_as_fixture(duplicate, None, Some(&author))
         .await
         .unwrap();
     assert_eq!(saved["nativeProvenanceUnknown"], false);

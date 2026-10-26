@@ -36,7 +36,7 @@ pub(crate) const MISSION_OPERATIONS: &[MissionOperation] = &[
     MissionOperation {
         name: "delete_task",
         scope: "manage",
-        description: "Delete a mission without active work. Members may delete only their own commitments.",
+        description: "Delete a mission without active work. Only the installation owner can delete missions.",
     },
     MissionOperation {
         name: "preview_schedule",
