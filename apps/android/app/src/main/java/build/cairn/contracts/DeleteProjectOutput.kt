@@ -6,5 +6,6 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class DeleteProjectOutput(val deleted: Boolean) {
+
     init {}
 }

@@ -136,7 +136,7 @@ JSON Schema's UUID format; clients never grant authority through validation.
 
 ### Development reset
 
-The fresh installation schema is now version 6. Earlier development databases
+The fresh installation schema is now version 7. Earlier development databases
 are rejected, without being rewritten. Stop the development processes, remove the
 **disposable development data directory** (SQLite, vault and related local state)
 and start with a newly empty data directory. Recreate projects/agents and rerun
@@ -230,7 +230,7 @@ prevent duplicate grants. Permission tables use WITHOUT ROWID so composite keys
 do not duplicate a separate rowid/primary-key index. Listing loads each relation
 once for the whole catalogue. Reads hydrate one SQLite snapshot, and profile/permission
 writes publish atomically. Revisions change on owner saves and resource revocation.
-There is no historical reader or migration: the initial schema is version 6.
+There is no historical reader or migration: the initial schema is version 7.
 
 The A2 mirror, resource reconciliation, Value permission writer and node
 configuration's `exclusiveAgents` input are removed. Resource wire lists are
@@ -277,7 +277,7 @@ agent. Scope checks remain `read`/`manage`; deletion remains owner-only in the a
 Members can edit their own commitments and pause/archive another author's mission,
 but cannot resume or restore it, change its content, or recover its creation identity.
 
-The initial SQLite schema v6 adds `missions` with named scalar columns, agent/project
+The initial SQLite schema v7 adds `missions` with named scalar columns, agent/project
 foreign keys, update/reference indexes and a partial due-time index. Ordered
 `mission_tags` and `mission_skills` preserve selections, duplicates and their order;
 `skills_inherited` distinguishes all allowed skills (`null`) from an empty selection.
@@ -390,7 +390,7 @@ bounded templates. Business unions remain generated sealed interfaces. Required
 object fields avoid the upstream generator's unsupported object-default feature;
 clients submit explicit objects instead of inventing server policy defaults.
 
-SQLite v6 stores `plugin_instances` with checked identity, name, enabled flag,
+SQLite v7 stores `plugin_instances` with checked identity, name, enabled flag,
 revision, manifest settings/secret field names, owner binding, update time and
 connection state/message. `external_delegations` holds the answering agent/project,
 access mode, limits and typed approval snapshots. `instance_people` stores ordered

@@ -18,10 +18,29 @@ data class PluginFormResult(
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 @JvmInline
-value class Errors(val value: Map<String, String>) : Map<String, String> by value
+value class Errors(
+    val value:
+        Map<
+            String,
+            String,
+        >
+) :
+    Map<
+        String,
+        String,
+    > by value
 
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 @JvmInline
-value class Options(val value: Map<String, List<PluginOption>>) :
-    Map<String, List<PluginOption>> by value
+value class Options(
+    val value:
+        Map<
+            String,
+            List<PluginOption>,
+        >
+) :
+    Map<
+        String,
+        List<PluginOption>,
+    > by value
