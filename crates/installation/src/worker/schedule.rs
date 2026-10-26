@@ -69,11 +69,9 @@ impl Worker {
         for id in &active {
             projects.extend(locked_projects(s, &s.store.run(id).await?));
         }
-        for state in s.store.read(|db| db.active_run_states()).await? {
-            if state.status != RunStatus::Queued {
-                continue;
-            }
-            let run = s.store.run(&state.id).await?;
+        for record in s.store.read(|db| db.queued_run_records()).await? {
+            let state = record.state.clone();
+            let run = record.wire()?;
             if !execution::uses_vm(&run, &s.config) {
                 let active_ids = self.active.lock().await.keys().cloned().collect::<Vec<_>>();
                 let mut host_runs = 0;
@@ -137,8 +135,9 @@ impl Worker {
             return Ok(());
         };
 
+        let state = record.state.clone();
         let run = record.wire()?;
-        let state = &record.state;
+        let state = &state;
         let recovering = state.recovery_pending;
         let launched = RunCheckpoint::load(&s.store, &run_id)
             .await?

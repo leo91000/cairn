@@ -663,7 +663,13 @@ async fn time_conditions_are_available_without_plugin_or_installation_access() {
     run["snapshot"]["agent"] = agent;
     f.service
         .store
-        .update_run_boundary(&f.run, json!({ "snapshot": run["snapshot"] }))
+        .change_run(
+            &f.run,
+            cairn_installation::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(run["snapshot"].clone()).unwrap()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let listing = project_workspaces::rpc(&f.service, &f.token, "tools/list", &json!({}))

@@ -681,9 +681,12 @@ async fn delay_replaces_condition_waits_and_private_tokens_follow_agent_identity
     let mut other = target.clone();
     other["snapshot"]["agent"]["id"] = id().into();
     f.s.store
-        .update_run_boundary(
+        .change_run(
             text(&target, "id"),
-            json!({ "snapshot": other["snapshot"] }),
+            cairn_installation::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(other["snapshot"].clone()).unwrap()),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();

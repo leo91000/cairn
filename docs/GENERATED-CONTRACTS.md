@@ -471,3 +471,9 @@ The A1/A2 `project_measurement` harness includes `run_storage_layouts`, comparin
 identical deterministic documents against the seven-column runs mapping at
 `7fecc082`, with the same indexes, WAL and audit. Measurement results belong in the
 PR description, never in committed artifacts.
+
+Run list display names and provider are SQLite stored generated columns of the
+typed snapshot. They are derived automatically on snapshot writes, including an
+agent merge, and have no independent writer. The measured list regression from
+repeated snapshot extraction motivated this projection. The full `data` and
+`summary_data` documents remain virtual projections for unconverted SQL callers.

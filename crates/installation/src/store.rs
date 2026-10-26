@@ -533,7 +533,9 @@ impl Db<'_> {
     }
 
     pub fn run(&self, id: &str) -> Result<Option<Value>> {
-        self.run_record(id)?.map(|record| record.wire()).transpose()
+        self.run_record(id)?
+            .map(crate::runs::RunRecord::wire)
+            .transpose()
     }
 
     pub fn active(&self) -> Result<Vec<Value>> {

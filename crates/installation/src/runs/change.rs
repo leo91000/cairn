@@ -1,4 +1,3 @@
-use crate::error::Result;
 use cairn_contracts::{AgentProvider, Retry, RunRequester, RunState, RunStatus};
 use serde_json::Value;
 
@@ -39,7 +38,7 @@ impl RunChanges {
     pub fn apply(
         self,
         state: &mut RunState,
-    ) -> Result<(Option<cairn_contracts::RunSnapshot>, Option<Value>)> {
+    ) -> (Option<cairn_contracts::RunSnapshot>, Option<Value>) {
         if let Some(value) = self.task_id {
             state.task_id = value;
         }
@@ -109,6 +108,6 @@ impl RunChanges {
         if let Some(value) = self.retry {
             state.retry = value;
         }
-        Ok((self.snapshot, self.boundary))
+        (self.snapshot, self.boundary)
     }
 }

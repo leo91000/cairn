@@ -268,8 +268,9 @@ async fn release(
         let native = saved
             .prepared()
             .is_some_and(|prepared| prepared["backend"] == "native");
+        let status = run.state.status;
         if crate::nodes::publication::protected(&run.wire()?)
-            && (native || matches!(run.state.status, RunStatus::Succeeded | RunStatus::Waiting))
+            && (native || matches!(status, RunStatus::Succeeded | RunStatus::Waiting))
         {
             // Native work can only be captured after fencing, including failed,
             // cancelled and paused turns. Durable demand survives upload errors.

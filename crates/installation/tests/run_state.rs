@@ -112,3 +112,53 @@ async fn independent_admissions_serialize_on_the_active_mission_constraint() {
         1
     );
 }
+
+#[tokio::test]
+async fn summaries_keep_frozen_names_and_accept_runs_without_a_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            db.admit_run(&state("without", "one"), None, &json!({}), None)?;
+            let mut snapshot: cairn_contracts::RunSnapshot = serde_json::from_value(json!({
+                "task": {
+                    "id": "00000000-0000-4000-8000-000000000003",
+                    "agentId": "00000000-0000-4000-8000-000000000001",
+                    "name": "Frozen mission",
+                    "prompt": "Inspect",
+                },
+                "agent": {
+                    "id": "00000000-0000-4000-8000-000000000001",
+                    "name": "Frozen agent",
+                    "revision": "fixture",
+                    "createdAt": 0,
+                    "access": cairn_contracts::AccessPolicy::default(),
+                    "exclusiveNodes": [],
+                    "plugins": [],
+                },
+                "project": null,
+            }))?;
+            db.admit_run(&state("with", "two"), Some(&snapshot), &json!({}), None)?;
+            let summaries = db.runs(None, None, 20, 0, false)?;
+            for summary in &summaries {
+                assert!(summary.get("snapshot").is_none());
+                serde_json::from_value::<cairn_contracts::Run>(summary.clone()).unwrap();
+            }
+            let summary = summaries.iter().find(|run| run["id"] == "with").unwrap();
+            assert_eq!(summary["taskName"], "Frozen mission");
+            assert_eq!(summary["agentName"], "Frozen agent");
+            snapshot.agent.settings.name = "Replacement snapshot".into();
+            db.change_run(
+                "with",
+                RunChanges {
+                    snapshot: Some(snapshot),
+                    ..Default::default()
+                },
+            )?;
+            let summaries = db.runs(None, Some("two"), 20, 0, false)?;
+            assert_eq!(summaries[0]["agentName"], "Replacement snapshot");
+            Ok(())
+        })
+        .await
+        .unwrap();
+}

@@ -2907,7 +2907,13 @@ async fn quiet_chat_protocol_keeps_a_finite_checkpoint_deadline() {
     let mut snapshot = run["snapshot"].clone();
     snapshot["agent"]["timeoutMinutes"] = 1.into();
     s.store
-        .update_run_boundary(id, json!({ "snapshot": snapshot }))
+        .change_run(
+            id,
+            cairn_installation::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(snapshot).unwrap()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     // Resume the final second of an existing one-minute budget.

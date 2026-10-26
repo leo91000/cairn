@@ -73,7 +73,7 @@ macro_rules! wire_fields {
 
 pub(crate) const SCHEMA: &str = concat!(
     r#"CREATE TABLE runs(
-  id TEXT PRIMARY KEY CHECK(length(id)>0),
+  id TEXT PRIMARY KEY NOT NULL CHECK(length(id)>0),
   task_id TEXT NOT NULL CHECK(length(task_id)>0),
   project_id TEXT,
   status TEXT NOT NULL CHECK(status IN ('queued','running','waiting','succeeded','failed','cancelled','interrupted')),
@@ -102,8 +102,13 @@ pub(crate) const SCHEMA: &str = concat!(
   retry_deadline_at INTEGER CHECK(retry_deadline_at BETWEEN 0 AND 9007199254740991),
   retry_cause TEXT CHECK(retry_cause IS NULL OR json_valid(retry_cause)),
   requested_by TEXT CHECK(requested_by IS NULL OR json_valid(requested_by)),
+  -- Frozen display fields are derived by SQLite once per snapshot write. Lists
+  -- need neither the snapshot's overflow pages nor repeated JSON extraction.
+  task_name TEXT GENERATED ALWAYS AS (coalesce(json_extract(snapshot,'$.task.name'),'')) STORED,
+  agent_name TEXT GENERATED ALWAYS AS (coalesce(json_extract(snapshot,'$.agent.name'),'')) STORED,
+  provider TEXT GENERATED ALWAYS AS (json_extract(snapshot,'$.agent.provider')) STORED,
   snapshot TEXT CHECK(snapshot IS NULL OR json_valid(snapshot)),
-  boundary TEXT NOT NULL CHECK(json_valid(boundary) AND json_type(boundary,'$.snapshot') IS NULL),
+  boundary TEXT NOT NULL CHECK(json_valid(boundary) AND json_type(boundary)='object' AND json_type(boundary,'$.snapshot') IS NULL),
   dedupe TEXT UNIQUE,
   data TEXT GENERATED ALWAYS AS (json_set(boundary,'$.snapshot',json(snapshot),'$.summary',summary,
 "#,
@@ -112,7 +117,7 @@ pub(crate) const SCHEMA: &str = concat!(
   summary_data TEXT GENERATED ALWAYS AS (json_set(boundary,
 "#,
     wire_fields!(),
-    r#",'$.taskName',json_extract(snapshot,'$.task.name'),'$.agentName',json_extract(snapshot,'$.agent.name'),'$.provider',json_extract(snapshot,'$.agent.provider'))) VIRTUAL,
+    r#",'$.taskName',task_name,'$.agentName',agent_name,'$.provider',provider)) VIRTUAL,
   CHECK((retry_attempt IS NULL AND retry_limit IS NULL AND retry_cause IS NULL AND retry_next_at IS NULL AND retry_started_at IS NULL AND retry_deadline_at IS NULL) OR (retry_attempt IS NOT NULL AND retry_limit IS NOT NULL AND retry_cause IS NOT NULL)),
   CHECK(retry_deadline_at IS NULL OR retry_started_at IS NULL OR retry_deadline_at>=retry_started_at)
 );
@@ -133,13 +138,12 @@ pub(crate) struct RunRecord {
 }
 
 impl RunRecord {
-    pub fn wire(&self) -> Result<Value> {
-        let mut value = self.boundary.clone();
-        let fields = serde_json::to_value(&self.state)?;
-        value
-            .as_object_mut()
-            .unwrap()
-            .extend(fields.as_object().unwrap().clone());
+    pub fn wire(self) -> Result<Value> {
+        let mut value = self.boundary;
+        let Value::Object(fields) = serde_json::to_value(self.state)? else {
+            unreachable!("RunState serializes to an object")
+        };
+        value.as_object_mut().unwrap().extend(fields);
         value["snapshot"] = self
             .snapshot
             .as_deref()
@@ -216,6 +220,21 @@ fn state_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunState> {
     })
 }
 
+fn record_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
+    let boundary: String = row.get(30)?;
+    Ok(RunRecord {
+        state: state_row(row)?,
+        snapshot: row.get(29)?,
+        boundary: serde_json::from_str(&boundary).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                30,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+    })
+}
+
 impl Db<'_> {
     pub fn run_state(&self, id: &str) -> Result<Option<RunState>> {
         Ok(self
@@ -233,28 +252,20 @@ impl Db<'_> {
     }
 
     pub(crate) fn run_record(&self, id: &str) -> Result<Option<RunRecord>> {
-        let result = self
+        Ok(self
             .0
             .prepare_cached(&format!(
                 "SELECT {STATE_COLUMNS},snapshot,boundary FROM runs WHERE id=?"
             ))?
-            .query_row([id], |row| {
-                Ok((
-                    state_row(row)?,
-                    row.get::<_, Option<String>>(29)?,
-                    row.get::<_, String>(30)?,
-                ))
-            })
-            .optional()?;
-        result
-            .map(|(state, snapshot, boundary)| {
-                Ok(RunRecord {
-                    state,
-                    snapshot,
-                    boundary: serde_json::from_str(&boundary)?,
-                })
-            })
-            .transpose()
+            .query_row([id], record_row)
+            .optional()?)
+    }
+
+    pub(crate) fn queued_run_records(&self) -> Result<Vec<RunRecord>> {
+        let mut query = self.0.prepare_cached(&format!("SELECT {STATE_COLUMNS},snapshot,boundary FROM runs WHERE status='queued' ORDER BY created_at"))?;
+        Ok(query
+            .query_map([], record_row)?
+            .collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn run_snapshot(&self, id: &str) -> Result<Option<cairn_contracts::RunSnapshot>> {
@@ -334,7 +345,7 @@ impl Db<'_> {
         self.0.execute_batch("SAVEPOINT run_transition")?;
         let result = (|| {
             let mut state = required(self.run_state(id)?, "Run not found")?;
-            let (snapshot, boundary) = change.apply(&mut state)?;
+            let (snapshot, boundary) = change.apply(&mut state);
             if let Some(snapshot) = snapshot {
                 self.0.execute(
                     "UPDATE runs SET snapshot=? WHERE id=?",
@@ -360,7 +371,7 @@ impl Db<'_> {
         }
     }
 
-    pub(crate) fn write_run_state(&self, state: &RunState) -> Result<()> {
+    fn write_run_state(&self, state: &RunState) -> Result<()> {
         self.0.prepare_cached("UPDATE runs SET task_id=?,project_id=?,status=?,trigger=?,created_at=?,started_at=?,finished_at=?,summary=?,error=?,session_id=?,workspace=?,workspace_cleaned_at=?,recovery_pending=?,resume_available=?,resume_count=?,cancel_requested_at=?,account_id=?,account_name=?,account_wait_reason=?,account_required=?,capacity_wait_until=?,retry_attempt=?,retry_limit=?,retry_next_at=?,retry_started_at=?,retry_deadline_at=?,retry_cause=?,requested_by=? WHERE id=?")?.execute(params![
             state.task_id,
             state.project_id,

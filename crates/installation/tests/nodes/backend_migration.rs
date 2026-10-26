@@ -393,14 +393,17 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     owner
         .service
         .store
-        .update_run_boundary(
+        .change_run(
             &run,
-            json!({
-                "snapshot": before["snapshot"],
-                "nodeId": before["nodeId"],
-                "backup": before["backup"],
-                "backendMigration": pending,
-            }),
+            cairn_installation::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(before["snapshot"].clone()).unwrap()),
+                boundary: Some(json!({
+                    "nodeId": before["nodeId"],
+                    "backup": before["backup"],
+                    "backendMigration": pending,
+                })),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();

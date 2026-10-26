@@ -233,8 +233,8 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
 /// Queues a stopped run to continue its saved conversation.
 fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
     let record = required(db.run_record(id)?, "Run not found")?;
+    let state = record.state.clone();
     let run = record.wire()?;
-    let state = &record.state;
     if run["backendMigration"].is_object() {
         return Err(Error::conflict(
             "Wait for the backend migration to finish before resuming.",
