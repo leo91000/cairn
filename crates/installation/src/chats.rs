@@ -1237,16 +1237,15 @@ impl Service {
         } else {
             text(&message, "text")
         };
-        let mut task = parse(
-            "task",
-            json!({
-                "name": chat["title"],
-                "prompt": prompt,
-                "agentId": chat["agentId"],
-                "projectId": chat["projectId"],
-                "worktree": true,
-            }),
-        )?;
+        let mut settings: cairn_contracts::MissionSettings = serde_json::from_value(json!({
+            "name": chat["title"],
+            "prompt": prompt,
+            "agentId": chat["agentId"],
+            "projectId": chat["projectId"],
+            "worktree": true,
+        }))?;
+        settings.validate().map_err(Error::bad)?;
+        let mut task = serde_json::to_value(settings)?;
         task["id"] = chat["id"].clone();
         task["createdAt"] = chat["createdAt"].clone();
         task["nextRun"] = Value::Null;

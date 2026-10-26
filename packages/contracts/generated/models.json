@@ -519,6 +519,22 @@
       ],
       "type": "object"
     },
+    "CreateMissionInput": {
+      "additionalProperties": false,
+      "properties": {
+        "creationId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/definitions/MissionSettings"
+        }
+      },
+      "required": [
+        "settings"
+      ],
+      "type": "object"
+    },
     "CreateProjectInput": {
       "additionalProperties": false,
       "properties": {
@@ -536,6 +552,18 @@
       "type": "object"
     },
     "DeleteAgentOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "deleted"
+      ],
+      "type": "object"
+    },
+    "DeleteMissionOutput": {
       "additionalProperties": false,
       "properties": {
         "deleted": {
@@ -590,6 +618,25 @@
       },
       "required": [
         "agents"
+      ],
+      "type": "object"
+    },
+    "ListMissionsInput": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ListMissionsOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "tasks": {
+          "items": {
+            "$ref": "#/definitions/Mission"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "tasks"
       ],
       "type": "object"
     },
@@ -657,6 +704,313 @@
         "targetId",
         "transferred",
         "deleted"
+      ],
+      "type": "object"
+    },
+    "Mission": {
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "archived": {
+          "default": false,
+          "type": "boolean"
+        },
+        "authorAccessId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authorId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authorRemoved": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cron": {
+          "default": null,
+          "maxLength": 100,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "nativeAuthorityNodes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "nativeParentAccess": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeParentRunId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativePrincipals": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "nativeProvenanceUnknown": {
+          "type": "boolean"
+        },
+        "nextRun": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "projectId": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "maxLength": 50000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "scheduleFailure": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ScheduleFailure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scheduleWaitReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skills": {
+          "default": null,
+          "items": {
+            "maxLength": 160,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "maxLength": 30,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "type": "array"
+        },
+        "timezone": {
+          "default": "Europe/Paris",
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "worktree": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "prompt",
+        "agentId",
+        "projectId",
+        "skills",
+        "tags",
+        "cron",
+        "timezone",
+        "enabled",
+        "archived",
+        "worktree",
+        "revision",
+        "createdAt",
+        "nextRun",
+        "authorId",
+        "authorAccessId",
+        "authorRemoved",
+        "scheduleWaitReason",
+        "scheduleFailure",
+        "nativePrincipals",
+        "nativeAuthorityNodes",
+        "nativeParentRunId",
+        "nativeParentAccess",
+        "nativeProvenanceUnknown"
+      ],
+      "type": "object"
+    },
+    "MissionInput": {
+      "additionalProperties": false,
+      "properties": {
+        "taskId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskId"
+      ],
+      "type": "object"
+    },
+    "MissionSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "archived": {
+          "default": false,
+          "type": "boolean"
+        },
+        "cron": {
+          "default": null,
+          "maxLength": 100,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "projectId": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "maxLength": 50000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "skills": {
+          "default": null,
+          "items": {
+            "maxLength": 160,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "maxLength": 30,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "type": "array"
+        },
+        "timezone": {
+          "default": "Europe/Paris",
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "worktree": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "prompt",
+        "agentId",
+        "projectId",
+        "skills",
+        "tags",
+        "cron",
+        "timezone",
+        "enabled",
+        "archived",
+        "worktree"
+      ],
+      "type": "object"
+    },
+    "MissionStateInput": {
+      "additionalProperties": false,
+      "properties": {
+        "archived": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "taskId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskId",
+        "revision",
+        "enabled",
+        "archived"
       ],
       "type": "object"
     },
@@ -925,6 +1279,27 @@
       ],
       "type": "object"
     },
+    "ReplaceMissionInput": {
+      "additionalProperties": false,
+      "properties": {
+        "revision": {
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/definitions/MissionSettings"
+        },
+        "taskId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskId",
+        "revision",
+        "settings"
+      ],
+      "type": "object"
+    },
     "ReplaceProjectInput": {
       "additionalProperties": false,
       "properties": {
@@ -983,6 +1358,163 @@
       },
       "required": [
         "runId"
+      ],
+      "type": "object"
+    },
+    "RunTaskSnapshot": {
+      "description": "Presentation of task settings in a run snapshot. Chats synthesize the same typed\nsettings without creating a mission or a scheduled commitment.",
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "archived": {
+          "default": false,
+          "type": "boolean"
+        },
+        "cron": {
+          "default": null,
+          "maxLength": 100,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "projectId": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "maxLength": 50000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "skills": {
+          "default": null,
+          "items": {
+            "maxLength": 160,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "maxLength": 30,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "type": "array"
+        },
+        "timezone": {
+          "default": "Europe/Paris",
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "worktree": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "prompt",
+        "agentId",
+        "projectId",
+        "skills",
+        "tags",
+        "cron",
+        "timezone",
+        "enabled",
+        "archived",
+        "worktree"
+      ],
+      "type": "object"
+    },
+    "ScheduleFailure": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "scheduledFor": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "message",
+        "scheduledFor",
+        "at"
+      ],
+      "type": "object"
+    },
+    "SchedulePreviewInput": {
+      "additionalProperties": false,
+      "properties": {
+        "cron": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "timezone": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "cron",
+        "timezone"
+      ],
+      "type": "object"
+    },
+    "SchedulePreviewOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "occurrences": {
+          "items": {
+            "format": "int64",
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "occurrences"
       ],
       "type": "object"
     },

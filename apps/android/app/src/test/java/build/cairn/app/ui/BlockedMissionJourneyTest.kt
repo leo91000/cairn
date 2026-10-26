@@ -54,13 +54,13 @@ class BlockedMissionJourneyTest {
             provider = "claude",
         )
     private val proof =
-        Task("proof", "Preuve appareil F8", agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1")
+        Task("2db836ee-ce2e-552d-b9fa-2fef2030546c", "Preuve appareil F8", agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1")
     private val notes =
-        Task("notes", "Notes de version 0.53", agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1")
+        Task("348988cc-0279-5ed4-801b-ac44d6987c6e", "Notes de version 0.53", agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1")
     private val checks =
-        Task("checks", "Checks de la PR315", agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1")
+        Task("25078a9c-7f0c-5a2b-8424-e17e90946633", "Checks de la PR315", agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1")
     private val deploy =
-        Task("deploy", "Déploiement staging", agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1")
+        Task("888f7003-e15b-5b1f-a1b3-a221bc92ec3a", "Déploiement staging", agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1")
     private val parent =
         Chat(
             "parent",
@@ -84,7 +84,7 @@ class BlockedMissionJourneyTest {
             createdAt = now - minutes * 60_000 - 300_000,
             startedAt = now - minutes * 60_000 - 300_000,
             finishedAt = now - minutes * 60_000,
-            snapshot = Snapshot(task = task, agent = claude),
+            snapshot = Snapshot(task = task.runTaskSnapshot(), agent = claude),
             outcome = outcome.copy(reportedAt = now - minutes * 60_000),
             requestedBy = requestedBy,
         )
@@ -297,7 +297,7 @@ class BlockedMissionJourneyTest {
 
             compose.onNodeWithContentDescription("Écarter Preuve appareil F8").performClick()
             waitText("Tâche bloquée · Écartée")
-            assertTrue(dismissals.containsKey("proof"))
+            assertTrue(dismissals.containsKey("2db836ee-ce2e-552d-b9fa-2fef2030546c"))
             capture("android-blocked-set-aside")
         }
 
@@ -314,7 +314,7 @@ class BlockedMissionJourneyTest {
         capture("android-blocked-run-dismissed")
         compose.onNodeWithText("Remettre dans Pour vous").performClick()
         waitText("Me le rappeler demain")
-        assertTrue(!dismissals.containsKey("proof"))
+        assertTrue(!dismissals.containsKey("2db836ee-ce2e-552d-b9fa-2fef2030546c"))
     }
 
     @Test

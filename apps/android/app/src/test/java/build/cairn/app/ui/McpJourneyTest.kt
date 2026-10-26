@@ -105,7 +105,7 @@ class McpJourneyTest {
                                             true
                                     )
                                         """{"agents":[]}"""
-                                    else "[]"
+                                    else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
                             }
                         return MockResponse().setBody(result)
                     }

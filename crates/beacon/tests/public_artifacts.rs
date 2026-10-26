@@ -1,3 +1,5 @@
+use common::MissionFixture;
+
 mod common;
 
 use common::RelayedInstallation;
@@ -11,7 +13,7 @@ async fn seeded_artifact(
 ) -> (String, String) {
     let installation = &relay.installation;
     let task = installation
-        .task(
+        .task_fixture(
             json!({
                 "name": "Report",
                 "prompt": "Make a report",

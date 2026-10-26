@@ -1,0 +1,47 @@
+package build.cairn.app.data
+
+// Complete current mission values for UI fixtures; production decodes generated models.
+@Suppress("FunctionName")
+fun Task(
+    id: String = "00000000-0000-4000-8000-000000000002",
+    name: String = "",
+    prompt: String = "",
+    agentId: String = MAIN_AGENT_ID,
+    projectId: String? = null,
+    skills: List<String>? = null,
+    tags: List<String> = emptyList(),
+    cron: String? = null,
+    timezone: String = "Europe/Paris",
+    enabled: Boolean = true,
+    archived: Boolean = false,
+    worktree: Boolean = true,
+    nextRun: Long? = null,
+    scheduleFailure: ScheduleFailure? = null,
+): Task =
+    build.cairn.contracts.Mission(
+        id = id,
+        name = name,
+        prompt = prompt,
+        agentId = agentId,
+        projectId = projectId,
+        skills = skills,
+        tags = tags,
+        cron = cron,
+        timezone = timezone,
+        enabled = enabled,
+        archived = archived,
+        worktree = worktree,
+        nextRun = nextRun,
+        scheduleFailure = scheduleFailure,
+        revision = "fixture-revision",
+        createdAt = 0L,
+        authorId = "fixture-account",
+        authorAccessId = "fixture-access",
+        authorRemoved = false,
+        scheduleWaitReason = null,
+        nativePrincipals = emptyList(),
+        nativeAuthorityNodes = emptyList(),
+        nativeParentRunId = null,
+        nativeParentAccess = null,
+        nativeProvenanceUnknown = true,
+    )

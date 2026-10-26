@@ -43,7 +43,7 @@ class FilPagerDeviceTest {
         )
     private val daily =
         Task(
-            "daily",
+            "a05f5991-ec1e-57a2-a8e5-ec314581a110",
             "Revue quotidienne",
             "Relire les changements du jour.",
             MAIN_AGENT_ID,
@@ -53,12 +53,12 @@ class FilPagerDeviceTest {
     private val failed =
         Run(
             "failed-run",
-            taskId = "daily",
+            taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
             status = "failed",
             trigger = "schedule",
             startedAt = now - 7_200_000,
             finishedAt = now - 7_000_000,
-            snapshot = Snapshot(task = daily, agent = main),
+            snapshot = Snapshot(task = daily.runTaskSnapshot(), agent = main),
         )
     private val chats =
         listOf(
@@ -138,7 +138,7 @@ class FilPagerDeviceTest {
                                     )
                                 )
                             path == "/api/installations/fixture/api/tasks" ->
-                                json(wireJson.encodeToString(listOf(daily)))
+                                json(wireJson.encodeToString(build.cairn.contracts.ListMissionsOutput(listOf(daily))))
                             path == "/api/installations/fixture/api/tasks/activity" ->
                                 json(wireJson.encodeToString(listOf(failed)))
                             path == "/api/installations/fixture/api/runs" ->
@@ -175,7 +175,7 @@ class FilPagerDeviceTest {
                                             true
                                     )
                                         """{"agents":[]}"""
-                                    else "[]"
+                                    else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
                                 )
                         }
                     }

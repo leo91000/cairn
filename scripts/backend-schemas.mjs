@@ -6,13 +6,9 @@ import {
   questionAnswerInput,
   questionFields,
 } from '../packages/contracts/chats.ts'
-import {
-  taskInput,
-} from '../packages/contracts/contracts.ts'
 import { mcpInput } from '../packages/contracts/mcp.ts'
 
 const schemas = {
-  task: taskInput,
   chat: chatInput,
   message: chatMessageInput,
   answer: questionAnswerInput,

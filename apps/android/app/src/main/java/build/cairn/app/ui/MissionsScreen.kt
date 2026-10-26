@@ -30,7 +30,14 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.currentStateAsState
 import build.cairn.app.data.*
-import kotlinx.serialization.json.encodeToJsonElement
+import build.cairn.contracts.CreateMissionInput
+import build.cairn.contracts.MissionInput
+import build.cairn.contracts.MissionStateInput
+import build.cairn.contracts.SchedulePreviewInput
+import build.cairn.contracts.createMission
+import build.cairn.contracts.deleteMission
+import build.cairn.contracts.previewSchedule
+import build.cairn.contracts.setMissionState
 
 private val filters =
     listOf(
@@ -268,13 +275,7 @@ fun MissionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Un
         TaskEditor(
             vm,
             state,
-            state.tasks.find { it.id == id }
-                ?: Task(
-                    agentId =
-                        state.agents.firstOrNull { it.id == MAIN_AGENT_ID }?.id
-                            ?: state.agents.firstOrNull()?.id.orEmpty(),
-                    timezone = java.time.ZoneId.systemDefault().id,
-                ),
+            state.tasks.find { it.id == id },
             onSaved = { task ->
                 query = ""
                 filter = if (task.archived) "archived" else "all"
@@ -293,7 +294,8 @@ fun MissionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Un
             { deleting = null },
         ) {
             vm.perform {
-                delete("/tasks/${segment(id)}")
+                api.deleteMission(MissionInput(taskId = id))
+                refresh()
                 deleting = null
             }
         }
@@ -485,7 +487,8 @@ internal fun MissionPanel(
             { deleting = false },
         ) {
             vm.perform {
-                delete("/tasks/${segment(task.id)}")
+                api.deleteMission(MissionInput(taskId = task.id))
+                refresh()
                 deleting = false
                 removed()
             }
@@ -523,10 +526,8 @@ private fun MissionDetail(
             occurrences =
                 try {
                     vm.api
-                        .send<Occurrences>(
-                            "POST",
-                            "/schedule/preview",
-                            body("cron" to cron, "timezone" to task.timezone),
+                        .previewSchedule(
+                            SchedulePreviewInput(cron = cron, timezone = task.timezone)
                         )
                         .occurrences
                         .take(2)
@@ -538,7 +539,15 @@ private fun MissionDetail(
     val agent = state.agents.find { it.id == task.agentId }
     val project = state.projects.find { it.id == task.projectId }
     fun toggle(copy: Task) = vm.perform {
-        save("tasks", task.id, wireJson.encodeToJsonElement(copy))
+        api.setMissionState(
+            MissionStateInput(
+                taskId = task.id,
+                revision = task.revision,
+                enabled = copy.enabled,
+                archived = copy.archived,
+            )
+        )
+        refresh()
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
         AgentAvatar(agent?.name ?: "?", task.agentId, 30.dp)
@@ -568,18 +577,19 @@ private fun MissionDetail(
                     onClick = {
                         menu = false
                         vm.perform {
-                            save(
-                                "tasks",
-                                "",
-                                wireJson.encodeToJsonElement(
-                                    task.copy(
-                                        id = "",
-                                        name = task.name.take(92) + " (copie)",
-                                        enabled = false,
-                                        archived = false,
-                                    )
-                                ),
+                            api.createMission(
+                                CreateMissionInput(
+                                    settings =
+                                        task
+                                            .settings()
+                                            .copy(
+                                                name = task.name.take(92) + " (copie)",
+                                                enabled = false,
+                                                archived = false,
+                                            )
+                                )
                             )
+                            refresh()
                         }
                     },
                 )

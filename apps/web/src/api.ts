@@ -7,6 +7,7 @@ import type {
 import type { McpView } from '../../../packages/contracts/mcp'
 import { reactive, watch } from 'vue'
 import { listAgents } from '../../../packages/contracts/generated/listAgents'
+import { listMissions } from '../../../packages/contracts/generated/listMissions'
 import { listProjects } from '../../../packages/contracts/generated/listProjects'
 import { beaconOrigin, installationHost } from './beacon-location'
 import { ProtocolMismatch } from './direct-channel'
@@ -412,7 +413,7 @@ export async function refresh() {
     lists = await Promise.all([
       listAgents(api, {}).then(output => output.agents),
       listProjects(api, {}).then(output => output.projects),
-      api<Task[]>('/tasks'),
+      listMissions(api, {}).then(output => output.tasks),
       api<Skill[]>('/skills'),
       state.installationRole === 'owner' ? api<McpView[]>('/mcps') : Promise.resolve([]),
     ])

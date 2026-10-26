@@ -349,7 +349,7 @@ abstract class SkillWorkbenchCases {
                                 request.requestUrl?.encodedPath?.endsWith("/api/agents") == true
                             )
                                 """{"agents":[]}"""
-                            else "[]"
+                            else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
                         )
                 }
             }

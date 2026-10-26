@@ -34,6 +34,14 @@ trait StorageEntity:
     serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug
 {
     const KIND: &'static str;
+    const TABLE: &'static str = Self::KIND;
+
+    fn prepare(_db: &Db<'_>) {}
+
+    fn deadlines(_db: &Db<'_>, _reference: bool) -> Option<usize> {
+        None
+    }
+
     const SAVE: &'static str;
 
     fn id(&self) -> String;
@@ -49,7 +57,7 @@ trait StorageEntity:
 CREATE TABLE records(id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX records_kind ON records(kind,updated_at DESC);
 CREATE INDEX records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
-CREATE UNIQUE INDEX records_chat_slug ON records(json_extract(data,'$.slug')) WHERE kind='chats';", Self::KIND)).unwrap();
+CREATE UNIQUE INDEX records_chat_slug ON records(json_extract(data,'$.slug')) WHERE kind='chats';", Self::TABLE)).unwrap();
     }
 
     fn reference_read(db: &Db<'_>, id: &str) -> Self {
@@ -156,6 +164,68 @@ impl StorageEntity for Agent {
 mod a2;
 
 use a2::A2Mapping;
+impl StorageEntity for cairn_contracts::Mission {
+    const KIND: &'static str = "tasks";
+    const TABLE: &'static str = "missions";
+    const SAVE: &'static str = "task.saved";
+
+    fn id(&self) -> String {
+        self.id.to_string()
+    }
+
+    fn read(db: &Db<'_>, id: &str) -> Self {
+        db.mission(id).unwrap().unwrap()
+    }
+
+    fn list(db: &Db<'_>) -> usize {
+        db.missions().unwrap().len()
+    }
+
+    fn prepare(db: &Db<'_>) {
+        let agent:Agent=serde_json::from_value(json!({
+            "id":cairn_installation::config::MAIN_AGENT_ID,"name":"Measurement agent","access":cairn_contracts::AccessPolicy::default(),
+            "exclusiveNodes":[],"plugins":[],"revision":"measurement","createdAt":0
+        })).unwrap();
+        db.save_agent(&agent).unwrap();
+    }
+
+    fn write(&self, db: &Db<'_>, replacement: bool) {
+        if replacement {
+            assert_eq!(
+                db.mission(&self.id()).unwrap().unwrap().revision,
+                self.revision
+            );
+        }
+        db.save_mission(self).unwrap();
+        db.audit(Self::SAVE, &json!({"id":self.id})).unwrap();
+    }
+
+    fn deadlines(db: &Db<'_>, reference: bool) -> Option<usize> {
+        Some(if reference {
+            db.json_rows("SELECT data FROM records WHERE kind='tasks' AND json_extract(data,'$.enabled')=1 AND json_extract(data,'$.archived')=0 AND json_extract(data,'$.cron') IS NOT NULL AND json_extract(data,'$.nextRun')<=? ORDER BY json_extract(data,'$.nextRun'),id",[1700000000000_i64]).unwrap().into_iter().map(|v|serde_json::from_value::<cairn_contracts::Mission>(v).unwrap()).count()
+        } else {
+            db.due_missions(1700000000000).unwrap().len()
+        })
+    }
+}
+
+#[tokio::test]
+#[ignore = "local measurement; run alone with --ignored --nocapture --test-threads=1"]
+async fn mission_storage_layouts() {
+    let corpus:Vec<cairn_contracts::Mission>=(0..1000).map(|n|serde_json::from_value(json!({
+        "id":uuid::Uuid::from_u128((4_u128<<76)|(2_u128<<62)|n),
+        "name":format!("Mission {n:04}"),"prompt":"Inspect changes and preserve scheduled admission. ".repeat(24),
+        "agentId":cairn_installation::config::MAIN_AGENT_ID,"projectId":null,
+        "skills":if n%3==0 { None } else if n%3==1 { Some(vec![]) } else { Some(vec!["global/review","global/test"]) },
+        "tags":["review","code"],"cron":if n%2==0 { Some("0 9 * * *") } else { None },
+        "timezone":"Europe/Paris","enabled":true,"archived":false,"worktree":true,
+        "createdAt":1700000000000_i64,"nextRun":if n%2==0 { Some(1699999999000_i64+n as i64) } else { None },
+        "revision":"00000000-0000-4000-8000-000000000002","authorId":"measurement-owner","authorAccessId":"measurement-membership","authorRemoved":false,
+        "scheduleFailure":null,"scheduleWaitReason":null,
+        "nativePrincipals":["measurement-owner"],"nativeAuthorityNodes":[],"nativeParentRunId":null,"nativeParentAccess":null,"nativeProvenanceUnknown":false,
+    })).unwrap()).collect();
+    measure(&corpus);
+}
 
 fn read<E: StorageEntity>(db: &Connection, reference: bool, id: &str) -> E {
     if reference {
@@ -268,6 +338,7 @@ fn measure<E: StorageEntity>(entities: &[E]) {
             if reference {
                 E::reference_schema(&db);
             }
+            E::prepare(&Db(&db));
             let mut insert = Vec::new();
             let cpu_start = cpu();
             for project in entities {
@@ -300,6 +371,15 @@ fn measure<E: StorageEntity>(entities: &[E]) {
                 assert_eq!(count, entities.len());
             }
             let list_cpu = cpu() - cpu_start;
+            let mut due = Vec::new();
+            let cpu_start = cpu();
+            if E::deadlines(&Db(&db), reference).is_some() {
+                for _ in 0..50 {
+                    let count = measured(&mut due, || E::deadlines(&Db(&db), reference).unwrap());
+                    assert_eq!(count, 500);
+                }
+            }
+            let due_cpu = cpu() - cpu_start;
             let mut replace = Vec::new();
             let cpu_start = cpu();
             for p in entities {
@@ -338,7 +418,7 @@ fn measure<E: StorageEntity>(entities: &[E]) {
                     if reference {
                         E::reference_delete(&Db(&tx), &p.id());
                     } else {
-                        tx.prepare_cached(&format!("DELETE FROM {} WHERE id=?", E::KIND))
+                        tx.prepare_cached(&format!("DELETE FROM {} WHERE id=?", E::TABLE))
                             .unwrap()
                             .execute([p.id()])
                             .unwrap();
@@ -366,6 +446,7 @@ fn measure<E: StorageEntity>(entities: &[E]) {
                     "warmRead": distribution(&warm),
                     "connectionColdRead": distribution(&cold),
                     "list1000": distribution(&list),
+                    "due500": if due.is_empty(){None}else{Some(distribution(&due))},
                     "delete": distribution(&delete),
                     "cpuUs": {
                         "insert": insert_cpu,
@@ -373,6 +454,7 @@ fn measure<E: StorageEntity>(entities: &[E]) {
                         "warmRead": warm_cpu,
                         "coldReadIncludingOpen": cold_cpu,
                         "list": list_cpu,
+                        "due": due_cpu,
                         "delete": delete_cpu,
                     },
                 })

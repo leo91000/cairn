@@ -1,4 +1,5 @@
 use common::AgentFixture;
+use common::MissionFixture;
 use common::ProjectFixture;
 
 mod common;
@@ -21,7 +22,7 @@ async fn service(root: &TempDir) -> Arc<Service> {
 
 async fn active_run(s: &Service, agent: &Value) -> (Value, Value) {
     let task = s
-        .task(
+        .task_fixture(
             json!({
                 "name": "Inspect Cairn", "prompt": "Inspect runs", "agentId": agent["id"],
                 "worktree": false,
@@ -1026,6 +1027,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "delete_agent",
         "get_agent_avatar_configuration",
         "generate_agent_avatar",
+        "list_tasks", "get_task", "create_task", "replace_task", "set_task_state", "delete_task", "preview_schedule", "list_task_activity",
         "list_projects",
         "get_project",
         "save_project",
@@ -1045,10 +1047,10 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         &s,
         &configuration,
         "create_task",
-        json!({
+        json!({ "settings": {
             "name": "Weekly audit", "prompt": "Audit", "agentId": MAIN_AGENT_ID,
             "cron": "0 9 * * 1", "timezone": "UTC", "worktree": false,
-        }),
+        } }),
     )
     .await;
     let task = result(&created);
@@ -1056,7 +1058,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     assert_eq!(task["authorId"], "fixture-owner");
     let tasks = call(&s, &configuration, "list_tasks", json!({})).await;
     assert!(
-        result(&tasks)
+        result(&tasks)["tasks"]
             .as_array()
             .unwrap()
             .iter()
@@ -1067,8 +1069,8 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     let updated = call(
         &s,
         &configuration,
-        "update_task",
-        json!({ "id": task["id"], "task": update }),
+        "replace_task",
+        json!({ "taskId": task["id"], "revision": task["revision"], "settings": mission_settings(&update) }),
     )
     .await;
     assert_eq!(result(&updated)["nextRun"], Value::Null);
@@ -1145,7 +1147,7 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
         )
         .await
         .unwrap();
-    s.remove("tasks", run["taskId"].as_str().unwrap())
+    s.remove_mission_fixture(run["taskId"].as_str().unwrap())
         .await
         .unwrap();
     s.store
@@ -1230,7 +1232,7 @@ async fn delete_agent_rejects_main_task_references_and_active_work() {
         .unwrap();
     let id = agent["id"].as_str().unwrap();
     let task = s
-        .task(
+        .task_fixture(
             json!({
                 "name": "Archived maintenance",
                 "prompt": "Maintain",
@@ -1247,15 +1249,15 @@ async fn delete_agent_rejects_main_task_references_and_active_work() {
         assigned["result"]["content"][0]["text"],
         "This item is used by a task. Update or remove that task first."
     );
-    s.remove("tasks", task["id"].as_str().unwrap())
+    s.remove_mission_fixture(task["id"].as_str().unwrap())
         .await
         .unwrap();
 
     let (run, _) = active_run(&s, &agent).await;
     let task_id = run["taskId"].as_str().unwrap();
-    let mut task = s.get("tasks", task_id).await.unwrap();
+    let mut task = s.mission_snapshot_fixture(task_id).await.unwrap();
     task["agentId"] = MAIN_AGENT_ID.into();
-    s.task(task, Some(task_id)).await.unwrap();
+    s.task_fixture(task, Some(task_id)).await.unwrap();
     let busy = call(&s, &configuration, "delete_agent", json!({ "id": id })).await;
     assert_eq!(busy["result"]["isError"], true);
     assert_eq!(
@@ -1472,12 +1474,12 @@ async fn installation_access_manages_resources_and_other_agents_work() {
         &s,
         &configuration,
         "create_task",
-        json!({
+        json!({ "settings": {
             "name": "Delegate",
             "prompt": "Inspect",
             "agentId": MAIN_AGENT_ID,
             "worktree": false
-        }),
+        } }),
     )
     .await;
     assert_eq!(result(&created)["agentId"], MAIN_AGENT_ID);
@@ -1485,17 +1487,17 @@ async fn installation_access_manages_resources_and_other_agents_work() {
         &s,
         &configuration,
         "create_task",
-        json!({
+        json!({ "settings": {
             "name": "Continue",
             "prompt": "Continue",
             "worktree": false
-        }),
+        } }),
     )
     .await;
     assert_eq!(result(&own_default)["agentId"], manager["id"]);
     let tasks = call(&s, &configuration, "list_tasks", json!({})).await;
     assert!(
-        result(&tasks)
+        result(&tasks)["tasks"]
             .as_array()
             .unwrap()
             .iter()
@@ -1518,10 +1520,11 @@ async fn installation_access_manages_resources_and_other_agents_work() {
     let updated = call(
         &s,
         &configuration,
-        "update_task",
+        "replace_task",
         json!({
-            "id": task["id"],
-            "task": task
+            "taskId": task["id"],
+            "revision": task["revision"],
+            "settings": mission_settings(&task)
         }),
     )
     .await;
@@ -3657,4 +3660,10 @@ async fn typed_agent_profiles_preview_and_avatars_match_on_both_tools() {
                 .is_none()
         );
     }
+}
+
+fn mission_settings(mission:&Value) -> Value {
+    let mut settings=mission.clone();
+    settings.as_object_mut().unwrap().retain(|key,_| ["name","prompt","agentId","projectId","skills","tags","cron","timezone","enabled","archived","worktree"].contains(&key.as_str()));
+    settings
 }

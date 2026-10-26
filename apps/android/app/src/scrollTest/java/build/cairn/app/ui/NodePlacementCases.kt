@@ -118,7 +118,7 @@ abstract class NodePlacementCases {
                                             true
                                     )
                                         """{"agents":[]}"""
-                                    else "[]"
+                                    else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -275,14 +275,14 @@ abstract class NodePlacementCases {
                                         """[{"id":"desk","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
                                     else if (enrolled.get())
                                         """[{"id":"unrelated","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]},{"id":"desk","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
-                                    else "[]"
+                                    else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
                                 "/api/installations/fixture/api/agents" ->
                                     """{"agents":[{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"65a2e5b3-c5e4-5bb1-a839-36064775dd2a","instructions":"","model":"","name":"Agent VM","plugins":[],"provider":"codex","reasoning":"high","revision":"r1","timeoutMinutes":0},{"access":{"backend":"native","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":[],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"38235acc-317f-50db-b506-53809ad1c8a0","instructions":"","model":"","name":"Agent natif","plugins":[],"provider":"codex","reasoning":"high","revision":"r1","timeoutMinutes":0}]}"""
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/overview" -> "{}"
                                 "/api/installations/fixture/api/projects" -> """{"projects":[]}"""
-                                else -> if (request.method == "PUT") "{}" else "[]"
+                                else -> if (request.method == "PUT") "{}" else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -507,7 +507,7 @@ abstract class NodePlacementCases {
                                             true
                                     )
                                         """{"agents":[]}"""
-                                    else "[]"
+                                    else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -579,7 +579,7 @@ abstract class NodePlacementCases {
                                             true
                                     )
                                         """{"agents":[]}"""
-                                    else "[]"
+                                    else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -644,7 +644,7 @@ abstract class NodePlacementCases {
                                             true
                                     )
                                         """{"agents":[]}"""
-                                    else "[]"
+                                    else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -735,7 +735,7 @@ abstract class NodePlacementCases {
                                             true
                                     )
                                         """{"agents":[]}"""
-                                    else "[]"
+                                    else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -861,7 +861,7 @@ abstract class NodePlacementCases {
                                             true
                                     )
                                         """{"agents":[]}"""
-                                    else "[]"
+                                    else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -995,7 +995,7 @@ abstract class NodePlacementCases {
                                             true
                                     )
                                         """{"agents":[]}"""
-                                    else "[]"
+                                    else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -1118,7 +1118,7 @@ abstract class NodePlacementCases {
                                             true
                                     )
                                         """{"agents":[]}"""
-                                    else "[]"
+                                    else if (request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true) """{"tasks":[]}""" else "[]"
                             }
                         return MockResponse().setBody(body).apply {
                             // Keep the save busy while the subsequent node refresh is in flight.

@@ -74,7 +74,7 @@ class SignalJourneyTest {
     private val site = Project("e11e98cf-45bf-5364-83b7-7606435a2154", "Site vitrine")
     private val daily =
         Task(
-            "daily",
+            "a05f5991-ec1e-57a2-a8e5-ec314581a110",
             "Revue quotidienne",
             "Relire les changements du jour.",
             MAIN_AGENT_ID,
@@ -82,20 +82,20 @@ class SignalJourneyTest {
             nextRun = now + 3_600_000,
             scheduleFailure =
                 ScheduleFailure(
-                    "Aucune node native autorisée.",
-                    now - 82_800_000,
-                    now - 82_800_000,
+                    message = "Aucune node native autorisée.",
+                    scheduledFor = now - 82_800_000,
+                    at = now - 82_800_000,
                 ),
         )
     private val failed =
         Run(
             "failed-run",
-            taskId = "daily",
+            taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
             status = "failed",
             trigger = "schedule",
             startedAt = now - 7_200_000,
             finishedAt = now - 7_000_000,
-            snapshot = Snapshot(task = daily, agent = main),
+            snapshot = Snapshot(task = daily.runTaskSnapshot(), agent = main),
         )
     private val chats =
         listOf(
@@ -184,20 +184,20 @@ class SignalJourneyTest {
                                 )
                             path == "/api/installations/fixture/api/tasks" &&
                                 request.method == "GET" ->
-                                json(wireJson.encodeToString(listOf(daily)))
-                            path == "/api/installations/fixture/api/tasks/daily" &&
+                                json(wireJson.encodeToString(build.cairn.contracts.ListMissionsOutput(listOf(daily))))
+                            path == "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110" &&
                                 request.method == "PUT" ->
                                 json(wireJson.encodeToString(daily.copy(enabled = false)))
                             path == "/api/installations/fixture/api/tasks/activity" ->
                                 json(wireJson.encodeToString(listOf(failed)))
-                            path == "/api/installations/fixture/api/tasks/daily/run" ->
+                            path == "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/run" ->
                                 json(
                                     wireJson.encodeToString(
                                         Run(
                                             "new-run",
-                                            taskId = "daily",
+                                            taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
                                             status = "running",
-                                            snapshot = Snapshot(task = daily, agent = main),
+                                            snapshot = Snapshot(task = daily.runTaskSnapshot(), agent = main),
                                         )
                                     )
                                 )
@@ -263,10 +263,10 @@ class SignalJourneyTest {
                                                         "/api/installations/fixture/api/runs/"
                                                     )
                                                     .removeSuffix("/stream"),
-                                                taskId = "daily",
+                                                taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
                                                 status = "running",
                                                 trigger = "schedule",
-                                                snapshot = Snapshot(task = daily, agent = main),
+                                                snapshot = Snapshot(task = daily.runTaskSnapshot(), agent = main),
                                             )
                                     )
                                 )
@@ -386,7 +386,7 @@ class SignalJourneyTest {
         capture("fil-light")
         // A failed mission is retried in place and its new run opens.
         compose.onNodeWithContentDescription("Relancer Revue quotidienne").performClick()
-        waitCall("POST", "/api/installations/fixture/api/tasks/daily/run")
+        waitCall("POST", "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/run")
         waitDescription("Retour")
         compose.onNodeWithContentDescription("Retour").performClick()
         // A running conversation shows the live working indicator.
@@ -500,7 +500,7 @@ class SignalJourneyTest {
         compose.onNodeWithText("Lancer « Revue quotidienne »").assertDoesNotExist()
         compose.onNodeWithTag("search-field").performTextReplacement("revue")
         compose.onNodeWithText("Lancer « Revue quotidienne »").performClick()
-        waitCall("POST", "/api/installations/fixture/api/tasks/daily/run")
+        waitCall("POST", "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/run")
     }
 
     @Test
@@ -572,14 +572,14 @@ class SignalJourneyTest {
             .assertExists()
         capture("mission-sheet-light")
         compose.onNodeWithContentDescription("Mettre en pause").performScrollTo().performClick()
-        waitCall("PUT", "/api/installations/fixture/api/tasks/daily")
+        waitCall("PUT", "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110")
         val saved =
             wireJson
                 .parseToJsonElement(
                     calls
                         .first {
                             it.first == "PUT" &&
-                                it.second == "/api/installations/fixture/api/tasks/daily"
+                                it.second == "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110"
                         }
                         .third
                 )
@@ -593,7 +593,7 @@ class SignalJourneyTest {
                 .isNotEmpty() && !vm.state.value.busy
         }
         compose.onNodeWithText("Lancer maintenant").performScrollTo().performClick()
-        waitCall("POST", "/api/installations/fixture/api/tasks/daily/run")
+        waitCall("POST", "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/run")
         waitDescription("Retour")
     }
 

@@ -1,3 +1,5 @@
+use common::{MissionFixture, StoreMissionFixture};
+
 mod common;
 
 use common::{RelayedInstallation, login};
@@ -274,11 +276,11 @@ async fn removal_and_departure_close_member_streams_and_preserve_owner_access() 
             Method::POST,
             &format!("{api}/tasks"),
         )
-        .json(&json!({
+        .json(&json!({"settings": json!({
             "name": "Member work",
             "prompt": "Continue independently",
             "agentId": MAIN_AGENT_ID,
-        }))
+        })}))
         .send()
         .await
         .unwrap()
@@ -1117,12 +1119,11 @@ async fn shared_tasks_record_the_verified_author_and_only_the_owner_can_delete()
     let id = relay.session["installations"][0]["id"].as_str().unwrap();
     let task_path = format!("/api/installations/{id}/api/tasks");
     let response = request(&relay, &cookie, &session, Method::POST, &task_path)
-        .json(&json!({
+        .json(&json!({"settings": json!({
             "name": "Shared task",
             "prompt": "Keep working",
             "agentId": cairn_installation::config::MAIN_AGENT_ID,
-            "authorId": relay.session["account"]["id"],
-        }))
+        })}))
         .send()
         .await
         .unwrap();
@@ -1183,29 +1184,18 @@ async fn members_cannot_rewrite_or_resume_another_authors_task() {
         "enabled": false,
     });
 
-    for (author_cookie, author_session, legacy) in [
-        (&relay.cookie, &relay.session, false),
-        (&relay.cookie, &relay.session, true),
-        (&other_cookie, &other_session, false),
+    for (author_cookie, author_session) in [
+        (&relay.cookie, &relay.session),
+        (&other_cookie, &other_session),
     ] {
-        let mut task: Value = request(&relay, author_cookie, author_session, Method::POST, &tasks)
-            .json(&input)
+        let task: Value = request(&relay, author_cookie, author_session, Method::POST, &tasks)
+            .json(&json!({"settings": input}))
             .send()
             .await
             .unwrap()
             .json()
             .await
             .unwrap();
-        if legacy {
-            task.as_object_mut().unwrap().remove("authorId");
-            task.as_object_mut().unwrap().remove("authorAccessId");
-            relay
-                .installation
-                .store
-                .save("tasks", task.clone(), "fixture.legacy_task")
-                .await
-                .unwrap();
-        }
         let path = format!("{tasks}/{}", task["id"].as_str().unwrap());
 
         for (field, value) in [
@@ -1219,7 +1209,7 @@ async fn members_cannot_rewrite_or_resume_another_authors_task() {
             let mut changed = task.clone();
             changed[field] = value;
             let response = request(&relay, &cookie, &session, Method::PUT, &path)
-                .json(&changed)
+                .json(&mission_replacement(&task, &changed))
                 .send()
                 .await
                 .unwrap();
@@ -1235,9 +1225,13 @@ async fn members_cannot_rewrite_or_resume_another_authors_task() {
             .send()
             .await
             .unwrap()
-            .json()
+            .json::<cairn_contracts::ListMissionsOutput>()
             .await
-            .unwrap();
+            .unwrap()
+            .tasks
+            .into_iter()
+            .map(|m| serde_json::to_value(m).unwrap())
+            .collect();
         let unchanged = stored
             .iter()
             .find(|stored| stored["id"] == task["id"])
@@ -1249,7 +1243,7 @@ async fn members_cannot_rewrite_or_resume_another_authors_task() {
         changed["prompt"] = "Author's updated work".into();
         assert_eq!(
             request(&relay, author_cookie, author_session, Method::PUT, &path)
-                .json(&changed)
+                .json(&mission_replacement(&task, &changed))
                 .send()
                 .await
                 .unwrap()
@@ -1275,7 +1269,7 @@ async fn removing_a_task_author_stops_their_schedules_and_preserves_admitted_wor
         "enabled": true,
     });
     let task: Value = request(&relay, &cookie, &session, Method::POST, &tasks)
-        .json(&input)
+        .json(&json!({"settings": input}))
         .send()
         .await
         .unwrap()
@@ -1283,13 +1277,12 @@ async fn removing_a_task_author_stops_their_schedules_and_preserves_admitted_wor
         .await
         .unwrap();
     let task_id = task["id"].as_str().unwrap();
-    let mut legacy = relay.installation.task(input, None).await.unwrap();
-    legacy.as_object_mut().unwrap().remove("authorId");
-    legacy.as_object_mut().unwrap().remove("authorAccessId");
-    relay
-        .installation
-        .store
-        .save("tasks", legacy.clone(), "fixture.legacy_task")
+    let owner_task: Value = request(&relay, &relay.cookie, &relay.session, Method::POST, &tasks)
+        .json(&json!({"settings": input}))
+        .send()
+        .await
+        .unwrap()
+        .json()
         .await
         .unwrap();
     let run: Value = request(
@@ -1325,9 +1318,13 @@ async fn removing_a_task_author_stops_their_schedules_and_preserves_admitted_wor
         .send()
         .await
         .unwrap()
-        .json()
+        .json::<cairn_contracts::ListMissionsOutput>()
         .await
-        .unwrap();
+        .unwrap()
+        .tasks
+        .into_iter()
+        .map(|m| serde_json::to_value(m).unwrap())
+        .collect();
     let retired = stored
         .iter()
         .find(|value| value["id"] == task["id"])
@@ -1337,7 +1334,7 @@ async fn removing_a_task_author_stops_their_schedules_and_preserves_admitted_wor
     assert_eq!(retired["authorId"], session["account"]["id"]);
     let owner_task = stored
         .iter()
-        .find(|value| value["id"] == legacy["id"])
+        .find(|value| value["id"] == owner_task["id"])
         .unwrap();
     assert_eq!(owner_task["enabled"], true);
     assert_eq!(owner_task["authorId"], relay.session["account"]["id"]);
@@ -1371,7 +1368,7 @@ async fn offline_removal_and_reinvitation_do_not_revive_old_task_commitments() {
         "enabled": true,
     });
     let task: Value = request(&relay, &cookie, &session, Method::POST, &tasks)
-        .json(&input)
+        .json(&json!({"settings": input}))
         .send()
         .await
         .unwrap()
@@ -1386,13 +1383,11 @@ async fn offline_removal_and_reinvitation_do_not_revive_old_task_commitments() {
         Method::PUT,
         &task_path,
     )
-    .json(&{
+    .json(&mission_replacement(&task, &{
         let mut edited = input.clone();
-        edited["authorId"] = relay.session["account"]["id"].clone();
-        edited["authorRemoved"] = false.into();
         edited["name"] = "Edited by owner".into();
         edited
-    })
+    }))
     .send()
     .await
     .unwrap()
@@ -1467,7 +1462,14 @@ async fn offline_removal_and_reinvitation_do_not_revive_old_task_commitments() {
         loop {
             let response = relay.get("/tasks").send().await.unwrap();
             if response.status() == StatusCode::OK {
-                break response.json().await.unwrap();
+                break response
+                    .json::<cairn_contracts::ListMissionsOutput>()
+                    .await
+                    .unwrap()
+                    .tasks
+                    .into_iter()
+                    .map(|m| serde_json::to_value(m).unwrap())
+                    .collect();
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
@@ -1484,12 +1486,10 @@ async fn offline_removal_and_reinvitation_do_not_revive_old_task_commitments() {
     for (actor_cookie, actor_session) in [(&cookie, &session), (&relay.cookie, &relay.session)] {
         assert_eq!(
             request(&relay, actor_cookie, actor_session, Method::PUT, &task_path)
-                .json(&{
+                .json(&mission_replacement(&task, &{
                     let mut edited = input.clone();
-                    edited["authorId"] = actor_session["account"]["id"].clone();
-                    edited["authorRemoved"] = false.into();
                     edited
-                })
+                }))
                 .send()
                 .await
                 .unwrap()
@@ -1498,7 +1498,7 @@ async fn offline_removal_and_reinvitation_do_not_revive_old_task_commitments() {
         );
     }
     let replacement: Value = request(&relay, &cookie, &session, Method::POST, &tasks)
-        .json(&input)
+        .json(&json!({"settings": input}))
         .send()
         .await
         .unwrap()
@@ -1525,14 +1525,14 @@ async fn leaving_or_deleting_the_author_account_stops_their_schedules() {
             Method::POST,
             &format!("/api/installations/{id}/api/tasks"),
         )
-        .json(&json!({
+        .json(&json!({"settings": json!({
             "name": "Member commitment",
             "prompt": "Scheduled work",
             "agentId": cairn_installation::config::MAIN_AGENT_ID,
             "cron": "0 9 * * *",
             "timezone": "UTC",
             "enabled": true,
-        }))
+        })}))
         .send()
         .await
         .unwrap()
@@ -1560,9 +1560,13 @@ async fn leaving_or_deleting_the_author_account_stops_their_schedules() {
             .send()
             .await
             .unwrap()
-            .json()
+            .json::<cairn_contracts::ListMissionsOutput>()
             .await
-            .unwrap();
+            .unwrap()
+            .tasks
+            .into_iter()
+            .map(|m| serde_json::to_value(m).unwrap())
+            .collect();
         let task = tasks
             .iter()
             .find(|stored| stored["id"] == task["id"])
@@ -1581,13 +1585,13 @@ async fn an_authority_wait_never_delays_already_admitted_work() {
     let id = relay.session["installations"][0]["id"].as_str().unwrap();
     let tasks = format!("/api/installations/{id}/api/tasks");
     let mut task: Value = request(&relay, &relay.cookie, &relay.session, Method::POST, &tasks)
-        .json(&json!({
+        .json(&json!({"settings": json!({
             "name": "Due commitment",
             "prompt": "Approved work",
             "agentId": cairn_installation::config::MAIN_AGENT_ID,
             "cron": "0 9 * * *",
             "enabled": true,
-        }))
+        })}))
         .send()
         .await
         .unwrap()
@@ -1611,7 +1615,7 @@ async fn an_authority_wait_never_delays_already_admitted_work() {
     relay
         .installation
         .store
-        .save("tasks", task, "fixture.time")
+        .put_mission_fixture(task)
         .await
         .unwrap();
     let entered = Arc::new(tokio::sync::Semaphore::new(0));
@@ -1685,13 +1689,13 @@ async fn a_deferred_author_check_preserves_its_due_time_without_blocking_other_t
             Method::POST,
             &tasks_path,
         )
-        .json(&json!({
+        .json(&json!({"settings": json!({
             "name": name,
             "prompt": "Approved work",
             "agentId": cairn_installation::config::MAIN_AGENT_ID,
             "cron": "0 9 * * *",
             "enabled": true,
-        }))
+        })}))
         .send()
         .await
         .unwrap()
@@ -1702,7 +1706,7 @@ async fn a_deferred_author_check_preserves_its_due_time_without_blocking_other_t
         relay
             .installation
             .store
-            .save("tasks", task, "fixture.time")
+            .put_mission_fixture(task)
             .await
             .unwrap();
     }
@@ -1711,9 +1715,13 @@ async fn a_deferred_author_check_preserves_its_due_time_without_blocking_other_t
         .send()
         .await
         .unwrap()
-        .json()
+        .json::<cairn_contracts::ListMissionsOutput>()
         .await
-        .unwrap();
+        .unwrap()
+        .tasks
+        .into_iter()
+        .map(|m| serde_json::to_value(m).unwrap())
+        .collect();
     let deferred_id = tasks[0]["id"].as_str().unwrap();
     let admitted_id = tasks[1]["id"].as_str().unwrap();
     let checks = Arc::new(AtomicUsize::new(0));
@@ -1762,9 +1770,13 @@ async fn a_deferred_author_check_preserves_its_due_time_without_blocking_other_t
         .send()
         .await
         .unwrap()
-        .json()
+        .json::<cairn_contracts::ListMissionsOutput>()
         .await
-        .unwrap();
+        .unwrap()
+        .tasks
+        .into_iter()
+        .map(|m| serde_json::to_value(m).unwrap())
+        .collect();
     let deferred = tasks.iter().find(|task| task["id"] == deferred_id).unwrap();
     assert_eq!(deferred["nextRun"], 1);
     assert_eq!(deferred["enabled"], true);
@@ -1795,9 +1807,13 @@ async fn a_deferred_author_check_preserves_its_due_time_without_blocking_other_t
         .send()
         .await
         .unwrap()
-        .json()
+        .json::<cairn_contracts::ListMissionsOutput>()
         .await
-        .unwrap();
+        .unwrap()
+        .tasks
+        .into_iter()
+        .map(|m| serde_json::to_value(m).unwrap())
+        .collect();
     assert!(
         tasks
             .iter()
@@ -1825,13 +1841,13 @@ async fn revoked_and_unclaimed_identities_explain_scheduled_work_without_audit_f
         Method::POST,
         &format!("/api/installations/{id}/api/tasks"),
     )
-    .json(&json!({
+    .json(&json!({"settings": json!({
         "name": "Waiting commitment",
         "prompt": "Approved work",
         "agentId": cairn_installation::config::MAIN_AGENT_ID,
         "cron": "0 9 * * *",
         "enabled": true,
-    }))
+    })}))
     .send()
     .await
     .unwrap()
@@ -1842,7 +1858,7 @@ async fn revoked_and_unclaimed_identities_explain_scheduled_work_without_audit_f
     relay
         .installation
         .store
-        .save("tasks", task, "fixture.time")
+        .put_mission_fixture(task)
         .await
         .unwrap();
     let identity_path = relay
@@ -1864,9 +1880,13 @@ async fn revoked_and_unclaimed_identities_explain_scheduled_work_without_audit_f
         .send()
         .await
         .unwrap()
-        .json()
+        .json::<cairn_contracts::ListMissionsOutput>()
         .await
-        .unwrap();
+        .unwrap()
+        .tasks
+        .into_iter()
+        .map(|m| serde_json::to_value(m).unwrap())
+        .collect();
     assert_eq!(
         tasks[0]["scheduleWaitReason"],
         "Installation identity revoked."
@@ -1897,9 +1917,13 @@ async fn revoked_and_unclaimed_identities_explain_scheduled_work_without_audit_f
         .send()
         .await
         .unwrap()
-        .json()
+        .json::<cairn_contracts::ListMissionsOutput>()
         .await
-        .unwrap();
+        .unwrap()
+        .tasks
+        .into_iter()
+        .map(|m| serde_json::to_value(m).unwrap())
+        .collect();
     assert_eq!(
         tasks[0]["scheduleWaitReason"],
         "Installation is not claimed. Run cairn claim before scheduling work."
@@ -1939,9 +1963,13 @@ async fn revoked_and_unclaimed_identities_explain_scheduled_work_without_audit_f
         .send()
         .await
         .unwrap()
-        .json()
+        .json::<cairn_contracts::ListMissionsOutput>()
         .await
-        .unwrap();
+        .unwrap()
+        .tasks
+        .into_iter()
+        .map(|m| serde_json::to_value(m).unwrap())
+        .collect();
     assert!(
         tasks[0]["scheduleWaitReason"].is_null(),
         "Recovery stayed deferred: {}",
@@ -1969,14 +1997,14 @@ async fn a_task_preparation_error_advances_only_its_occurrence_and_is_audited_an
         ("Valid work", Value::Null),
     ] {
         let mut task: Value = request(&relay, &relay.cookie, &relay.session, Method::POST, &tasks)
-            .json(&json!({
+            .json(&json!({"settings": json!({
                 "name": name,
                 "prompt": "Approved work",
                 "agentId": cairn_installation::config::MAIN_AGENT_ID,
                 "cron": "0 9 * * *",
                 "enabled": true,
                 "skills": skills,
-            }))
+            })}))
             .send()
             .await
             .unwrap()
@@ -1992,7 +2020,7 @@ async fn a_task_preparation_error_advances_only_its_occurrence_and_is_audited_an
         relay
             .installation
             .store
-            .save("tasks", task, "fixture.time")
+            .put_mission_fixture(task)
             .await
             .unwrap();
     }
@@ -2021,9 +2049,13 @@ async fn a_task_preparation_error_advances_only_its_occurrence_and_is_audited_an
         .send()
         .await
         .unwrap()
-        .json()
+        .json::<cairn_contracts::ListMissionsOutput>()
         .await
-        .unwrap();
+        .unwrap()
+        .tasks
+        .into_iter()
+        .map(|m| serde_json::to_value(m).unwrap())
+        .collect();
     assert!(
         tasks
             .iter()
@@ -2120,13 +2152,13 @@ async fn task_pause_and_archive_need_no_beacon_round_trip() {
     let mut commitments = Vec::new();
     for (author_cookie, author_session) in [(&relay.cookie, &relay.session), (&cookie, &session)] {
         let response = request(&relay, author_cookie, author_session, Method::POST, &tasks)
-            .json(&json!({
+            .json(&json!({"settings": json!({
                 "name": "Active commitment",
                 "prompt": "Approved work",
                 "agentId": cairn_installation::config::MAIN_AGENT_ID,
                 "cron": "0 9 * * *",
                 "enabled": true,
-            }))
+            })}))
             .send()
             .await
             .unwrap();
@@ -2146,7 +2178,7 @@ async fn task_pause_and_archive_need_no_beacon_round_trip() {
         let path = format!("{tasks}/{}", task["id"].as_str().unwrap());
         task["enabled"] = false.into();
         let paused = request(&relay, &cookie, &session, Method::PUT, &path)
-            .json(&task)
+            .json(&mission_replacement(&task, &task))
             .send()
             .await
             .unwrap();
@@ -2156,9 +2188,10 @@ async fn task_pause_and_archive_need_no_beacon_round_trip() {
         assert!(paused["nextRun"].is_null());
         assert_eq!(paused["authorId"], task["authorId"]);
 
+        task = paused;
         task["archived"] = true.into();
         let archived = request(&relay, &cookie, &session, Method::PUT, &path)
-            .json(&task)
+            .json(&mission_replacement(&task, &task))
             .send()
             .await
             .unwrap();
@@ -2169,7 +2202,7 @@ async fn task_pause_and_archive_need_no_beacon_round_trip() {
         task["archived"] = false.into();
         assert_ne!(
             request(&relay, &cookie, &session, Method::PUT, &path)
-                .json(&task)
+                .json(&mission_replacement(&task, &task))
                 .send()
                 .await
                 .unwrap()
@@ -2191,7 +2224,7 @@ async fn temporary_authority_outage_defers_schedules_without_disabling_them() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let mut task = relay
         .installation
-        .task(
+        .task_fixture(
             json!({
                 "name": "Owner commitment",
                 "prompt": "Scheduled work",
@@ -2209,7 +2242,7 @@ async fn temporary_authority_outage_defers_schedules_without_disabling_them() {
     relay
         .installation
         .store
-        .save("tasks", task.clone(), "fixture.time")
+        .put_mission_fixture(task.clone())
         .await
         .unwrap();
     let unavailable = Arc::new(AtomicBool::new(true));
@@ -2241,9 +2274,13 @@ async fn temporary_authority_outage_defers_schedules_without_disabling_them() {
         .send()
         .await
         .unwrap()
-        .json()
+        .json::<cairn_contracts::ListMissionsOutput>()
         .await
-        .unwrap();
+        .unwrap()
+        .tasks
+        .into_iter()
+        .map(|m| serde_json::to_value(m).unwrap())
+        .collect();
     assert_eq!(stored[0]["enabled"], true);
     assert_eq!(stored[0]["nextRun"], 1);
     let runs: Value = relay
@@ -2374,14 +2411,14 @@ async fn author_removal_during_slow_preparation_prevents_late_scheduled_admissio
         Method::POST,
         &format!("/api/installations/{id}/api/tasks"),
     )
-    .json(&json!({
+    .json(&json!({"settings": json!({
         "name": "Slow preparation",
         "prompt": "Scheduled work",
         "agentId": cairn_installation::config::MAIN_AGENT_ID,
         "cron": "0 9 * * *",
         "timezone": "UTC",
         "enabled": true,
-    }))
+    })}))
     .send()
     .await
     .unwrap()
@@ -2392,7 +2429,7 @@ async fn author_removal_during_slow_preparation_prevents_late_scheduled_admissio
     relay
         .installation
         .store
-        .save("tasks", task, "fixture.time")
+        .put_mission_fixture(task)
         .await
         .unwrap();
     let directory = relay.installation.config.home.join(".agents/skills/block");
@@ -2458,9 +2495,34 @@ async fn author_removal_during_slow_preparation_prevents_late_scheduled_admissio
         .send()
         .await
         .unwrap()
-        .json()
+        .json::<cairn_contracts::ListMissionsOutput>()
         .await
-        .unwrap();
+        .unwrap()
+        .tasks
+        .into_iter()
+        .map(|m| serde_json::to_value(m).unwrap())
+        .collect();
     assert_eq!(tasks[0]["enabled"], false);
     relay.close().await;
+}
+
+fn mission_replacement(current: &Value, settings: &Value) -> Value {
+    let mut settings = settings.clone();
+    settings.as_object_mut().unwrap().retain(|key, _| {
+        [
+            "name",
+            "prompt",
+            "agentId",
+            "projectId",
+            "skills",
+            "tags",
+            "cron",
+            "timezone",
+            "enabled",
+            "archived",
+            "worktree",
+        ]
+        .contains(&key.as_str())
+    });
+    json!({"taskId":current["id"],"revision":current["revision"],"settings":settings})
 }

@@ -10,32 +10,10 @@ export const reasoningEffort = z.string().max(40).regex(/^(?:[a-z][a-z0-9_-]*)?$
 // Tiers are catalog strings too, so a new speed needs no app release.
 export const serviceSpeed = z.string().max(40).regex(/^(?:[a-z][a-z0-9_-]*)?$/)
 export { MAIN_AGENT_ID } from './constants'
-export const taskInput = z.object({
-  name,
-  prompt: z.string().trim().min(1).max(50000),
-  agentId: id,
-  projectId: id.nullable().default(null),
-  skills: z.array(z.string().max(160)).max(100).nullable().default(null),
-  tags: z.array(z.string().max(30)).max(10).default([]),
-  cron: z.string().max(100).nullable().default(null),
-  timezone: z.string().max(100).default('Europe/Paris'),
-  enabled: z.boolean().default(true),
-  archived: z.boolean().default(false),
-  worktree: z.boolean().default(true),
-})
 export type { Agent } from './generated/typescript/Agent'
 export type { AgentAvatar } from './generated/typescript/AgentAvatar'
+export type { Mission as Task } from './generated/typescript/Mission'
 export type { Project } from './generated/typescript/Project'
-export type Task = z.infer<typeof taskInput> & {
-  id: string
-  createdAt: number
-  nextRun: number | null
-  authorId?: string | null
-  authorRemoved?: boolean | null
-  scheduleWaitReason?: string | null
-  /** The latest scheduled occurrence that could not start; cleared by the next admitted one. */
-  scheduleFailure?: { message: string, scheduledFor: number, at: number } | null
-}
 export type RunStatus
   = 'queued' | 'running' | 'waiting' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
 /** Who must act next on work that is blocked or needs input; the user when absent. */
@@ -124,7 +102,7 @@ export interface Run {
   isolated?: boolean
   workspaceCleanedAt?: number
   snapshot: {
-    task: Task
+    task: import('./generated/typescript/RunTaskSnapshot').RunTaskSnapshot
     agent: Agent
     project: Project | null
     projects?: Project[]

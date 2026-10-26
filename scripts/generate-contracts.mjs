@@ -54,7 +54,7 @@ suspend fun CairnApi.listAccountMethods(): ListAccountMethodsOutput =
 `)
 
 // Project calls use the same Rust exports and Kotlin generation as the B1 pilot.
-const projectClients = ['project-clients.json', 'agent-clients.json'].flatMap(file => JSON.parse(readFileSync(path.join(generated, file), 'utf8')))
+const projectClients = ['project-clients.json', 'agent-clients.json', 'mission-clients.json'].flatMap(file => JSON.parse(readFileSync(path.join(generated, file), 'utf8')))
 for (const client of projectClients) {
   const hasBody = ['POST', 'PUT'].includes(client.method)
 

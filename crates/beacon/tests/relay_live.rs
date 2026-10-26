@@ -1,3 +1,5 @@
+use common::MissionFixture;
+
 mod common;
 
 use common::RelayedInstallation;
@@ -92,7 +94,7 @@ async fn relay_disconnect_replays_activity_and_does_not_stop_the_run() {
     let mut relay = RelayedInstallation::new(axum::Router::new()).await;
     let task = relay
         .installation
-        .task(
+        .task_fixture(
             json!({
                 "name": "Relay recovery",
                 "prompt": "Continue independently",

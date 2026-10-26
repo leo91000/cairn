@@ -1,5 +1,7 @@
 use common::AgentFixture;
+use common::MissionFixture;
 use common::StoreAgentFixture;
+use common::StoreMissionFixture;
 
 mod common;
 
@@ -2098,7 +2100,7 @@ async fn editing_a_vm_task_cannot_replace_its_authors_with_a_native_trusted_edit
         .agent_fixture(json!({ "name": "VM task agent" }), None)
         .await
         .unwrap();
-    let task = policy::CALLER.scope(Some(OTHER.into()), f.service.task(
+    let task = policy::CALLER.scope(Some(OTHER.into()), f.service.task_fixture(
         json!({ "name": "Retained commitment", "prompt": "Original brief", "agentId": vm["id"] }), None
     )).await.unwrap();
     assert_eq!(task["authorId"], "fixture-owner");
@@ -2107,14 +2109,14 @@ async fn editing_a_vm_task_cannot_replace_its_authors_with_a_native_trusted_edit
     let error = policy::CALLER
         .scope(
             Some(TRUSTED.into()),
-            f.service.task(edited, task["id"].as_str()),
+            f.service.task_fixture(edited, task["id"].as_str()),
         )
         .await
         .unwrap_err();
     assert_eq!(error.status, 403);
     assert_eq!(
         f.service
-            .get("tasks", task["id"].as_str().unwrap())
+            .mission_snapshot_fixture(task["id"].as_str().unwrap())
             .await
             .unwrap()["agentId"],
         vm["id"]
@@ -2145,7 +2147,7 @@ async fn trust_owner(f: &Fixture) {
 async fn native_tasks_retain_previous_directing_editors_and_current_author_rights() {
     let f = Fixture::new().await;
     trust_owner(&f).await;
-    let task = policy::CALLER.scope(Some("fixture-owner".into()), f.service.task(
+    let task = policy::CALLER.scope(Some("fixture-owner".into()), f.service.task_fixture(
         json!({ "name": "Native commitment", "prompt": "Original brief", "agentId": f.agent["id"] }), None
     )).await.unwrap();
     let mut edited = task.clone();
@@ -2153,7 +2155,7 @@ async fn native_tasks_retain_previous_directing_editors_and_current_author_right
     let saved = policy::CALLER
         .scope(
             Some(TRUSTED.into()),
-            f.service.task(edited, task["id"].as_str()),
+            f.service.task_fixture(edited, task["id"].as_str()),
         )
         .await
         .unwrap();
@@ -2173,7 +2175,7 @@ async fn native_tasks_retain_previous_directing_editors_and_current_author_right
     let error = policy::CALLER
         .scope(
             Some(TRUSTED.into()),
-            f.service.task(saved, task["id"].as_str()),
+            f.service.task_fixture(saved, task["id"].as_str()),
         )
         .await
         .unwrap_err();
@@ -2253,12 +2255,16 @@ async fn a_native_task_without_recorded_provenance_says_how_to_schedule_it_again
         "nextRun": now(),
         "nativeProvenanceUnknown": true,
     });
-    f.service.store.put("tasks", task.clone()).await.unwrap();
+    f.service
+        .store
+        .put_mission_fixture(task.clone())
+        .await
+        .unwrap();
 
     let error = policy::CALLER
         .scope(
             Some("fixture-owner".into()),
-            f.service.task(task.clone(), task["id"].as_str()),
+            f.service.task_fixture(task.clone(), task["id"].as_str()),
         )
         .await
         .unwrap_err();
@@ -2274,7 +2280,7 @@ async fn a_native_task_without_recorded_provenance_says_how_to_schedule_it_again
     let saved = policy::CALLER
         .scope(
             Some("fixture-owner".into()),
-            f.service.task(duplicate, None),
+            f.service.task_fixture(duplicate, None),
         )
         .await
         .unwrap();

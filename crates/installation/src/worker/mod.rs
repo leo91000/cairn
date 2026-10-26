@@ -292,7 +292,7 @@ mod tests {
                 .is_err()
         );
         let task = s
-            .task(
+            .task_fixture(
                 json!({"name":"Wake test","prompt":"Hello","agentId":crate::config::MAIN_AGENT_ID}),
                 None,
             )
@@ -343,3 +343,6 @@ mod tests {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+use crate::mission_fixture::MissionFixture;

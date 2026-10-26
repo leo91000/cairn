@@ -194,6 +194,7 @@ class ChatJourneyTest {
                             )
                         val value =
                             when (path) {
+                                "/api/installations/fixture/api/tasks" -> """{"tasks":[]}"""
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("csrf-fixture")
                                 "/api/installations/fixture/api/agents" ->
@@ -222,7 +223,6 @@ class ChatJourneyTest {
                                         )
                                     )
                                 "/api/installations/fixture/api/projects" -> """{"projects":[]}"""
-                                "/api/installations/fixture/api/tasks",
                                 "/api/installations/fixture/api/tasks/activity",
                                 "/api/installations/fixture/api/skills",
                                 "/api/installations/fixture/api/mcps" -> "[]"
