@@ -15,7 +15,7 @@ data class PluginActivity(
     val userId: String = "",
 ) {
     init {
-        require(createdAt <= 9007199254740991L)
+        require(createdAt in 0L..9007199254740991L)
         require(Regex("^(working|replied|failed|stopped)\$").containsMatchIn(status))
     }
 }

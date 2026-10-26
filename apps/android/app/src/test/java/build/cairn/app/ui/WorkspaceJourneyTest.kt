@@ -200,7 +200,7 @@ class WorkspaceJourneyTest {
                                                         LiveState(
                                                             run =
                                                                 Run(
-                                                                    "run",
+                                                                    id = "run",
                                                                     status = "running",
                                                                     snapshot =
                                                                         Snapshot(
@@ -239,6 +239,7 @@ class WorkspaceJourneyTest {
                                                                                         "Reviewer",
                                                                                 ),
                                                                         ),
+                                                                    taskId = "",
                                                                 )
                                                         ),
                                                         false,

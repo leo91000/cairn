@@ -1,5 +1,7 @@
 //! Test-only manager for the disposable native-runtime/S3 qualification.
 //! JSONL stays on private pipes: responses include synthetic scoped read grants.
+use run_fixture::DbRunFixture;
+
 #[path = "../tests/common/agent_fixture.rs"]
 mod agent_fixture;
 
@@ -53,7 +55,7 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
             s.store
                 .transaction({
                     let run = run.clone();
-                    move |db| db.add_run(&run, None)
+                    move |db| db.add_run_fixture(&run, None)
                 })
                 .await?;
             let grant = disk_grants::new_disk(s, &run, nodes::LOCAL_NODE_ID).await?;
@@ -74,11 +76,23 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
         "publish" | "live-publish" => {
             if command["op"] == "live-publish" {
                 s.store
-                    .patch_run(run_id, json!({ "status": "running" }))
+                    .change_run(
+                        run_id,
+                        cairn_installation::runs::RunChanges {
+                            status: Some(cairn_contracts::RunStatus::Running),
+                            ..Default::default()
+                        },
+                    )
                     .await?;
             } else {
                 s.store
-                    .patch_run(run_id, json!({ "status": "succeeded" }))
+                    .change_run(
+                        run_id,
+                        cairn_installation::runs::RunChanges {
+                            status: Some(cairn_contracts::RunStatus::Succeeded),
+                            ..Default::default()
+                        },
+                    )
                     .await?;
                 publication::request(s, run_id).await?;
             }
@@ -272,3 +286,6 @@ async fn main() -> Result<()> {
     s.shutdown.cancel();
     Ok(())
 }
+
+#[path = "../tests/common/run_fixture.rs"]
+mod run_fixture;

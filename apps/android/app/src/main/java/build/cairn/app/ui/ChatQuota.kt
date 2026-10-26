@@ -87,7 +87,7 @@ internal fun chatQuota(run: Run?, events: List<RunEvent>): ChatQuota? {
     // Admission has no current agent failure; saved failures have an authoritative error.
     val message = if (savedQuota) run.error.orEmpty() else if (exhausted) failureMessage else ""
     return ChatQuota(
-        providerLabel(run.snapshot.agent.provider),
+        providerLabel(run.snapshot?.agent?.provider ?: run.provider ?: "codex"),
         message,
         message.contains("spend limit", ignoreCase = true),
         Regex("\\bresets\\b(.*)$", RegexOption.IGNORE_CASE)

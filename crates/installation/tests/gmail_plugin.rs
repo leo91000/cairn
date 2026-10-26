@@ -85,7 +85,13 @@ async fn answer(google: Arc<Google>, request: Request<Body>) -> Response {
         .strip_prefix("Bearer access-")
         .unwrap_or("invalid");
     if path.ends_with("/profile") {
-        return axum::Json(json!({ "emailAddress": format!("{account}@example.test"), "historyId": "18446744073709551610", "messagesTotal": 8, "threadsTotal": 3 })).into_response();
+        return axum::Json(json!({
+            "emailAddress": format!("{account}@example.test"),
+            "historyId": "18446744073709551610",
+            "messagesTotal": 8,
+            "threadsTotal": 3,
+        }))
+        .into_response();
     }
     if path.ends_with("/attachments/large") {
         return axum::Json(json!({ "data": URL_SAFE_NO_PAD.encode(vec![0xa5; 3 * 1024 * 1024]), "size": 3 * 1024 * 1024 })).into_response();
@@ -324,7 +330,21 @@ async fn sign_in(f: &Fixture, account: &str, instance: Option<&str>) -> Value {
 
 async fn connect(f: &Fixture, account: &str) -> Connection {
     let flow = sign_in(f, account, None).await;
-    let saved = common::save_plugin(&f.s, "gmail", &json!({ "name": account, "enabled": true, "settings": settings(), "secrets": { "clientSecret": "fixture-secret" }, "credentialFlow": flow["id"], "agentIds": [MAIN_AGENT_ID] }), None).await.unwrap();
+    let saved = common::save_plugin(
+        &f.s,
+        "gmail",
+        &json!({
+            "name": account,
+            "enabled": true,
+            "settings": settings(),
+            "secrets": { "clientSecret": "fixture-secret" },
+            "credentialFlow": flow["id"],
+            "agentIds": [MAIN_AGENT_ID],
+        }),
+        None,
+    )
+    .await
+    .unwrap();
     assert!(!saved.to_string().contains("access-"));
     serde_json::from_value(saved).unwrap()
 }
@@ -503,8 +523,18 @@ async fn mime_reply_draft_large_attachments_and_send_receipts() {
     let f = fixture().await;
     let account = connect(&f, "alice").await;
     let accounts = [account.clone()];
-    let file = tool(&f, &accounts, json!({ "operation": "fileCreate", "accountId": account.id, "file": { "name": "été.pdf", "mediaType": "application/pdf", "data": "JVBERi1maXh0dXJl", "encoding": "base64" } })).await.unwrap();
-    let request = json!({ "operation": "reply", "accountId": account.id, "messageId": "parent", "requestId": "invoice-followup-one", "message": { "to": [{ "email": "restaurant@example.test", "name": "Café été" }], "text": "Bonjour, voici la facture.", "html": "<p>Bonjour, voici la facture.</p>", "attachments": [{ "id": file["id"], "name": "été.pdf", "mediaType": "application/pdf" }] } });
+    let file = tool(&f, &accounts, json!({
+        "operation": "fileCreate",
+        "accountId": account.id,
+        "file": { "name": "été.pdf", "mediaType": "application/pdf", "data": "JVBERi1maXh0dXJl", "encoding": "base64" },
+    })).await.unwrap();
+    let request = json!({
+        "operation": "reply",
+        "accountId": account.id,
+        "messageId": "parent",
+        "requestId": "invoice-followup-one",
+        "message": { "to": [{ "email": "restaurant@example.test", "name": "Café été" }], "text": "Bonjour, voici la facture.", "html": "<p>Bonjour, voici la facture.</p>", "attachments": [{ "id": file["id"], "name": "été.pdf", "mediaType": "application/pdf" }] },
+    });
     let first = tool(&f, &accounts, request.clone()).await.unwrap();
     assert_eq!(first["data"]["id"], "sent-one");
     let replay = tool(&f, &accounts, request.clone()).await.unwrap();
@@ -538,7 +568,17 @@ async fn mime_reply_draft_large_attachments_and_send_receipts() {
         "{raw}"
     );
     assert!(!raw.contains("fixture-secret") && !raw.contains("access-alice"));
-    tool(&f, &accounts, json!({ "operation": "fileAppend", "accountId": account.id, "file": { "id": file["id"], "offset": file["size"], "data": "changed" } })).await.unwrap();
+    tool(
+        &f,
+        &accounts,
+        json!({
+            "operation": "fileAppend",
+            "accountId": account.id,
+            "file": { "id": file["id"], "offset": file["size"], "data": "changed" },
+        }),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         tool(&f, &accounts, request.clone()).await.unwrap()["ok"],
         false,
@@ -547,7 +587,11 @@ async fn mime_reply_draft_large_attachments_and_send_receipts() {
     let mut different = request;
     different["message"]["text"] = json!("Different");
     assert_eq!(tool(&f, &accounts, different).await.unwrap()["ok"], false);
-    let draft = tool(&f, &accounts, json!({ "operation": "draft", "accountId": account.id, "message": { "to": ["restaurant@example.test"], "subject": "Brouillon", "text": "Bonjour" } })).await.unwrap();
+    let draft = tool(&f, &accounts, json!({
+        "operation": "draft",
+        "accountId": account.id,
+        "message": { "to": ["restaurant@example.test"], "subject": "Brouillon", "text": "Bonjour" },
+    })).await.unwrap();
     assert!(draft["ok"].as_bool().unwrap());
     let call = f
         .google
@@ -559,16 +603,43 @@ async fn mime_reply_draft_large_attachments_and_send_receipts() {
         .unwrap()
         .clone();
     assert!(call["body"]["message"]["raw"].as_str().is_some());
-    let downloaded = tool(&f, &accounts, json!({ "operation": "attachment", "accountId": account.id, "messageId": "parent", "attachmentId": "large", "name": "large.pdf" })).await.unwrap();
+    let downloaded = tool(
+        &f,
+        &accounts,
+        json!({
+            "operation": "attachment",
+            "accountId": account.id,
+            "messageId": "parent",
+            "attachmentId": "large",
+            "name": "large.pdf",
+        }),
+    )
+    .await
+    .unwrap();
     assert_eq!(downloaded["file"]["size"], 3 * 1024 * 1024);
-    let read = tool(&f, &accounts, json!({ "operation": "fileRead", "accountId": account.id, "file": { "id": downloaded["file"]["id"], "offset": 2_000_000, "limit": 100 } })).await.unwrap();
+    let read = tool(
+        &f,
+        &accounts,
+        json!({
+            "operation": "fileRead",
+            "accountId": account.id,
+            "file": { "id": downloaded["file"]["id"], "offset": 2_000_000, "limit": 100 },
+        }),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         URL_SAFE_NO_PAD.decode(text(&read, "data")).unwrap(),
         vec![0xa5; 100]
     );
     let bob = connect(&f, "bob").await;
     assert!(tool(&f, std::slice::from_ref(&bob), json!({ "operation": "fileRead", "accountId": bob.id, "file": { "id": downloaded["file"]["id"] } })).await.is_err());
-    assert!(tool(&f, &accounts, json!({ "operation": "send", "accountId": account.id, "requestId": "injection", "message": { "to": ["victim@example.test\r\nBcc: other@example.test"], "text": "bad" } })).await.is_err());
+    assert!(tool(&f, &accounts, json!({
+        "operation": "send",
+        "accountId": account.id,
+        "requestId": "injection",
+        "message": { "to": ["victim@example.test\r\nBcc: other@example.test"], "text": "bad" },
+    })).await.is_err());
 }
 
 #[tokio::test]
@@ -621,7 +692,13 @@ async fn every_discovered_gmail_method_is_callable_without_cross_account_paths()
 async fn sign_in_is_saved_once_and_cannot_replace_a_mailbox() {
     let f = fixture().await;
     let flow = sign_in(&f, "alice", None).await;
-    let input = json!({ "name": "Alice", "enabled": true, "settings": settings(), "secrets": { "clientSecret": "fixture-secret" }, "credentialFlow": flow["id"] });
+    let input = json!({
+        "name": "Alice",
+        "enabled": true,
+        "settings": settings(),
+        "secrets": { "clientSecret": "fixture-secret" },
+        "credentialFlow": flow["id"],
+    });
     let (first, second) = tokio::join!(
         common::save_plugin(&f.s, "gmail", &input, None),
         common::save_plugin(&f.s, "gmail", &input, None)
@@ -653,7 +730,12 @@ async fn ambiguous_sends_and_confirmed_service_errors_are_never_retried_automati
     let f = fixture().await;
     let account = connect(&f, "alice").await;
     let accounts = [account.clone()];
-    let request = json!({ "operation": "send", "accountId": account.id, "requestId": "interrupted", "message": { "to": ["restaurant@example.test"], "subject": "Facture", "text": "Bonjour" } });
+    let request = json!({
+        "operation": "send",
+        "accountId": account.id,
+        "requestId": "interrupted",
+        "message": { "to": ["restaurant@example.test"], "subject": "Facture", "text": "Bonjour" },
+    });
     *f.google.broken_send.lock().unwrap() = true;
     let interrupted = tool(&f, &accounts, request.clone()).await.unwrap();
     assert_eq!(interrupted["ok"], false);
@@ -777,17 +859,25 @@ async fn private_cli_transfers_use_the_run_and_current_account_grant() {
             .unwrap();
     let run =
         f.s.store
-            .patch_run(
+            .change_run(
                 text(&run, "id"),
-                json!({ "status": "running", "isolated": true }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    boundary: Some(serde_json::json!({"isolated": true})),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
+    let run = f.s.store.run(&run.id).await.unwrap();
     let configuration = f.s.mcps.run_configuration(&f.s, &run).await.unwrap();
     let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
     let created = f.s.plugins.command(&f.s, bearer, &json!({ "plugin": "gmail", "file": { "method": "create", "instance": account.id, "name": "invoice.pdf" } })).await.unwrap()["value"].clone();
     let bytes = vec![0xa6; 65_536];
-    let append = json!({ "plugin": "gmail", "file": { "method": "append", "instance": account.id, "id": created["id"], "offset": 0, "data": URL_SAFE_NO_PAD.encode(&bytes), "encoding": "base64url" } });
+    let append = json!({
+        "plugin": "gmail",
+        "file": { "method": "append", "instance": account.id, "id": created["id"], "offset": 0, "data": URL_SAFE_NO_PAD.encode(&bytes), "encoding": "base64url" },
+    });
     assert_eq!(
         f.s.plugins.command(&f.s, bearer, &append).await.unwrap()["value"]["size"],
         65_536
@@ -836,12 +926,17 @@ async fn installation_management_revocation_during_oauth_refresh_cannot_publish_
             .unwrap();
     let run =
         f.s.store
-            .patch_run(
+            .change_run(
                 text(&run, "id"),
-                json!({ "status": "running", "isolated": true }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    boundary: Some(serde_json::json!({"isolated": true})),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
+    let run = f.s.store.run(&run.id).await.unwrap();
     let configuration = f.s.mcps.run_configuration(&f.s, &run).await.unwrap();
     let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
     let key = connections::credential_key(&account.id);
@@ -852,7 +947,12 @@ async fn installation_management_revocation_during_oauth_refresh_cannot_publish_
     let resume = Arc::new(tokio::sync::Notify::new());
     *f.google.pause_refresh.lock().unwrap() = Some((started.clone(), resume.clone()));
     let app = cairn_installation::http::router(f.s.clone()).await.unwrap();
-    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": common::mcp_arguments("manage_plugin", &json!({ "pluginId": "gmail", "kind": "test", "instanceId": account.id })) });
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": common::mcp_arguments("manage_plugin", &json!({ "pluginId": "gmail", "kind": "test", "instanceId": account.id })),
+    });
     let request = common::request("POST", "/mcp-installation")
         .header("authorization", format!("Bearer {bearer}"))
         .body(Body::from(body.to_string()))
@@ -901,16 +1001,26 @@ async fn manage(f: &Fixture, args: Value) -> Value {
             .unwrap();
     let run =
         f.s.store
-            .patch_run(
+            .change_run(
                 text(&run, "id"),
-                json!({ "status": "running", "isolated": true }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    boundary: Some(serde_json::json!({"isolated": true})),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
+    let run = f.s.store.run(&run.id).await.unwrap();
     let configuration = f.s.mcps.run_configuration(&f.s, &run).await.unwrap();
     let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
     let app = cairn_installation::http::router(f.s.clone()).await.unwrap();
-    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": common::mcp_arguments("manage_plugin", &args) });
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": common::mcp_arguments("manage_plugin", &args),
+    });
     let request = common::request("POST", "/mcp-installation")
         .header("authorization", format!("Bearer {bearer}"))
         .body(Body::from(body.to_string()))
@@ -998,11 +1108,28 @@ async fn installation_management_reuses_only_a_granted_google_app() {
     let f = fixture().await;
     let granted = connect(&f, "alice").await;
     let flow = sign_in(&f, "bob", None).await;
-    let ungranted = common::save_plugin(&f.s, "gmail", &json!({ "name": "bob", "enabled": true, "settings": settings(), "secrets": { "clientSecret": "fixture-secret" }, "credentialFlow": flow["id"] }), None).await.unwrap();
+    let ungranted = common::save_plugin(
+        &f.s,
+        "gmail",
+        &json!({
+            "name": "bob",
+            "enabled": true,
+            "settings": settings(),
+            "secrets": { "clientSecret": "fixture-secret" },
+            "credentialFlow": flow["id"],
+        }),
+        None,
+    )
+    .await
+    .unwrap();
 
     let refused = manage(
         &f,
-        json!({ "pluginId": "gmail", "kind": "signin", "data": { "sharedFrom": ungranted["id"], "settings": {}, "secrets": {} } }),
+        json!({
+            "pluginId": "gmail",
+            "kind": "signin",
+            "data": { "sharedFrom": ungranted["id"], "settings": {}, "secrets": {} },
+        }),
     )
     .await;
     assert_eq!(refused["result"]["isError"], true, "{refused}");
@@ -1010,7 +1137,11 @@ async fn installation_management_reuses_only_a_granted_google_app() {
 
     let started = manage(
         &f,
-        json!({ "pluginId": "gmail", "kind": "signin", "data": { "sharedFrom": granted.id, "settings": {}, "secrets": {} } }),
+        json!({
+            "pluginId": "gmail",
+            "kind": "signin",
+            "data": { "sharedFrom": granted.id, "settings": {}, "secrets": {} },
+        }),
     )
     .await;
     assert_ne!(started["result"]["isError"], true, "{started}");

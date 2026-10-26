@@ -263,7 +263,7 @@ fn persist_grant(db: &Db<'_>, attempt: &mut Value, allowance: u64) -> Result<()>
     let run_id = text(attempt, "runId");
     let mut run = db.run(run_id)?.unwrap();
     run["resources"]["diskMiB"] = allowance.into();
-    db.patch_run(run_id, &json!({ "resources": run["resources"] }))?;
+    db.update_run_boundary(run_id, &json!({ "resources": run["resources"] }))?;
     Ok(())
 }
 

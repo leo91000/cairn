@@ -67,14 +67,18 @@ async fn bearer_for_agent(s: &Service, agent: &str) -> String {
         .await
         .unwrap();
     let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
-    let run = s
-        .store
-        .patch_run(
+    s.store
+        .change_run(
             text(&run, "id"),
-            json!({ "status": "running", "isolated": true }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                boundary: Some(serde_json::json!({"isolated": true})),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
+    let run = s.store.run(text(&run, "id")).await.unwrap();
     let config = s.mcps.run_configuration(s, &run).await.unwrap();
     text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned()
 }

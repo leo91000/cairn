@@ -1208,6 +1208,7 @@ dependencies = [
 name = "cairn-contracts"
 version = "0.52.3"
 dependencies = [
+ "rand 0.9.5",
  "schemars",
  "serde",
  "serde_json",

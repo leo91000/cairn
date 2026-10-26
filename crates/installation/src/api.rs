@@ -2,7 +2,6 @@ use crate::{
     error::{Error, Result},
     http::Input,
     service::Service,
-    validation::text,
 };
 use serde_json::{Value, json};
 use std::{
@@ -210,7 +209,16 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
             s.synchronize_task_authors().await?;
             json!({ "updated": true })
         }
-        ("POST", ["tasks", id, "run"]) => s.enqueue(id, "manual", None).await?,
+        ("POST", ["tasks", id, "run"]) => {
+            crate::capabilities::run_operation("run_task")
+                .unwrap()
+                .invoke(
+                    s,
+                    json!({ "taskId": id }),
+                    crate::capabilities::ResumeContext::http(input)?,
+                )
+                .await?
+        }
         _ => return Ok(None),
     };
     Ok(Some(result))
@@ -243,10 +251,6 @@ async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result
             s.store
                 .read(move |db| Ok(db.events(&id, after, limit)?.into()))
                 .await?
-        }
-        ("POST", ["runs", id, "retry"]) => {
-            let run = s.store.run(id).await?;
-            s.enqueue(text(&run, "taskId"), "retry", None).await?
         }
         ("GET", [provider, "models"]) => {
             crate::provider::Provider::parse(provider)?

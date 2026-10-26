@@ -30,6 +30,8 @@ import androidx.compose.ui.unit.dp
 import build.cairn.app.R
 import build.cairn.app.data.*
 import build.cairn.contracts.MissionStateInput
+import build.cairn.contracts.RunMissionInput
+import build.cairn.contracts.runMission
 import build.cairn.contracts.setMissionState
 import kotlinx.coroutines.delay
 
@@ -272,8 +274,9 @@ internal fun buildFeed(
         .forEach { run ->
             val task = names[run.taskId]
             if (task?.archived == true) return@forEach
-            val agent = run.snapshot.agent.name.ifBlank { "Agent" }
-            val agentKey = run.snapshot.agent.id.ifBlank { task?.agentId.orEmpty() }
+            val agent =
+                run.agentName.ifBlank { run.snapshot?.agent?.name.orEmpty() }.ifBlank { "Agent" }
+            val agentKey = run.snapshot?.agent?.id ?: task?.agentId.orEmpty()
             fun item(kind: FeedKind, subtitle: String) =
                 FeedItem(
                     "run:${run.id}",
@@ -460,7 +463,7 @@ fun FilScreen(
     val feed = buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads, now)
     fun retry(item: FeedItem) {
         val task = item.taskId ?: return
-        vm.perform { openRun(api.send<Run>("POST", "/tasks/${segment(task)}/run").id) }
+        vm.perform { openRun(api.runMission(RunMissionInput(task)).id) }
     }
     fun setAside(item: FeedItem, until: Long? = null) {
         vm.setAside(item.runId ?: return, item.taskId ?: return, item.stamp, until)

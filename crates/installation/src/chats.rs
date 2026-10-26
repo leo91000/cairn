@@ -102,14 +102,18 @@ pub(crate) fn is_compaction(run: &Value) -> bool {
 /// its outcome, and does not become newly finished. Resuming an interrupted compaction clears
 /// the run's outcome, so it comes from what the compaction saved. Failures and stops still show
 /// why it ended.
-pub(crate) fn keep_reply_after_compaction(run: &Value, patch: &mut Value) {
+pub(crate) fn keep_reply_after_compaction(
+    run: &Value,
+    patch: &mut crate::runs::RunChanges,
+) -> Result<()> {
     if !is_compaction(run) {
-        return;
+        return Ok(());
     }
     let previous = &run["chatExecution"]["previous"];
-    patch["summary"] = previous["summary"].clone();
-    patch["finishedAt"] = previous["finishedAt"].clone();
-    patch["outcome"] = previous["outcome"].clone();
+    patch.summary = Some(serde_json::from_value(previous["summary"].clone())?);
+    patch.finished_at = Some(serde_json::from_value(previous["finishedAt"].clone())?);
+    patch.boundary.get_or_insert_with(|| json!({}))["outcome"] = previous["outcome"].clone();
+    Ok(())
 }
 
 /// Payload of the `chat.user` event recorded when a message reaches the agent.
@@ -894,14 +898,15 @@ fn continue_run(
         execution.context = Some(handoff_context(db, run_id)?);
         checkpoint["launched"] = false.into();
         remove_keys(&mut checkpoint, &["controllerRecoveries"]);
-        db.patch_run(
+        db.change_run(
             run_id,
-            &json!({
-                "sessionId": null,
-                "resumeAvailable": false,
+            crate::runs::RunChanges {
+                session_id: Some(None),
+                resume_available: Some(false),
                 // The fresh session starts with an empty context.
-                "contextUsage": null,
-            }),
+                boundary: Some(json!({ "contextUsage": null })),
+                ..Default::default()
+            },
         )?;
         let status = format!(
             "Continuing with {} · conversation context and workspace preserved",
@@ -923,21 +928,22 @@ fn continue_run(
     remove_keys(&mut checkpoint, &["lastMessage", "settled"]);
     db.set(&key, &checkpoint, None)?;
     let compaction = execution.operation == Some(COMPACT);
-    let mut patch = json!({
-        "snapshot": snapshot["snapshot"],
-        "status": RunStatus::Queued,
-        "error": null,
-        "finishedAt": null,
-        "cancelRequestedAt": null,
-        "recoveryPending": true,
-        "chatExecution": serde_json::to_value(execution)?,
-    });
+    let mut patch = crate::runs::RunChanges {
+        snapshot: Some(serde_json::from_value(snapshot["snapshot"].clone())?),
+        status: Some(RunStatus::Queued),
+        error: Some(None),
+        finished_at: Some(None),
+        cancel_requested_at: Some(None),
+        recovery_pending: Some(true),
+        boundary: Some(json!({ "chatExecution": serde_json::to_value(execution)? })),
+        ..Default::default()
+    };
     // A compaction answers no message: the last reply and its outcome stay current.
     if !compaction {
-        patch["summary"] = "".into();
-        patch["outcome"] = Value::Null;
+        patch.summary = Some(String::new());
+        patch.boundary.as_mut().unwrap()["outcome"] = Value::Null;
     }
-    db.patch_run(run_id, &patch)?;
+    db.change_run(run_id, patch)?;
     Ok(())
 }
 
@@ -1001,7 +1007,7 @@ fn launch_turn(
     } else {
         crate::native::policy::apply(&mut snapshot, &chat);
         snapshot["chatExecution"] = serde_json::to_value(execution)?;
-        db.add_run(&snapshot, None)?;
+        crate::runs::admit_prepared(db, &snapshot, None)?;
         chat["runId"] = snapshot["id"].clone();
     }
     chat["cancelledByDeletion"] = false.into();
@@ -1082,27 +1088,37 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
     task_projects(&agent, &chat, &db.projects()?)?;
 
     let chat = db.put("chats", &chat)?;
-    db.patch_run(
+    db.change_run(
         run_id,
-        &json!({
-            "sourceTaskId": run["taskId"],
-            "sourceTaskPrompt": run["snapshot"]["task"]["prompt"],
-            "sourceSessionId": run["sessionId"],
-            "taskId": chat["id"],
-            "trigger": "chat",
-        }),
+        crate::runs::RunChanges {
+            task_id: Some(chat["id"].as_str().unwrap_or_default().to_owned()),
+            trigger: Some(("chat").to_owned()),
+            boundary: Some(json!({
+                "sourceTaskId": run["taskId"],
+                "sourceTaskPrompt": run["snapshot"]["task"]["prompt"],
+                "sourceSessionId": run["sessionId"],
+            })),
+            ..Default::default()
+        },
     )?;
-    db.0.execute(
-        "UPDATE runs SET task_id=? WHERE id=?",
-        rusqlite::params![text(&chat, "id"), run_id],
+    // Work already delegated by this run still returns to its new conversation.
+    let dependents = db.json_rows(
+        "SELECT data FROM runs WHERE json_extract(requested_by,'$.runId')=?",
+        [run_id],
     )?;
-    // Work launched by this execution still returns to the same requester,
-    // whose conversation now lives in Chats rather than the mission's history.
-    db.0.execute(
-        "UPDATE runs SET data=json_set(data, '$.requestedBy', json_object('runId', ?, 'chatId', ?))
-         WHERE json_extract(data, '$.requestedBy.runId')=?",
-        rusqlite::params![run_id, text(&chat, "id"), run_id],
-    )?;
+    for dependent in dependents {
+        db.change_run(
+            text(&dependent, "id"),
+            crate::runs::RunChanges {
+                requested_by: Some(Some(cairn_contracts::RunRequester {
+                    run_id: run_id.to_owned(),
+                    chat_id: Some(text(&chat, "id").to_owned()),
+                    task_id: None,
+                })),
+                ..Default::default()
+            },
+        )?;
+    }
     db.restore_chat_summaries(Some(run_id))?;
     db.audit(
         "run.converted_to_chat",
@@ -1469,6 +1485,9 @@ impl Service {
 }
 
 #[cfg(test)]
+use crate::run_fixture::DbRunFixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1512,7 +1531,7 @@ mod tests {
                         "status": "succeeded",
                         "snapshot": { "agent": agent },
                     });
-                    db.add_run(&run, None)?;
+                    db.add_run_fixture(&run, None)?;
                     db.put(
                         "chats",
                         &json!({ "id": id, "runId": id, "agentId": "agent" }),
@@ -1563,7 +1582,7 @@ mod tests {
                     "chatExecution": { "messageId": "first", "text": "First", "attachments": [], "recovery": false },
                     "snapshot": { "agent": { "provider": "codex" } },
                 });
-                db.add_run(&run, None)?;
+                db.add_run_fixture(&run, None)?;
                 db.set("run-checkpoint:run", &json!({ "completed": true, "launched": true }), None)?;
                 db.put(
                     "chats",
@@ -1641,7 +1660,7 @@ mod tests {
                 ];
                 for (index, (provider, status, session, reason)) in cases.into_iter().enumerate() {
                     let id = format!("case-{index}");
-                    db.add_run(
+                    db.add_run_fixture(
                         &json!({
                             "id": id,
                             "taskId": id,
@@ -1680,7 +1699,7 @@ mod tests {
                 assert!(text(&state, "reason").contains("first message"));
 
                 // A run that names no coding agent still shows its conversation.
-                db.add_run(
+                db.add_run_fixture(
                     &json!({ "id": "unnamed", "taskId": "unnamed", "createdAt": 0, "status": "succeeded" }),
                     None,
                 )?;
@@ -1721,12 +1740,13 @@ mod tests {
                             "sessionId": "old-native",
                             "snapshot": { "agent": { "provider": "codex" } },
                         });
-                        db.add_run(&run, None)?;
+                        let run = db.add_run_fixture(&run, None)?;
                         db.event("run", "chat.user", "Context to preserve", None)?;
                         let chat = json!({
                             "id": "chat",
                             "runId": "run",
                             "sessionRestartRequested": !checkpoint_restart,
+                            "agentId": crate::config::MAIN_AGENT_ID,
                         });
                         db.put("chats", &chat)?;
                         db.set(
@@ -1787,7 +1807,14 @@ mod tests {
                         assert_eq!(question["blocking"], false);
 
                         // A later ordinary continuation resumes the newly established session.
-                        let resumed = db.patch_run("run", &json!({ "sessionId": "new-native" }))?;
+                        let _resumed = db.change_run(
+                            "run",
+                            crate::runs::RunChanges {
+                                session_id: Some(Some("new-native".into())),
+                                ..Default::default()
+                            },
+                        )?;
+                        let resumed = db.run("run")?.unwrap();
                         continue_run(
                             db,
                             &chat,
@@ -1840,7 +1867,7 @@ mod tests {
                         run["sourceTaskPrompt"] = "Check the deployment.".into();
                         run["sourceSessionId"] = source.into();
                     }
-                    db.add_run(&run, None)?;
+                    let run = db.add_run_fixture(&run, None)?;
                     db.set("run-checkpoint:run", &json!({ "completed": true }), None)?;
                     let chat = json!({ "id": "chat", "runId": "run" });
                     db.put("chats", &chat)?;
@@ -1909,19 +1936,18 @@ mod tests {
     #[test]
     fn provider_changes_must_wait_for_the_next_turn_and_model_aliases_are_valid() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch("CREATE TABLE runs(id TEXT,data TEXT);")
-            .unwrap();
+        connection.execute_batch(crate::runs::SCHEMA).unwrap();
         let run = json!({
             "status": "running",
             "snapshot": {
                 "agent": { "provider": "codex", "model": "gpt-6-sol", "reasoning": "high" },
             },
         });
-        connection
-            .execute("INSERT INTO runs VALUES('run',?)", [run.to_string()])
-            .unwrap();
         let db = Db(&connection);
+        let mut run = run;
+        run["id"] = "run".into();
+        run["taskId"] = "chat".into();
+        db.add_run_fixture(&run, None).unwrap();
         let chat = json!({ "runId": "run" });
         let mut message = parse(
             "message",
@@ -2047,7 +2073,7 @@ mod tests {
                     "status": "succeeded",
                     "snapshot": { "agent": { "provider": "claude" } },
                 });
-                db.add_run(&run, None)?;
+                db.add_run_fixture(&run, None)?;
                 let new_codex = json!({ "id": "new-codex", "runId": null, "agentId": codex });
                 let new_claude = json!({ "id": "new-claude", "runId": null, "agentId": claude });
                 let switched = json!({ "id": "switched", "runId": "claude-run", "agentId": codex });
@@ -2088,7 +2114,7 @@ mod tests {
                     "status": "running",
                     "snapshot": { "agent": { "provider": "codex", "speed": "priority" } },
                 });
-                db.add_run(&running, None)?;
+                db.add_run_fixture(&running, None)?;
                 let steering = json!({ "id": "steering", "runId": "codex-run", "agentId": codex });
                 let switching = json!({
                     "id": "switching",

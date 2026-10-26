@@ -12,8 +12,7 @@ const val LOCAL_NODE_ID = "00000000-0000-4000-8000-000000000002"
 @Serializable
 data class NodeAgent(val id: String, val name: String = "", val allNodes: Boolean = false)
 
-@Serializable
-data class NodeResources(val cpu: Int = 1, val memoryMiB: Long = 128, val diskMiB: Long = 128)
+typealias NodeResources = build.cairn.boundary.NodeResources
 
 @Serializable
 data class NodeCapabilities(
@@ -69,13 +68,7 @@ data class ExecutionNode(
     val storage: NodeStoragePolicy? = null,
 )
 
-@Serializable
-data class NativeModeState(
-    val mode: String = "protected",
-    val generation: String? = null,
-    val status: String = "",
-    val error: String? = null,
-)
+typealias NativeModeState = build.cairn.boundary.NativeModeState
 
 @Serializable
 data class NodeDiskAccounting(
@@ -130,21 +123,7 @@ suspend fun grantNodeAgents(
     )
 }
 
-@Serializable
-data class ExclusiveReservation(
-    val id: String,
-    val nodeId: String,
-    val ownerRunId: String,
-    val reason: String,
-    val state: String,
-    val createdAt: Long = 0,
-    val expiresAt: Long? = null,
-    val renewalPending: Boolean = false,
-    val waitUntil: Long = 0,
-    val pausedRunIds: List<String> = emptyList(),
-    val minimumAvailableMemoryMiB: Long = 0,
-    val error: String? = null,
-)
+typealias ExclusiveReservation = build.cairn.boundary.ExclusiveReservation
 
 fun exclusiveReservationState(state: String): String =
     when (state) {
@@ -221,14 +200,7 @@ data class NodeConfiguration(
     val confirmNativeAdministration: Boolean = false,
 )
 
-@Serializable
-data class NodeBackup(
-    val id: String? = null,
-    val capturedAt: Long? = null,
-    val status: String = "",
-    val error: String? = null,
-    val uploadedBytes: Long? = null,
-)
+typealias NodeBackup = build.cairn.boundary.NodeBackup
 
 @Serializable
 data class NodeSyncSettings(
@@ -297,14 +269,7 @@ fun nodeDiagnostics(node: ExecutionNode, now: Long = System.currentTimeMillis())
     return reasons
 }
 
-@Serializable
-data class RunStorage(
-    val mode: String = "",
-    val localBytes: Long? = null,
-    val dirtyBytes: Long? = null,
-    val dirtySince: Long? = null,
-    val waitingFor: String? = null,
-)
+typealias RunStorage = build.cairn.boundary.RunStorage
 
 @Serializable
 data class NodeStoragePolicy(

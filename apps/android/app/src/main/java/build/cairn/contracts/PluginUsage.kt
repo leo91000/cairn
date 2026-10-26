@@ -6,5 +6,7 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class PluginUsage(val hour: Long = 0) {
-    init {}
+    init {
+        require(hour >= 0L)
+    }
 }

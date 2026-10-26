@@ -471,7 +471,7 @@ async fn chat_run(relay: &common::RelayedInstallation) -> (String, String) {
     relay
         .installation
         .store
-        .transaction(move |db| db.add_run(&run, None))
+        .transaction(move |db| db.admit_run(&serde_json::from_value(run)?, None, &json!({}), None))
         .await
         .unwrap();
     (chat_id, run_id)

@@ -256,7 +256,13 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
 
 async fn set_capacity_wait(s: &Service, run_id: &str, until: Option<i64>) -> Result<()> {
     s.store
-        .patch_run(run_id, json!({ "capacityWaitUntil": until }))
+        .change_run(
+            run_id,
+            crate::runs::RunChanges {
+                capacity_wait_until: Some(until),
+                ..Default::default()
+            },
+        )
         .await?;
     Ok(())
 }
@@ -356,17 +362,16 @@ async fn record_request(
                     }
                 }
             }
-            let mut patch = json!({
-                "movementError": null,
-                "capacityWaitUntil": null,
-                "moveRequest": move_request,
-                "nodeState": NodeState::Pausing,
-            });
+            let mut patch = crate::runs::RunChanges {
+                capacity_wait_until : Some(None),
+                boundary: Some(serde_json::json!({"movementError": null,"moveRequest": move_request,"nodeState": NodeState::Pausing})),
+                ..Default::default()
+            };
             if idle || expected == RunStatus::Queued {
-                patch["status"] = RunStatus::Queued.into();
-                patch["recoveryPending"] = true.into();
+                patch.status = Some(RunStatus::Queued);
+                patch.recovery_pending = Some(true);
             }
-            db.patch_run(&owner, &patch)?;
+            db.change_run(&owner, patch)?;
             Ok(())
         })
         .await
@@ -541,11 +546,14 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
         return Ok(Recovery::Waiting);
     }
     let Some(backup) = latest(s, run_id).await? else {
-        let patch = json!({
-            "nodeState": NodeState::WaitingForNode,
-            "accountWaitReason": "Original node unavailable; no usable recovery point exists.",
-        });
-        s.store.patch_run(run_id, patch).await?;
+        let patch = crate::runs::RunChanges {
+            account_wait_reason: Some(Some(
+                "Original node unavailable; no usable recovery point exists.".into(),
+            )),
+            boundary: Some(serde_json::json!({"nodeState": NodeState::WaitingForNode})),
+            ..Default::default()
+        };
+        s.store.change_run(run_id, patch).await?;
         let body = "The node running this conversation is unavailable and no recovery point can resume it elsewhere. It resumes when the node returns.";
         super::alerts::raise(s, run_id, "waiting", WAITING_TITLE, body).await?;
         return Ok(Recovery::Waiting);
@@ -610,7 +618,7 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
                         {
                             return Ok(false);
                         }
-                        db.patch_run(&owner, &json!({ "moveRequest": pending }))?;
+                        db.update_run_boundary(&owner, &json!({ "moveRequest": pending }))?;
                         Ok(true)
                     })
                     .await;
@@ -641,13 +649,13 @@ async fn transfer(s: &Service, current: &Value) -> Result<Value> {
         s.get("node-backups", id).await?
     } else {
         s.store
-            .patch_run(run_id, json!({ "nodeState": NodeState::Saving }))
+            .update_run_boundary(run_id, json!({ "nodeState": NodeState::Saving }))
             .await?;
         let point = super::publication::capture(s, current).await?;
         s.get("node-backups", text(&point, "id")).await?
     };
     s.store
-        .patch_run(run_id, json!({ "nodeState": NodeState::Restoring }))
+        .update_run_boundary(run_id, json!({ "nodeState": NodeState::Restoring }))
         .await?;
     super::placement::materialize(s, text(movement, "reservation")).await?;
     let source = super::checkpoint(s, run_id).await?;
@@ -662,15 +670,15 @@ async fn fail_transfer(s: &Service, current: &Value, error: &Error) -> Result<()
     release_destination(s, current).await?;
     let idle = current["moveRequest"]["idle"] == true;
     let node_state = (!idle).then_some(NodeState::WaitingForNode);
-    let mut patch = json!({
-        "moveRequest": null,
-        "moveReservation": null,
-        "nodeState": node_state,
-        "movementError": error.message,
-        "recoveryPending": !idle,
-    });
+    let mut patch = crate::runs::RunChanges {
+        recovery_pending: Some(!idle),
+        boundary: Some(
+            serde_json::json!({"moveRequest": null,"moveReservation": null,"nodeState": node_state,"movementError": error.message}),
+        ),
+        ..Default::default()
+    };
     if idle {
-        patch["status"] = RunStatus::Succeeded.into();
+        patch.status = Some(RunStatus::Succeeded);
     }
     let owner = run_id.to_owned();
     s.store
@@ -680,11 +688,11 @@ async fn fail_transfer(s: &Service, current: &Value, error: &Error) -> Result<()
                 .ok_or_else(|| Error::not_found("Conversation removed."))?;
             let cancelled = !current["cancelRequestedAt"].is_null();
             if cancelled {
-                patch["status"] = RunStatus::Cancelled.into();
-                patch["recoveryPending"] = false.into();
-                patch["nodeState"] = Value::Null;
+                patch.status = Some(RunStatus::Cancelled);
+                patch.recovery_pending = Some(false);
+                patch.boundary.as_mut().unwrap()["nodeState"] = Value::Null;
             }
-            db.patch_run(&owner, &patch)?;
+            db.change_run(&owner, patch)?;
             // A run waiting for an automatic retry shows the stop in its conversation.
             if cancelled && current["retry"]["nextAttemptAt"].is_number() {
                 db.event(&owner, "status", RunStatus::Cancelled.as_str(), None)?;
@@ -739,21 +747,24 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
     } else {
         RunStatus::Queued
     };
-    let patch = json!({
-        "storage": { "mode": super::ON_DEMAND },
-        "movementError": null,
-        "accountWaitReason": null,
-        "nodeId": node,
-        "nodeState": node_state,
-        "resources": movement["resources"],
-        "requiredTags": required_tags,
-        "moveRequest": null,
-        "moveReservation": reservation,
-        "sessionId": backup["sessionId"],
-        "restoredAt": captured_at,
-        "recoveryPending": !idle,
-        "status": status,
-    });
+    let patch = crate::runs::RunChanges {
+        account_wait_reason: Some(None),
+        session_id: Some(serde_json::from_value(backup["sessionId"].clone())?),
+        recovery_pending: Some(!idle),
+        status: Some(status),
+        boundary: Some(serde_json::json!({
+            "storage": { "mode": super::ON_DEMAND },
+            "movementError": null,
+            "nodeId": node,
+            "nodeState": node_state,
+            "resources": movement["resources"],
+            "requiredTags": required_tags,
+            "moveRequest": null,
+            "moveReservation": reservation,
+            "restoredAt": captured_at,
+        })),
+        ..Default::default()
+    };
     let owner = run_id.clone();
     s.store
         .transaction(move |db| {
@@ -772,7 +783,7 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
             checkpoint["settled"] = Value::Null;
             checkpoint["controllerRecoveries"] = 0.into();
             db.set(&key, &checkpoint, None)?;
-            db.patch_run(&owner, &patch)?;
+            db.change_run(&owner, patch)?;
             db.event(
                 &owner,
                 "status",

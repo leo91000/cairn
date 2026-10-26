@@ -86,120 +86,21 @@ data class Skill(
     val source: SkillSource? = null,
 )
 
-@Serializable
-data class SnapshotSkill(
-    val name: String,
-    val path: String = "",
-    val content: String = "",
-    val bundle: String? = null,
-)
+typealias SnapshotSkill = build.cairn.contracts.RunSkill
 
-@Serializable
-data class Snapshot(
-    val task: build.cairn.contracts.RunTaskSnapshot =
-        build.cairn.contracts.RunTaskSnapshot(
-            id = "00000000-0000-4000-8000-000000000000",
-            name = "",
-            prompt = "",
-            agentId = MAIN_AGENT_ID,
-            skills = null,
-        ),
-    val agent: Agent =
-        Agent(
-            exclusiveNodes = emptyList(),
-            plugins = emptyList(),
-            id = "00000000-0000-4000-8000-000000000000",
-            name = "",
-            revision = "",
-            createdAt = 0,
-            access =
-                AccessPolicy(
-                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
-                    projects = null,
-                    skills = null,
-                    mcps = null,
-                ),
-        ),
-    val project: Project? = null,
-    val projects: List<Project> = emptyList(),
-    val skills: List<SnapshotSkill> = emptyList(),
-)
+typealias Snapshot = build.cairn.contracts.RunSnapshot
 
-@Serializable
-data class RunRetryCause(val kind: String, val message: String, val startup: Boolean = false)
+typealias RunRetryCause = build.cairn.contracts.Cause
 
-@Serializable
-data class RunRetry(
-    val attempt: Int,
-    val limit: Int,
-    val nextAttemptAt: Long? = null,
-    val cause: RunRetryCause,
-    val startedAt: Long? = null,
-    val deadlineAt: Long? = null,
-)
+typealias RunRetry = build.cairn.contracts.Retry
 
-@Serializable
-data class Run(
-    val id: String,
-    val taskId: String = "",
-    val projectId: String? = null,
-    val taskName: String = "",
-    val status: String,
-    val trigger: String = "",
-    val createdAt: Long = 0,
-    val startedAt: Long? = null,
-    val finishedAt: Long? = null,
-    val summary: String = "",
-    val sessionId: String? = null,
-    val workspace: String? = null,
-    val workspaceCleanedAt: Long? = null,
-    val snapshot: Snapshot = Snapshot(),
-    /** The run's coding agent, as run lists report it without the snapshot. */
-    val provider: String? = null,
-    val usage: Map<String, JsonElement>? = null,
-    val recoveryPending: Boolean = false,
-    val resumeAvailable: Boolean = false,
-    val accountName: String? = null,
-    /** The coding agent whose accounts need the user in Connexions before this run can start. */
-    val accountRequired: String? = null,
-    val accountWaitReason: String? = null,
-    val retry: RunRetry? = null,
-    val cancelRequestedAt: Long? = null,
-    val resumeCount: Int = 0,
-    val workspaces: List<RunWorkspace> = emptyList(),
-    val isolated: Boolean = false,
-    val outcome: TaskOutcome? = null,
-    /** The conversation or mission whose agent started this run. */
-    val requestedBy: RunRequester? = null,
-    /** This account set the run's outcome aside: dismissed, or snoozed until a time. */
-    val dismissal: OutcomeDismissal? = null,
-    val chatExecution: ChatExecution? = null,
-    val error: String? = null,
-    /** A mission run that finished after this account last opened its mission. */
-    val unread: Boolean = false,
-    /** The opening of the agent's final message, while unread. */
-    val preview: String? = null,
-    val nodeId: String? = null,
-    val nativeMode: NativeModeState? = null,
-    val nodeState: String? = null,
-    val resources: NodeResources? = null,
-    val pinnedNodeId: String? = null,
-    val preferredNodeId: String? = null,
-    val capacityWaitUntil: Long? = null,
-    val restoredAt: Long? = null,
-    val movementError: String? = null,
-    val backup: NodeBackup? = null,
-    val storage: RunStorage? = null,
-    val suspendedByExclusive: ExclusiveReservation? = null,
-    val wakeup: ChatWakeup? = null,
-    val executionBackend: String? = null,
-) {
-    val active
-        get() = status in listOf("running", "queued", "waiting")
+typealias Run = build.cairn.contracts.Run
 
-    val title
-        get() = taskName.ifBlank { snapshot.task.name }.ifBlank { "Exécution" }
-}
+val Run.active
+    get() = status in listOf("running", "queued", "waiting")
+
+val Run.title
+    get() = taskName.ifBlank { snapshot?.task?.name.orEmpty() }.ifBlank { "Exécution" }
 
 @Serializable
 data class RunEvent(
@@ -265,26 +166,11 @@ typealias Occurrences = build.cairn.contracts.SchedulePreviewOutput
 
 @Serializable data class ConsentResult(val redirect: String)
 
-@Serializable
-data class TaskOutcome(
-    val status: String,
-    val reason: String = "",
-    val evidence: List<String> = emptyList(),
-    val reportedAt: Long = 0,
-    val messageId: String? = null,
-    /** Who must act next on blocked work: user (the default), requester or external. */
-    val waitingOn: String? = null,
-)
+typealias TaskOutcome = build.cairn.boundary.TaskOutcome
 
-@Serializable
-data class RunRequester(val runId: String, val chatId: String? = null, val taskId: String? = null)
+typealias RunRequester = build.cairn.contracts.RunRequester
 
 /** A dismissed outcome has no [until]; a snoozed one asks again then. */
-@Serializable data class OutcomeDismissal(val until: Long? = null)
+typealias OutcomeDismissal = build.cairn.boundary.OutcomeDismissal
 
-@Serializable
-data class ChatExecution(
-    val messageId: String,
-    val text: String = "",
-    val recovery: Boolean = false,
-)
+typealias ChatExecution = build.cairn.boundary.ChatExecution

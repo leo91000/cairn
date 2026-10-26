@@ -235,7 +235,7 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
             continue;
         }
         s.store
-            .patch_run(run_id, json!({ "nodeState": NodeState::Updating }))
+            .update_run_boundary(run_id, json!({ "nodeState": NodeState::Updating }))
             .await?;
         s.store
             .event(

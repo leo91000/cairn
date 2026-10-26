@@ -1,6 +1,8 @@
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
+use crate::common::run_fixture::DbRunFixture;
+use crate::common::run_fixture::RunFixture;
 use common::AgentFixture;
 use common::MissionFixture;
 use common::StoreAgentFixture;
@@ -485,7 +487,7 @@ async fn converting_a_mission_retains_native_authority_and_rejects_unauthorized_
     f.service
         .store
         .transaction(move |db| {
-            db.add_run(&saved, None)?;
+            db.add_run_fixture(&saved, None)?;
             db.set(
                 &format!("run-checkpoint:{}", saved["id"].as_str().unwrap()),
                 &json!({ "prepared": {} }),
@@ -494,6 +496,7 @@ async fn converting_a_mission_retains_native_authority_and_rejects_unauthorized_
         })
         .await
         .unwrap();
+    let run = f.service.store.run(&run_id).await.unwrap();
     let path = format!("/api/runs/{run_id}/chat");
     let (status, _) = f.call(&f.other, "POST", &path, json!({})).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -725,14 +728,17 @@ async fn delegated_native_administration_requires_the_requesters_current_review(
     let parent = f
         .service
         .store
-        .patch_run(
+        .change_run(
             text(&parent, "id"),
-            json!({
-                "status": "running", "nodeId": f.node["id"],
-            }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                boundary: Some(serde_json::json!({"nodeId": f.node["id"]})),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
+    let parent = f.service.store.run(&parent.id).await.unwrap();
     let configuration = f
         .service
         .mcps
@@ -804,9 +810,16 @@ async fn task_delegation_has_its_own_revocable_native_authority() {
     let parent = f
         .service
         .store
-        .patch_run(text(&parent, "id"), json!({ "status": "running" }))
+        .change_run(
+            text(&parent, "id"),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
+    let parent = f.service.store.run(&parent.id).await.unwrap();
     let configuration = f
         .service
         .mcps
@@ -873,7 +886,7 @@ async fn task_delegation_has_its_own_revocable_native_authority() {
     assert!(check(child.clone()).await.unwrap());
     f.service
         .store
-        .patch_run(text(&parent, "id"), json!({ "nativeAuthorityNodes": [] }))
+        .update_run_boundary(text(&parent, "id"), json!({ "nativeAuthorityNodes": [] }))
         .await
         .unwrap();
     assert!(
@@ -1051,7 +1064,13 @@ async fn native_stop_controls_remain_available_without_host_admission() {
         if action == "stop" {
             f.service
                 .store
-                .patch_run(&run_id, json!({ "status": "succeeded" }))
+                .change_run(
+                    &run_id,
+                    cairn_installation::runs::RunChanges {
+                        status: Some(cairn_contracts::RunStatus::Succeeded),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .unwrap();
             chat["wakeup"] = json!({ "at": now() + 60_000, "reason": "Saved continuation" });
@@ -1124,7 +1143,13 @@ async fn accepted_native_run_controls_retain_the_director_on_the_chat_and_run() 
         let (method, path, body) = if action == "resume" {
             f.service
                 .store
-                .patch_run(run_id, json!({ "status": "cancelled" }))
+                .change_run(
+                    run_id,
+                    cairn_installation::runs::RunChanges {
+                        status: Some(cairn_contracts::RunStatus::Cancelled),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .unwrap();
             ("POST", format!("/api/runs/{run_id}/resume"), json!({}))
@@ -1271,17 +1296,20 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         let resumed = f
             .service
             .store
-            .patch_run(
+            .change_run(
                 run_id,
-                json!({
-                    "placementTransition": false,
-                    "targetNodeId": null,
-                    "moveReservation": reservation,
-                    "nodeId": node["id"],
-                    "nodeState": "resuming",
-                    "recoveryPending": true,
-                    "status": "queued",
-                }),
+                cairn_installation::runs::RunChanges {
+                    recovery_pending: Some(true),
+                    status: Some(cairn_contracts::RunStatus::Queued),
+                    boundary: Some(serde_json::json!({
+                        "placementTransition": false,
+                        "targetNodeId": null,
+                        "moveReservation": reservation,
+                        "nodeId": node["id"],
+                        "nodeState": "resuming",
+                    })),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -1298,6 +1326,7 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         }
         f.service.store.put("nodes", node).await.unwrap();
         let attempt = id();
+        let resumed = f.service.store.run(&resumed.id).await.unwrap();
         let claimed = placement::reserve(&f.service, &resumed, &attempt).await;
         let succeeds = !changed_backend;
         if succeeds {
@@ -1410,7 +1439,7 @@ async fn native_same_node_resume_reuses_retained_capacity_on_a_small_pool() {
     run["recoveryPending"] = true.into();
     f.service
         .store
-        .patch_run(text(&run, "id"), run.clone())
+        .change_run_fixture(text(&run, "id"), run.clone())
         .await
         .unwrap();
     placement::check(&f.service, &run).await.unwrap();
@@ -1952,9 +1981,12 @@ async fn a_vm_coordinator_can_delegate_only_its_traced_native_authority() {
     );
     f.service
         .store
-        .patch_run(
+        .change_run(
             parent["id"].as_str().unwrap(),
-            json!({ "cancelRequestedAt": now() }),
+            cairn_installation::runs::RunChanges {
+                cancel_requested_at: Some(Some(now())),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -2133,12 +2165,16 @@ async fn a_vm_coordinator_directed_by_unrelated_parents_loses_native_delegation(
     let coordinator_run = f
         .service
         .store
-        .patch_run(
+        .change_run(
             coordinator_run["id"].as_str().unwrap(),
-            json!({ "status": "running" }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
+    let coordinator_run = f.service.store.run(&coordinator_run.id).await.unwrap();
     let c = f
         .service
         .mcps
@@ -2205,7 +2241,7 @@ async fn a_vm_coordinator_directed_by_unrelated_parents_loses_native_delegation(
     ] {
         f.service
             .store
-            .patch_run(parent_b["id"].as_str().unwrap(), reduction)
+            .change_run_fixture(parent_b["id"].as_str().unwrap(), reduction)
             .await
             .unwrap();
         let run = existing_native.clone();
@@ -2248,7 +2284,7 @@ async fn changing_the_parent_permission_or_node_ceiling_revokes_descendants() {
     child["nativeParentRunId"] = parent["id"].clone();
     f.service
         .store
-        .patch_run(
+        .update_run_boundary(
             parent["id"].as_str().unwrap(),
             json!({ "nativeAuthorityNodes": [] }),
         )
@@ -2264,7 +2300,7 @@ async fn changing_the_parent_permission_or_node_ceiling_revokes_descendants() {
     );
     f.service
         .store
-        .patch_run(
+        .update_run_boundary(
             parent["id"].as_str().unwrap(),
             json!({ "nativeAuthorityNodes": [f.node["id"]] }),
         )
@@ -2687,7 +2723,7 @@ async fn native_mode_confirmation_covers_incoming_moves_and_reservations() {
     }
     f.service
         .store
-        .patch_run(
+        .update_run_boundary(
             text(&incoming[2], "id"),
             json!({
                 "moveRequest": { "nodeId": node_id, "reservation": id() },
@@ -2901,7 +2937,7 @@ async fn saved_native_mission(f: &Fixture) -> Value {
         }),
     )
     .await;
-    run
+    f.service.store.run(text(&run, "id")).await.unwrap()
 }
 
 async fn resume_coordinator(f: &Fixture, traced: bool) -> (Value, Value) {
@@ -2939,8 +2975,18 @@ async fn resume_run_preserves_native_human_and_delegated_provenance() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(f.service.store.run(run_id).await.unwrap(), run);
     let public = common::relay_fixture::grant(&f.service, &["run"]).await;
-    let request = common::request("POST", "/mcp").header("authorization", format!("Bearer {public}"))
-        .body(Body::from(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": common::mcp_arguments("resume_run", &json!({ "runId": run_id })) }).to_string())).unwrap();
+    let request = common::request("POST", "/mcp")
+        .header("authorization", format!("Bearer {public}"))
+        .body(Body::from(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": common::mcp_arguments("resume_run", &json!({ "runId": run_id })),
+            })
+            .to_string(),
+        ))
+        .unwrap();
     let denied = read_json(common::send(&f.router, request).await).await;
     assert_eq!(denied["result"]["isError"], true, "{denied}");
     let (_, unknown) = resume_coordinator(&f, false).await;
@@ -2957,9 +3003,13 @@ async fn resume_run_preserves_native_human_and_delegated_provenance() {
     f.service.worker.cancel(&f.service, run_id).await.unwrap();
     f.service
         .store
-        .patch_run(
+        .change_run(
             run_id,
-            json!({ "status": "cancelled", "recoveryPending": false }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Cancelled),
+                recovery_pending: Some(false),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -3025,7 +3075,13 @@ async fn resume_run_rechecks_grant_and_cancellation_after_native_preparation() {
         } else {
             f.service
                 .store
-                .patch_run(text(&caller, "id"), json!({ "cancelRequestedAt": now() }))
+                .change_run(
+                    text(&caller, "id"),
+                    cairn_installation::runs::RunChanges {
+                        cancel_requested_at: Some(Some(now())),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .unwrap();
         }

@@ -1,0 +1,289 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Cause": {
+      "properties": {
+        "kind": {
+          "pattern": "^(connection|timeout|rate-limit|server)$",
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "startup": {
+          "default": false,
+          "description": "The adapter confirmed that no new agent turn was submitted.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "message",
+        "startup"
+      ],
+      "type": "object"
+    },
+    "Retry": {
+      "properties": {
+        "attempt": {
+          "format": "uint64",
+          "maximum": 5,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "cause": {
+          "$ref": "#/definitions/Cause"
+        },
+        "deadlineAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint64",
+          "maximum": 5,
+          "minimum": 5,
+          "type": "integer"
+        },
+        "nextAttemptAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "startedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attempt",
+        "limit",
+        "nextAttemptAt",
+        "startedAt",
+        "deadlineAt",
+        "cause"
+      ],
+      "type": "object"
+    },
+    "RunRequester": {
+      "additionalProperties": false,
+      "properties": {
+        "chatId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "taskId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Lifecycle fields have one SQL authority. Engine/node/chat payloads are adapted\nseparately at their domain boundaries, never merged into this state.",
+  "properties": {
+    "accountId": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "accountName": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "accountRequired": {
+      "default": null,
+      "pattern": "^(codex|claude|opencode)$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "accountWaitReason": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "cancelRequestedAt": {
+      "default": null,
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "capacityWaitUntil": {
+      "default": null,
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "createdAt": {
+      "default": 0,
+      "format": "int64",
+      "type": "integer"
+    },
+    "error": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "finishedAt": {
+      "default": null,
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "id": {
+      "type": "string"
+    },
+    "projectId": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "recoveryPending": {
+      "default": false,
+      "type": "boolean"
+    },
+    "requestedBy": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RunRequester"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "resumeAvailable": {
+      "default": false,
+      "type": "boolean"
+    },
+    "resumeCount": {
+      "default": 0,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "retry": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Retry"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "sessionId": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "startedAt": {
+      "default": null,
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "status": {
+      "pattern": "^(queued|running|waiting|succeeded|failed|cancelled|interrupted)$",
+      "type": "string"
+    },
+    "summary": {
+      "default": "",
+      "type": "string"
+    },
+    "taskId": {
+      "type": "string"
+    },
+    "trigger": {
+      "default": "",
+      "type": "string"
+    },
+    "workspace": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "workspaceCleanedAt": {
+      "default": null,
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "taskId",
+    "projectId",
+    "status",
+    "trigger",
+    "createdAt",
+    "startedAt",
+    "finishedAt",
+    "summary",
+    "error",
+    "sessionId",
+    "workspace",
+    "workspaceCleanedAt",
+    "recoveryPending",
+    "resumeAvailable",
+    "resumeCount",
+    "cancelRequestedAt",
+    "accountId",
+    "accountName",
+    "accountWaitReason",
+    "accountRequired",
+    "capacityWaitUntil",
+    "retry",
+    "requestedBy"
+  ],
+  "title": "RunState",
+  "type": "object"
+}

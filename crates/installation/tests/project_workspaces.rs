@@ -1,3 +1,4 @@
+use crate::common::run_fixture::RunFixture;
 use common::AgentFixture;
 use common::MissionFixture;
 use common::ProjectFixture;
@@ -59,7 +60,10 @@ async fn run(s: &Service, project: Value, agent: &str) -> Value {
 }
 
 async fn patch_run(s: &Service, run: &Value, patch: Value) {
-    s.store.patch_run(text(run, "id"), patch).await.unwrap();
+    s.store
+        .change_run_fixture(text(run, "id"), patch)
+        .await
+        .unwrap();
 }
 
 /// Marks `run` running and returns the MCP token of its grant.
@@ -492,7 +496,10 @@ fn git(directory: &Path, args: &[&str]) -> String {
 
 async fn archive_seed(s: &Service, project: &Value, root: &Path) -> PathBuf {
     std::fs::create_dir(root).unwrap();
-    let run = json!({ "id": id(), "snapshot": { "agent": { "access": { "backend": "native" } }, "task": { "worktree": true } } });
+    let run = json!({
+        "id": id(),
+        "snapshot": { "agent": { "access": { "backend": "native" } }, "task": { "worktree": true } },
+    });
     let entry = execution::project_seed(&run, project, &s.config, root, &RunCredentials::default())
         .await
         .unwrap();

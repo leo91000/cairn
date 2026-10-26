@@ -188,7 +188,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       title: task.name,
       agent: run.agentName,
       agentKey: task.agentId,
-      harness: run.provider,
+      harness: run.provider ?? undefined,
       project: null,
       at: run.finishedAt ?? run.startedAt ?? run.createdAt,
       to: filRunPath(run.id),

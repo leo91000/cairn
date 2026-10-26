@@ -462,26 +462,29 @@ impl Service {
             // Freezing keeps queued and restarted runs on the files they were created with.
             let (bundle, content) = self.skills.freeze(Path::new(text(skill, "path"))).await?;
             let frozen_metadata = crate::skills::parse(&content)?;
-            skills.push(json!({
-                "name": skill["name"],
-                "description": frozen_metadata["description"],
-                "path": skill["path"],
-                "content": content,
-                "bundle": bundle,
-            }));
+            skills.push(cairn_contracts::RunSkill {
+                name: text(skill, "name").to_owned(),
+                description: text(&frozen_metadata, "description").to_owned(),
+                path: text(skill, "path").to_owned(),
+                content,
+                bundle: Some(bundle),
+            });
         }
-        let snapshot = json!({
-            "task": task,
-            "agent": agent,
-            "project": project,
-            "projects": projects,
-            "availableProjects": available_projects,
-            "skills": skills,
-        });
+        let task_id = task["id"].clone();
+        let project_id = project.as_ref().map(|p| p.id);
+        let snapshot = cairn_contracts::RunSnapshot {
+            task: serde_json::from_value(task)?,
+            agent: serde_json::from_value(agent)?,
+            project,
+            projects,
+            available_projects,
+            skills,
+            delegation: None,
+        };
         Ok(json!({
             "id": id(),
-            "taskId": task["id"],
-            "projectId": project.as_ref().map(|p| p.id),
+            "taskId": task_id,
+            "projectId": project_id,
             "status": RunStatus::Queued,
             "trigger": trigger,
             "createdAt": now(),
@@ -506,11 +509,6 @@ impl Service {
             return self.missions.enqueue_scheduled(self, run, dedupe).await;
         }
         self.queue_run(run, dedupe, None).await
-    }
-
-    pub(crate) async fn enqueue_from_run(&self, task_id: &str, bearer: &str) -> Result<Value> {
-        let run = self.prepare_run(task_id, "mcp").await?;
-        self.queue_run(run, None, Some(bearer.to_owned())).await
     }
 
     pub(crate) async fn prepare_run(&self, task_id: &str, trigger: &str) -> Result<Value> {
@@ -564,7 +562,7 @@ impl Service {
                     )?;
                     run["requestedBy"] = requester(&caller);
                 }
-                db.add_run(&run, dedupe.as_deref())?;
+                let run = crate::runs::admit_prepared(db, &run, dedupe.as_deref())?;
                 db.event(text(&run, "id"), "status", "Queued", None)?;
                 let detail = json!({
                     "id": run["id"],

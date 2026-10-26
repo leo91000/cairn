@@ -32,10 +32,8 @@ data class PluginConfiguration(
 ) {
     init {
         require(Regex("^(allowlist|requests|everyone)\$").containsMatchIn(accessMode))
-        require(maxMessagesPerHour >= 1)
-        require(maxMessagesPerHour <= 100)
-        require(maxPerPersonPerHour >= 1)
-        require(maxPerPersonPerHour <= 50)
+        require(maxMessagesPerHour in 1..100)
+        require(maxPerPersonPerHour in 1..50)
         sharedFrom?.let { java.util.UUID.fromString(it) }
     }
 }

@@ -481,21 +481,27 @@ fn request_reclamation(db: &Db<'_>, run: &Value, configured: bool) -> Result<()>
 /// Growth leaves enough capacity for the oldest eligible queued conversation.
 /// This is a transaction-local ceiling, not an allocation or an authority grant.
 pub(super) fn waiting_disk_bytes(db: &Db<'_>, node: &Value, attempts: &[Value]) -> Result<u64> {
-    let runs = db.json_rows(
-        "SELECT data FROM runs WHERE status='queued' AND json_extract(data,'$.isolated')=1 ORDER BY created_at,id",
-        [],
-    )?;
-    for run in runs {
-        if !run["cancelRequestedAt"].is_null()
-            || run["backendMigration"].is_object()
+    let mut runs = db.queued_run_records()?;
+    runs.sort_by(|left, right| {
+        left.state
+            .created_at
+            .cmp(&right.state.created_at)
+            .then_with(|| left.state.id.cmp(&right.state.id))
+    });
+    for record in runs {
+        let state = &record.state;
+        if record.boundary["isolated"] != true
+            || state.cancel_requested_at.is_some()
+            || record.boundary["backendMigration"].is_object()
             || attempts
                 .iter()
-                .any(|a| a["runId"] == run["id"] && super::is_active_attempt(a))
-            || crate::run_retry::Retry::waiting(&run, crate::config::now())
-            || crate::conversation_lifecycle::require_active_run(db, text(&run, "id")).is_err()
+                .any(|attempt| attempt["runId"] == state.id && super::is_active_attempt(attempt))
+            || crate::run_retry::Retry::waiting(state.retry.as_ref(), crate::config::now())
+            || crate::conversation_lifecycle::require_active_run(db, &state.id).is_err()
         {
             continue;
         }
+        let run = record.wire()?;
         let agent = db
             .agent_snapshot(super::run_agent(&run))?
             .unwrap_or_default();
@@ -613,7 +619,7 @@ fn claim_reservation(
     held["runtimeId"] = record["runtimeId"].clone();
     held["leaseExpiresAt"] = (now() + RESERVATION_LEASE_MS).into();
     db.put("node-attempts", &held)?;
-    db.patch_run(request.run_id(), &json!({ "moveReservation": null }))?;
+    db.update_run_boundary(request.run_id(), &json!({ "moveReservation": null }))?;
     let placement = Placement {
         native_mode: held["nativeMode"].clone(),
         node_id: &held["nodeId"],
@@ -816,7 +822,7 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
         if record["moveRequest"].is_object() || record["moveReservation"].is_string() {
             return Err(Error::conflict("Wait for the current movement to finish."));
         }
-        record = db.patch_run(run, &serde_json::to_value(&selection)?)?;
+        record = db.update_run_boundary(run, &serde_json::to_value(&selection)?)?;
         db.audit(
             "node.placement.configured",
             &json!({
@@ -899,6 +905,9 @@ pub async fn renew_local(s: &Service, run_id: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+use crate::run_fixture::DbRunFixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -914,10 +923,10 @@ mod tests {
             store.transaction(move |db| {
                 let run = json!({
                     "id": run_id, "taskId": crate::config::id(), "createdAt": now(),
-                    "status": "pending", "moveReservation": held_id,
+                    "status": "queued", "moveReservation": held_id,
                     "snapshot": { "agent": { "provider": "codex", "access": { "backend": backend } } },
                 });
-                db.add_run(&run, None)?;
+                db.add_run_fixture(&run, None)?;
                 db.put("node-attempts", &json!({
                     "id": held_id, "runId": run_id, "nodeId": node_id,
                     "role": "destination", "runtimeId": "previous-build", "released": false,

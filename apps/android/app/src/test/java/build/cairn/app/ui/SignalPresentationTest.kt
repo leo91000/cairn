@@ -20,7 +20,12 @@ class SignalPresentationTest {
                 suspendedByExclusive = reservation,
             )
         val mission =
-            Run("mission", taskId = "task", status = "running", suspendedByExclusive = reservation)
+            Run(
+                id = "mission",
+                taskId = "task",
+                status = "running",
+                suspendedByExclusive = reservation,
+            )
         val feed =
             buildFeed(
                 listOf(
@@ -61,7 +66,13 @@ class SignalPresentationTest {
                     agentName = "Cairn",
                     projectName = "Manager",
                     status = "running",
-                    run = Run("r1", status = "running", startedAt = 100),
+                    run =
+                        Run(
+                            id = "r1",
+                            status = "running",
+                            startedAt = 100,
+                            taskId = "",
+                        ),
                     updatedAt = 4,
                 ),
                 Chat("queued", "En file", agentName = "Cairn", status = "queued", updatedAt = 3),
@@ -89,11 +100,12 @@ class SignalPresentationTest {
                     updatedAt = 6,
                     run =
                         Run(
-                            "r2",
+                            id = "r2",
                             status = "queued",
                             accountWaitReason =
                                 "Connect a Claude Code account in Connections before running this agent.",
                             accountRequired = "claude",
+                            taskId = "",
                         ),
                 ),
                 Chat("idle", "Ancienne conversation", agentName = "Cairn", updatedAt = 0),
@@ -110,7 +122,7 @@ class SignalPresentationTest {
         val activity =
             listOf(
                 Run(
-                    "t1",
+                    id = "t1",
                     taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
                     status = "failed",
                     trigger = "manual",
@@ -132,16 +144,28 @@ class SignalPresentationTest {
                                         ),
                                     id = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
                                     name = "Reviewer",
-                                )
+                                ),
+                            task =
+                                build.cairn.contracts.RunTaskSnapshot(
+                                    agentId = build.cairn.app.data.MAIN_AGENT_ID,
+                                    id = "00000000-0000-4000-8000-000000000003",
+                                    name = "Fixture",
+                                    prompt = "Fixture",
+                                ),
                         ),
                 ),
                 Run(
-                    "t2",
+                    id = "t2",
                     taskId = "456fb838-d909-52a8-8fd7-8e95f2792cad",
                     status = "failed",
                     trigger = "manual",
                 ),
-                Run("t3", taskId = "chat-task", status = "failed", trigger = "chat"),
+                Run(
+                    id = "t3",
+                    taskId = "chat-task",
+                    status = "failed",
+                    trigger = "chat",
+                ),
             )
         val feed = buildFeed(chats, activity, tasks)
         assertEquals(
@@ -185,7 +209,7 @@ class SignalPresentationTest {
                 ),
                 listOf(
                     Run(
-                        "audit-run",
+                        id = "audit-run",
                         taskId = "b7ec3b50-62dd-530b-8060-bd5700fb7eb6",
                         status = "running",
                         provider = "opencode",
@@ -214,13 +238,13 @@ class SignalPresentationTest {
         val activity =
             listOf(
                 Run(
-                    "r1",
+                    id = "r1",
                     taskId = "8a025d72-4937-53c0-a41d-820414dc655d",
                     status = "succeeded",
                     outcome = TaskOutcome("blocked", "Accès manquant"),
                 ),
                 Run(
-                    "r2",
+                    id = "r2",
                     taskId = "00eada4d-84f3-57cb-837e-3c023a643647",
                     status = "running",
                     startedAt = 10,
@@ -248,32 +272,40 @@ class SignalPresentationTest {
         val activity =
             listOf(
                 Run(
-                    "proof-1",
+                    id = "proof-1",
                     taskId = "2db836ee-ce2e-552d-b9fa-2fef2030546c",
                     status = "succeeded",
                     outcome = blocked("user"),
                 ),
                 Run(
-                    "ci-1",
+                    id = "ci-1",
                     taskId = "3c7c4abf-37d8-5123-814f-356a0797b145",
                     status = "succeeded",
                     finishedAt = 3,
                     outcome = blocked("requester"),
-                    requestedBy = RunRequester("parent-run", chatId = "parent"),
+                    requestedBy =
+                        RunRequester(
+                            runId = "parent-run",
+                            chatId = "parent",
+                        ),
                 ),
                 Run(
-                    "deploy-1",
+                    id = "deploy-1",
                     taskId = "888f7003-e15b-5b1f-a1b3-a221bc92ec3a",
                     status = "succeeded",
                     outcome = blocked("external"),
                 ),
                 // Its requester is gone: the user is the one left to act.
                 Run(
-                    "orphan-1",
+                    id = "orphan-1",
                     taskId = "0a0e9fbd-72fd-586d-b159-15ebbd5e1070",
                     status = "succeeded",
                     outcome = blocked("requester"),
-                    requestedBy = RunRequester("gone", chatId = "deleted"),
+                    requestedBy =
+                        RunRequester(
+                            runId = "gone",
+                            chatId = "deleted",
+                        ),
                 ),
             )
         val feed =
@@ -305,14 +337,14 @@ class SignalPresentationTest {
         val activity =
             listOf(
                 Run(
-                    "r1",
+                    id = "r1",
                     taskId = "8a025d72-4937-53c0-a41d-820414dc655d",
                     status = "succeeded",
                     outcome = TaskOutcome("blocked", "CI"),
                     dismissal = OutcomeDismissal(),
                 ),
                 Run(
-                    "r2",
+                    id = "r2",
                     taskId = "00eada4d-84f3-57cb-837e-3c023a643647",
                     status = "succeeded",
                     outcome = TaskOutcome("needs_input", "Choisir"),
@@ -367,7 +399,7 @@ class SignalPresentationTest {
         val activity =
             listOf(
                 Run(
-                    "digest-1",
+                    id = "digest-1",
                     taskId = "22db892f-1069-55df-8435-9b003528bdcf",
                     status = "succeeded",
                     finishedAt = 60,
@@ -417,13 +449,13 @@ class SignalPresentationTest {
         val activity =
             listOf(
                 Run(
-                    "failed",
+                    id = "failed",
                     taskId = "8a025d72-4937-53c0-a41d-820414dc655d",
                     status = "failed",
                     finishedAt = 6,
                 ),
                 Run(
-                    "running",
+                    id = "running",
                     taskId = "00eada4d-84f3-57cb-837e-3c023a643647",
                     status = "running",
                     startedAt = 1,
@@ -588,9 +620,17 @@ class SignalPresentationTest {
         val latest =
             mapOf(
                 "87d969a4-be62-5c7e-bacd-4917b8604bed" to
-                    Run("r1", taskId = "87d969a4-be62-5c7e-bacd-4917b8604bed", status = "failed"),
+                    Run(
+                        id = "r1",
+                        taskId = "87d969a4-be62-5c7e-bacd-4917b8604bed",
+                        status = "failed",
+                    ),
                 "5bfed223-205d-577b-a9eb-2561157d92ff" to
-                    Run("r2", taskId = "5bfed223-205d-577b-a9eb-2561157d92ff", status = "running"),
+                    Run(
+                        id = "r2",
+                        taskId = "5bfed223-205d-577b-a9eb-2561157d92ff",
+                        status = "running",
+                    ),
             )
         assertEquals(
             listOf(

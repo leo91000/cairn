@@ -513,6 +513,11 @@ pub(crate) fn operations() -> Vec<Value> {
     operations.push(crate::capabilities::RESUME_RUN.descriptor());
     operations.push(crate::capabilities::MANAGE_PLUGIN.descriptor());
     operations.extend(
+        crate::capabilities::RUN_OPERATIONS
+            .iter()
+            .map(crate::capabilities::RunOperation::descriptor),
+    );
+    operations.extend(
         crate::capabilities::PROJECT_OPERATIONS
             .iter()
             .map(crate::capabilities::ProjectOperation::descriptor),
@@ -598,6 +603,15 @@ pub(crate) async fn operation(
             )
             .await;
     }
+    if let Some(op) = crate::capabilities::run_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(scopes.to_vec()),
+            )
+            .await;
+    }
     if name == cairn_contracts::RESUME_RUN_ID {
         let input = crate::capabilities::RESUME_RUN.decode(args)?;
         let context = crate::capabilities::ResumeContext::Public(scopes.to_vec());
@@ -640,15 +654,6 @@ fn run_record_preview(record: Value, fields: &[&str]) -> Result<(Value, usize)> 
     Ok((preview, bytes))
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunHistory {
-    run: Value,
-    events: Vec<Value>,
-    next_after: i64,
-    has_more: bool,
-}
-
 pub(crate) fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
     let run = required(db.run(id)?, "Run not found")?;
     let (run, _) = run_record_preview(
@@ -685,8 +690,17 @@ pub(crate) fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
         rusqlite::params![id, next],
         |row| row.get(0),
     )?;
-    let history = RunHistory {
-        run,
+    let history = cairn_contracts::RunHistoryOutput {
+        run: if run["truncated"] == true {
+            cairn_contracts::RunMetadataPage::Truncated {
+                total_bytes: run["totalBytes"].as_u64().unwrap(),
+                preview: serde_json::from_value(run)?,
+            }
+        } else {
+            cairn_contracts::RunMetadataPage::Complete {
+                run: Box::new(serde_json::from_value(run)?),
+            }
+        },
         events,
         next_after: next,
         has_more: more,
@@ -797,35 +811,10 @@ pub(crate) async fn invoke(
                 .model_catalog(s)
                 .await
         }
-        "run_task" => s.enqueue(text(&args, "taskId"), "mcp", None).await,
         "convert_run_to_chat" => {
             s.chat_from_run_authorized(text(&args, "runId"), authorize)
                 .await
         }
-        "cancel_run" => {
-            s.worker.cancel(s, text(&args, "runId")).await?;
-            Ok(json!({ "cancelled": true }))
-        }
-        "list_runs" => {
-            s.store
-                .read(move |db| {
-                    let runs = db.runs(
-                        args["status"].as_str(),
-                        None,
-                        args["limit"].as_i64().unwrap(),
-                        args["offset"].as_i64().unwrap(),
-                        false,
-                    )?;
-                    Ok(runs.into())
-                })
-                .await
-        }
-        "get_run" => {
-            let id = text(&args, "runId").to_owned();
-            let after = args["after"].as_i64().unwrap();
-            s.store.read(move |db| run_history(db, &id, after)).await
-        }
-        "read_run_content" => s.store.read(move |db| read_run_content(db, &args)).await,
         "list_skills" | "read_skill" | "save_skill" | "edit_skill_files" => {
             skills_tool(s, name, &args, bearer).await
         }

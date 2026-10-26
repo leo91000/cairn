@@ -40,13 +40,24 @@ abstract class ChatProviderCases {
                 )
             val run =
                 Run(
-                    "run",
+                    id = "run",
                     status = "queued",
-                    snapshot = Snapshot(agent = agent),
+                    snapshot =
+                        Snapshot(
+                            agent = agent,
+                            task =
+                                build.cairn.contracts.RunTaskSnapshot(
+                                    agentId = build.cairn.app.data.MAIN_AGENT_ID,
+                                    id = "00000000-0000-4000-8000-000000000003",
+                                    name = "Fixture",
+                                    prompt = "Fixture",
+                                ),
+                        ),
                     accountWaitReason =
                         "Reconnect your Claude Code account in Connections to continue.",
                     accountRequired = "claude",
                     chatExecution = ChatExecution("message"),
+                    taskId = "",
                 )
             val chat =
                 Chat(
@@ -184,7 +195,23 @@ abstract class ChatProviderCases {
                     model = "fixture-deep",
                     reasoning = "ultra",
                 )
-            val run = Run("run", status = "succeeded", snapshot = Snapshot(agent = agent))
+            val run =
+                Run(
+                    id = "run",
+                    status = "succeeded",
+                    snapshot =
+                        Snapshot(
+                            agent = agent,
+                            task =
+                                build.cairn.contracts.RunTaskSnapshot(
+                                    agentId = build.cairn.app.data.MAIN_AGENT_ID,
+                                    id = "00000000-0000-4000-8000-000000000003",
+                                    name = "Fixture",
+                                    prompt = "Fixture",
+                                ),
+                        ),
+                    taskId = "",
+                )
             val chat =
                 Chat(
                     "chat",
@@ -455,7 +482,7 @@ abstract class ChatProviderCases {
                 )
             val run =
                 Run(
-                    "run",
+                    id = "run",
                     status = if (error == null) "succeeded" else "failed",
                     error = error,
                     snapshot =
@@ -465,8 +492,16 @@ abstract class ChatProviderCases {
                                     provider = "opencode",
                                     model = "auto/deepseek-v4-1-flash",
                                     reasoning = "high",
-                                )
+                                ),
+                            task =
+                                build.cairn.contracts.RunTaskSnapshot(
+                                    agentId = build.cairn.app.data.MAIN_AGENT_ID,
+                                    id = "00000000-0000-4000-8000-000000000003",
+                                    name = "Fixture",
+                                    prompt = "Fixture",
+                                ),
                         ),
+                    taskId = "",
                 )
             val chat =
                 Chat(

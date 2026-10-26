@@ -803,7 +803,9 @@ class DirectTransportTest {
             for (failure in listOf("closed", "corrupt", "credit", "end", "timeout")) {
                 MockWebServer().use { server ->
                     fun sse(cursor: Long, events: List<RunEvent>) =
-                        "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(LiveBatch(events, LiveState(run = Run("r1", status = "running")), false, false, history = "h1"))}\n\n"
+                        "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(LiveBatch(events, LiveState(run = Run(id = "r1",
+status = "running",
+taskId = "",)), false, false, history = "h1",))}\n\n"
                     val first =
                         RunEvent(
                             7,

@@ -24,11 +24,11 @@ data class Agent(
     val timeoutMinutes: Int = 0,
 ) {
     init {
-        require(createdAt <= 9007199254740991L)
+        require(createdAt in 0L..9007199254740991L)
         java.util.UUID.fromString(id)
         require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
         require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(reasoning))
         require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(speed))
-        require(timeoutMinutes <= 720)
+        require(timeoutMinutes in 0..720)
     }
 }

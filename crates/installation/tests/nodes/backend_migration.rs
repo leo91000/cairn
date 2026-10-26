@@ -150,9 +150,15 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     record["sessionId"] = "old-engine-session".into();
     record["resources"] = limits(1, 512, 128);
     record["snapshot"] = json!({ "agent": original_agent });
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     owner.put("chats", json!({ "id": chat, "runId": run, "agentId": agent, "paused": false, "title": "same conversation" })).await;
-    let message = json!({ "id": id(), "chatId": chat, "text": "keep this history", "createdAt": now(), "status": "delivered" });
+    let message = json!({
+        "id": id(),
+        "chatId": chat,
+        "text": "keep this history",
+        "createdAt": now(),
+        "status": "delivered",
+    });
     let saved = message.clone();
     owner
         .service
@@ -198,7 +204,13 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         .await
         .unwrap();
     let sending = json!({ "id": id(), "chatId": chat, "text": "stop this input", "createdAt": now(), "status": "sending" });
-    let queued = json!({ "id": id(), "chatId": chat, "text": "independent queued follow-up", "createdAt": now() + 1, "status": "queued" });
+    let queued = json!({
+        "id": id(),
+        "chatId": chat,
+        "text": "independent queued follow-up",
+        "createdAt": now() + 1,
+        "status": "queued",
+    });
     let (active_input, later_input) = (sending.clone(), queued.clone());
     owner
         .service
@@ -220,7 +232,13 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         owner
             .service
             .store
-            .patch_run(&run, json!({ "status": RunStatus::Running }))
+            .change_run(
+                &run,
+                cairn_installation::runs::RunChanges {
+                    status: Some(RunStatus::Running),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         owner.service.store.set("native-authority", json!({ "observedAt": now(), "accounts": { "fixture-owner": { "email": "fixture@example.test" } } }), None).await.unwrap();
@@ -341,7 +359,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     owner
         .service
         .store
-        .patch_run(&run, json!({ "backendMigration": marker }))
+        .update_run_boundary(&run, json!({ "backendMigration": marker }))
         .await
         .unwrap();
     let (status, response) = owner
@@ -367,8 +385,28 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let reservation = id();
     let mut pending = json!({ "id": id(), "reservationId": reservation, "process": "old-manager-process", "paused": false,
         "nodeId": native_node, "runtimeId": "development", "snapshot": retried["snapshot"], "convertedBackup": saved_point });
-    pending["grant"] = json!({ "nativePrincipals": retried["nativePrincipals"], "nativeAuthorityNodes": retried["nativeAuthorityNodes"], "nativeProvenanceUnknown": false });
-    owner.service.store.patch_run(&run, json!({ "snapshot": before["snapshot"], "nodeId": before["nodeId"], "backup": before["backup"], "backendMigration": pending })).await.unwrap();
+    pending["grant"] = json!({
+        "nativePrincipals": retried["nativePrincipals"],
+        "nativeAuthorityNodes": retried["nativeAuthorityNodes"],
+        "nativeProvenanceUnknown": false,
+    });
+    owner
+        .service
+        .store
+        .change_run(
+            &run,
+            cairn_installation::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(before["snapshot"].clone()).unwrap()),
+                boundary: Some(json!({
+                    "nodeId": before["nodeId"],
+                    "backup": before["backup"],
+                    "backendMigration": pending,
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     let mut source_checkpoint = checkpoint_before;
     source_checkpoint["nodeId"] = vm_node.clone().into();
     source_checkpoint["prepared"]["backend"] = "firecracker".into();

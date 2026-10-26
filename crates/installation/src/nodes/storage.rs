@@ -170,7 +170,7 @@ fn record_status(
         backup.extend(pointer.as_object().unwrap().clone());
         patch["backup"] = backup.into();
     }
-    db.patch_run(id, &patch)?;
+    db.update_run_boundary(id, &patch)?;
     record_volume(db, id, node, status)?;
     Ok(())
 }

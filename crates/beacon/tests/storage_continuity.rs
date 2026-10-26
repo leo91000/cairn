@@ -81,7 +81,14 @@ async fn existing_disks_keep_publishing_reading_and_purging_on_their_original_st
     });
     service
         .store
-        .write(move |db| db.add_run(&record, None))
+        .write(move |db| {
+            db.admit_run(
+                &serde_json::from_value(record)?,
+                None,
+                &json!({"nodeId": LOCAL_NODE_ID}),
+                None,
+            )
+        })
         .await
         .unwrap();
     service

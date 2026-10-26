@@ -39,7 +39,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-const DATABASE_VERSION: i64 = 7;
+const DATABASE_VERSION: i64 = 8;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -86,11 +86,6 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('projects','agents','tasks','mcps','plugin-connections')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS records_kind ON records(kind,updated_at DESC);
 CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
-CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,project_id TEXT NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,data TEXT NOT NULL,dedupe TEXT UNIQUE);
-CREATE INDEX IF NOT EXISTS runs_status ON runs(status,created_at);
-CREATE INDEX IF NOT EXISTS runs_task ON runs(task_id,created_at DESC);
-CREATE INDEX IF NOT EXISTS runs_created ON runs(created_at DESC,id DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS runs_active_task ON runs(task_id) WHERE status IN ('queued','running','waiting');
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL,type TEXT NOT NULL,text TEXT NOT NULL,payload TEXT);
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id,id);
 CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY,data TEXT NOT NULL,expires INTEGER);
@@ -106,6 +101,7 @@ CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id,created_a
             tx.execute_batch("CREATE INDEX IF NOT EXISTS events_turns ON events(run_id,id) WHERE type='turn.started';
 CREATE INDEX IF NOT EXISTS events_user_input ON events(run_id,id) WHERE type='chat.user';
 CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload,'$.item.id'),id) WHERE json_extract(payload,'$.item.type')='agent_message';")?;
+            tx.execute_batch(crate::runs::SCHEMA)?;
             tx.execute_batch(crate::nodes::shared_blocks::SCHEMA)?;
             tx.execute_batch(crate::projects::SCHEMA)?;
             tx.execute_batch(crate::agents::SCHEMA)?;
@@ -283,13 +279,6 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             .await
     }
 
-    pub async fn patch_run(&self, id: &str, patch: Value) -> Result<Value> {
-        let id = id.to_owned();
-        // Read and rewrite the document under one write lock: another connection,
-        // such as a second process on this database, must not interleave its patch.
-        self.transaction(move |db| db.patch_run(&id, &patch)).await
-    }
-
     pub async fn event(
         &self,
         id: &str,
@@ -315,12 +304,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
 
 /// Run list projection: drops the heavy snapshot and summary, keeps display names and the
 /// explicit coding agent saved in the snapshot.
-pub const RUN_SUMMARY: &str = "json_set(
-    json_remove(data,'$.snapshot','$.summary'),
-    '$.taskName',json_extract(data,'$.snapshot.task.name'),
-    '$.agentName',json_extract(data,'$.snapshot.agent.name'),
-    '$.provider',json_extract(data,'$.snapshot.agent.provider')
-)";
+pub const RUN_SUMMARY: &str = "summary_data";
 
 // Database transactions and statement caches stay on their owning database thread.
 pub struct Db<'a>(pub &'a Connection);
@@ -549,31 +533,9 @@ impl Db<'_> {
     }
 
     pub fn run(&self, id: &str) -> Result<Option<Value>> {
-        self.json_row("SELECT data FROM runs WHERE id=?", [id])
-    }
-
-    pub fn add_run(&self, run: &Value, dedupe: Option<&str>) -> Result<Value> {
-        self.0
-            .prepare_cached("INSERT INTO runs VALUES(?,?,?,?,?,?,?)")?
-            .execute(params![
-                run["id"].as_str(),
-                run["taskId"].as_str(),
-                run["projectId"].as_str().unwrap_or(""),
-                run["status"].as_str(),
-                run["createdAt"].as_i64(),
-                run.to_string(),
-                dedupe
-            ])?;
-        Ok(run.clone())
-    }
-
-    pub fn patch_run(&self, id: &str, patch: &Value) -> Result<Value> {
-        let mut run = required(self.run(id)?, "Run not found")?;
-        merge(&mut run, patch);
-        self.0
-            .prepare_cached("UPDATE runs SET status=?,data=? WHERE id=?")?
-            .execute(params![run["status"].as_str(), run.to_string(), id])?;
-        Ok(run)
+        self.run_record(id)?
+            .map(crate::runs::RunRecord::wire)
+            .transpose()
     }
 
     pub fn active(&self) -> Result<Vec<Value>> {
@@ -678,7 +640,7 @@ impl Db<'_> {
                     "DELETE FROM events
                      WHERE run_id=?1
                        AND id<(SELECT COALESCE(MAX(id),0)-10000 FROM events WHERE run_id=?1)
-                       AND run_id IN (SELECT id FROM runs WHERE json_extract(data,'$.trigger')!='chat')",
+                       AND run_id IN (SELECT id FROM runs WHERE trigger!='chat')",
                 )?
                 .execute([run])?;
         }
@@ -933,7 +895,7 @@ mod schema_tests {
 
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 12, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 12, 99] {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();

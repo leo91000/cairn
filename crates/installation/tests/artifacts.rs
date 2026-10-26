@@ -138,7 +138,13 @@ async fn start_run(s: &Arc<Service>, name: &str, prompt: &str) -> Value {
         .unwrap();
     let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
     s.store
-        .patch_run(text(&run, "id"), json!({ "status": RunStatus::Running }))
+        .change_run(
+            text(&run, "id"),
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Running),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     run
@@ -337,7 +343,13 @@ async fn publication_is_idempotent_versioned_and_readable_after_restart_without_
     assert_eq!(events.iter().filter(|e| e["type"] == "artifact").count(), 2);
     f.server.abort();
     s.store
-        .patch_run(&f.run, json!({ "status": RunStatus::Succeeded }))
+        .change_run(
+            &f.run,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Succeeded),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(f.publish(&args).await.unwrap_err().status, 401);

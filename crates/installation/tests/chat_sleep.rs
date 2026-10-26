@@ -47,7 +47,13 @@ impl Fixture {
         let run_id = text(&run, "id").to_owned();
         service
             .store
-            .patch_run(&run_id, json!({ "status": "running" }))
+            .change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         service.chat_acknowledge(&run_id, &message).await.unwrap();
@@ -87,9 +93,20 @@ impl Fixture {
     }
 
     async fn finish(&self) {
-        self.service.store.patch_run(&self.run, json!({
-            "status": "succeeded", "recoveryPending": false, "sessionId": "saved-session", "workspace": "/saved/workspace",
-        })).await.unwrap();
+        self.service
+            .store
+            .change_run(
+                &self.run,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Succeeded),
+                    recovery_pending: Some(false),
+                    session_id: Some(Some("saved-session".into())),
+                    workspace: Some(Some("/saved/workspace".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
     }
 
     async fn due(&self) {
@@ -220,7 +237,13 @@ async fn replacing_waits_and_expired_turn_grants_cannot_reschedule_the_next_turn
     );
     f.service
         .store
-        .patch_run(&f.run, json!({ "status": "running" }))
+        .change_run(
+            &f.run,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let configuration = f
@@ -305,7 +328,13 @@ async fn user_input_cancel_and_trash_prevent_obsolete_wakeups() {
             "failure" => {
                 f.service
                     .store
-                    .patch_run(&f.run, json!({ "status": "failed" }))
+                    .change_run(
+                        &f.run,
+                        cairn_installation::runs::RunChanges {
+                            status: Some(cairn_contracts::RunStatus::Failed),
+                            ..Default::default()
+                        },
+                    )
                     .await
                     .unwrap();
             }
@@ -339,13 +368,14 @@ async fn failed_paused_turn_cannot_replay_its_wakeup_after_manual_resume() {
         f.due().await;
         f.service
             .store
-            .patch_run(
+            .change_run(
                 &f.run,
-                json!({
-                    "status": "failed",
-                    "resumeAvailable": true,
-                    "recoveryPending": false,
-                }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Failed),
+                    resume_available: Some(true),
+                    recovery_pending: Some(false),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -378,7 +408,13 @@ async fn failed_paused_turn_cannot_replay_its_wakeup_after_manual_resume() {
         f.finish().await;
         f.service
             .store
-            .patch_run(&f.run, json!({ "recoveryPending": false }))
+            .change_run(
+                &f.run,
+                cairn_installation::runs::RunChanges {
+                    recovery_pending: Some(false),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
 
@@ -477,7 +513,11 @@ async fn delay_rejects_invalid_inputs_and_pending_steering_but_accepts_missions(
     let task = f
         .service
         .task_fixture(
-            json!({ "name": "Scheduled task", "prompt": "Do work", "agentId": cairn_installation::config::MAIN_AGENT_ID }),
+            json!({
+                "name": "Scheduled task",
+                "prompt": "Do work",
+                "agentId": cairn_installation::config::MAIN_AGENT_ID,
+            }),
             None,
         )
         .await
@@ -489,7 +529,13 @@ async fn delay_rejects_invalid_inputs_and_pending_steering_but_accepts_missions(
         .unwrap();
     f.service
         .store
-        .patch_run(text(&run, "id"), json!({ "status": "running" }))
+        .change_run(
+            text(&run, "id"),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let config = f
@@ -538,7 +584,7 @@ async fn replacing_a_native_session_retires_its_pending_questions_before_startup
             .unwrap();
         f.service
             .store
-            .patch_run(&f.run, json!({ "outcome": { "status": "needs_input" } }))
+            .update_run_boundary(&f.run, json!({ "outcome": { "status": "needs_input" } }))
             .await
             .unwrap();
         f.finish().await;
@@ -617,7 +663,13 @@ async fn time_conditions_are_available_without_plugin_or_installation_access() {
     run["snapshot"]["agent"] = agent;
     f.service
         .store
-        .patch_run(&f.run, json!({ "snapshot": run["snapshot"] }))
+        .change_run(
+            &f.run,
+            cairn_installation::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(run["snapshot"].clone()).unwrap()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let listing = project_workspaces::rpc(&f.service, &f.token, "tools/list", &json!({}))
@@ -685,7 +737,10 @@ async fn dates_are_absolute_timezone_aware_and_repeated_calls_keep_the_deadline(
         "Keep the legacy timer shape for older binaries"
     );
     let offset = chrono::FixedOffset::east_opt(7200).unwrap();
-    let equivalent = json!({ "conditions": [{ "type": "at", "date": date.with_timezone(&offset).to_rfc3339() }], "reason": "Wait until date" });
+    let equivalent = json!({
+        "conditions": [{ "type": "at", "date": date.with_timezone(&offset).to_rfc3339() }],
+        "reason": "Wait until date",
+    });
     assert_eq!(
         wait_for::schedule(&f.service, &f.token, &equivalent)
             .await
@@ -702,7 +757,10 @@ async fn dates_are_absolute_timezone_aware_and_repeated_calls_keep_the_deadline(
         json!({ "type": "at", "date": "tomorrow" }),
         json!({ "type": "at", "date": "2026-10-23T09:00:00" }),
         json!({ "type": "at", "date": "2026-02-30T09:00:00Z" }),
-        json!({ "type": "at", "date": chrono::DateTime::from_timestamp_millis(now() + 86_500_000).unwrap().to_rfc3339() }),
+        json!({
+            "type": "at",
+            "date": chrono::DateTime::from_timestamp_millis(now() + 86_500_000).unwrap().to_rfc3339(),
+        }),
         json!({ "type": "at", "date": date.to_rfc3339(), "seconds": 10 }),
     ] {
         assert!(

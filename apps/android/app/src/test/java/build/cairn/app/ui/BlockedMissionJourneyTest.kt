@@ -94,7 +94,7 @@ class BlockedMissionJourneyTest {
         requestedBy: RunRequester? = null,
     ) =
         Run(
-            "${task.id}-run",
+            id = "${task.id}-run",
             taskId = task.id,
             status = "succeeded",
             trigger = "mcp",
@@ -129,7 +129,10 @@ class BlockedMissionJourneyTest {
                     waitingOn = "requester",
                 ),
                 20,
-                RunRequester("parent-run", chatId = "parent"),
+                RunRequester(
+                    runId = "parent-run",
+                    chatId = "parent",
+                ),
             ),
             run(
                 deploy,

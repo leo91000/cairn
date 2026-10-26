@@ -386,12 +386,15 @@ async fn evict_clean(
                     .into();
                 db.put("node-volumes", &volume)?;
             }
-            db.patch_run(&run, &json!({ "storage": status }))?;
+            db.update_run_boundary(&run, &json!({ "storage": status }))?;
             Ok(())
         })
         .await?;
     Ok(true)
 }
+
+#[cfg(test)]
+use crate::run_fixture::DbRunFixture;
 
 #[cfg(test)]
 mod tests {
@@ -408,7 +411,7 @@ mod tests {
         db.put("nodes", &json!({
             "id": node, "lastSeen": now(), "capabilities": { "backend": "native", "ublk": true },
         }))?;
-        db.add_run(&json!({
+        db.add_run_fixture(&json!({
             "id": run, "taskId": id(), "createdAt": time - IDLE_MS, "finishedAt": time - IDLE_MS,
             "status": "succeeded", "executionBackend": "native", "recoveryPending": false,
             "nodeState": null, "moveRequest": null,
@@ -472,15 +475,20 @@ mod tests {
             .transaction(|db| {
                 let (run, time) = (id(), now());
                 records(db, &run, time)?;
-                db.patch_run(
+                db.change_run(
                     &run,
-                    &json!({ "status": "queued", "finishedAt": null, "recoveryPending": true }),
+                    crate::runs::RunChanges {
+                        status: Some(cairn_contracts::RunStatus::Queued),
+                        finished_at: Some(None),
+                        recovery_pending: Some(true),
+                        ..Default::default()
+                    },
                 )?;
                 let node = super::super::LOCAL_NODE_ID;
                 assert_eq!(pressure_page(db, node)?[0]["id"], run);
                 assert!(candidate(db, &run, time, None)?.is_none());
                 assert!(candidate(db, &run, time, Some(node))?.is_some());
-                db.patch_run(&run, &json!({ "backup": { "status": "saving" } }))?;
+                db.update_run_boundary(&run, &json!({ "backup": { "status": "saving" } }))?;
                 assert!(candidate(db, &run, time, Some(node))?.is_none());
                 Ok(())
             })
@@ -523,11 +531,17 @@ mod tests {
                 for index in 0..33 {
                     let run = id();
                     records(db, &run, time)?;
-                    db.patch_run(&run, &json!({ "finishedAt": time - IDLE_MS + index }))?;
+                    db.change_run(
+                        &run,
+                        crate::runs::RunChanges {
+                            finished_at: Some(Some(time - IDLE_MS + index)),
+                            ..Default::default()
+                        },
+                    )?;
                     if index < 32 {
                         let mut backup = db.run(&run)?.unwrap()["backup"].clone();
                         backup["status"] = "error".into();
-                        db.patch_run(&run, &json!({ "backup": backup }))?;
+                        db.update_run_boundary(&run, &json!({ "backup": backup }))?;
                     } else {
                         final_run = run;
                     }
@@ -578,7 +592,7 @@ mod tests {
                 let node_id = super::super::LOCAL_NODE_ID;
                 let mut storage = db.run(&run)?.unwrap()["storage"].clone();
                 storage["dirtyBytes"] = 0.into();
-                db.patch_run(&run, &json!({ "nodeId": node_id, "storage": storage }))?;
+                db.update_run_boundary(&run, &json!({ "nodeId": node_id, "storage": storage }))?;
                 let mut node = db.get("nodes", node_id)?.unwrap();
                 node["limits"] = json!({ "diskMiB": 102400 });
                 node["diskCapacity"] = json!({
@@ -591,7 +605,7 @@ mod tests {
                 assert_eq!(accounting["unsynchronizedBytes"], 0);
                 let mut storage = db.run(&run)?.unwrap()["storage"].clone();
                 storage["dirtyBytes"] = 4096.into();
-                db.patch_run(&run, &json!({ "storage": storage }))?;
+                db.update_run_boundary(&run, &json!({ "storage": storage }))?;
                 let accounting = super::super::disk_capacity::accounting(db, &node, &[])?;
                 assert_eq!(accounting["reclaimableBytes"], 0);
                 assert_eq!(accounting["unsynchronizedBytes"], 4096);
@@ -611,7 +625,13 @@ mod tests {
             .transaction(|db| {
                 let (run, time) = (id(), now());
                 records(db, &run, time)?;
-                db.patch_run(&run, &json!({ "finishedAt": time }))?;
+                db.change_run(
+                    &run,
+                    crate::runs::RunChanges {
+                        finished_at: Some(Some(time)),
+                        ..Default::default()
+                    },
+                )?;
                 let saved = db.kv(&checkpoint::key(&run))?.unwrap();
                 let mut attempt = db.get("node-attempts", text(&saved, "runnerId"))?.unwrap();
                 attempt["releasedAt"] = time.into();
@@ -623,7 +643,7 @@ mod tests {
                 assert!(candidate(db, &run, time, None)?.is_none());
                 attempt["released"] = true.into();
                 db.put("node-attempts", &attempt)?;
-                db.patch_run(&run, &json!({ "backup": { "requestedRevision": 3 } }))?;
+                db.update_run_boundary(&run, &json!({ "backup": { "requestedRevision": 3 } }))?;
                 assert!(candidate(db, &run, time, None)?.is_none());
                 Ok(())
             })
@@ -641,15 +661,48 @@ mod tests {
             assert!(candidate(db, &run, time - IDLE_MS - 1, None)?.is_none());
             assert!(candidate(db, &run, time - IDLE_MS, None)?.is_some());
             let original = db.run(&run)?.unwrap();
-            for patch in [
-                json!({ "status": "queued" }), json!({ "status": "running" }),
-                json!({ "recoveryPending": true }), json!({ "moveRequest": {} }), json!({ "nodeState": "restoring" }),
-                json!({ "backup": { "status": "error" } }), json!({ "backup": { "status": "saving" } }),
-                json!({ "backup": { "status": "ready", "requestedRevision": 3, "acknowledgedRevision": 2 } }),
+            for change in [
+                crate::runs::RunChanges {
+                    status: Some(RunStatus::Queued),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    status: Some(RunStatus::Running),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    recovery_pending: Some(true),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    boundary: Some(json!({ "moveRequest": {} })),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    boundary: Some(json!({ "nodeState": "restoring" })),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    boundary: Some(json!({ "backup": { "status": "error" } })),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    boundary: Some(json!({ "backup": { "status": "saving" } })),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    boundary: Some(json!({ "backup": { "status": "ready", "requestedRevision": 3, "acknowledgedRevision": 2 } })),
+                    ..Default::default()
+                },
             ] {
-                db.patch_run(&run, &patch)?;
-                assert!(candidate(db, &run, time - IDLE_MS, None)?.is_none(), "{patch}");
-                db.patch_run(&run, &original)?;
+                db.change_run(&run, change)?;
+                assert!(candidate(db, &run, time - IDLE_MS, None)?.is_none());
+                db.change_run(&run, crate::runs::RunChanges {
+                    status: Some(RunStatus::Succeeded),
+                    recovery_pending: Some(false),
+                    ..Default::default()
+                })?;
+                db.update_run_boundary(&run, &json!({ "moveRequest": null, "nodeState": null, "backup": original["backup"] }))?;
             }
             let saved = db.kv(&checkpoint::key(&run))?.unwrap();
             let mut execution = db.get("node-attempts", text(&saved, "runnerId"))?.unwrap();

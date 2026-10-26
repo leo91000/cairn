@@ -113,7 +113,7 @@ async fn runtime_disk_notice_preserves_publication_metadata_and_redacts_all_payl
     fixture
         .service
         .store
-        .patch_run(&fixture.id, json!({ "storage": storage }))
+        .update_run_boundary(&fixture.id, json!({ "storage": storage }))
         .await
         .unwrap();
     fixture
@@ -130,7 +130,7 @@ async fn runtime_disk_notice_preserves_publication_metadata_and_redacts_all_payl
     fixture
         .service
         .store
-        .patch_run(
+        .update_run_boundary(
             &fixture.id,
             json!({ "storage": { "mode": "on-demand", "dirtyBytes": 0 } }),
         )
@@ -373,7 +373,11 @@ async fn engine_reports_survive_log_budget_redacted_and_only_a_reported_limit_ex
         json!({ "type": "provider.limit", "status": "rejected", "window": "five_hour", "blocked": true }),
         json!({ "type": "engine.notice", "level": "warning", "message": "Hook printed sensitive-tool-credential" }),
         // A long notice is cut once redacted: a secret across the cut leaves no part behind.
-        json!({ "type": "engine.notice", "level": "warning", "message": format!("{}sensitive-tool-credential", "x".repeat(3_995)) }),
+        json!({
+            "type": "engine.notice",
+            "level": "warning",
+            "message": format!("{}sensitive-tool-credential", "x".repeat(3_995)),
+        }),
         // Notices the conversation does not show stay within the run log's budget.
         json!({ "type": "engine.notice", "level": "info", "message": "Tool Bash running for 30s" }),
     ] {
@@ -574,9 +578,27 @@ async fn transport_previews_do_not_cut_secrets_before_manager_redaction() {
         )
     };
     for item in [
-        json!({ "id": "command", "type": "command_execution", "status": "completed", "command": boundary(1024), "cwd": boundary(256), "error": { "message": boundary(512) } }),
-        json!({ "id": "files", "type": "file_change", "changes": [{ "path": boundary(256), "kind": "update", "diff": "large" }] }),
-        json!({ "id": "subagent", "type": "subagent", "status": "completed", "prompt": boundary(4096), "result": boundary(4096), "activity": boundary(1024) }),
+        json!({
+            "id": "command",
+            "type": "command_execution",
+            "status": "completed",
+            "command": boundary(1024),
+            "cwd": boundary(256),
+            "error": { "message": boundary(512) },
+        }),
+        json!({
+            "id": "files",
+            "type": "file_change",
+            "changes": [{ "path": boundary(256), "kind": "update", "diff": "large" }],
+        }),
+        json!({
+            "id": "subagent",
+            "type": "subagent",
+            "status": "completed",
+            "prompt": boundary(4096),
+            "result": boundary(4096),
+            "activity": boundary(1024),
+        }),
     ] {
         let event = json!({ "type": "item.completed", "item": item });
         let transported = serde_json::from_slice(&run_output::event_line(&event)).unwrap();
@@ -765,7 +787,7 @@ async fn a_completed_outcome_retires_questions_but_input_needed_and_old_reports_
         fixture
             .service
             .store
-            .patch_run(
+            .update_run_boundary(
                 &fixture.id,
                 json!({
                     "chatExecution": { "messageId": "current" },
