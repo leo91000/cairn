@@ -174,6 +174,25 @@ fun NodesScreen(
                     Text(
                         "${node.availableSlots} slots libres sur ${node.slots} · ${node.occupiedSlots} occupés"
                     )
+                    node.diskAccounting?.let { disk ->
+                        Text("Capacité disque", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "${formatBytes(disk.localBytes)} stockés localement · ${formatBytes(disk.unusedGrantedBytes)} accordés mais inutilisés"
+                        )
+                        Text(
+                            "${formatBytes(disk.hostFreeBytes)} libres sur l’hôte · ${formatBytes(disk.hostReserveBytes)} réservés à l’hôte · ${formatBytes(disk.poolReserveBytes)} de réserve du pool"
+                        )
+                        Text(
+                            "Au moins ${formatBytes(disk.reclaimableBytes)} récupérables sur les conversations inactives synchronisées"
+                        )
+                        Text(
+                            "${formatBytes(disk.unsynchronizedBytes)} de journal non synchronisé au dernier relevé ; conservés jusqu’à la réussite de la synchronisation."
+                        )
+                        Text(
+                            "Ces mesures se recoupent. Sous pression, les copies inactives synchronisées sont libérées sans attendre une heure ; les conversations en attente passent avant un nouvel agrandissement.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
                     NodeAgents(node, state, openAgents)
                     node.exclusiveReservation?.let { reservation ->
                         Panel {

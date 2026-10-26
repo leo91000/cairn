@@ -36,7 +36,7 @@ const SHARED_V1: &str = "shared-v1";
 const SYNC_CANDIDATES: &str =
     "SELECT data FROM runs WHERE status='running'
         OR json_extract(data,'$.backup.requestedRevision') > COALESCE(json_extract(data,'$.backup.acknowledgedRevision'),0)
-        OR (status IN ('succeeded','queued','waiting')
+        OR (status IN ('succeeded','failed','cancelled','interrupted','queued','waiting')
              AND json_extract(data,'$.storage.mode')='on-demand'
              AND (json_extract(data,'$.storage.dirtyBytes')>0
                   OR json_extract(data,'$.backup.status') IN ('pending','saving','error')))";
@@ -1616,6 +1616,35 @@ async fn local_locations(s: &Service, run: &str) -> Result<Vec<Value>> {
 #[cfg(test)]
 mod capture_policy_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn storage_pressure_recovers_dirty_finished_runs_without_pending_demand() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            for status in ["succeeded", "failed", "cancelled", "interrupted"] {
+                db.add_run(&json!({
+                    "id": status,
+                    "taskId": status,
+                    "status": status,
+                    "createdAt": 0,
+                    "isolated": true,
+                    "storage": { "mode": "on-demand", "dirtyBytes": 4096 },
+                    "backup": { "status": "error", "requestedRevision": 1, "acknowledgedRevision": 1 }
+                }), None)?;
+            }
+            Ok(())
+        }).await.unwrap();
+        let candidates = store
+            .read(|db| db.json_rows(SYNC_CANDIDATES, []))
+            .await
+            .unwrap();
+        assert_eq!(
+            candidates.len(),
+            4,
+            "All finished journals must remain eligible for backup and reclamation"
+        );
+    }
 
     #[tokio::test]
     async fn waiting_mission_dirty_publication_is_recovered_after_a_crash_before_demand() {

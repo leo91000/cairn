@@ -6,7 +6,12 @@ import {
   onMounted,
   ref,
 } from 'vue'
-import { diskCapacity, formatMiB, nodeDiagnostics } from '../../../../packages/contracts/nodes'
+import {
+  diskCapacity,
+  formatBytes,
+  formatMiB,
+  nodeDiagnostics,
+} from '../../../../packages/contracts/nodes'
 import { nodeBackend } from '../agent-access'
 import {
   api,
@@ -464,6 +469,15 @@ function statusLabel(node: ExecutionNode) {
             <div><span>Shared RAM</span><strong>{{ formatMiB(node.limits.memoryMiB) }}</strong><span>{{ node.usage ? `${formatMiB(node.usage.memoryMiB)} in use` : 'usage unavailable' }}</span></div>
             <div><span>Shared disk</span><strong>{{ formatMiB(node.limits.diskMiB) }}</strong><span>{{ node.usage ? `${formatMiB(node.usage.diskMiB)} on this node` : 'usage unavailable' }}</span></div>
           </div>
+          <section v-if="node.diskAccounting" class="mt-2 grid gap-1 rounded-xl border border-line px-4 py-3 text-sm" aria-label="Disk capacity details">
+            <p><strong>Disk capacity</strong> · {{ formatBytes(node.diskAccounting.localBytes) }} stored locally · {{ formatBytes(node.diskAccounting.unusedGrantedBytes) }} granted but unused</p>
+            <p>{{ formatBytes(node.diskAccounting.hostFreeBytes) }} free on the host · {{ formatBytes(node.diskAccounting.hostReserveBytes) }} kept free for the host · {{ formatBytes(node.diskAccounting.poolReserveBytes) }} pool reserve</p>
+            <p>At least {{ formatBytes(node.diskAccounting.reclaimableBytes) }} reclaimable from synchronized inactive conversations</p>
+            <p>{{ formatBytes(node.diskAccounting.unsynchronizedBytes) }} of unpublished journal data last reported; retained until synchronization succeeds.</p>
+            <p class="text-xs text-muted">
+              These figures overlap. Under pressure, synchronized inactive copies are reclaimed without the one-hour delay; waiting conversations take priority over further growth.
+            </p>
+          </section>
           <section class="mt-2 grid gap-1 rounded-xl border border-line px-4 py-3 text-sm" :aria-label="`Agents on ${node.name}`">
             <p>
               <template v-if="node.agents?.length">

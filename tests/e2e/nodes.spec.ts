@@ -8,6 +8,32 @@ import {
   workspacePath,
 } from './fixtures'
 
+test('shows reclaimable and unpublished disk data on desktop and phone', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const [node] = await workspace.api('/api/nodes')
+  node.diskAccounting = {
+    capturedAt: Date.now(),
+    localBytes: 80 * 1024 ** 3,
+    unusedGrantedBytes: 12 * 1024 ** 3,
+    hostFreeBytes: 90 * 1024 ** 3,
+    hostReserveBytes: 20 * 1024 ** 3,
+    poolReserveBytes: 5 * 1024 ** 3,
+    reclaimableBytes: 16 * 1024 ** 3,
+    unsynchronizedBytes: 8 * 1024 ** 3,
+  }
+  await page.route('**/api/nodes', route => route.fulfill({ json: [node] }))
+  await page.goto(workspacePath('/nodes'))
+  await authenticateWorkspace(page)
+  const details = page.getByRole('region', { name: 'Disk capacity details' })
+  await expect(details).toContainText('80 GiB stored locally')
+  await expect(details).toContainText('16 GiB reclaimable')
+  await expect(details).toContainText('8 GiB of unpublished journal data')
+  await expect(details).toContainText('without the one-hour delay')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(details).toBeVisible()
+  expect(await details.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
+})
+
 test('registers, configures and revokes a node through the owner interface', async ({ page, workspace }) => {
   test.setTimeout(60000)
   // Requests are observed below, so they must go through HTTP.

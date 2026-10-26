@@ -250,7 +250,9 @@ fn route(method: &str, path: &str) -> Result<()> {
 
 /// How long the controller may take to answer, by operation.
 fn controller_timeout(method: &str, path: &str, native: bool) -> Duration {
-    Duration::from_secs(if path.ends_with("/restore") {
+    Duration::from_secs(if method == "POST" && path.ends_with("/publication") {
+        super::snapshots::PUBLICATION_STARTUP.as_secs()
+    } else if path.ends_with("/restore") {
         120
     } else if method == "POST" && matches!(path, "/exclusive/acquire" | "/exclusive/release") {
         // Match the manager's acknowledgement window: suspension and memory
@@ -496,6 +498,16 @@ async fn progressing_upload<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_pressure_publication_can_open_a_large_stopped_journal() {
+        let path = format!("/snapshots/{}/publication", crate::config::id());
+        assert!(controller_timeout("POST", &path, true) >= Duration::from_secs(120));
+        assert_eq!(
+            controller_timeout("POST", "/storage-policy", true),
+            Duration::from_secs(25)
+        );
+    }
 
     #[test]
     fn idle_cache_eviction_reaches_the_controller_only_with_a_canonical_run_and_post() {

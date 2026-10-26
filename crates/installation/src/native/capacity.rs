@@ -114,6 +114,9 @@ impl Capacity {
                 "Automatic growth is not negotiated with this installation; the current allowance remains in effect."
             } else {
                 match attempt.reason.as_str() {
+                    "waiting-conversation" => {
+                        "Additional capacity is reserved for a conversation waiting to start. Cairn reclaims synchronized inactive caches first."
+                    }
                     "granted" => {
                         "Cairn granted additional shared capacity and is expanding the filesystem."
                     }

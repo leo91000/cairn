@@ -174,7 +174,7 @@ async fn pressure(s: &Service) -> Result<()> {
 }
 
 fn candidate(
-    db: &mut Db<'_>,
+    db: &Db<'_>,
     run: &str,
     cutoff: i64,
     expected_node: Option<&str>,
@@ -260,6 +260,27 @@ fn candidate(
         "generation": point["diskGeneration"], "grantId": current["storage"]["grantId"],
     });
     Ok(Some((node, point, expected)))
+}
+
+/// A conservative lower bound: fresh exclusive backing of inactive disks whose
+/// current generation is acknowledged. The controller rechecks before deletion.
+pub(super) fn reclaimable_bytes(db: &Db<'_>, node: &Value) -> Result<u64> {
+    let Some(retained) = node["diskCapacity"]["retainedBytes"].as_object() else {
+        return Ok(0);
+    };
+    let mut bytes = 0u64;
+    for (run, backing) in retained {
+        if db
+            .run(run)?
+            .is_none_or(|run| run["storage"]["dirtyBytes"] != 0)
+        {
+            continue;
+        }
+        if candidate(db, run, now(), Some(text(node, "id")))?.is_some() {
+            bytes = bytes.saturating_add(backing.as_u64().unwrap_or(0));
+        }
+    }
+    Ok(bytes)
 }
 
 pub(crate) async fn evict_idle(s: &Service, run: &str, time: i64) -> Result<bool> {
@@ -539,6 +560,43 @@ mod tests {
                 node["diskCapacity"]["capturedAt"] = time.into();
                 request(db, &node)?;
                 assert_eq!(db.kv(&key)?, Some(json!(true)));
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn storage_pressure_accounting_distinguishes_reclaimable_and_unpublished_data() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let run = id();
+                let time = now();
+                records(db, &run, time)?;
+                let node_id = super::super::LOCAL_NODE_ID;
+                let mut storage = db.run(&run)?.unwrap()["storage"].clone();
+                storage["dirtyBytes"] = 0.into();
+                db.patch_run(&run, &json!({ "nodeId": node_id, "storage": storage }))?;
+                let mut node = db.get("nodes", node_id)?.unwrap();
+                node["limits"] = json!({ "diskMiB": 102400 });
+                node["diskCapacity"] = json!({
+                    "protocol": 1, "capturedAt": time, "usedBytes": 10000,
+                    "freeBytes": 100000, "ownedBytes": {}, "requests": [],
+                    "retainedBytes": { &run: 2048 }
+                });
+                let accounting = super::super::disk_capacity::accounting(db, &node, &[])?;
+                assert_eq!(accounting["reclaimableBytes"], 2048);
+                assert_eq!(accounting["unsynchronizedBytes"], 0);
+                let mut storage = db.run(&run)?.unwrap()["storage"].clone();
+                storage["dirtyBytes"] = 4096.into();
+                db.patch_run(&run, &json!({ "storage": storage }))?;
+                let accounting = super::super::disk_capacity::accounting(db, &node, &[])?;
+                assert_eq!(accounting["reclaimableBytes"], 0);
+                assert_eq!(accounting["unsynchronizedBytes"], 4096);
+                node["diskCapacity"]["capturedAt"] = (time - 31_000).into();
+                assert!(super::super::disk_capacity::accounting(db, &node, &[])?.is_null());
                 Ok(())
             })
             .await

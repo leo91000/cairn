@@ -53,6 +53,7 @@ data class ExecutionNode(
     val occupiedSlots: Int = 0,
     val availableSlots: Int = 4,
     val usage: NodeUsage? = null,
+    val diskAccounting: NodeDiskAccounting? = null,
     val budgetError: String? = null,
     val pressure: String? = null,
     val executionReady: Boolean = false,
@@ -74,6 +75,18 @@ data class NativeModeState(
     val generation: String? = null,
     val status: String = "",
     val error: String? = null,
+)
+
+@Serializable
+data class NodeDiskAccounting(
+    val capturedAt: Long,
+    val localBytes: Long,
+    val unusedGrantedBytes: Long,
+    val hostFreeBytes: Long,
+    val hostReserveBytes: Long,
+    val poolReserveBytes: Long,
+    val reclaimableBytes: Long,
+    val unsynchronizedBytes: Long,
 )
 
 fun nativeModeLabel(mode: String) =

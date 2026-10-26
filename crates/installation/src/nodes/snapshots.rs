@@ -24,6 +24,9 @@ pub const READ_BATCH: usize = 8;
 pub const PUBLICATION_BATCH: usize = 8;
 pub const MAX_PUBLICATION_BLOCKS: usize = (1024_u64 * 1024 * 1024 * 1024 / BLOCK) as usize;
 const DIRECT_PUBLICATION_STARTUP: std::time::Duration = std::time::Duration::from_secs(1800);
+/// Opening a stopped journal verifies its durable append history before headers.
+/// Keep that work separate from the idle deadline on the subsequent byte stream.
+pub(crate) const PUBLICATION_STARTUP: std::time::Duration = std::time::Duration::from_secs(300);
 const TRANSFER_IDLE: std::time::Duration = std::time::Duration::from_secs(120);
 const MANIFEST_VERSION: u64 = 1;
 
@@ -478,7 +481,7 @@ impl Fetch {
             let startup = if self.direct_publication {
                 DIRECT_PUBLICATION_STARTUP
             } else {
-                TRANSFER_IDLE
+                PUBLICATION_STARTUP
             };
             let response = tokio::time::timeout(startup, request.send())
                 .await
@@ -486,7 +489,10 @@ impl Fetch {
                 .map_err(|_| Error::unavailable("Backup block transfer interrupted."))?;
             {
                 if !response.status().is_success() {
-                    return Err(Error::unavailable("Backup block batch unavailable."));
+                    return Err(Error::unavailable(format!(
+                        "Backup block batch unavailable (HTTP {}).",
+                        response.status().as_u16()
+                    )));
                 }
                 if response
                     .content_length()
@@ -622,7 +628,8 @@ mod tests {
         use std::time::Duration;
 
         for (direct, delay, succeeds) in [
-            (false, TRANSFER_IDLE + Duration::from_secs(1), false),
+            (false, TRANSFER_IDLE + Duration::from_secs(1), true),
+            (false, PUBLICATION_STARTUP + Duration::from_secs(1), false),
             (true, TRANSFER_IDLE + Duration::from_secs(1), true),
             (
                 true,
