@@ -69,6 +69,7 @@ impl MissionFixture for Service {
             "nativeParentRunId",
             "nativeParentAccess",
             "nativeProvenanceUnknown",
+            "nativePluginGrants",
         ] {
             fields.remove(field);
         }

@@ -180,6 +180,7 @@ impl Missions {
             native_parent_run_id: None,
             native_parent_access: None,
             native_provenance_unknown: true,
+            native_plugin_grants: None,
         };
         s.store
             .transaction(move |db| {
@@ -388,6 +389,7 @@ struct NativeGrant {
     native_parent_run_id: Option<String>,
     native_parent_access: Option<String>,
     native_provenance_unknown: bool,
+    native_plugin_grants: Option<Vec<MissionPluginGrant>>,
 }
 
 fn apply_native(m: &mut Mission, value: Value) -> Result<()> {
@@ -397,6 +399,7 @@ fn apply_native(m: &mut Mission, value: Value) -> Result<()> {
     m.native_parent_run_id = grant.native_parent_run_id;
     m.native_parent_access = grant.native_parent_access;
     m.native_provenance_unknown = grant.native_provenance_unknown;
+    m.native_plugin_grants = grant.native_plugin_grants;
     Ok(())
 }
 

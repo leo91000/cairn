@@ -233,7 +233,7 @@ async fn mission_storage_layouts() {
         "createdAt":1700000000000_i64,"nextRun":if n%2==0 { Some(1699999999000_i64+n as i64) } else { None },
         "revision":"00000000-0000-4000-8000-000000000002","authorId":"measurement-owner","authorAccessId":"measurement-membership","authorRemoved":false,
         "scheduleFailure":null,"scheduleWaitReason":null,
-        "nativePrincipals":["measurement-owner"],"nativeAuthorityNodes":[],"nativeParentRunId":null,"nativeParentAccess":null,"nativeProvenanceUnknown":false,
+        "nativePrincipals":["measurement-owner"],"nativeAuthorityNodes":[],"nativeParentRunId":null,"nativeParentAccess":null,"nativeProvenanceUnknown":false,"nativePluginGrants":null,
     })).unwrap()).collect();
     measure(&corpus);
 }

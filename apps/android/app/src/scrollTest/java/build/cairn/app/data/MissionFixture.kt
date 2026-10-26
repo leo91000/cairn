@@ -44,4 +44,5 @@ fun Task(
         nativeParentRunId = null,
         nativeParentAccess = null,
         nativeProvenanceUnknown = true,
+        nativePluginGrants = null,
     )

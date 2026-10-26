@@ -19,6 +19,7 @@ data class Mission(
     val nativeAuthorityNodes: List<String>,
     val nativeParentAccess: String?,
     val nativeParentRunId: String?,
+    val nativePluginGrants: List<MissionPluginGrant>?,
     val nativePrincipals: List<String>,
     val nativeProvenanceUnknown: Boolean,
     val nextRun: Long?,

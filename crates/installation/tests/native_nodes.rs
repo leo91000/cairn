@@ -105,6 +105,59 @@ async fn an_owner_approved_bot_can_submit_to_its_native_agent() {
             .unwrap()
     );
 
+    // The current mission view must retain the plugin's revocation lineage through
+    // SQL reload, replacement and the frozen launch snapshot, independently of its author.
+    let mission_owner =
+        auth::InstallationIdentity::trusted(auth::InstallationRole::Owner, "fixture-owner");
+    let mission = f.service.task_as_fixture(json!({
+        "name": "Retained bot commitment", "prompt": "Follow the approved delegation", "agentId": f.agent["id"],
+        "cron": "0 9 * * *", "timezone": "UTC"
+    }), None, Some(&mission_owner)).await.unwrap();
+    let mut stored = f
+        .service
+        .store
+        .mission(text(&mission, "id"))
+        .await
+        .unwrap()
+        .unwrap();
+    stored.native_plugin_grants =
+        serde_json::from_value(run["nativePluginGrants"].clone()).unwrap();
+    f.service
+        .store
+        .transaction(move |db| db.save_mission(&stored))
+        .await
+        .unwrap();
+    let replaced = f
+        .service
+        .task_as_fixture(
+            json!({ "prompt": "Retain the approved delegation after editing" }),
+            Some(text(&mission, "id")),
+            Some(&mission_owner),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replaced["nativePluginGrants"], run["nativePluginGrants"]);
+    let restarted = Service::new(f.service.config.clone()).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(
+            restarted
+                .store
+                .mission(text(&mission, "id"))
+                .await
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
+        replaced
+    );
+    let queued = f
+        .service
+        .enqueue(text(&mission, "id"), "schedule", None)
+        .await
+        .unwrap();
+    assert_eq!(queued["nativePluginGrants"], run["nativePluginGrants"]);
+    assert_eq!(queued["snapshot"]["task"], replaced);
+
     let original = serde_json::to_value(&connection).unwrap();
     for (label, field, value) in [
         ("disabled", "enabled", json!(false)),
@@ -132,6 +185,15 @@ async fn an_owner_approved_bot_can_submit_to_its_native_agent() {
                 .await
                 .unwrap(),
             "{label}"
+        );
+        let (check, target) = (queued.clone(), node.clone());
+        assert!(
+            !f.service
+                .store
+                .read(move |db| policy::allows(db, &check, &target))
+                .await
+                .unwrap(),
+            "Mission lineage: {label}"
         );
         f.service
             .store
@@ -163,6 +225,30 @@ async fn an_owner_approved_bot_can_submit_to_its_native_agent() {
     )
     .await
     .unwrap();
+    let paused = f
+        .service
+        .task_as_fixture(
+            json!({ "enabled": false }),
+            Some(text(&mission, "id")),
+            Some(&mission_owner),
+        )
+        .await
+        .unwrap();
+    assert_eq!(paused["nativePluginGrants"], replaced["nativePluginGrants"]);
+    assert_eq!(
+        f.service.store.run(text(&queued, "id")).await.unwrap()["snapshot"]["task"],
+        replaced
+    );
+    let denied = f
+        .service
+        .task_as_fixture(
+            json!({ "enabled": true }),
+            Some(text(&mission, "id")),
+            Some(&mission_owner),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(denied.status, 403);
     assert!(
         !f.service
             .store

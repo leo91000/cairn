@@ -145,6 +145,15 @@ pub struct SchedulePreviewOutput {
     pub occurrences: Vec<i64>,
 }
 
+// Provenance retained at the native-node boundary until that domain is converted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MissionPluginGrant {
+    pub connection_id: String,
+    pub revision: String,
+    pub author_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Mission {
@@ -171,6 +180,7 @@ pub struct Mission {
     pub native_parent_run_id: Option<String>,
     pub native_parent_access: Option<String>,
     pub native_provenance_unknown: bool,
+    pub native_plugin_grants: Option<Vec<MissionPluginGrant>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]

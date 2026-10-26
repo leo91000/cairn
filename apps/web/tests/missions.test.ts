@@ -22,6 +22,7 @@ function task(id: string, extra: Partial<Task> = {}): Task {
     nativeParentRunId: null,
     nativeParentAccess: null,
     nativeProvenanceUnknown: true,
+    nativePluginGrants: null,
     id,
     name: id,
     prompt: 'Do it',

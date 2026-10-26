@@ -300,7 +300,10 @@ mission data classes. Android also shows the same author restrictions and schedu
 wait/removal reasons as the web, in French/native controls. Run task presentation
 uses generated `RunTaskSnapshot`: chat runs synthesize typed settings without creating
 a mission. JSON remains only at the unconverted run/native-node boundaries (A5/A10),
-including typed native provenance lists in named SQL columns. `list_task_activity`
+including typed native provenance lists and nullable plugin grant lists in named SQL
+columns. Connection/revision/external-author lineage from ADR-0068 survives mission
+replacement, restrictive state changes, restart and launch; revocation still uses
+the live native policy. `list_task_activity`
 returns the existing run-summary shape until the run conversion; its input and policy
 are registered here. It uses the authenticated account's read state in the apps and
 the owner's current read state in agent tools, without initializing that state on

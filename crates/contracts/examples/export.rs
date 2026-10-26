@@ -145,6 +145,13 @@ fn main() {
             native_parent_run_id: None,
             native_parent_access: None,
             native_provenance_unknown: true,
+            native_plugin_grants: input.settings.archived.then(|| {
+                vec![MissionPluginGrant {
+                    connection_id: "00000000-0000-4000-8000-000000000003".into(),
+                    revision: "connection-revision".into(),
+                    author_id: "external-person".into(),
+                }]
+            }),
         })
         .collect();
     fs::write(

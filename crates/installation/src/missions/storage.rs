@@ -35,6 +35,7 @@ CREATE TABLE missions(
  native_parent_run_id TEXT,
  native_parent_access TEXT CHECK(native_parent_access IN ('installation','delegation')),
  native_provenance_unknown INTEGER NOT NULL CHECK(native_provenance_unknown IN (0,1)),
+ native_plugin_grants TEXT CHECK(native_plugin_grants IS NULL OR (json_valid(native_plugin_grants) AND json_type(native_plugin_grants)='array')),
  CHECK((author_id IS NULL)=(author_access_id IS NULL)),
  CHECK(next_run IS NULL OR (enabled=1 AND archived=0 AND cron IS NOT NULL AND author_removed=0)),
  CHECK((failure_message IS NULL AND failure_scheduled_for IS NULL AND failure_at IS NULL)
@@ -62,7 +63,7 @@ CREATE TABLE mission_skills(
 ) WITHOUT ROWID;
 ";
 
-const COLUMNS: &str = "id,agent_id,project_id,name,prompt,cron,timezone,enabled,archived,worktree,skills_inherited,next_run,author_id,author_access_id,author_removed,revision,created_at,schedule_wait_reason,failure_message,failure_scheduled_for,failure_at,native_principals,native_authority_nodes,native_parent_run_id,native_parent_access,native_provenance_unknown";
+const COLUMNS: &str = "id,agent_id,project_id,name,prompt,cron,timezone,enabled,archived,worktree,skills_inherited,next_run,author_id,author_access_id,author_removed,revision,created_at,schedule_wait_reason,failure_message,failure_scheduled_for,failure_at,native_principals,native_authority_nodes,native_parent_run_id,native_parent_access,native_provenance_unknown,native_plugin_grants";
 
 fn decode<T: std::str::FromStr>(r: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<T>
 where
@@ -129,6 +130,18 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Mission> {
         native_parent_run_id: r.get(23)?,
         native_parent_access: r.get(24)?,
         native_provenance_unknown: r.get(25)?,
+        native_plugin_grants: r
+            .get::<_, Option<String>>(26)?
+            .map(|s| {
+                serde_json::from_str(&s).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        26,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })
+            })
+            .transpose()?,
     })
 }
 
@@ -192,9 +205,9 @@ impl Db<'_> {
     pub fn save_mission(&self, m: &Mission) -> Result<()> {
         let s = &m.settings;
         let f = m.schedule_failure.as_ref();
-        self.0.prepare_cached("INSERT INTO missions VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)
-   ON CONFLICT(id) DO UPDATE SET agent_id=excluded.agent_id,project_id=excluded.project_id,name=excluded.name,prompt=excluded.prompt,cron=excluded.cron,timezone=excluded.timezone,enabled=excluded.enabled,archived=excluded.archived,worktree=excluded.worktree,skills_inherited=excluded.skills_inherited,next_run=excluded.next_run,author_id=excluded.author_id,author_access_id=excluded.author_access_id,author_removed=excluded.author_removed,revision=excluded.revision,created_at=excluded.created_at,updated_at=excluded.updated_at,schedule_wait_reason=excluded.schedule_wait_reason,failure_message=excluded.failure_message,failure_scheduled_for=excluded.failure_scheduled_for,failure_at=excluded.failure_at,native_principals=excluded.native_principals,native_authority_nodes=excluded.native_authority_nodes,native_parent_run_id=excluded.native_parent_run_id,native_parent_access=excluded.native_parent_access,native_provenance_unknown=excluded.native_provenance_unknown")?.execute(params![
-   m.id.to_string(), s.agent_id.to_string(), s.project_id.map(|id| id.to_string()), s.name,s.prompt,s.cron,s.timezone,s.enabled,s.archived,s.worktree,s.skills.is_none(),m.next_run,m.author_id,m.author_access_id,m.author_removed,m.revision,m.created_at,now(),m.schedule_wait_reason,f.map(|f| &f.message),f.map(|f| f.scheduled_for),f.map(|f| f.at),serde_json::to_string(&m.native_principals)?,serde_json::to_string(&m.native_authority_nodes)?,m.native_parent_run_id,m.native_parent_access,m.native_provenance_unknown
+        self.0.prepare_cached("INSERT INTO missions VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)
+   ON CONFLICT(id) DO UPDATE SET agent_id=excluded.agent_id,project_id=excluded.project_id,name=excluded.name,prompt=excluded.prompt,cron=excluded.cron,timezone=excluded.timezone,enabled=excluded.enabled,archived=excluded.archived,worktree=excluded.worktree,skills_inherited=excluded.skills_inherited,next_run=excluded.next_run,author_id=excluded.author_id,author_access_id=excluded.author_access_id,author_removed=excluded.author_removed,revision=excluded.revision,created_at=excluded.created_at,updated_at=excluded.updated_at,schedule_wait_reason=excluded.schedule_wait_reason,failure_message=excluded.failure_message,failure_scheduled_for=excluded.failure_scheduled_for,failure_at=excluded.failure_at,native_principals=excluded.native_principals,native_authority_nodes=excluded.native_authority_nodes,native_parent_run_id=excluded.native_parent_run_id,native_parent_access=excluded.native_parent_access,native_provenance_unknown=excluded.native_provenance_unknown,native_plugin_grants=excluded.native_plugin_grants")?.execute(params![
+   m.id.to_string(), s.agent_id.to_string(), s.project_id.map(|id| id.to_string()), s.name,s.prompt,s.cron,s.timezone,s.enabled,s.archived,s.worktree,s.skills.is_none(),m.next_run,m.author_id,m.author_access_id,m.author_removed,m.revision,m.created_at,now(),m.schedule_wait_reason,f.map(|f| &f.message),f.map(|f| f.scheduled_for),f.map(|f| f.at),serde_json::to_string(&m.native_principals)?,serde_json::to_string(&m.native_authority_nodes)?,m.native_parent_run_id,m.native_parent_access,m.native_provenance_unknown,m.native_plugin_grants.as_ref().map(serde_json::to_string).transpose()?
   ])?;
         let id = m.id.to_string();
         self.0

@@ -1,6 +1,26 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "MissionPluginGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "authorId": {
+          "type": "string"
+        },
+        "connectionId": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "connectionId",
+        "revision",
+        "authorId"
+      ],
+      "type": "object"
+    },
     "ScheduleFailure": {
       "additionalProperties": false,
       "properties": {
@@ -94,6 +114,15 @@
     "nativeParentRunId": {
       "type": [
         "string",
+        "null"
+      ]
+    },
+    "nativePluginGrants": {
+      "items": {
+        "$ref": "#/definitions/MissionPluginGrant"
+      },
+      "type": [
+        "array",
         "null"
       ]
     },
@@ -204,7 +233,8 @@
     "nativeAuthorityNodes",
     "nativeParentRunId",
     "nativeParentAccess",
-    "nativeProvenanceUnknown"
+    "nativeProvenanceUnknown",
+    "nativePluginGrants"
   ],
   "title": "Mission",
   "type": "object"

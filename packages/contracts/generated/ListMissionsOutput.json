@@ -72,6 +72,15 @@
             "null"
           ]
         },
+        "nativePluginGrants": {
+          "items": {
+            "$ref": "#/definitions/MissionPluginGrant"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "nativePrincipals": {
           "items": {
             "type": "string"
@@ -179,7 +188,28 @@
         "nativeAuthorityNodes",
         "nativeParentRunId",
         "nativeParentAccess",
-        "nativeProvenanceUnknown"
+        "nativeProvenanceUnknown",
+        "nativePluginGrants"
+      ],
+      "type": "object"
+    },
+    "MissionPluginGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "authorId": {
+          "type": "string"
+        },
+        "connectionId": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "connectionId",
+        "revision",
+        "authorId"
       ],
       "type": "object"
     },
