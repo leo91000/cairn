@@ -108,4 +108,44 @@ class ContextUsageTest {
         assertEquals("Échec de la compaction du contexte", compactionText(failed).first)
         assertEquals("running", contextCompaction(started, "item.started", null).state)
     }
+
+    @Test
+    fun `a compaction its coding agent failed or stopped without closing it ends`() {
+        val started =
+            RunEvent(
+                1,
+                1000,
+                "item.started",
+                "",
+                mapOf(
+                    "item" to
+                        buildJsonObject {
+                            put("id", "c")
+                            put("type", "context_compaction")
+                            put("status", "in_progress")
+                        }
+                ),
+                runId = "run",
+            )
+        fun end(type: String, text: String = "", runId: String = "run") =
+            RunEvent(2, 2000, type, text, runId = runId)
+        fun state(vararg events: RunEvent) =
+            timelineEntries(listOf(started) + events, chat = true).mapNotNull { it.compaction }
+
+        // Codex fails the turn, or the run is stopped, without completing the compaction item.
+        assertEquals("failed", state(end("turn.failed")).single().state)
+        for (text in listOf("cancelled", "interrupted")) {
+            val stopped = state(end("status", text)).single()
+            assertEquals("stopped", stopped.state)
+            assertEquals("Compaction du contexte interrompue" to "", compactionText(stopped))
+        }
+        // A later execution does not revive it; another run's failure does not end it.
+        assertEquals(
+            "stopped",
+            state(end("status", "cancelled"), RunEvent(3, 3000, "turn.started", "", runId = "run"))
+                .single()
+                .state,
+        )
+        assertEquals("running", state(end("turn.failed", runId = "other")).single().state)
+    }
 }

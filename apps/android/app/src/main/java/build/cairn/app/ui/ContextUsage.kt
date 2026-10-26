@@ -81,7 +81,10 @@ internal fun contextSummary(usage: ContextUsage?): ContextSummary {
     )
 }
 
-/** The coding agent compacted its context; the history above stays as it was. */
+/**
+ * The coding agent compacted its context; the history above stays as it was. [state] is `running`,
+ * `done`, `failed`, or `stopped` when its execution ended before the coding agent confirmed it.
+ */
 internal data class ContextCompaction(
     val state: String,
     val trigger: String? = null,
@@ -111,11 +114,28 @@ internal fun contextCompaction(
     )
 }
 
+/**
+ * How an event that ends a turn or run ends a compaction its coding agent never confirmed. A coding
+ * agent may fail or be stopped without closing the compaction it started.
+ */
+internal fun compactionEnd(type: String, text: String): String? =
+    when {
+        type == "turn.failed" ||
+            type == "runner.failed" ||
+            (type == "status" && text == "failed") -> "failed"
+        type == "turn.started" ||
+            type == "turn.completed" ||
+            (type == "status" && text in setOf("succeeded", "cancelled", "interrupted")) ->
+            "stopped"
+        else -> null
+    }
+
 internal fun compactionText(compaction: ContextCompaction): Pair<String, String> {
     val title =
         when {
             compaction.state == "running" -> "Compaction du contexte…"
             compaction.state == "failed" -> "Échec de la compaction du contexte"
+            compaction.state == "stopped" -> "Compaction du contexte interrompue"
             compaction.trigger == "auto" -> "Contexte compacté automatiquement"
             else -> "Contexte compacté"
         }

@@ -50,6 +50,11 @@ messages become `context_compaction` items. Their status is `in_progress`, `comp
 compaction happened. Earlier messages stay in place, and the compaction never shows as a
 reply or a finished task. Claude Code's injected summary message is not shown.
 
+A coding agent can fail or be stopped without closing the compaction it started: Codex then
+fails its turn without completing the item. A divider still running when its run's turn ends
+or fails, or the run stops, therefore ends too: failed with the turn or run, otherwise
+"stopped". It never shows as completed without the coding agent's confirmation.
+
 ## Explicit compaction
 
 `POST /api/chats/:id/compact` and the `compact_chat` MCP tool (scope `run`, also on
@@ -75,7 +80,10 @@ it is not queued, acknowledged or added to the transcript.
   - Claude Code resumes the session and sends the local `/compact` command. Claude Code
     2.1.280 runs it without a model turn for the command itself, then emits `compact_boundary`.
     A successful result without a boundary fails with Claude Code's own message, for example
-    "No messages to compact".
+    "No messages to compact". At the boundary Cairn asks for a context report, which Claude
+    Code answers after the command's result. The execution waits for it, up to five seconds,
+    so the run shows the compacted estimate. A report requested before a later measured
+    response is ignored, as it describes the older context.
 - **Queue and steering.**
   - While a compaction runs, new messages stay queued. They are not steered into it, and
     they start the next turn once it ends.
@@ -88,7 +96,9 @@ it is not queued, acknowledged or added to the transcript.
     restored. It does not mark the conversation unread or newly finished.
   - Failure shows its reason like a failed turn.
 - **Recovery.** A compaction interrupted by a restart runs again: it has no external effect.
-  Claude Code writes no completion receipt for it, so no empty reply is ever replayed.
+  Claude Code writes no completion receipt for it, so no empty reply is ever replayed. One
+  that completed before the restart settles like a normal completion, keeping the previous
+  summary and `finishedAt`.
 - **Authorization.** The route and tool use the conversation's native grant like sending a
   message, because compaction spends the agent's model usage. MCP requires the `run`
   scope; reading alone is refused.

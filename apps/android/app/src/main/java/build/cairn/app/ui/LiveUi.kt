@@ -727,6 +727,18 @@ internal fun timelineEntries(
             scheduled = null
         }
         for ((eventIndex, event) in folded.withIndex()) {
+            // A compaction still running when its turn or run ends did not complete.
+            compactionEnd(event.type, event.text)?.let { end ->
+                for ((key, index) in compactions) {
+                    val compaction = result[index].compaction ?: continue
+                    if (
+                        compaction.state == "running" &&
+                            key.startsWith("compaction:${event.runId}:")
+                    )
+                        result[index] =
+                            result[index].copy(compaction = compaction.copy(state = end))
+                }
+            }
             if (
                 event.type in WAIT_BOUNDARIES ||
                     (event.type == "status" && event.text in TERMINAL_STATUSES)

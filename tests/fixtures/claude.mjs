@@ -102,8 +102,11 @@ else {
   // Like Claude Code 2.1.280: the last response's prompt (cached or not) is the context,
   // and a local estimate stands in before the first response or after `/compact`.
   let lastUsage = null
+  // The transcript's local estimate shrinks once compacted.
+  let estimate = 18000
+  let compacted = false
   const contextReport = () => ({
-    totalTokens: lastUsage ? lastUsage.input_tokens + lastUsage.cache_creation_input_tokens + lastUsage.cache_read_input_tokens : 18000,
+    totalTokens: lastUsage ? lastUsage.input_tokens + lastUsage.cache_creation_input_tokens + lastUsage.cache_read_input_tokens : estimate,
     maxTokens: 200000,
     rawMaxTokens: 200000,
     percentage: 9,
@@ -147,6 +150,8 @@ else {
     if (value.type === 'control_request') {
       if (value.request.subtype === 'get_context_usage') {
         appendFileSync(path.join(home, 'context-requests.jsonl'), `${JSON.stringify(value.request)}\n`)
+        if (compacted && existsSync(path.join(home, 'fixture-context-unanswered')))
+          return
         out({ type: 'control_response', response: { subtype: 'success', request_id: value.request_id, response: contextReport() } })
         return
       }
@@ -285,6 +290,8 @@ else {
         })
         out({ type: 'user', message: { role: 'user', content: 'This session is being continued from a previous conversation. Fixture summary.' }, session_id: session })
         lastUsage = null
+        estimate = 6200
+        compacted = true
       }
 
       out({
@@ -318,6 +325,9 @@ else {
         session_id: session,
         compact_metadata: { trigger: 'auto', pre_tokens: 167500, post_tokens: 9100 },
       })
+      lastUsage = null
+      estimate = 9800
+      compacted = true
     }
 
     if (prompt.includes('fixture:spend-limit') || prompt.includes('Corrige le dialogue de révocation.')) {

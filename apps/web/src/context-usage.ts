@@ -57,19 +57,34 @@ export interface CompactionEntry {
   kind: 'compaction'
   id: string
   time: number
-  state: 'running' | 'done' | 'failed'
+  /** `stopped`: its execution ended before the coding agent confirmed the compaction. */
+  state: 'running' | 'done' | 'failed' | 'stopped'
   trigger: 'manual' | 'auto' | null
   preTokens: number | null
   postTokens: number | null
 }
 
+/**
+ * How an event that ends a turn or run ends a compaction its coding agent never confirmed. A
+ * coding agent may fail or be stopped without closing the compaction it started.
+ */
+export function compactionEnd(event: { type: string, text?: string }): 'failed' | 'stopped' | null {
+  if (event.type === 'turn.failed' || event.type === 'runner.failed' || (event.type === 'status' && event.text === 'failed'))
+    return 'failed'
+  if (event.type === 'turn.started' || event.type === 'turn.completed' || (event.type === 'status' && ['succeeded', 'cancelled', 'interrupted'].includes(event.text ?? '')))
+    return 'stopped'
+  return null
+}
+
 /** The divider a context compaction shows as. The visible history above it is unchanged. */
 export function compactionText(entry: CompactionEntry) {
-  const title = entry.state === 'running'
-    ? 'Compacting the agent context…'
-    : entry.state === 'failed'
-      ? 'Context compaction failed'
-      : entry.trigger === 'auto' ? 'Context compacted automatically' : 'Context compacted'
+  const titles = {
+    running: 'Compacting the agent context…',
+    failed: 'Context compaction failed',
+    stopped: 'Context compaction stopped',
+    done: entry.trigger === 'auto' ? 'Context compacted automatically' : 'Context compacted',
+  }
+  const title = titles[entry.state]
   const change = entry.preTokens && entry.postTokens
     ? `${tokens(entry.preTokens)} → ${tokens(entry.postTokens)} tokens`
     : ''

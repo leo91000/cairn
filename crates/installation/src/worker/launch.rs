@@ -1140,12 +1140,8 @@ impl Execution<'_> {
                 RunStatus::Waiting
             } else { status };
             patch["status"] = status.into();
-            // A compaction is not a reply: the conversation keeps its last reply and does
-            // not become newly finished. Failures and stops still show why it ended.
-            if status == RunStatus::Succeeded && crate::chats::is_compaction(&current) {
-                let previous = &current["chatExecution"]["previous"];
-                patch["summary"] = previous["summary"].clone();
-                patch["finishedAt"] = previous["finishedAt"].clone();
+            if status == RunStatus::Succeeded {
+                crate::chats::keep_reply_after_compaction(&current, &mut patch);
             }
             if status == RunStatus::Waiting {
                 patch["finishedAt"] = Value::Null;

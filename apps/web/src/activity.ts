@@ -10,6 +10,7 @@ import {
   planSteps,
   samePlan,
 } from './agent-plan'
+import { compactionEnd } from './context-usage'
 import {
   engineAttention,
   engineNoticeTitle,
@@ -297,6 +298,15 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
   const compactions = new Map<string, CompactionEntry>()
   for (const [eventIndex, stored] of events.entries()) {
     const event = stored
+    // A compaction still running when its turn or run ends did not complete.
+    const end = compactionEnd(event)
+    if (end) {
+      for (const [key, compaction] of compactions) {
+        if (compaction.state === 'running' && key.startsWith(`${event.runId}:`))
+          compaction.state = end
+      }
+    }
+
     // Context usage is a measurement the conversation header shows, not an activity.
     if (event.type === 'artifact' || event.type === 'context.usage')
       continue

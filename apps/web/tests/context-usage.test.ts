@@ -120,4 +120,35 @@ describe('context compaction', () => {
     if (failed[0]?.kind === 'compaction')
       expect(compactionText(failed[0]).title).toBe('Context compaction failed')
   })
+
+  it('ends a compaction its coding agent failed or stopped without closing it', () => {
+    const started = event(1, 'item.started', { item: { id: 'c', type: 'context_compaction', status: 'in_progress' } })
+    const status = (id: number, text: string) => ({ ...event(id, 'status'), text })
+
+    // Codex fails the turn, or the run is stopped, without completing the compaction item.
+    const failed = activityEntries([started, event(2, 'turn.failed', { error: { message: 'Compaction failed' } })], true)
+    expect(failed.find(entry => entry.kind === 'compaction')).toMatchObject({ state: 'failed' })
+    for (const text of ['cancelled', 'interrupted']) {
+      const stopped = activityEntries([started, status(2, text)], true)
+      const compaction = stopped.find(entry => entry.kind === 'compaction')
+      expect(compaction).toMatchObject({ state: 'stopped' })
+      if (compaction?.kind === 'compaction')
+        expect(compactionText(compaction)).toEqual({ title: 'Context compaction stopped', detail: '' })
+    }
+
+    // A later execution of the conversation does not revive it.
+    const resumed = activityEntries([started, status(2, 'cancelled'), event(3, 'turn.started')], true)
+    expect(resumed.find(entry => entry.kind === 'compaction')).toMatchObject({ state: 'stopped' })
+
+    // A completed compaction stays completed when its turn ends, and other runs are unaffected.
+    const completed = activityEntries([
+      started,
+      event(2, 'item.completed', { item: { id: 'c', type: 'context_compaction', status: 'completed' } }),
+      event(3, 'turn.completed'),
+      { ...event(4, 'turn.failed'), runId: 'other' },
+    ], true)
+    expect(completed.find(entry => entry.kind === 'compaction')).toMatchObject({ state: 'done' })
+    const elsewhere = activityEntries([started, { ...event(2, 'turn.failed'), runId: 'other' }], true)
+    expect(elsewhere.find(entry => entry.kind === 'compaction')).toMatchObject({ state: 'running' })
+  })
 })

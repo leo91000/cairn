@@ -469,6 +469,9 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
             });
             if waiting {
                 patch["outcome"] = Value::Null;
+            } else {
+                // A compaction completed before the restart settles like one that did not.
+                crate::chats::keep_reply_after_compaction(&current, &mut patch);
             }
             db.patch_run(id, &patch)?;
             return Ok(false);
@@ -750,6 +753,53 @@ mod tests {
                     assert_eq!(cancelled["recoveryPending"], false);
                     assert!(db.active()?.is_empty());
                 }
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn compaction_completed_before_restart_keeps_the_last_reply() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let outcome = json!({ "status": "completed", "messageId": "first" });
+                let record = json!({
+                    "id": "chat-run",
+                    "taskId": "chat",
+                    "trigger": "chat",
+                    "status": "queued",
+                    "createdAt": 0,
+                    "recoveryPending": true,
+                    "sessionId": "saved",
+                    "summary": "Last reply",
+                    "finishedAt": 500,
+                    "outcome": outcome,
+                    "chatExecution": {
+                        "messageId": "compact:fixture",
+                        "text": "",
+                        "attachments": [],
+                        "recovery": false,
+                        "operation": "compact",
+                        "previous": { "summary": "Last reply", "finishedAt": 500 },
+                    },
+                });
+                db.add_run(&record, None)?;
+
+                // The compaction's `turn.completed` was saved; the manager stopped before
+                // settling the run, and a compaction leaves no reply in the checkpoint.
+                let checkpoint = RunCheckpoint::from_value(json!({ "completed": true }))?;
+                assert_eq!(checkpoint.last_message(), "");
+                assert!(!finish_recovery(db, "chat-run", Some(&checkpoint))?);
+
+                let recovered = db.run("chat-run")?.unwrap();
+                assert_eq!(recovered["status"], "succeeded");
+                assert_eq!(recovered["recoveryPending"], false);
+                assert_eq!(recovered["summary"], "Last reply");
+                assert_eq!(recovered["finishedAt"], 500);
+                assert_eq!(recovered["outcome"], outcome);
                 Ok(())
             })
             .await

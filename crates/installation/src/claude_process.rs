@@ -30,6 +30,10 @@ const MAX_IMAGE: usize = 10_000_000;
 /// Prefix of the context usage requests this adapter sends Claude Code.
 const CONTEXT_REQUEST: &str = "cairn-context-";
 
+/// How long a finished execution waits for the context report requested at a compaction
+/// boundary. Claude Code answers it locally, after the command's result.
+const CONTEXT_REPORT_WAIT: Duration = Duration::from_secs(5);
+
 const DENIED: &str =
     "This tool is outside the agent's access policy. Ask the user in your response.";
 
@@ -481,6 +485,14 @@ struct Turn<'a> {
     waiting_for_background: bool,
     /// Context usage requests sent to Claude Code.
     context_requests: u64,
+    /// Requests up to this number were sent before the latest measured response, so their
+    /// reports describe an older context.
+    context_measured: u64,
+    /// The report requested at a compaction boundary, until it answers or a response measures
+    /// the compacted context.
+    context_pending: Option<u64>,
+    /// The execution finished and only waits for [`Self::context_pending`], until this time.
+    finishing: Option<tokio::time::Instant>,
     /// The model's context window, from Claude Code's latest context usage report.
     context_window: Option<u64>,
     /// The latest context usage shown, so unchanged reports are not repeated.
@@ -561,17 +573,45 @@ impl Turn<'_> {
         self.emit(event).await
     }
 
-    async fn on_control_response(&mut self, value: &Value) -> Result<()> {
+    /// Claude Code's answer to a context usage request. Answers whether the execution is now
+    /// complete.
+    async fn on_control_response(&mut self, value: &Value) -> Result<bool> {
         let response = &value["response"];
-        let ours = text(response, "request_id").starts_with(CONTEXT_REQUEST);
-        if !ours || response["subtype"] != "success" {
-            return Ok(());
+        let Some(number) = text(response, "request_id")
+            .strip_prefix(CONTEXT_REQUEST)
+            .and_then(|number| number.parse::<u64>().ok())
+        else {
+            return Ok(false);
+        };
+
+        if response["subtype"] == "success" {
+            let report = &response["response"];
+            if let Some(window) = report["maxTokens"].as_u64().filter(|window| *window > 0) {
+                self.context_window = Some(window);
+            }
+            // A response measured after this request was sent is more recent than its report.
+            if number > self.context_measured {
+                self.show_context(ContextUsage::claude_report(report))
+                    .await?;
+            }
         }
-        let report = &response["response"];
-        if let Some(window) = report["maxTokens"].as_u64().filter(|window| *window > 0) {
-            self.context_window = Some(window);
+        if self.context_pending == Some(number) {
+            self.context_pending = None;
         }
-        self.show_context(ContextUsage::claude_report(report)).await
+        self.finish_after_report().await
+    }
+
+    /// Completes a finished execution once the compaction's context report answered, or once
+    /// waiting for it took too long. The run then keeps the last usage it showed.
+    async fn finish_after_report(&mut self) -> Result<bool> {
+        let Some(deadline) = self.finishing else {
+            return Ok(false);
+        };
+        if self.context_pending.is_some() && tokio::time::Instant::now() < deadline {
+            return Ok(false);
+        }
+        self.complete().await?;
+        Ok(true)
     }
 
     /// `status` while Claude Code compacts, and the `compact_boundary` that ends it.
@@ -618,7 +658,9 @@ impl Turn<'_> {
         self.emit(json!({ "type": "item.completed", "item": item }))
             .await?;
         // The next response measures the compacted context; until then show Claude Code's estimate.
-        self.request_context().await
+        self.request_context().await?;
+        self.context_pending = Some(self.context_requests);
+        Ok(())
     }
 
     /// Submits messages the user added to the inbox, or answers to pending questions.
@@ -741,7 +783,7 @@ impl Turn<'_> {
                 self.on_stream_event(&value["event"]).await?;
             }
             "control_request" => self.on_control_request(value).await?,
-            "control_response" => self.on_control_response(value).await?,
+            "control_response" => return self.on_control_response(value).await,
             "result" => return self.on_result(value).await,
             _ => {}
         }
@@ -976,9 +1018,14 @@ impl Turn<'_> {
             self.api_error = text(value, "error").to_owned();
             // Subagents have their own context. Local command replies are not model requests.
             let response = &value["message"];
-            if response["model"] != "<synthetic>" {
-                let usage = ContextUsage::claude_response(&response["usage"], self.context_window);
-                self.show_context(usage).await?;
+            let usage = (response["model"] != "<synthetic>")
+                .then(|| ContextUsage::claude_response(&response["usage"], self.context_window))
+                .flatten();
+            if let Some(usage) = usage {
+                // Reports requested before this response describe the context it replaced.
+                self.context_measured = self.context_requests;
+                self.context_pending = None;
+                self.show_context(Some(usage)).await?;
             }
         }
         let message = text(&value["message"], "id").to_owned();
@@ -1428,6 +1475,12 @@ impl Turn<'_> {
             }
             return Ok(false);
         }
+        if self.context_pending.is_some() {
+            // Claude Code answers the compaction's context request after its result: wait
+            // briefly for it so the run shows the compacted context.
+            self.finishing = Some(tokio::time::Instant::now() + CONTEXT_REPORT_WAIT);
+            return Ok(false);
+        }
         self.complete().await?;
         Ok(true)
     }
@@ -1472,7 +1525,15 @@ impl Turn<'_> {
                         result = client.sync() => result?,
                     }
                 }
-                _ = timer.tick() => self.poll_inbox().await?,
+                _ = timer.tick() => {
+                    if self.finish_after_report().await? {
+                        return Ok(());
+                    }
+                    // A finished execution no longer takes messages.
+                    if self.finishing.is_none() {
+                        self.poll_inbox().await?;
+                    }
+                }
                 bytes = stdout.fill_buf() => {
                     let (count, complete) = take_line(bytes?, &mut buffer)?;
                     stdout.consume(count);
@@ -1615,6 +1676,9 @@ pub async fn run(
         background_replayed: false,
         waiting_for_background: false,
         context_requests: 0,
+        context_measured: 0,
+        context_pending: None,
+        finishing: None,
         context_window: None,
         context: None,
         compaction: None,

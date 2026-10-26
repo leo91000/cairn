@@ -2232,6 +2232,32 @@ async fn automatic_compaction_shows_without_rewriting_the_reply() {
         std::fs::read_to_string(root.path().join("result.md")).unwrap(),
         "Claude fixture completed"
     );
+    // The response after the compaction measured the compacted context.
+    assert_eq!(context_usage(&events).last().unwrap()["estimated"], false);
+}
+
+#[tokio::test]
+async fn compaction_completes_when_its_context_report_never_answers() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    run_to_end(&c, plan(&root, "Inspect the workspace"))
+        .await
+        .0
+        .unwrap();
+
+    std::fs::write(c.home.join(".claude/fixture-context-unanswered"), "").unwrap();
+    let started = std::time::Instant::now();
+    let (result, events) = run_to_end(&c, compaction_plan(&root)).await;
+    result.unwrap();
+
+    // The wait is bounded, and the run keeps the last usage it knew.
+    assert!(started.elapsed() < Duration::from_secs(15));
+    assert!(completes(&events));
+    assert!(
+        context_usage(&events)
+            .iter()
+            .all(|usage| usage["contextTokens"] != 6_200)
+    );
 }
 
 #[tokio::test]
@@ -2261,8 +2287,13 @@ async fn compaction_runs_the_native_command_without_a_user_turn() {
     assert_eq!(completed["item"]["trigger"], "manual");
     assert_eq!(completed["item"]["status"], "completed");
     assert!(!events.iter().any(|e| e["item"]["type"] == "agent_message"));
+    // Claude Code answers the boundary's context request after its result: the run still
+    // shows the compacted estimate rather than the usage before the compaction.
     let usage = context_usage(&events);
-    assert_eq!(usage.last().unwrap()["estimated"], true);
+    assert_eq!(
+        usage.last().unwrap(),
+        &json!({ "contextTokens": 6_200, "contextWindow": 200_000, "cachedTokens": null, "estimated": true })
+    );
     assert_eq!(events.last().unwrap()["type"], "turn.completed");
     // No receipt: a restart compacts again instead of replaying an empty reply.
     let receipt = root.path().join("result.claude-receipt.json");

@@ -98,6 +98,17 @@ pub(crate) fn is_compaction(run: &Value) -> bool {
     run["chatExecution"]["operation"] == COMPACT
 }
 
+/// A compaction is not a reply: once it succeeds, the conversation keeps its last reply and
+/// does not become newly finished. Failures and stops still show why it ended.
+pub(crate) fn keep_reply_after_compaction(run: &Value, patch: &mut Value) {
+    if !is_compaction(run) {
+        return;
+    }
+    let previous = &run["chatExecution"]["previous"];
+    patch["summary"] = previous["summary"].clone();
+    patch["finishedAt"] = previous["finishedAt"].clone();
+}
+
 /// Payload of the `chat.user` event recorded when a message reaches the agent.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
