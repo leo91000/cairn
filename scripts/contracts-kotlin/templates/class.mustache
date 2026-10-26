@@ -3,6 +3,7 @@ package {{&packageName}}
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerialName
-
+{{#imports}}import {{&.}}
+{{/imports}}
 {{#constraints}}{{>model}}{{#nestedClasses}}
 {{#constraints}}{{>model}}{{/constraints}}{{/nestedClasses}}{{/constraints}}

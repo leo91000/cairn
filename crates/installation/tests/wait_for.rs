@@ -600,7 +600,7 @@ async fn permissions_origins_and_workflow_commit_mismatches_are_rechecked() {
     let f = Fixture::new().await;
     f.schedule(f.github_condition()).await;
     f.finish().await;
-    connections::set_enabled(&f.s, "github", &f.instance, &json!({ "enabled": false }))
+    common::enable_plugin(&f.s, "github", &f.instance, &json!({ "enabled": false }))
         .await
         .unwrap();
     conditions::poll_once(&f.s).await.unwrap();

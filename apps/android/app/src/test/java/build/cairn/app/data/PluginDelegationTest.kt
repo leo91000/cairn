@@ -61,7 +61,13 @@ class PluginDelegationTest {
             agent(limited.copy(sandbox = "yolo", mcps = null))
                 .delegationRisks(
                     listOf(
-                        PluginConnection(agentIds = listOf("08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3"))
+                        PluginConnection(
+                            agentIds = listOf("08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3"),
+                            settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                            status = PluginStatus(),
+                            usage = PluginUsage(),
+                            enabled = true,
+                        )
                     ),
                     everyone = true,
                 ),
@@ -75,7 +81,15 @@ class PluginDelegationTest {
         assertEquals(
             warning,
             helper.delegationRisks(
-                listOf(PluginConnection(agentIds = listOf("08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3"))),
+                listOf(
+                    PluginConnection(
+                        agentIds = listOf("08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3"),
+                        settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                        status = PluginStatus(),
+                        usage = PluginUsage(),
+                        enabled = true,
+                    )
+                ),
                 true,
             ),
         )

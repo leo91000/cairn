@@ -511,6 +511,7 @@ pub(crate) fn operations() -> Vec<Value> {
             .map(crate::capabilities::McpOperation::descriptor),
     );
     operations.push(crate::capabilities::RESUME_RUN.descriptor());
+    operations.push(crate::capabilities::MANAGE_PLUGIN.descriptor());
     operations.extend(
         crate::capabilities::PROJECT_OPERATIONS
             .iter()
@@ -551,6 +552,15 @@ pub(crate) async fn operation(
     name: &str,
     args: Value,
 ) -> Result<Value> {
+    if name == "manage_plugin" {
+        return crate::capabilities::MANAGE_PLUGIN
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(scopes.to_vec()),
+            )
+            .await;
+    }
     if let Some(op) = crate::capabilities::mission_operation(name) {
         return op
             .invoke(
@@ -818,8 +828,11 @@ pub(crate) async fn invoke(
         "list_skills" | "read_skill" | "save_skill" | "edit_skill_files" => {
             skills_tool(s, name, &args, bearer).await
         }
-        "list_plugins" | "manage_plugin" => {
-            Box::pin(crate::plugins::management::invoke(s, name, &args, bearer)).await
+        "list_plugins" => {
+            if let Some(bearer) = bearer {
+                crate::installation_mcp::authorize(s, bearer).await?;
+            }
+            crate::plugins::management::catalog(s).await
         }
 
         _ => Err(Error::not_found("Unknown tool")),

@@ -348,9 +348,14 @@ async fn pr_waits_keep_cancellation_permission_and_deadline_contracts() {
                     .unwrap();
             }
             "permission" => {
-                connections::set_enabled(&f.s, "github", &f.instance, &json!({ "enabled": false }))
-                    .await
-                    .unwrap();
+                connections::set_enabled(
+                    &f.s,
+                    "github",
+                    &f.instance,
+                    &cairn_contracts::PluginEnabledInput { enabled: false },
+                )
+                .await
+                .unwrap();
             }
             "deadline" => {
                 f.due().await;

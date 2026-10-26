@@ -1,3 +1,6 @@
+#[allow(unused_imports)]
+use common::{PluginServiceFixture as _, PluginStoreFixture as _};
+
 use common::AgentFixture;
 use common::MissionFixture;
 use common::StoreAgentFixture;
@@ -284,11 +287,16 @@ async fn merge_rejects_invalid_targets_permissions_credentials_and_delegations()
     ] {
         assert!(s.merge_agents_fixture(args).await.is_err());
     }
+    let granted_instance = id();
+    s.store
+        .put_instance_fixture(json!({ "id": granted_instance, "pluginId": "fixture" }))
+        .await
+        .unwrap();
     for change in [
         json!({ "access": { "installation": true } }),
         json!({ "access": { "nodes": null } }),
         json!({ "access": { "backend": "native" } }),
-        json!({ "plugins": [id()] }),
+        json!({ "plugins": [granted_instance] }),
         json!({ "exclusiveNodes": [id()] }),
     ] {
         let mut changed = source.clone();
@@ -304,10 +312,7 @@ async fn merge_rejects_invalid_targets_permissions_credentials_and_delegations()
     }
     s.store.put_agent_fixture(source.clone()).await.unwrap();
     s.store
-        .put(
-            "plugin-connections",
-            json!({ "id": id(), "agentId": source["id"], "enabled": false }),
-        )
+        .put_instance_fixture(json!({ "id": id(), "agentId": source["id"], "enabled": false }))
         .await
         .unwrap();
     assert!(
@@ -338,9 +343,12 @@ async fn merge_keeps_preapproved_live_grants_and_rolls_back_a_failed_delete() {
             let mut target = db.agent_snapshot(MAIN_AGENT_ID)?.unwrap();
             source["plugins"] = json!([instance]);
             target["plugins"] = json!([instance]);
+            let mut account = cairn_installation::plugins::connections::Connection::draft(&instance,"fixture",json!({}),Vec::new());
+            account.name = "Fixture".into();
+            account.revision = "r1".into();
+            db.save_plugin_instance(&account)?;
             db.save_agent(&serde_json::from_value(source.clone())?)?;
             db.save_agent(&serde_json::from_value(target.clone())?)?;
-            db.put("plugin-connections", &json!({ "id": instance }))?;
             db.0.execute_batch("CREATE TRIGGER reject_merge BEFORE DELETE ON agents BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;")?;
             Ok(())
         }
@@ -353,7 +361,7 @@ async fn merge_keeps_preapproved_live_grants_and_rolls_back_a_failed_delete() {
         source["id"]
     );
     assert_eq!(
-        s.get("plugin-connections", &instance).await.unwrap()["agentIds"],
+        s.instance_fixture(&instance).await.unwrap()["agentIds"],
         json!([MAIN_AGENT_ID, source["id"]])
     );
     s.store
@@ -369,7 +377,7 @@ async fn merge_keeps_preapproved_live_grants_and_rolls_back_a_failed_delete() {
         json!([instance])
     );
     assert_eq!(
-        s.get("plugin-connections", &instance).await.unwrap()["agentIds"],
+        s.instance_fixture(&instance).await.unwrap()["agentIds"],
         json!([MAIN_AGENT_ID])
     );
 }

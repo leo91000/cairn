@@ -9,6 +9,7 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+import { mockPluginCommand } from './mock-plugin-command'
 
 const token = `synthetic_browser_discord_token_${'x'.repeat(48)}`
 
@@ -86,9 +87,9 @@ test('Discord bots are set up through the package’s own form and keep the toke
   })
   await workspace.api('/api/agents', 'POST', { name: 'Release helper' })
   await useRelayForHttpMocks(page)
-  await page.route('**/plugins/discord/form', discordForm)
+  await mockPluginCommand(page, '**/plugins/discord/form', discordForm)
   // Keep the journey offline: the saved bot starts paused instead of opening a Gateway session.
-  await page.route('**/plugins/discord/connections', async (route) => {
+  await mockPluginCommand(page, '**/plugins/discord/connections', async (route) => {
     if (route.request().method() !== 'POST')
       return route.continue()
     await route.continue({ postData: JSON.stringify({ ...route.request().postDataJSON(), enabled: false }) })
@@ -342,8 +343,8 @@ values = { more = true, extra = true }
   await expect(form.getByText('Enter a team', { exact: true })).toHaveCount(0)
   const refreshed: string[] = []
   page.on('request', (request) => {
-    if (request.method() === 'POST' && request.url().endsWith('/plugins/notes/form')) {
-      const changed = request.postDataJSON().changed
+    if (request.method() === 'POST' && request.url().endsWith('/plugins/manage') && request.postDataJSON().kind === 'form') {
+      const changed = request.postDataJSON().data.changed
       if (changed)
         refreshed.push(changed)
     }
@@ -536,7 +537,7 @@ test('required choices and Unicode text keep the shared form whitespace contract
     },
   }))
   const saves: Record<string, any>[] = []
-  await page.route('**/api/plugins/forms/connections', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/forms/connections', async (route) => {
     saves.push(route.request().postDataJSON())
     await route.fulfill({ json: {} })
   })
@@ -655,11 +656,11 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
     },
   }))
   const initialPanelValues = { password: 'synthetic_never_prefill', unknown: 'drop' }
-  await page.route('**/api/plugins/forms/connections/example/view', route => route.fulfill({
+  await mockPluginCommand(page, '**/api/plugins/forms/connections/example/view', route => route.fulfill({
     json: { view: [panelNode(initialPanelValues)] },
   }))
   const actions: Record<string, any>[] = []
-  await page.route('**/api/plugins/forms/connections/example/actions', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/forms/connections/example/actions', async (route) => {
     actions.push(route.request().postDataJSON().values)
     const result = actions.length === 2
       ? { view: [panelNode(initialPanelValues)] }
@@ -669,7 +670,7 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
     await route.fulfill({ json: result })
   })
   const completions: Record<string, any>[] = []
-  await page.route('**/api/plugins/forms/form', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/forms/form', async (route) => {
     completions.push(route.request().postDataJSON())
     await route.fulfill({
       json: {
@@ -681,7 +682,7 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
     })
   })
   const saves: Record<string, any>[] = []
-  await page.route('**/api/plugins/forms/connections/example', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/forms/connections/example', async (route) => {
     saves.push(route.request().postDataJSON())
     await route.fulfill({ json: {} })
   })
@@ -797,7 +798,9 @@ test('bot warnings include the current instance and new draft plugin grants', as
     people: [],
     requests: [],
     enabled: false,
-    status: { state: 'paused' },
+    status: { state: 'disconnected', message: null },
+    revision: 'fixture',
+    secretKeys: [],
     usage: { hour: 0 },
     activity: [],
     maxMessagesPerHour: 20,
@@ -908,7 +911,7 @@ test('a package with device sign-in saves an account without the token reaching 
     await route.fulfill({ json: flow(id, id === 'second' && polls > 1 ? 'completed' : 'pending') })
   })
   const completions: Record<string, any>[] = []
-  await page.route('**/api/plugins/codehost/form', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/codehost/form', async (route) => {
     const body = route.request().postDataJSON()
     completions.push(body)
     const signedIn = body.credentialFlow === 'second'
@@ -922,7 +925,7 @@ test('a package with device sign-in saves an account without the token reaching 
     })
   })
   const saves: Record<string, any>[] = []
-  await page.route('**/api/plugins/codehost/connections', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/codehost/connections', async (route) => {
     saves.push(route.request().postDataJSON())
     await route.fulfill({ json: {} })
   })

@@ -26,4 +26,14 @@ data class QualificationFixture(
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 @JvmInline
-value class Names(val value: Map<String, String>) : Map<String, String> by value
+value class Names(
+    val value:
+        Map<
+            String,
+            String,
+        >
+) :
+    Map<
+        String,
+        String,
+    > by value

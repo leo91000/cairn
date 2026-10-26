@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "instanceId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "pluginId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "pluginId",
+    "instanceId"
+  ],
+  "title": "PluginInstanceInput",
+  "type": "object"
+}

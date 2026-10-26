@@ -243,9 +243,8 @@ impl Service {
             }
             crate::agent_grants::validate(db, &agent, &accepts_agents)?;
             let agent = crate::agent_grants::save_profile(db, agent, owner_review, &review.native_node_reviews)?;
-            let snapshot = serde_json::to_value(&agent)?;
             for connection in &review.reapprove_delegations {
-                crate::plugins::connections::reapprove(db, connection, &snapshot, &origin)?;
+                crate::plugins::connections::reapprove(db, connection, &agent, &origin)?;
             }
             Ok((agent, creating))
         }).await?;
@@ -268,12 +267,12 @@ impl Service {
         let requested = crate::agent_grants::plugins(agent);
         let mut accepting = Vec::new();
         let mut run_credentials = Vec::new();
-        for instance in self.store.list(crate::plugins::connections::KIND).await? {
-            let id = text(&instance, "id");
+        for instance in self.store.plugin_instances().await? {
+            let id = instance.id.as_str();
             if !requested.iter().any(|requested| requested == id) {
                 continue;
             }
-            let plugin = text(&instance, "pluginId");
+            let plugin = instance.plugin_id.as_str();
             let Ok(package) = crate::plugins::registry::active(self, plugin).await else {
                 continue;
             };
@@ -643,6 +642,19 @@ pub(crate) fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> 
     if kind == "projects" && db.agent_snapshots()?.iter().any(assigned) {
         return Err(Error::conflict(
             "This project is assigned to an agent. Update the agent first.",
+        ));
+    }
+    if matches!(kind, "agents" | "projects")
+        && db.plugin_instances()?.iter().any(|instance| {
+            if kind == "agents" {
+                instance.agent_id == id
+            } else {
+                instance.project_id.as_deref() == Some(id)
+            }
+        })
+    {
+        return Err(Error::conflict(
+            "This item is used by a plugin delegation. Update the instance first.",
         ));
     }
     let task_field = if kind == "agents" {

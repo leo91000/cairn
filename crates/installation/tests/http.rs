@@ -643,6 +643,7 @@ async fn plugin_secrets_require_trusted_owner_context() {
     let input = json!({
         "name": "Fixture",
         "secrets": { "token": "ops_http_fixture" },
+        "settings": {},
         "enabled": true,
         "agentIds": [],
     });
