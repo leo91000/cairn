@@ -157,6 +157,8 @@ async fn mission_conversion_keeps_delegated_work_attached_to_its_requester() {
         .await
         .unwrap();
 
+    child = service.store.run(text(&child, "id")).await.unwrap();
+    unrelated = service.store.run(text(&unrelated, "id")).await.unwrap();
     let chat = service.chat_from_run(run_id).await.unwrap();
     service.chat_from_run(run_id).await.unwrap();
     let delegated = service.store.run(text(&child, "id")).await.unwrap();

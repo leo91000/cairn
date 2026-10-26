@@ -496,6 +496,7 @@ async fn converting_a_mission_retains_native_authority_and_rejects_unauthorized_
         })
         .await
         .unwrap();
+    let run = f.service.store.run(&run_id).await.unwrap();
     let path = format!("/api/runs/{run_id}/chat");
     let (status, _) = f.call(&f.other, "POST", &path, json!({})).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -2936,7 +2937,7 @@ async fn saved_native_mission(f: &Fixture) -> Value {
         }),
     )
     .await;
-    run
+    f.service.store.run(text(&run, "id")).await.unwrap()
 }
 
 async fn resume_coordinator(f: &Fixture, traced: bool) -> (Value, Value) {

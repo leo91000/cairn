@@ -1,3 +1,4 @@
+use crate::common::run_fixture::RunFixture;
 use common::AgentFixture;
 use common::MissionFixture;
 use common::StoreMissionFixture;
@@ -486,14 +487,14 @@ async fn github_monitor_only_probes_resumable_wakeups() {
         ("chatExecution", json!({ "messageId": "another-turn" })),
     ] {
         f.s.store
-            .update_run_boundary(&f.run, json!({ (field): value }))
+            .change_run_fixture(&f.run, json!({ (field): value }))
             .await
             .unwrap();
         conditions::poll_once(&f.s).await.unwrap();
         assert_eq!(f.calls().len(), 1, "run guard: {field}");
         assert_eq!(f.s.get("chats", &f.chat).await.unwrap(), chat);
         f.s.store
-            .update_run_boundary(&f.run, json!({ (field): run[field] }))
+            .change_run_fixture(&f.run, json!({ (field): run[field] }))
             .await
             .unwrap();
     }

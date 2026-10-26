@@ -72,6 +72,8 @@ impl App {
         let (run, context) = (run.to_owned(), context.to_owned());
         let mut record = json!({
             "id": run,
+            "taskId": run,
+            "createdAt": 0,
             "status": status,
             "nativeProvenanceUnknown": true,
             "nativePrincipals": [],

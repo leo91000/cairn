@@ -1052,6 +1052,15 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "mcp_connection_status",
         "cancel_mcp_connection",
     ]);
+    public_names.extend([
+        "run_task",
+        "retry_run",
+        "cancel_run",
+        "cleanup_run",
+        "list_runs",
+        "get_run",
+        "read_run_content",
+    ]);
     public_names.insert(cairn_contracts::RESUME_RUN_ID);
     public_names.insert("manage_plugin");
     public_names.extend([

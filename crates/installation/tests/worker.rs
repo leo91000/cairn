@@ -1952,7 +1952,7 @@ async fn node_slots_exceed_manager_concurrency_without_overpreparing_the_queue()
         "queued work must never enter recovery: {}",
         queued[0]
     );
-    assert_eq!(queued[0]["recoveryPending"], Value::Null);
+    assert_eq!(queued[0]["recoveryPending"], false);
     assert_eq!(controller.plans.lock().await.len(), 12);
     let attempts = fixture.service.store.list("node-attempts").await.unwrap();
     assert_eq!(attempts.len(), 12);
