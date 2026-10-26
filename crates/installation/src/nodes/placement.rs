@@ -504,6 +504,12 @@ pub(super) fn waiting_disk_bytes(db: &Db<'_>, node: &Value, attempts: &[Value]) 
         }
         let access = policy(&agent);
         let checkpoint = super::db_checkpoint(db, text(&run, "id"))?;
+        if checkpoint["capacityRetryAt"]
+            .as_i64()
+            .is_some_and(|at| at > crate::config::now())
+        {
+            continue;
+        }
         let request = Request::new(&run, &access, &checkpoint);
         let fleet = Fleet {
             attempts,

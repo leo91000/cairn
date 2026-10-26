@@ -1554,7 +1554,21 @@ async fn storage_pressure_reserves_waiting_admission_before_another_growth_incre
     waiting["isolated"] = true.into();
     common::add_run(&f.service.store, &waiting).await;
 
-    for current in [32768, 40960] {
+    for (current, expected, retrying) in [
+        (32768, 40960, false),
+        (40960, 40960, false),
+        (40960, 49152, true),
+    ] {
+        if retrying {
+            common::set_checkpoint(
+                &f.service.store,
+                text(&waiting, "id"),
+                json!({
+                    "nodeId": node["id"], "capacityRetryAt": now() + 30_000
+                }),
+            )
+            .await;
+        }
         let body = json!({
             "backend": "native", "nodeProtocol": 2, "executionReady": true,
             "dataRoot": "/fixture", "runtimeId": "development",
@@ -1580,15 +1594,13 @@ async fn storage_pressure_reserves_waiting_admission_before_another_growth_incre
         assert_eq!(response.status(), StatusCode::OK);
         let reply = read_json(response).await;
         assert_eq!(
-            reply["diskGrowth"]["grants"][0]["allowanceMiB"], 40960,
+            reply["diskGrowth"]["grants"][0]["allowanceMiB"], expected,
             "Growth must leave room for the queued conversation: {reply}"
         );
+        if current == 40960 && !retrying {
+            assert!(placement::check(&f.service, &waiting).await.is_ok());
+        }
     }
-    assert!(
-        placement::reserve(&f.service, &waiting, &id())
-            .await
-            .is_ok()
-    );
 }
 
 #[tokio::test]
