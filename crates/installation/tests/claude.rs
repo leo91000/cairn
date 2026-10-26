@@ -1484,6 +1484,7 @@ async fn engine_retries_limits_and_notices_are_reported_without_ending_the_turn(
     assert_eq!(notices[0]["message"], "Context is almost full.");
     let known = [
         "thread.started",
+        "context.usage",
         "chat.delivered",
         "engine.retry",
         "provider.limit",

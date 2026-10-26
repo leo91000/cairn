@@ -1528,7 +1528,15 @@ mod tests {
                 });
                 db.add_run(&run, None)?;
                 db.set("run-checkpoint:run", &json!({ "completed": true, "launched": true }), None)?;
-                db.put("chats", &json!({ "id": "chat", "runId": "run", "agentId": "agent" }))?;
+                db.put(
+                    "chats",
+                    &json!({
+                        "id": "chat",
+                        "runId": "run",
+                        "agentId": "agent",
+                        "nativeProvenanceUnknown": false,
+                    }),
+                )?;
 
                 let idle = view(db, chat(db, "chat")?)?;
                 assert_eq!(idle["contextUsage"]["contextTokens"], 150_000);
@@ -1606,7 +1614,12 @@ mod tests {
                     )?;
                     db.put(
                         "chats",
-                        &json!({ "id": id, "runId": id, "agentId": "agent" }),
+                        &json!({
+                            "id": id,
+                            "runId": id,
+                            "agentId": "agent",
+                            "nativeProvenanceUnknown": false,
+                        }),
                     )?;
                     let state = view(db, chat(db, &id)?)?["compaction"].clone();
                     assert_eq!(state["available"], false, "{provider} {status}");
