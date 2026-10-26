@@ -90,6 +90,231 @@ fn command(name: &str, args: &[&str]) -> Value {
     json!({ "plugin": "onepassword", "command": name, "args": args })
 }
 
+#[tokio::test]
+async fn quota_failures_explain_the_account_limit_without_echoing_program_output() {
+    let f = fixture().await;
+    let saved = save(
+        &f.s,
+        json!({
+            "name": "Production", "enabled": true,
+            "secrets": { "token": "ops_fixture" }, "agentIds": [MAIN_AGENT_ID],
+        }),
+        None,
+    )
+    .await;
+    let account = text(&saved, "id");
+    write_program(
+        &f.program,
+        r#"#!/bin/sh
+if [ "$1" = service-account ]; then
+    printf '[{"type":"account","action":"read_write","limit":1000,"used":1000,"remaining":0,"reset":18803,"secret":"ops_fixture"}]'
+    exit 0
+fi
+echo 'ops_fixture Too many requests. Your client has been rate-limited. Try again in seconds' >&2
+exit 1
+"#,
+    );
+    let read = command("read", &["--account", account, "op://vault/item/password"]);
+    let error =
+        f.s.plugins
+            .command(&f.s, &f.bearer, &read)
+            .await
+            .unwrap_err();
+    assert!(error.message.contains("daily account quota"), "{error:?}");
+    assert!(error.message.contains("1000/1000"), "{error:?}");
+    assert!(error.message.contains("18803 seconds"), "{error:?}");
+    assert!(error.message.contains("shared"), "{error:?}");
+    assert!(!error.message.contains("ops_fixture"));
+
+    let limits = run(&f, command("limits", &["--account", account]))
+        .await
+        .unwrap();
+    assert_eq!(limits["value"]["limits"][0]["remaining"], 0);
+    assert!(!limits.to_string().contains("ops_fixture"));
+
+    let metadata = mcp(
+        &f,
+        "tools/call",
+        json!({ "name": "onepassword", "arguments": { "operation": "limits", "accountId": account } }),
+    )
+    .await;
+    assert_eq!(
+        metadata["result"]["structuredContent"]["limits"][0]["remaining"],
+        0
+    );
+    assert!(!metadata.to_string().contains("ops_fixture"));
+
+    let result = mcp(
+        &f, "tools/call",
+        json!({ "name": "onepassword", "arguments": { "operation": "fields", "accountId": account, "vault": "vault", "item": "item" } }),
+    ).await;
+    assert_eq!(result["result"]["isError"], true);
+    assert!(
+        result["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("daily account quota")
+    );
+    assert!(!result.to_string().contains("ops_fixture"));
+}
+
+#[tokio::test]
+async fn rate_limit_diagnostics_fall_back_safely_and_choose_the_longest_exhausted_limit() {
+    let f = fixture().await;
+    let saved = save(
+        &f.s,
+        json!({ "name": "Production", "enabled": true, "secrets": { "token": "ops_fixture" }, "agentIds": [MAIN_AGENT_ID] }),
+        None,
+    ).await;
+    let read = command(
+        "read",
+        &["--account", text(&saved, "id"), "op://vault/item/password"],
+    );
+    for diagnostic in [
+        "printf 'ops_fixture invalid-json'",
+        "echo ops_fixture >&2; exit 1",
+        "printf '[{\"type\":\"account\",\"action\":\"read_write\",\"limit\":\"ops_fixture\",\"used\":1000,\"remaining\":0,\"reset\":1}]'",
+    ] {
+        write_program(
+            &f.program,
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = service-account ]; then {diagnostic}; exit 0; fi\necho 'rate limit exceeded ops_fixture' >&2\nexit 1\n"
+            ),
+        );
+        let error =
+            f.s.plugins
+                .command(&f.s, &f.bearer, &read)
+                .await
+                .unwrap_err();
+        assert!(error.message.contains("rate limit"), "{error:?}");
+        assert!(!error.message.contains("ops_fixture"));
+    }
+    write_program(
+        &f.program,
+        r#"#!/bin/sh
+if [ "$1" = service-account ]; then
+    printf '[{"type":"account","action":"read_write","limit":1000,"used":1000,"remaining":0,"reset":18803},{"type":"token","action":"read","limit":1000,"used":1000,"remaining":0,"reset":60}]'
+    exit 0
+fi
+echo '(429) Too Many Requests ops_fixture' >&2
+exit 1
+"#,
+    );
+    let error =
+        f.s.plugins
+            .command(&f.s, &f.bearer, &read)
+            .await
+            .unwrap_err();
+    assert!(error.message.contains("18803 seconds"), "{error:?}");
+}
+
+#[tokio::test]
+async fn selected_secret_fields_share_one_item_read_and_never_enter_metadata() {
+    let f = fixture().await;
+    let saved = save(
+        &f.s,
+        json!({ "name": "Production", "enabled": true, "secrets": { "token": "ops_fixture" }, "agentIds": [MAIN_AGENT_ID] }),
+        None,
+    ).await;
+    let calls = f.root.path().join("calls");
+    write_program(
+        &f.program,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+[ "$1" = item ] && [ "$2" = get ] || exit 1
+printf '{{"fields":[{{"id":"username","label":"username","value":"alice"}},{{"id":"credential","label":"JIRA_API_TOKEN","type":"CONCEALED","value":"hidden-token"}},{{"id":"notesPlain","value":"unrequested-secret"}}]}}'
+"#,
+            calls.display()
+        ),
+    );
+    let account = text(&saved, "id");
+    let read = |fields| {
+        command(
+            "read-fields",
+            &[
+                "--account",
+                account,
+                "--vault",
+                "vault",
+                "--item",
+                "--help",
+                "--fields",
+                fields,
+            ],
+        )
+    };
+    let result = run(&f, read(r#"["username","JIRA_API_TOKEN"]"#))
+        .await
+        .unwrap();
+    assert_eq!(result["output"], "secret");
+    let values: Value = serde_json::from_str(result["value"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        values,
+        json!({ "username": "alice", "JIRA_API_TOKEN": "hidden-token" })
+    );
+    let invoked = std::fs::read_to_string(&calls).unwrap();
+    assert_eq!(invoked.lines().count(), 1);
+    assert_eq!(
+        invoked.trim(),
+        "item get --vault=vault --format=json -- --help"
+    );
+    for fields in [
+        "[]",
+        "{}",
+        "null",
+        "not-json",
+        "[1]",
+        r#"["username","username"]"#,
+        r#"["username",null]"#,
+        r#"[null,"username"]"#,
+    ] {
+        assert!(run(&f, read(fields)).await.is_err(), "{fields}");
+    }
+    assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 1);
+    let missing =
+        f.s.plugins
+            .command(&f.s, &f.bearer, &read(r#"["missing"]"#))
+            .await
+            .unwrap_err();
+    assert!(!missing.message.contains("hidden-token"));
+    assert!(!missing.message.contains("unrequested-secret"));
+    let metadata = mcp(&f, "tools/call", json!({ "name": "onepassword", "arguments": { "operation": "read-fields", "accountId": account } })).await;
+    assert_eq!(metadata["result"]["isError"], true);
+    assert!(!metadata.to_string().contains("hidden-token"));
+    write_program(
+        &f.program,
+        r#"#!/bin/sh
+printf '{"fields":[{"id":"username","value":"alice"},{"id":"other","label":"username","value":"unrequested-secret"}]}'
+"#,
+    );
+    let by_id = run(&f, read(r#"["username"]"#)).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(by_id["value"].as_str().unwrap()).unwrap(),
+        json!({"username":"alice"})
+    );
+    for fields in [
+        r#"[{"id":"first","label":"duplicate","value":"hidden-token"},{"id":"second","label":"duplicate","value":"unrequested-secret"}]"#,
+        r#"[{"id":"duplicate","type":"OTP","value":"totp-seed"}]"#,
+    ] {
+        write_program(
+            &f.program,
+            &format!("#!/bin/sh\nprintf '%s' '{{\"fields\":{fields}}}'\n"),
+        );
+        let error =
+            f.s.plugins
+                .command(&f.s, &f.bearer, &read(r#"["duplicate"]"#))
+                .await
+                .unwrap_err();
+        assert!(!error.message.contains("hidden-token"));
+        assert!(!error.message.contains("totp-seed"));
+    }
+    f.s.agent_fixture(json!({ "plugins": [] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
+    assert_eq!(run(&f, read(r#"["username"]"#)).await, Err(403));
+}
+
 async fn run(f: &Fixture, input: Value) -> Result<Value, u16> {
     f.s.plugins
         .command(&f.s, &f.bearer, &input)

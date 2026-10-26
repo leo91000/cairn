@@ -822,10 +822,31 @@ secret reads only through the CLI, consumed inside a pipe or script:
 
 ```sh
 cairn plugin onepassword accounts
+cairn plugin onepassword limits --account ACCOUNT_ID
 cairn plugin onepassword fields --account ACCOUNT_ID --vault VAULT_ID --item ITEM_ID
 cairn plugin onepassword read --account ACCOUNT_ID op://vault/item/password |
   docker login --username example --password-stdin
 ```
+
+For related credentials, `read-fields --account ACCOUNT_ID --vault VAULT_ID
+--item ITEM_ID --fields '["username","credential"]'` fetches the item once and
+writes a secret JSON object keyed by the requested field IDs or labels. Pipe it
+into the consuming script, then reuse the values in memory for that bounded
+script's API calls. No server-side secret cache is introduced. Ambiguous labels
+require unique field IDs; TOTP fields use `read` instead, so the grouped command
+cannot accidentally return their seeds. Metadata tools never expose either
+secret command.
+
+`limits` is also available through the metadata tool. It reports the CLI's
+hourly token and daily account limits, usage, remaining requests and `reset` in
+seconds. A rate-limited read reports the exhausted quota and the longest reset
+among exhausted limits. If the diagnostic query fails, it returns a safe rate-limit
+message rather than forwarding program output. Other errors retain the generic
+message, since arbitrary CLI diagnostics can contain secrets.
+
+Daily limits are shared by all service accounts of the same 1Password account.
+Stop repeated reads until reset; reconnecting or rotating a token does not reset
+the daily budget. See [1Password's quota documentation](https://www.1password.dev/service-accounts/rate-limits).
 
 The CLI uses the same private VM channel and run grant, including remote nodes.
 It never authenticates `op` inside the conversation VM. The service-account token

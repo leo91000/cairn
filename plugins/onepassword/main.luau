@@ -5,8 +5,8 @@
 local FAILED = "1Password request failed. Check the token, vault permissions, reference, and service account limits."
 
 -- Runs `op` for one service account and returns its stdout.
-local function op(account, args)
-    local result = cairn.exec.run({
+local function run_op(account, args)
+    return cairn.exec.run({
         program = "op",
         instance = account,
         args = args,
@@ -16,9 +16,72 @@ local function op(account, args)
             OP_CACHE = "false",
         },
     })
-    if result.status ~= 0 then
-        cairn.fail(FAILED)
+end
+
+local function nonnegative_integer(value)
+    return type(value) == "number" and value >= 0 and value <= 9007199254740991 and value % 1 == 0
+end
+
+-- Only known quota fields may leave the CLI. Never forward its stdout/stderr in errors.
+local function quota_usage(account)
+    local result = run_op(account, { "service-account", "ratelimit", "--format=json" })
+    local ok, rows = pcall(cairn.json.decode, result.stdout)
+    local limits = cairn.array()
+    if result.status ~= 0 or not ok or type(rows) ~= "table" then
+        return nil
     end
+
+    for _, row in rows do
+        if type(row) ~= "table" then
+            continue
+        end
+        local known_type = row.type == "account" or row.type == "token"
+        local known_action = row.action == "read" or row.action == "write" or row.action == "read_write"
+        if known_type and known_action and nonnegative_integer(row.limit) and nonnegative_integer(row.used)
+            and nonnegative_integer(row.remaining) and nonnegative_integer(row.reset) then
+            table.insert(limits, {
+                type = row.type,
+                action = row.action,
+                limit = row.limit,
+                used = row.used,
+                remaining = row.remaining,
+                reset = row.reset,
+            })
+        end
+    end
+    return if #limits > 0 then limits else nil
+end
+
+local function quota_failure(account)
+    local exhausted
+    for _, limit in quota_usage(account) or {} do
+        if limit.remaining == 0 and (not exhausted or limit.reset > exhausted.reset) then
+            exhausted = limit
+        end
+    end
+    if not exhausted then
+        cairn.fail("1Password rate limit exceeded. Wait for the quota to reset; use cairn plugin onepassword limits --account ACCOUNT_ID to check usage.")
+    end
+
+    local scope = if exhausted.type == "account" then "daily account quota" else "hourly service-account quota"
+    local message = `1Password {scope} exhausted ({exhausted.used}/{exhausted.limit} requests). Retry after {exhausted.reset} seconds.`
+    if exhausted.type == "account" then
+        message ..= " This quota is shared by all service accounts; a new token will not reset it."
+    end
+    cairn.fail(message)
+end
+
+local function op(account, args)
+    local result = run_op(account, args)
+    if result.status == 0 then
+        return result.stdout
+    end
+    local error = string.lower(result.stderr or "")
+    if string.find(error, "rate-limit", 1, true) or string.find(error, "rate limit", 1, true)
+        or string.find(error, "too many requests", 1, true) or string.find(error, "(429)", 1, true) then
+        quota_failure(account)
+    end
+    cairn.fail(FAILED)
     return result.stdout
 end
 
@@ -74,6 +137,14 @@ function operations.accounts(input)
     return { accounts = accounts }
 end
 
+function operations.limits(input)
+    local limits = quota_usage(account(input))
+    if not limits then
+        cairn.fail(FAILED)
+    end
+    return { limits = limits }
+end
+
 function operations.vaults(input)
     return { items = decode(op(account(input), { "vault", "list", "--format=json" })) }
 end
@@ -94,6 +165,65 @@ function operations.read(input)
     return op(account(input), { "read", "--no-newline", input.arguments.reference })
 end
 
+-- One item read for related credentials, without a cache or unrequested fields.
+operations["read-fields"] = function(input)
+    local encoded = input.arguments.fields
+    local ok, fields = pcall(cairn.json.decode, encoded)
+    if not string.match(encoded, "^%s*%[") or not ok or type(fields) ~= "table" or #fields == 0 or #fields > 32 then
+        cairn.fail("fields must be a JSON array of 1 to 32 distinct field IDs or labels.")
+    end
+    -- JSON null becomes nil in Luau and could otherwise disappear from the array.
+    local inside_string, escaped = false, false
+    for index = 1, #encoded do
+        local character = string.sub(encoded, index, index)
+        if escaped then
+            escaped = false
+        elseif inside_string and character == "\\" then
+            escaped = true
+        elseif character == '"' then
+            inside_string = not inside_string
+        elseif not inside_string and not string.match(character, "[%s%[%],]") then
+            cairn.fail("fields must be a JSON array of 1 to 32 distinct field IDs or labels.")
+        end
+    end
+    local requested = {}
+    for _, name in fields do
+        if type(name) ~= "string" or name == "" or #name > 200 or requested[name] then
+            cairn.fail("fields must be a JSON array of 1 to 32 distinct field IDs or labels.")
+        end
+        requested[name] = true
+    end
+
+    local item = decode(op(account(input), {
+        "item", "get", "--vault=" .. input.arguments.vault, "--format=json", "--", input.arguments.item,
+    }))
+    local values = {}
+    for _, name in fields do
+        local selected
+        for _, key in { "id", "label" } do
+            for _, field in item.fields or {} do
+                if field[key] == name then
+                    if selected then
+                        cairn.fail("A requested field is ambiguous. Use unique field IDs from the fields command.")
+                    end
+                    selected = field
+                end
+            end
+            if selected then
+                break
+            end
+        end
+        if not selected then
+            cairn.fail("A requested field does not exist. Use the fields command to find its ID or label.")
+        end
+        if selected.type == "OTP" then
+            cairn.fail("Use the read command for one-time passwords; read-fields does not return TOTP seeds.")
+        end
+        values[name] = selected.value or ""
+    end
+    return cairn.json.encode(values)
+end
+
 local function vault_list(instance)
     local vaults = decode(op(instance.id, { "vault", "list", "--format=json" }))
     local items = cairn.array()
@@ -112,7 +242,7 @@ return {
     tool = function(input)
         local request = input.input
         local operation = operations[request.operation]
-        if request.operation == "read" or operation == nil then
+        if request.operation == "read" or request.operation == "read-fields" or operation == nil then
             cairn.fail("Read secrets through the Cairn plugin CLI and pipe them directly to the consuming command.")
         end
 
