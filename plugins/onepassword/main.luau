@@ -58,7 +58,9 @@ end
 local function quota_failure(account)
     local exhausted
     for _, limit in quota_usage(account) or {} do
-        if limit.remaining == 0 and (not exhausted or limit.reset > exhausted.reset) then
+        local applies_to_read = (limit.type == "token" and limit.action == "read")
+            or (limit.type == "account" and limit.action == "read_write")
+        if applies_to_read and limit.remaining == 0 and (not exhausted or limit.reset > exhausted.reset) then
             exhausted = limit
         end
     end

@@ -208,6 +208,29 @@ exit 1
             .await
             .unwrap_err();
     assert!(error.message.contains("18803 seconds"), "{error:?}");
+
+    write_program(
+        &f.program,
+        r#"#!/bin/sh
+if [ "$1" = service-account ]; then
+    printf '[{"type":"token","action":"write","limit":100,"used":100,"remaining":0,"reset":3500},{"type":"token","action":"read","limit":1000,"used":1000,"remaining":0,"reset":60},{"type":"account","action":"read_write","limit":1000,"used":900,"remaining":100,"reset":18000}]'
+    exit 0
+fi
+echo 'rate limit exceeded' >&2
+exit 1
+"#,
+    );
+    let error =
+        f.s.plugins
+            .command(&f.s, &f.bearer, &read)
+            .await
+            .unwrap_err();
+    assert!(
+        error.message.contains("hourly service-account quota"),
+        "{error:?}"
+    );
+    assert!(error.message.contains("1000/1000"), "{error:?}");
+    assert!(error.message.contains("60 seconds"), "{error:?}");
 }
 
 #[tokio::test]

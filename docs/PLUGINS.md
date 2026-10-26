@@ -840,7 +840,8 @@ secret command.
 `limits` is also available through the metadata tool. It reports the CLI's
 hourly token and daily account limits, usage, remaining requests and `reset` in
 seconds. A rate-limited read reports the exhausted quota and the longest reset
-among exhausted limits. If the diagnostic query fails, it returns a safe rate-limit
+among exhausted limits that apply to reads (hourly write limits are independent).
+If the diagnostic query fails, it returns a safe rate-limit
 message rather than forwarding program output. Other errors retain the generic
 message, since arbitrary CLI diagnostics can contain secrets.
 
