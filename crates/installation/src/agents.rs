@@ -44,14 +44,21 @@ fn decode<T: serde::de::DeserializeOwned>(index: usize, value: &str) -> rusqlite
     })
 }
 
-fn row(db: &Db<'_>, row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
+fn row(
+    row: &rusqlite::Row<'_>,
+    permissions: crate::agent_grants::Permissions,
+) -> rusqlite::Result<Agent> {
     let identifier: String = row.get(0)?;
     let identifier = uuid::Uuid::parse_str(&identifier).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
     })?;
     let provider: String = row.get(2)?;
     let status: Option<String> = row.get(12)?;
-    let (access, exclusive_nodes, plugins) = db.agent_permissions(&identifier.to_string())?;
+    let crate::agent_grants::Permissions {
+        access,
+        exclusive_nodes,
+        plugins,
+    } = permissions;
     Ok(Agent {
         id: AgentId(identifier),
         settings: AgentSettings {
@@ -90,12 +97,19 @@ impl Db<'_> {
             )?;
             return Db(&tx).agents();
         }
+        let mut permissions = self.agent_permission_sets()?;
         Ok(self
             .0
             .prepare_cached(&format!(
                 "SELECT {COLUMNS} FROM agents ORDER BY updated_at DESC,id"
             ))?
-            .query_map([], |value| row(self, value))?
+            .query_map([], |value| {
+                let id: String = value.get(0)?;
+                let grants = permissions
+                    .remove(&id)
+                    .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                row(value, grants)
+            })?
             .collect::<rusqlite::Result<_>>()?)
     }
 
@@ -110,7 +124,7 @@ impl Db<'_> {
         Ok(self
             .0
             .prepare_cached(&format!("SELECT {COLUMNS} FROM agents WHERE id=?"))?
-            .query_row([id], |value| row(self, value))
+            .query_row([id], |value| row(value, self.agent_permissions(id)?))
             .optional()?)
     }
 

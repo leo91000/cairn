@@ -846,8 +846,20 @@ async fn selected_permissions_and_empty_tool_selections_survive_reopening() {
         )
         .await
         .unwrap();
+    let project_path = owner._root.path().join("project");
+    std::fs::create_dir(&project_path).unwrap();
+    let (status, project) = owner
+        .send(
+            "POST",
+            "/api/projects",
+            json!({
+                "settings": { "name": "App", "path": project_path, "sourceMode": "local" },
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{project}");
     let mut agent = owner.create_agent("Selections").await;
-    agent["access"]["projects"] = json!([]);
+    agent["access"]["projects"] = json!([project["id"]]);
     agent["access"]["skills"] = json!(["global/review", "global/review"]);
     agent["access"]["mcps"] = json!([connection["id"]]);
     agent["access"]["mcpTools"] = json!({ text(&connection,"id"): [] });
@@ -858,11 +870,28 @@ async fn selected_permissions_and_empty_tool_selections_survive_reopening() {
     assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(saved["access"]["skills"], json!(["global/review"]));
     assert_eq!(saved["access"]["nodes"], json!([LOCAL_NODE_ID, NODE]));
+    let mut other = owner.create_agent("Selected tools").await;
+    other["access"]["mcpTools"] = json!({ text(&connection,"id"): ["read", "read", "search"] });
+    let (status, other) = owner.send("PUT", &path(&other), other).await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    assert_eq!(
+        other["access"]["mcpTools"][text(&connection, "id")],
+        json!(["read", "search"])
+    );
     let reopened = start(owner._root.path()).await;
     assert_eq!(
         reopened.agent_snapshot(text(&saved, "id")).await.unwrap(),
         saved
     );
+
+    let listed = reopened.store.agents().await.unwrap();
+    assert_eq!(listed.len(), 3);
+    for profile in listed {
+        assert_eq!(
+            Some(profile.clone()),
+            reopened.store.agent(&profile.id.to_string()).await.unwrap()
+        );
+    }
 
     // An instance editor cannot restore a revoked grant from a stale resource list.
     let rejected = connections::save(

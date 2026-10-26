@@ -252,39 +252,39 @@ CREATE TABLE agent_permissions(
  all_skills INTEGER NOT NULL CHECK(all_skills IN (0,1)),
  all_nodes INTEGER NOT NULL CHECK(all_nodes IN (0,1)),
  all_mcps INTEGER NOT NULL CHECK(all_mcps IN (0,1))
-);
+) WITHOUT ROWID;
 CREATE TABLE agent_projects(
  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
  position INTEGER NOT NULL CHECK(position>=0),
  PRIMARY KEY(agent_id,project_id), UNIQUE(agent_id,position)
-);
+) WITHOUT ROWID;
 CREATE INDEX agent_projects_resource ON agent_projects(project_id,agent_id);
 CREATE TABLE agent_skills(
  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
  skill TEXT NOT NULL CHECK(length(skill)<=160),
  position INTEGER NOT NULL CHECK(position>=0),
  PRIMARY KEY(agent_id,skill), UNIQUE(agent_id,position)
-);
+) WITHOUT ROWID;
 CREATE TABLE agent_nodes(
  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
  node_id TEXT NOT NULL CHECK(length(node_id)=36),
  position INTEGER NOT NULL CHECK(position>=0),
  PRIMARY KEY(agent_id,node_id), UNIQUE(agent_id,position)
-);
+) WITHOUT ROWID;
 CREATE INDEX agent_nodes_resource ON agent_nodes(node_id,agent_id);
 CREATE TABLE agent_mcps(
  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
  mcp_id TEXT NOT NULL CHECK(length(mcp_id)=36),
  position INTEGER NOT NULL CHECK(position>=0),
  PRIMARY KEY(agent_id,mcp_id), UNIQUE(agent_id,position)
-);
+) WITHOUT ROWID;
 CREATE INDEX agent_mcps_resource ON agent_mcps(mcp_id,agent_id);
 CREATE TABLE agent_mcp_selections(
  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
  mcp_id TEXT NOT NULL CHECK(length(mcp_id)=36),
  PRIMARY KEY(agent_id,mcp_id)
-);
+) WITHOUT ROWID;
 CREATE TABLE agent_mcp_tools(
  agent_id TEXT NOT NULL,
  mcp_id TEXT NOT NULL,
@@ -292,38 +292,78 @@ CREATE TABLE agent_mcp_tools(
  position INTEGER NOT NULL CHECK(position>=0),
  PRIMARY KEY(agent_id,mcp_id,tool), UNIQUE(agent_id,mcp_id,position),
  FOREIGN KEY(agent_id,mcp_id) REFERENCES agent_mcp_selections(agent_id,mcp_id) ON DELETE CASCADE
-);
+) WITHOUT ROWID;
 CREATE TABLE agent_plugins(
  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
  instance_id TEXT NOT NULL CHECK(length(instance_id)=36),
  position INTEGER NOT NULL CHECK(position>=0),
  PRIMARY KEY(agent_id,instance_id), UNIQUE(agent_id,position)
-);
+) WITHOUT ROWID;
 CREATE INDEX agent_plugins_resource ON agent_plugins(instance_id,agent_id);
 CREATE TABLE agent_exclusive_nodes(
  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
  node_id TEXT NOT NULL CHECK(length(node_id)=36),
  position INTEGER NOT NULL CHECK(position>=0),
  PRIMARY KEY(agent_id,node_id), UNIQUE(agent_id,position)
-);
+) WITHOUT ROWID;
 CREATE INDEX agent_exclusive_nodes_resource ON agent_exclusive_nodes(node_id,agent_id);
 ";
 
+pub(crate) struct Permissions {
+    pub access: cairn_contracts::AccessPolicy,
+    pub exclusive_nodes: Vec<String>,
+    pub plugins: Vec<String>,
+}
+
+fn permission_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, Permissions)> {
+    Ok((
+        row.get(0)?,
+        Permissions {
+            access: cairn_contracts::AccessPolicy {
+                backend: row.get(1)?,
+                sandbox: row.get(2)?,
+                installation: row.get(3)?,
+                delegation: row.get(4)?,
+                projects: if row.get::<_, bool>(5)? {
+                    None
+                } else {
+                    Some(Vec::new())
+                },
+                skills: if row.get::<_, bool>(6)? {
+                    None
+                } else {
+                    Some(Vec::new())
+                },
+                nodes: if row.get::<_, bool>(7)? {
+                    None
+                } else {
+                    Some(Vec::new())
+                },
+                mcps: if row.get::<_, bool>(8)? {
+                    None
+                } else {
+                    Some(Vec::new())
+                },
+                mcp_tools: std::collections::BTreeMap::new(),
+            },
+            exclusive_nodes: Vec::new(),
+            plugins: Vec::new(),
+        },
+    ))
+}
+
+const PERMISSION_COLUMNS: &str =
+    "agent_id,backend,sandbox,installation,delegation,all_projects,all_skills,all_nodes,all_mcps";
+
 impl Db<'_> {
-    pub(crate) fn agent_permissions(
-        &self,
-        id: &str,
-    ) -> rusqlite::Result<(cairn_contracts::AccessPolicy, Vec<String>, Vec<String>)> {
-        let mut access = self.0.prepare_cached("SELECT backend,sandbox,installation,delegation,all_projects,all_skills,all_nodes,all_mcps FROM agent_permissions WHERE agent_id=?")?.query_row([id], |row| {
-            Ok(cairn_contracts::AccessPolicy {
-                backend: row.get(0)?, sandbox: row.get(1)?, installation: row.get(2)?, delegation: row.get(3)?,
-                projects: if row.get::<_,bool>(4)? { None } else { Some(Vec::new()) },
-                skills: if row.get::<_,bool>(5)? { None } else { Some(Vec::new()) },
-                nodes: if row.get::<_,bool>(6)? { None } else { Some(Vec::new()) },
-                mcps: if row.get::<_,bool>(7)? { None } else { Some(Vec::new()) },
-                mcp_tools: std::collections::BTreeMap::default(),
-            })
-        })?;
+    pub(crate) fn agent_permissions(&self, id: &str) -> rusqlite::Result<Permissions> {
+        let (_, mut permissions) = self
+            .0
+            .prepare_cached(&format!(
+                "SELECT {PERMISSION_COLUMNS} FROM agent_permissions WHERE agent_id=?"
+            ))?
+            .query_row([id], permission_row)?;
+        let access = &mut permissions.access;
         for (sql, selection) in [
             (
                 "SELECT project_id FROM agent_projects WHERE agent_id=? ORDER BY position",
@@ -375,7 +415,102 @@ impl Db<'_> {
             )?
             .query_map([id], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        Ok((access, exclusive, plugins))
+        permissions.exclusive_nodes = exclusive;
+        permissions.plugins = plugins;
+        Ok(permissions)
+    }
+
+    /// The catalogue reads each relation once under its caller's SQLite snapshot,
+    /// rather than issuing one set of queries for every agent in the list.
+    pub(crate) fn agent_permission_sets(
+        &self,
+    ) -> rusqlite::Result<std::collections::BTreeMap<String, Permissions>> {
+        let mut permissions = self
+            .0
+            .prepare_cached(&format!(
+                "SELECT {PERMISSION_COLUMNS} FROM agent_permissions"
+            ))?
+            .query_map([], permission_row)?
+            .collect::<rusqlite::Result<std::collections::BTreeMap<_, _>>>()?;
+        type Selection = fn(&mut Permissions) -> Option<&mut Vec<String>>;
+        let selections: [(&str, Selection); 6] = [
+            (
+                "SELECT agent_id,project_id FROM agent_projects ORDER BY agent_id,position",
+                |p| p.access.projects.as_mut(),
+            ),
+            (
+                "SELECT agent_id,skill FROM agent_skills ORDER BY agent_id,position",
+                |p| p.access.skills.as_mut(),
+            ),
+            (
+                "SELECT agent_id,node_id FROM agent_nodes ORDER BY agent_id,position",
+                |p| p.access.nodes.as_mut(),
+            ),
+            (
+                "SELECT agent_id,mcp_id FROM agent_mcps ORDER BY agent_id,position",
+                |p| p.access.mcps.as_mut(),
+            ),
+            (
+                "SELECT agent_id,instance_id FROM agent_plugins ORDER BY agent_id,position",
+                |p| Some(&mut p.plugins),
+            ),
+            (
+                "SELECT agent_id,node_id FROM agent_exclusive_nodes ORDER BY agent_id,position",
+                |p| Some(&mut p.exclusive_nodes),
+            ),
+        ];
+        for (sql, selection) in selections {
+            let mut statement = self.0.prepare_cached(sql)?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (agent, resource) = row?;
+                let profile = permissions
+                    .get_mut(&agent)
+                    .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                if let Some(values) = selection(profile) {
+                    values.push(resource);
+                }
+            }
+        }
+        let mut statement = self.0.prepare_cached(
+            "SELECT agent_id,mcp_id FROM agent_mcp_selections ORDER BY agent_id,mcp_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (agent, connection) = row?;
+            permissions
+                .get_mut(&agent)
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?
+                .access
+                .mcp_tools
+                .insert(connection, Vec::new());
+        }
+        let mut statement = self.0.prepare_cached(
+            "SELECT agent_id,mcp_id,tool FROM agent_mcp_tools ORDER BY agent_id,mcp_id,position",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (agent, connection, tool) = row?;
+            permissions
+                .get_mut(&agent)
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?
+                .access
+                .mcp_tools
+                .get_mut(&connection)
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?
+                .push(tool);
+        }
+        Ok(permissions)
     }
 
     pub(crate) fn save_permissions(&self, agent: &cairn_contracts::Agent) -> Result<()> {

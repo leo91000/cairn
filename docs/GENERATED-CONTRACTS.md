@@ -226,7 +226,9 @@ selections normalize to their first occurrence.
 
 Agent FKs cascade on deletion; project FKs restrict deletion. CHECKs bound boolean
 flags, supported backend/sandbox values, text and list positions; unique keys
-prevent duplicate grants. Reads hydrate one SQLite snapshot, and profile/permission
+prevent duplicate grants. Permission tables use WITHOUT ROWID so composite keys
+do not duplicate a separate rowid/primary-key index. Listing loads each relation
+once for the whole catalogue. Reads hydrate one SQLite snapshot, and profile/permission
 writes publish atomically. Revisions change on owner saves and resource revocation.
 There is no historical reader or migration: the initial schema is version 4.
 
