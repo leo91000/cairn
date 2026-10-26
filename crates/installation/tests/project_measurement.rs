@@ -51,6 +51,14 @@ trait StorageEntity:
 
     const SAVE: &'static str;
 
+    fn encoded_bytes(_db: &Db<'_>) -> Option<i64> {
+        None
+    }
+
+    fn admission_state(_db: &Db<'_>, _id: &str, _reference: bool) -> Option<String> {
+        None
+    }
+
     fn id(&self) -> String;
 
     fn setup(_db: &Connection) {}
@@ -638,6 +646,16 @@ fn measure<E: StorageEntity>(entities: &[E]) {
                 assert_eq!(result, *p);
             }
             let warm_cpu = cpu() - cpu_start;
+            let mut admission = Vec::new();
+            let cpu_start = cpu();
+            if E::admission_state(&Db(&db), &entities[0].id(), reference).is_some() {
+                for entity in entities {
+                    measured(&mut admission, || {
+                        E::admission_state(&Db(&db), &entity.id(), reference).unwrap()
+                    });
+                }
+            }
+            let admission_cpu = cpu() - cpu_start;
             let mut list = Vec::new();
             let cpu_start = cpu();
             for _ in 0..50 {
@@ -671,6 +689,7 @@ fn measure<E: StorageEntity>(entities: &[E]) {
             db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
                 .unwrap();
             let db_bytes = std::fs::metadata(&path).unwrap().len();
+            let encoded_bytes = E::encoded_bytes(&Db(&db));
             let pages: Vec<(String, i64)> = db
                 .prepare("SELECT name,sum(pgsize) FROM dbstat GROUP BY name ORDER BY name")
                 .unwrap()
@@ -716,11 +735,13 @@ fn measure<E: StorageEntity>(entities: &[E]) {
                     "rows": entities.len(),
                     "wireBytes": entities.iter().map(|p| serde_json::to_vec(p).unwrap().len()).sum::<usize>(),
                     "dbBytes": db_bytes,
+                    "encodedBytes": encoded_bytes,
                     "walBeforeCheckpointBytes": wal,
                     "pages": pages,
                     "insert": distribution(&insert),
                     "replace": distribution(&replace),
                     "warmRead": distribution(&warm),
+                    "admissionRead": if admission.is_empty() { None } else { Some(distribution(&admission)) },
                     "connectionColdRead": distribution(&cold),
                     "list1000": distribution(&list),
                     "due500": if due.is_empty(){None}else{Some(distribution(&due))},
@@ -729,6 +750,7 @@ fn measure<E: StorageEntity>(entities: &[E]) {
                         "insert": insert_cpu,
                         "replace": replace_cpu,
                         "warmRead": warm_cpu,
+                        "admissionRead": admission_cpu,
                         "coldReadIncludingOpen": cold_cpu,
                         "list": list_cpu,
                         "due": due_cpu,
@@ -839,6 +861,26 @@ impl StorageEntity for MeasuredRun {
     const KIND: &'static str = "runs";
     const SAVE: &'static str = "run.saved";
 
+    fn encoded_bytes(db: &Db<'_>) -> Option<i64> {
+        Some(db.0.query_row("SELECT sum(payload) FROM dbstat WHERE name='runs' OR name LIKE 'runs_%' OR name LIKE 'sqlite_autoindex_runs_%'", [], |row| row.get(0)).unwrap())
+    }
+
+    fn admission_state(db: &Db<'_>, id: &str, reference: bool) -> Option<String> {
+        Some(if reference {
+            Self::reference_read(db, id).0["status"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        } else {
+            db.run_state(id)
+                .unwrap()
+                .unwrap()
+                .status
+                .as_str()
+                .to_owned()
+        })
+    }
+
     fn id(&self) -> String {
         self.state().id
     }
@@ -909,9 +951,17 @@ CREATE UNIQUE INDEX runs_active_task ON runs(task_id) WHERE status IN ('queued',
     fn reference_write(&self, db: &Db<'_>, replacement: bool) {
         let state = self.state();
         if replacement {
+            let mut current = Self::reference_read(db, &state.id).0;
+            current["status"] = state.status.into();
+            current["summary"] = state.summary.into();
+            current["finishedAt"] = state.finished_at.into();
             db.0.prepare_cached("UPDATE runs SET status=?,data=? WHERE id=?")
                 .unwrap()
-                .execute(params![state.status.as_str(), self.0.to_string(), state.id])
+                .execute(params![
+                    state.status.as_str(),
+                    current.to_string(),
+                    state.id
+                ])
                 .unwrap();
         } else {
             db.0.prepare_cached("INSERT INTO runs(id,task_id,project_id,status,created_at,data,dedupe) VALUES(?,?,?,?,?,?,NULL)").unwrap().execute(params![state.id,state.task_id,state.project_id.unwrap_or_default(),state.status.as_str(),state.created_at,self.0.to_string()]).unwrap();

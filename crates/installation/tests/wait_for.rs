@@ -131,7 +131,7 @@ impl Fixture {
                 .await
                 .unwrap();
         f.run = text(&run, "id").to_owned();
-        let run =
+        let _state =
             f.s.store
                 .change_run(
                     &f.run,
@@ -142,6 +142,7 @@ impl Fixture {
                 )
                 .await
                 .unwrap();
+        let run = f.s.store.run(&f.run).await.unwrap();
         let config = f.s.mcps.run_configuration(&f.s, &run).await.unwrap();
         f.token = text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
         f.s.store
@@ -358,7 +359,7 @@ async fn already_finished_sources_return_results_without_scheduling_or_ending_th
             .change_run(
                 text(&target, "id"),
                 cairn_installation::runs::RunChanges {
-                    status: Some(status),
+                    status: Some(cairn_contracts::RunStatus::parse(status).unwrap()),
                     ..Default::default()
                 },
             )
@@ -940,17 +941,17 @@ async fn watchers_share_requests_only_for_the_same_granted_project_origin() {
             .await
             .unwrap();
         let mut run = f.s.chat_detail(chat).await.unwrap()["run"].clone();
-        run =
-            f.s.store
-                .change_run(
-                    text(&run, "id"),
-                    cairn_installation::runs::RunChanges {
-                        status: Some(cairn_contracts::RunStatus::Running),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
+        f.s.store
+            .change_run(
+                text(&run, "id"),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        run = f.s.store.run(text(&run, "id")).await.unwrap();
         f.s.chat_acknowledge(text(&run, "id"), &message)
             .await
             .unwrap();

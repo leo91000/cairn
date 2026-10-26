@@ -1090,7 +1090,7 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
         crate::runs::RunChanges {
             task_id: Some(chat["id"].as_str().unwrap_or_default().to_owned()),
             trigger: Some(("chat").to_owned()),
-            boundary: Some(serde_json::json!({
+            boundary: Some(json!({
                 "sourceTaskId": run["taskId"],
                 "sourceTaskPrompt": run["snapshot"]["task"]["prompt"],
                 "sourceSessionId": run["sessionId"],

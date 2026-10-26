@@ -737,6 +737,7 @@ async fn delegated_native_administration_requires_the_requesters_current_review(
         )
         .await
         .unwrap();
+    let parent = f.service.store.run(&parent.id).await.unwrap();
     let configuration = f
         .service
         .mcps
@@ -817,6 +818,7 @@ async fn task_delegation_has_its_own_revocable_native_authority() {
         )
         .await
         .unwrap();
+    let parent = f.service.store.run(&parent.id).await.unwrap();
     let configuration = f
         .service
         .mcps
@@ -1323,6 +1325,7 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         }
         f.service.store.put("nodes", node).await.unwrap();
         let attempt = id();
+        let resumed = f.service.store.run(&resumed.id).await.unwrap();
         let claimed = placement::reserve(&f.service, &resumed, &attempt).await;
         let succeeds = !changed_backend;
         if succeeds {
@@ -2170,6 +2173,7 @@ async fn a_vm_coordinator_directed_by_unrelated_parents_loses_native_delegation(
         )
         .await
         .unwrap();
+    let coordinator_run = f.service.store.run(&coordinator_run.id).await.unwrap();
     let c = f
         .service
         .mcps

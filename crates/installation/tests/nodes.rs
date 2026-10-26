@@ -1,4 +1,3 @@
-use crate::common::run_fixture::DbRunFixture;
 use common::McpFixture;
 use common::StoreAgentFixture;
 
@@ -225,7 +224,7 @@ impl Owner {
         self.service.store.run(id).await.unwrap()
     }
 
-    async fn add_run(&self, record: &Value) {
+    async fn add_run_fixture(&self, record: &Value) {
         common::add_run(&self.service.store, record).await;
     }
 

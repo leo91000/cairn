@@ -331,10 +331,19 @@ class ConversationPresentationTest {
         assertEquals(31_000L, decoded.retry!!.nextAttemptAt)
         assertEquals("timeout", decoded.retry.cause.kind)
         assertTrue(retryNotice(decoded, 1000)!!.contains("attempt 2/5"))
-        assertEquals(null, wireJson.decodeFromString<Run>("""{"id":"r","status":"queued","taskId":"fixture-task"}""").retry)
         assertEquals(
             null,
-            wireJson.decodeFromString<Run>("""{"id":"r","status":"queued","retry":null,"taskId":"fixture-task"}""").retry,
+            wireJson
+                .decodeFromString<Run>("""{"id":"r","status":"queued","taskId":"fixture-task"}""")
+                .retry,
+        )
+        assertEquals(
+            null,
+            wireJson
+                .decodeFromString<Run>(
+                    """{"id":"r","status":"queued","retry":null,"taskId":"fixture-task"}"""
+                )
+                .retry,
         )
         assertEquals(
             null,

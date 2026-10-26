@@ -242,7 +242,9 @@ async fn transient_agent_failure_resumes_same_session_and_workspace_after_restar
         .change_run(
             &run_id,
             cairn_installation::runs::RunChanges {
-                retry: Some(serde_json::from_value(waiting["retry"].clone())?),
+                retry: Some(Some(
+                    serde_json::from_value(waiting["retry"].clone()).unwrap(),
+                )),
                 ..Default::default()
             },
         )
@@ -262,7 +264,7 @@ async fn transient_agent_failure_resumes_same_session_and_workspace_after_restar
         .change_run(
             &run_id,
             cairn_installation::runs::RunChanges {
-                retry: Some(Some(retry.clone())),
+                retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
                 ..Default::default()
             },
         )
@@ -318,7 +320,7 @@ async fn startup_disconnect_before_first_turn_retries_without_losing_the_pending
         .change_run(
             &run_id,
             cairn_installation::runs::RunChanges {
-                retry: Some(Some(retry.clone())),
+                retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
                 ..Default::default()
             },
         )
@@ -390,7 +392,7 @@ async fn first_start_recovery_remains_manually_resumable_after_stop_or_exhaustio
                     .change_run(
                         &run_id,
                         cairn_installation::runs::RunChanges {
-                            retry: Some(Some(retry.clone())),
+                            retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
                             ..Default::default()
                         },
                     )
@@ -463,7 +465,7 @@ async fn native_recovery_preflight_disconnect_consumes_the_same_retry_budget() {
         .change_run(
             &run_id,
             cairn_installation::runs::RunChanges {
-                retry: Some(Some(retry.clone())),
+                retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
                 ..Default::default()
             },
         )
@@ -489,7 +491,7 @@ async fn native_recovery_preflight_disconnect_consumes_the_same_retry_budget() {
         .change_run(
             &run_id,
             cairn_installation::runs::RunChanges {
-                retry: Some(Some(retry.clone())),
+                retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
                 ..Default::default()
             },
         )
@@ -524,7 +526,7 @@ async fn an_expired_retry_window_does_not_admit_another_agent() {
         .change_run(
             &run_id,
             cairn_installation::runs::RunChanges {
-                retry: Some(Some(retry.clone())),
+                retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
                 ..Default::default()
             },
         )
@@ -609,7 +611,7 @@ async fn agent_retries_stop_after_five_attempts_or_when_the_error_becomes_termin
                 .change_run(
                     &run_id,
                     cairn_installation::runs::RunChanges {
-                        retry: Some(Some(retry.clone())),
+                        retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
                         ..Default::default()
                     },
                 )
@@ -736,7 +738,7 @@ async fn managed_task_retry_releases_its_account_during_backoff() {
         .change_run(
             run_id,
             cairn_installation::runs::RunChanges {
-                retry: Some(Some(retry.clone())),
+                retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
                 ..Default::default()
             },
         )
@@ -757,7 +759,7 @@ async fn managed_task_retry_releases_its_account_during_backoff() {
         .change_run(
             run_id,
             cairn_installation::runs::RunChanges {
-                retry: Some(Some(retry.clone())),
+                retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
                 ..Default::default()
             },
         )

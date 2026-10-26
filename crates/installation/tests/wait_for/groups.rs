@@ -30,7 +30,7 @@ impl Fixture {
             .change_run(
                 text(run, "id"),
                 cairn_installation::runs::RunChanges {
-                    status: Some(status),
+                    status: Some(cairn_contracts::RunStatus::parse(status).unwrap()),
                     finished_at: Some(Some(now())),
                     ..Default::default()
                 },
