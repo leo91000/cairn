@@ -425,6 +425,8 @@ impl Db<'_> {
     pub(crate) fn agent_permission_sets(
         &self,
     ) -> rusqlite::Result<std::collections::BTreeMap<String, Permissions>> {
+        type Selection = fn(&mut Permissions) -> Option<&mut Vec<String>>;
+
         let mut permissions = self
             .0
             .prepare_cached(&format!(
@@ -432,7 +434,6 @@ impl Db<'_> {
             ))?
             .query_map([], permission_row)?
             .collect::<rusqlite::Result<std::collections::BTreeMap<_, _>>>()?;
-        type Selection = fn(&mut Permissions) -> Option<&mut Vec<String>>;
         let selections: [(&str, Selection); 6] = [
             (
                 "SELECT agent_id,project_id FROM agent_projects ORDER BY agent_id,position",
