@@ -242,6 +242,37 @@ async fn failed_startup_can_be_retried_and_shutdown_removes_the_home() {
 }
 
 #[tokio::test]
+async fn transient_leases_are_canceled_by_connection_and_package_changes() {
+    let root = TempDir::new().unwrap();
+    let caches = Caches::default();
+    let identity = identity(executable(&root));
+    for package_change in [false, true] {
+        let lease = caches
+            .acquire(identity.clone(), &config(), false, caches.generation())
+            .await
+            .unwrap();
+        let home = lease.home().to_owned();
+        assert!(caches.entries.lock().unwrap().is_empty());
+        if package_change {
+            caches.forget_plugin(&identity.plugin);
+        } else {
+            caches.forget(&identity.connection);
+        }
+        assert!(lease.stop().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while lease.entry.daemon.get().unwrap().alive() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(lease);
+        assert!(!home.exists());
+        assert!(caches.transient.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn shutdown_cancels_transient_leases_and_permanently_refuses_acquisition() {
     let root = TempDir::new().unwrap();
     let caches = Caches::default();

@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -55,6 +55,9 @@ impl Entry {
 #[derive(Default)]
 pub(crate) struct Caches {
     entries: Mutex<HashMap<(String, String), Arc<Entry>>>,
+    /// Non-owning registration keeps drafts isolated and ephemeral while making
+    /// their active operations reachable by connection/package invalidation.
+    transient: Mutex<Vec<Weak<Entry>>>,
     shutdown: CancellationToken,
     generation: AtomicU64,
 }
@@ -129,6 +132,10 @@ impl Caches {
                         entries.remove(&key);
                     }
                     entries.insert(key, entry.clone());
+                } else {
+                    let mut transient = self.transient.lock().unwrap();
+                    transient.retain(|entry| entry.strong_count() > 0);
+                    transient.push(Arc::downgrade(&entry));
                 }
                 entry
             }
@@ -168,6 +175,20 @@ impl Caches {
             entry.stop();
             false
         });
+        self.invalidate_transient(matches);
+    }
+
+    fn invalidate_transient(&self, matches: impl Fn(&Identity) -> bool) {
+        self.transient.lock().unwrap().retain(|entry| {
+            let Some(entry) = entry.upgrade() else {
+                return false;
+            };
+            if !matches(&entry.identity) {
+                return true;
+            }
+            entry.stop();
+            false
+        });
     }
 
     /// Reuses the plugin supervisor's authoritative enabled-instance/package snapshot.
@@ -199,6 +220,7 @@ impl Caches {
             entry.stop();
         }
         entries.clear();
+        self.invalidate_transient(|_| true);
     }
 }
 

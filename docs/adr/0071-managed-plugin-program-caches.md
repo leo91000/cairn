@@ -33,6 +33,8 @@ Existing authorization and post-I/O checks apply on every call. Rotating or
 changing an instance, disabling/deleting/disconnecting it, replacing its approved
 package, or shutdown invalidates its daemon and cancels active calls. Draft and
 disabled-instance tests use transient daemons rather than entering the pool.
+Weak registrations make those transient operations reachable by connection and
+package invalidation without retaining their daemons or homes after the call.
 Configuration invalidation advances a generation under the pool lock. Acquisition
 captures it before rereading authoritative state; reconciliation captures it before
 its asynchronous snapshot. Both reject stale generations. A caller cannot replace

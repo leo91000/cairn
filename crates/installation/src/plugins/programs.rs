@@ -142,7 +142,10 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
             environment: hex::encode(Sha256::digest(serde_json::to_vec(&resolved_environment)?)),
         };
         let reusable = context.draft.is_none() && context.connection.enabled;
-        if context.draft.is_none() {
+        if let Some(draft) = &context.draft {
+            let draft = draft.clone();
+            s.store.read(move |db| draft.authorize(db)).await?;
+        } else {
             let expected = context.connection.clone();
             s.store
                 .read(move |db| super::connections::check_revision(db, &expected))
