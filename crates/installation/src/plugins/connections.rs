@@ -64,6 +64,10 @@ pub struct Connection {
     pub agent_id: String,
     pub project_id: Option<String>,
     pub granted_access: Value,
+    /// Native authority committed when the owner selects the answering agent.
+    /// Older/unscoped connections carry no native grant until saved by an authorized caller.
+    #[serde(default)]
+    pub native_authority: Value,
     pub owner_access_id: Option<String>,
     pub access_mode: AccessMode,
     pub user_ids: Vec<String>,
@@ -92,6 +96,7 @@ impl Connection {
             agent_id: String::new(),
             project_id: None,
             granted_access: Value::Null,
+            native_authority: Value::Null,
             owner_access_id: None,
             access_mode: AccessMode::Allowlist,
             user_ids: Vec::new(),
@@ -592,6 +597,7 @@ where
         None => None,
     };
     let owner = crate::relay::task_author_policy(s).await?;
+    let origin = crate::native::policy::origin();
     let name = text(input, "name").trim();
     if name.is_empty() || name.chars().count() > 100 {
         return Err(Error::bad("Enter a connection name."));
@@ -609,6 +615,7 @@ where
         .map(str::to_owned);
     if delegates {
         uuid(agent_id)?;
+        crate::native::policy::refresh_agent(s, agent_id).await?;
     }
     if let Some(project) = &project {
         uuid(project)?;
@@ -802,7 +809,8 @@ where
         agent_id: agent_id.to_owned(),
         project_id: project,
         granted_access: Value::Null,
-        owner_access_id: owner.map(|policy| policy.owner.access_id),
+        native_authority: Value::Null,
+        owner_access_id: owner.as_ref().map(|policy| policy.owner.access_id.clone()),
         access_mode,
         user_ids,
         people,
@@ -862,6 +870,7 @@ where
                 let access = policy(&agent);
                 delegation_rules(db, &connection, &access)?;
                 connection.granted_access = access;
+                connection.native_authority = native_authority(db, &connection, &agent, &origin)?;
             }
             if connection.access_mode != AccessMode::Requests {
                 for request in db.list("plugin-requests")? {
@@ -945,7 +954,38 @@ pub(crate) async fn load(s: &Service, connection_id: &str) -> Result<Connection>
 
 /// Approves the agent's saved access for a delegation that answers as this agent,
 /// as saving the instance again would. Runs in the agent's save transaction.
-pub(crate) fn reapprove(db: &Db<'_>, connection_id: &str, agent: &Value) -> Result<()> {
+fn native_authority(
+    db: &Db<'_>,
+    connection: &Connection,
+    agent: &Value,
+    origin: &crate::native::policy::Origin,
+) -> Result<Value> {
+    if !crate::native::policy::native(agent) {
+        return Ok(Value::Null);
+    }
+    let mut grant = crate::native::policy::authorize_origin(db, agent, origin)?;
+    let authority = db.kv("native-authority")?.unwrap_or_default();
+    let owner_access = connection
+        .owner_access_id
+        .as_deref()
+        .ok_or_else(|| Error::forbidden("The bot has no current owner delegation."))?;
+    let owner = authority["accounts"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .find(|(_, account)| account["accessId"].as_str() == Some(owner_access))
+        .map(|(id, _)| id.clone())
+        .ok_or_else(|| Error::forbidden("The bot's owner has no current native authority."))?;
+    grant["pluginOwnerAccountId"] = owner.into();
+    Ok(grant)
+}
+
+pub(crate) fn reapprove(
+    db: &Db<'_>,
+    connection_id: &str,
+    agent: &Value,
+    origin: &crate::native::policy::Origin,
+) -> Result<()> {
     let value = db
         .get(KIND, connection_id)?
         .ok_or_else(|| Error::bad("A plugin delegation to reapprove no longer exists."))?;
@@ -963,6 +1003,7 @@ pub(crate) fn reapprove(db: &Db<'_>, connection_id: &str, agent: &Value) -> Resu
         ))
     })?;
     connection.granted_access = access;
+    connection.native_authority = native_authority(db, &connection, agent, origin)?;
     connection.revision = id();
     connection.updated_at = now();
     db.put(KIND, &serde_json::to_value(&connection)?)?;

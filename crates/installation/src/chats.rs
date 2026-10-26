@@ -862,10 +862,6 @@ fn launch_turn(
     Ok(())
 }
 
-pub(crate) fn create_in(db: &Db<'_>, input: Value) -> Result<Value> {
-    create_as(db, input, &crate::native::policy::Origin::default())
-}
-
 /// Transfers a completed mission's conversation to a chat without replaying it.
 fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -> Result<Value> {
     crate::conversation_lifecycle::require_active_run(db, run_id)?;
@@ -976,14 +972,13 @@ pub(crate) fn create_as(
     db.put("chats", &chat)
 }
 
-pub(crate) fn send_in(db: &Db<'_>, chat: &str, input: Value) -> Result<Value> {
-    send(
-        db,
-        chat,
-        parse("message", input)?,
-        None,
-        &crate::native::policy::Origin::default(),
-    )
+pub(crate) fn send_as_in(
+    db: &Db<'_>,
+    chat: &str,
+    input: Value,
+    origin: &crate::native::policy::Origin,
+) -> Result<Value> {
+    send(db, chat, parse("message", input)?, None, origin)
 }
 
 pub(crate) fn pause_in(db: &Db<'_>, id: &str, paused: bool) -> Result<Value> {
