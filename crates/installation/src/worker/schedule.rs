@@ -496,7 +496,7 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
                 patch.boundary.as_mut().unwrap()["outcome"] = Value::Null;
             } else {
                 // A compaction completed before the restart settles like one that did not.
-                crate::chats::keep_reply_after_compaction(&current, &mut patch)?;
+                crate::chats::keep_reply_after_compaction(&record.boundary, &mut patch)?;
             }
             db.change_run(id, patch)?;
             return Ok(false);
@@ -840,7 +840,7 @@ mod tests {
                         "previous": { "summary": "Last reply", "finishedAt": 500, "outcome": outcome },
                     },
                 });
-                db.add_run(&record, None)?;
+                db.add_run_fixture(&record, None)?;
 
                 // The compaction's `turn.completed` was saved; the manager stopped before
                 // settling the run, and a compaction leaves no reply in the checkpoint.

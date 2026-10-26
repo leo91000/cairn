@@ -3367,6 +3367,15 @@
           ],
           "x-kotlin-type": "ChatExecution"
         },
+        "contextUsage": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "ContextUsage"
+        },
         "createdAt": {
           "default": 0,
           "format": "int64",

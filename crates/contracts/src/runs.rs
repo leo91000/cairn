@@ -175,6 +175,11 @@ pub struct Run {
     #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "RunUsage"))]
     pub usage: Option<serde_json::Value>,
     #[serde(default)]
+    #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "ContextUsage"))]
+    #[ts(optional = nullable)]
+    #[ts(type = "import('../../chats').ContextUsage | null")]
+    pub context_usage: Option<serde_json::Value>,
+    #[serde(default)]
     #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "ChatWakeup"))]
     #[ts(optional = nullable)]
     #[ts(type = "import('../../chats').ChatWakeup | null")]

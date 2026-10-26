@@ -52,20 +52,7 @@ data class ChatQuestion(
 
 typealias ChatWakeup = build.cairn.boundary.ChatWakeup
 
-/**
- * How full the coding agent's context was at its latest report. [contextTokens] is what the latest
- * model request occupied, never the conversation's cumulative spend.
- */
-@Serializable
-data class ContextUsage(
-    val contextTokens: Long = 0,
-    /** The model's context window; absent when the coding agent does not report it. */
-    val contextWindow: Long? = null,
-    /** Of [contextTokens], input read from the prompt cache, when reported. */
-    val cachedTokens: Long? = null,
-    /** A local estimate: before the session's first response, or right after a compaction. */
-    val estimated: Boolean = false,
-)
+typealias ContextUsage = build.cairn.boundary.ContextUsage
 
 /** Whether the coding agent can compact its context now, and why not when it cannot. */
 @Serializable

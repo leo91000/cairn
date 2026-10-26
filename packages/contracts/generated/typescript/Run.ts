@@ -22,6 +22,7 @@ export interface Run {
   unread: boolean
   preview?: string | null
   usage?: Record<string, number> | null
+  contextUsage?: import('../../chats').ContextUsage | null
   wakeup?: import('../../chats').ChatWakeup | null
   chatExecution?: import('../../chats').ChatExecution | null
   outcome?: import('../../contracts').TaskOutcome | null

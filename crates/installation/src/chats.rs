@@ -102,7 +102,10 @@ pub(crate) fn is_compaction(run: &Value) -> bool {
 /// its outcome, and does not become newly finished. Resuming an interrupted compaction clears
 /// the run's outcome, so it comes from what the compaction saved. Failures and stops still show
 /// why it ended.
-pub(crate) fn keep_reply_after_compaction(run: &Value, patch: &mut crate::runs::RunChanges) -> Result<()> {
+pub(crate) fn keep_reply_after_compaction(
+    run: &Value,
+    patch: &mut crate::runs::RunChanges,
+) -> Result<()> {
     if !is_compaction(run) {
         return Ok(());
     }
@@ -1579,7 +1582,7 @@ mod tests {
                     "chatExecution": { "messageId": "first", "text": "First", "attachments": [], "recovery": false },
                     "snapshot": { "agent": { "provider": "codex" } },
                 });
-                db.add_run(&run, None)?;
+                db.add_run_fixture(&run, None)?;
                 db.set("run-checkpoint:run", &json!({ "completed": true, "launched": true }), None)?;
                 db.put(
                     "chats",
@@ -1657,7 +1660,7 @@ mod tests {
                 ];
                 for (index, (provider, status, session, reason)) in cases.into_iter().enumerate() {
                     let id = format!("case-{index}");
-                    db.add_run(
+                    db.add_run_fixture(
                         &json!({
                             "id": id,
                             "taskId": id,
@@ -1696,7 +1699,7 @@ mod tests {
                 assert!(text(&state, "reason").contains("first message"));
 
                 // A run that names no coding agent still shows its conversation.
-                db.add_run(
+                db.add_run_fixture(
                     &json!({ "id": "unnamed", "taskId": "unnamed", "createdAt": 0, "status": "succeeded" }),
                     None,
                 )?;

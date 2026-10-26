@@ -3,6 +3,7 @@ package build.cairn.contracts
 
 import build.cairn.boundary.ChatExecution
 import build.cairn.boundary.ChatWakeup
+import build.cairn.boundary.ContextUsage
 import build.cairn.boundary.ExclusiveReservation
 import build.cairn.boundary.NativeModeState
 import build.cairn.boundary.NodeBackup
@@ -27,6 +28,7 @@ data class Run(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val capacityWaitUntil: Long? = null,
     val chatExecution: ChatExecution? = null,
+    val contextUsage: ContextUsage? = null,
     val createdAt: Long = 0,
     val dismissal: OutcomeDismissal? = null,
     val error: String? = null,

@@ -3381,20 +3381,23 @@ async fn chat_compaction_matches_public_mcp_and_installation_tools() {
         let (target, _) = active_run(&s, &main).await;
         let run_id = target["id"].as_str().unwrap();
         s.store
-            .patch_run(
+            .change_run(
                 run_id,
-                json!({
-                    "status": "succeeded",
-                    "sessionId": "native-session",
-                    "summary": "Last reply",
-                    "finishedAt": 500,
-                    "contextUsage": {
-                        "contextTokens": 150_000,
-                        "contextWindow": 200_000,
-                        "cachedTokens": 120_000,
-                        "estimated": false,
-                    },
-                }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_installation::run_status::RunStatus::Succeeded),
+                    session_id: Some(Some("native-session".into())),
+                    summary: Some("Last reply".into()),
+                    finished_at: Some(Some(500)),
+                    boundary: Some(json!({
+                        "contextUsage": {
+                            "contextTokens": 150_000,
+                            "contextWindow": 200_000,
+                            "cachedTokens": 120_000,
+                            "estimated": false,
+                        },
+                    })),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -3421,6 +3424,12 @@ async fn chat_compaction_matches_public_mcp_and_installation_tools() {
                 }
             }
         };
+
+        let metadata = invoke("get_run", json!({ "runId": run_id })).await;
+        assert_eq!(
+            result(&metadata)["run"]["run"]["contextUsage"]["contextTokens"],
+            150_000
+        );
 
         let read = invoke("get_chat", json!({ "chatId": chat_id })).await;
         let summary = &result(&read)["chat"];

@@ -11,6 +11,7 @@
         "ExclusiveReservation": "build.cairn.boundary.ExclusiveReservation",
         "NodeBackup": "build.cairn.boundary.NodeBackup",
         "RunStorage": "build.cairn.boundary.RunStorage",
+        "ContextUsage": "build.cairn.boundary.ContextUsage",
         "RunUsage": "kotlinx.serialization.json.JsonObject"
       }
     }

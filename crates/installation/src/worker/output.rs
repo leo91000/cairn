@@ -433,7 +433,7 @@ async fn apply_event(
     // The latest occupancy of the native session, shown before its history loads.
     if event["type"] == "context.usage" && event["usage"]["contextTokens"].is_u64() {
         let patch = serde_json::json!({ "contextUsage": event["usage"] });
-        s.store.patch_run(id, patch).await?;
+        s.store.update_run_boundary(id, patch).await?;
     }
     if event["item"]["type"] == "agent_message" && event["item"]["text"].is_string() {
         let message = truncate(
