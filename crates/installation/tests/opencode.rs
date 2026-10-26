@@ -163,6 +163,44 @@ async fn run(s: &Service, plan: Value) -> (cairn_installation::error::Result<()>
 }
 
 #[tokio::test]
+async fn disk_notice_is_submitted_without_user_delivery_receipts_including_replay() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s).await;
+    tokio::fs::create_dir_all(root.path().join("inbox"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        root.path().join("inbox/disk-notice.json"),
+        json!({ "id": "disk-notice", "operationalNotice": true, "text": "Runtime disk pressure" })
+            .to_string(),
+    )
+    .await
+    .unwrap();
+    let input = plan(&root, "Build the status panel");
+    for _ in 0..2 {
+        let (result, events) = run(&s, input.clone()).await;
+        result.unwrap();
+        assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["type"] == "chat.delivered"
+                    && event["messageId"] == "disk-notice")
+        );
+    }
+    let receipt = tokio::fs::read_to_string(root.path().join("result.opencode-receipt.json"))
+        .await
+        .unwrap();
+    assert!(
+        !serde_json::from_str::<Value>(&receipt).unwrap()["delivered"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("disk-notice"))
+    );
+}
+
+#[tokio::test]
 async fn native_turn_streams_and_completed_receipt_replays_without_an_engine() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
@@ -386,78 +424,6 @@ async fn cancelling_during_native_startup_kills_the_waiting_process() {
 }
 
 #[tokio::test]
-async fn legacy_receipts_reject_native_continuations_during_recovery() {
-    let root = TempDir::new().unwrap();
-    let s = service(&root).await;
-    connect(&s).await;
-    let session = "ses_legacy";
-    let legacy_wire = "msg_1a000000000001abcdefghijklmn";
-    let native_wire = "msg_000000001002abcdefghijklmn";
-    let submitted_at: i64 = 0x1a000000000000 / 4096;
-    assert!(native_wire < legacy_wire);
-
-    // An older incomplete receipt has an untruncated ID and no submission time.
-    tokio::fs::write(
-        root.path().join("result.opencode-receipt.json"),
-        json!({
-            "messageId": "initial",
-            "submissions": [["initial", legacy_wire]],
-            "delivered": ["initial"],
-        })
-        .to_string(),
-    )
-    .await
-    .unwrap();
-    let native_data = Provider::Opencode
-        .driver()
-        .home(&s, "protocol-test")
-        .join("data/opencode");
-    tokio::fs::create_dir_all(&native_data).await.unwrap();
-    // Put the unknown continuation first, so detection must establish the
-    // timestamp boundary from owned history before visiting any unknown user.
-    tokio::fs::write(
-        native_data.join("fixture-sessions.json"),
-        json!({
-            session: {
-                "id": session,
-                "messages": [
-                    {
-                        "info": {
-                            "id": native_wire,
-                            "role": "user",
-                            "time": { "created": submitted_at + 1 },
-                        },
-                        "parts": [],
-                    },
-                    {
-                        "info": {
-                            "id": legacy_wire,
-                            "role": "user",
-                            "time": { "created": submitted_at },
-                        },
-                        "parts": [],
-                    },
-                ],
-            },
-        })
-        .to_string(),
-    )
-    .await
-    .unwrap();
-
-    let mut input = plan(&root, "Continue the interrupted request.");
-    input["sessionId"] = session.into();
-    let (result, events) = run(&s, input).await;
-    assert!(
-        result
-            .unwrap_err()
-            .message
-            .contains("unsupported continuation")
-    );
-    assert!(!events.iter().any(|event| event["type"] == "turn.completed"));
-}
-
-#[tokio::test]
 async fn cancellation_stops_a_busy_native_turn() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
@@ -495,10 +461,48 @@ async fn cancellation_stops_a_busy_native_turn() {
     );
 }
 
-/// Optional pinned-native smoke: real OpenCode, a local model server, synthetic auth.
+/// Optional native qualification: the real OpenCode release reports the provider and
+/// model catalog that account connection and the model picker read.
 /// Run with OPENCODE_NATIVE_BIN set via the credential-isolated backend launcher.
 #[tokio::test]
-#[ignore = "requires the pinned OpenCode 1.19.0 binary"]
+#[ignore = "requires a native OpenCode binary"]
+async fn native_cli_lists_providers_and_models() {
+    let binary = std::env::var("OPENCODE_NATIVE_BIN").expect("set OPENCODE_NATIVE_BIN");
+    let root = TempDir::new().unwrap();
+    let s = Service::new(Config {
+        opencode_bin: binary,
+        ..common::config(root.path())
+    })
+    .await
+    .unwrap();
+    let providers = s.opencode.providers(&s).await.unwrap();
+    for provider in ["opencode", "openai"] {
+        assert!(
+            providers
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"] == provider && !text(p, "name").is_empty()),
+            "{providers}"
+        );
+    }
+    // Connecting checks the provider against the same native catalog.
+    s.accounts
+        .connect_api_key(&s, Provider::Opencode, "OpenAI", "openai", KEY, None)
+        .await
+        .unwrap();
+    let models = s.opencode.models(&s).await.unwrap();
+    assert_eq!(models["error"], "", "{models}");
+    assert!(!models["models"].as_array().unwrap().is_empty(), "{models}");
+}
+
+/// Optional pinned-native smoke: real OpenCode, a local model server, synthetic auth.
+/// Run with OPENCODE_NATIVE_BIN set via the credential-isolated backend launcher.
+/// OPENCODE_NATIVE_RESUME_BIN resumes the session with another release: a newer
+/// one taking over sessions an installation already holds, or an older one after
+/// a rollback.
+#[tokio::test]
+#[ignore = "requires a native OpenCode binary"]
 async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
     use axum::{Router, http::HeaderMap, routing::post};
     let binary = std::env::var("OPENCODE_NATIVE_BIN").expect("set OPENCODE_NATIVE_BIN");
@@ -524,8 +528,12 @@ async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
         .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let router = Router::new().route("/v1/chat/completions", post(|headers: HeaderMap| async move {
+    // Model requests, to check that a resumed session sends its earlier turns.
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let recorded = requests.clone();
+    let router = Router::new().route("/v1/chat/completions", post(move |headers: HeaderMap, body: axum::body::Bytes| async move {
         assert_eq!(headers["authorization"], format!("Bearer {KEY}"));
+        recorded.lock().unwrap().push(serde_json::from_slice(&body).unwrap());
         let chunks = [
             json!({
                 "id": "local",
@@ -616,6 +624,10 @@ async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
         "thread_id",
     )
     .to_owned();
+    if let Ok(binary) = std::env::var("OPENCODE_NATIVE_RESUME_BIN") {
+        config.opencode_bin = binary;
+    }
+    let first_turn = requests.lock().unwrap().len();
     input["sessionId"] = session.clone().into();
     input["execution"]["messageId"] = "follow-up".into();
     input["execution"]["text"] = "Continue in the same session. Do not call tools.".into();
@@ -652,6 +664,18 @@ async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
             .await
             .unwrap(),
         "Native OpenCode local model passed."
+    );
+    // The resuming release loaded the stored history rather than starting over.
+    assert!(
+        requests.lock().unwrap()[first_turn..]
+            .iter()
+            .any(|request| {
+                let messages = request["messages"].to_string();
+                messages.contains("Reply with the local model result")
+                    && messages.contains("Native OpenCode local model passed.")
+                    && messages.contains("Continue in the same session")
+            }),
+        "The follow-up request did not include the first turn"
     );
 }
 

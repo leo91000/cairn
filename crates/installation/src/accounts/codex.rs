@@ -649,30 +649,6 @@ async fn redeem(
     }
 }
 
-/// Records written before usage was normalized kept Codex's raw rate limits.
-async fn upgrade_records(s: &Service) -> Result<()> {
-    for mut account in s.store.list(KIND).await? {
-        let Some(object) = account.as_object_mut() else {
-            continue;
-        };
-        let Some(limits) = object.remove("limits") else {
-            continue;
-        };
-        if !limits.is_null() {
-            let mut usage = normalize(&limits);
-            usage["checkedAt"] = object.get("checkedAt").cloned().unwrap_or(Value::Null);
-            object.insert("usage".into(), usage);
-        }
-        if let Some(exhausted) = object.get_mut("exhausted").and_then(Value::as_object_mut)
-            && let Some(limits) = exhausted.remove("limits")
-        {
-            exhausted.insert("usage".into(), normalize(&limits));
-        }
-        s.store.put(KIND, account).await?;
-    }
-    Ok(())
-}
-
 /// Recovers credentials a manager session may have rotated just before a crash.
 async fn recover_sessions(s: &Service) -> Result<()> {
     for account in s.accounts.of(s, Provider::Codex).await? {
@@ -734,9 +710,6 @@ pub struct Codex;
 #[async_trait::async_trait]
 impl Driver for Codex {
     async fn initialize(&self, s: &Service) -> Result<()> {
-        upgrade_records(s).await?;
-        // Earlier versions signed in here; an unfinished sign-in never survives a restart.
-        remove_directory(&s.config.data_dir.join("codex-login")).await?;
         recover_sessions(s).await?;
         if s.store.kv(MANAGED).await?.is_some() {
             return Ok(());
@@ -828,8 +801,8 @@ impl Driver for Codex {
         true
     }
 
-    async fn supports(&self, s: &Service, id: &str, model: &str) -> Result<bool> {
-        crate::models::account_supports(s, id, model).await
+    async fn supports(&self, s: &Service, id: &str, model: &str, speed: &str) -> Result<bool> {
+        crate::models::account_supports(s, id, model, speed).await
     }
 
     fn home(&self, s: &Service, run_id: &str) -> PathBuf {

@@ -1,7 +1,6 @@
 //! Field readers for third-party JSON: a value of an unexpected type reads as missing
 //! instead of rejecting the whole message.
 use super::usage::Usage;
-use crate::provider::Provider;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
@@ -52,16 +51,6 @@ where
 {
     let value = Value::deserialize(deserializer)?;
     Ok(T::deserialize(value).unwrap_or_default())
-}
-
-/// "claude", or Codex for anything else.
-pub fn provider<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Provider, D::Error> {
-    let value = Value::deserialize(deserializer)?;
-    Ok(match value.as_str() {
-        Some("claude") => Provider::Claude,
-        Some("opencode") => Provider::Opencode,
-        _ => Provider::Codex,
-    })
 }
 
 /// Unreadable usage counts as unknown usage.

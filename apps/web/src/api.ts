@@ -6,7 +6,11 @@ import type {
 } from '../../../packages/contracts/contracts'
 import type { McpView } from '../../../packages/contracts/mcp'
 import { reactive, watch } from 'vue'
+import { listAgents } from '../../../packages/contracts/generated/listAgents'
+import { listMissions } from '../../../packages/contracts/generated/listMissions'
+import { listProjects } from '../../../packages/contracts/generated/listProjects'
 import { beaconOrigin, installationHost } from './beacon-location'
+import { ProtocolMismatch } from './direct-channel'
 import { clearHistoryCache } from './history-cache'
 import { InstallationTransport } from './installation-transport'
 import { observeTransport } from './transport-observation'
@@ -17,6 +21,7 @@ export const installationRoute = beaconEntry ? installationHost || /^\/installat
 
 export const state = reactive({
   transportRoute: 'relay' as 'direct' | 'relay',
+  protocolError: '',
   connectionLost: false,
   ready: false,
   authenticated: false,
@@ -38,6 +43,9 @@ export const state = reactive({
   toast: '',
   error: '',
 })
+watch(connectionScope, () => {
+  state.protocolError = ''
+}, { flush: 'sync' })
 watch(() => state.signingOut || (state.ready && !state.authenticated), (clear) => {
   if (clear)
     void clearHistoryCache()
@@ -249,6 +257,8 @@ async function requestOnce<T = any>(
   catch (error) {
     if (options.signal?.aborted)
       throw error
+    if (error instanceof ProtocolMismatch)
+      throw new ApiError(error.message, 426)
     throw new ConnectionError(error)
   }
 
@@ -401,9 +411,9 @@ export async function refresh() {
   let lists: [Agent[], Project[], Task[], Skill[], McpView[]]
   try {
     lists = await Promise.all([
-      api<Agent[]>('/agents'),
-      api<Project[]>('/projects'),
-      api<Task[]>('/tasks'),
+      listAgents(api, {}).then(output => output.agents),
+      listProjects(api, {}).then(output => output.projects),
+      listMissions(api, {}).then(output => output.tasks),
       api<Skill[]>('/skills'),
       state.installationRole === 'owner' ? api<McpView[]>('/mcps') : Promise.resolve([]),
     ])

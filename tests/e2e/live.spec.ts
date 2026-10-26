@@ -37,9 +37,9 @@ test('chat groups visible calls despite diagnostics, updates and global event ID
   await useRelayForHttpMocks(page)
   await page.route(`**/chats/${chat.id}/stream*`, route => route.fulfill({
     contentType: 'text/event-stream',
-    body: `event: batch\ndata: ${JSON.stringify({
+    body: `id: ${events.at(-1)!.id}\nevent: batch\ndata: ${JSON.stringify({
       events,
-      state: { run, chat },
+      state: { run, chat: workspace.service.chats.detail(chat.id), artifacts: [] },
       reset: true,
       more: false,
       history: `grouping:${run.id}`,
@@ -66,7 +66,7 @@ test('agent diagnostics preserve embedded JSON as terminal text', async ({ page,
     trigger: 'diagnostic-fixture',
   })
   const diagnostic = '2026-10-22T12:08:49Z WARN native: request failed: {"error":{"message":"disk full"}}\npartial result: {"error":\n'
-  workspace.service.store.event(run.id, 'diagnostic', `\x1B[33m${diagnostic}\x1B[0m`)
+  workspace.service.store.event(run.id, 'diagnostic', diagnostic)
   await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
   await authenticateWorkspace(page)
   await page.getByTestId('agent-actions').locator(':scope > button').click()

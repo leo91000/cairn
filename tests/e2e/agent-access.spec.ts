@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test'
+import type { ListProjectsOutput } from '../../packages/contracts/generated/typescript/ListProjectsOutput'
 import type { Workspace } from './fixtures'
 import {
   signIn as authenticateWorkspace,
@@ -29,7 +30,7 @@ async function enroll(page: Page, workspace: Workspace, name: string, exclusive:
       code: invitation.code,
       name,
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: {
         os: 'linux',
         arch: 'x86_64',
@@ -44,7 +45,7 @@ async function enroll(page: Page, workspace: Workspace, name: string, exclusive:
   const node = await response.json()
   const heartbeat = await page.request.post(`${workspace.installationUrl}/internal/nodes/heartbeat`, {
     headers: { authorization: `Bearer ${node.token}` },
-    data: { exclusiveReservations: exclusive },
+    data: { exclusiveReservations: exclusive, runtimeId: 'development', nodeProtocol: 2 },
   })
   expect(heartbeat.ok()).toBe(true)
   return node.nodeId as string
@@ -157,7 +158,8 @@ for (const kind of ['projects'] as const) {
       await expect(dialog.getByRole('alert')).toContainText(failure === 'refresh' ? 'saved, but the workspace could not be reloaded' : `Could not confirm whether the ${label} was saved`)
       await expectUncovered(dialog.getByRole('alert'))
       rejectRefresh = false
-      const first = (await workspace.api(`/api/${kind}`)).filter((item: { id: string }) => item.id === createdId)
+      const initialProjects: ListProjectsOutput = await workspace.api(`/api/${kind}`)
+      const first = initialProjects.projects.filter(item => item.id === createdId)
       expect(first).toHaveLength(1)
       const createdAt = first[0].createdAt
       await page.screenshot({ path: testInfo.outputPath(`${kind}-${failure.replaceAll(' ', '-')}-mobile.png`), animations: 'disabled' })
@@ -174,7 +176,8 @@ for (const kind of ['projects'] as const) {
       await dialog.getByRole('button', { name: `Save ${label}`, exact: true }).click()
       await expect(dialog).toHaveCount(0)
 
-      const saved = (await workspace.api(`/api/${kind}`)).filter((item: { name: string }) => item.name.startsWith(name))
+      const updatedProjects: ListProjectsOutput = await workspace.api(`/api/${kind}`)
+      const saved = updatedProjects.projects.filter(item => item.name.startsWith(name))
       expect(saved).toHaveLength(1)
       expect(saved[0]).toMatchObject({ id: createdId, name: `${name} edited`, createdAt })
       expect(updates).toBe(failure === 'refresh' ? 2 : 1)
@@ -552,7 +555,7 @@ test('tool choices stay visible and editable when every MCP connection is grante
   // Choosing no connection saves: tool choices of connections no longer granted are not sent.
   const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${agent.id}`))
   await bar.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await saving).postDataJSON().access).toMatchObject({ mcps: [], mcpTools: {} })
+  expect((await saving).postDataJSON().settings.access).toMatchObject({ mcps: [], mcpTools: {} })
   await expect(bar).toHaveCount(0)
   expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access).toMatchObject({ mcps: [], mcpTools: {} })
 })
@@ -568,8 +571,8 @@ test('a held plugin grant whose package cannot give agents access is shown, coun
     }
 
     const response = await route.fetch()
-    const agents = await response.json()
-    await route.fulfill({ response, json: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) })
+    const { agents } = await response.json()
+    await route.fulfill({ response, json: { agents: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) } })
   })
   await page.route('**/api/plugins', route => route.fulfill({
     json: {
@@ -624,7 +627,7 @@ test('a held plugin grant whose package cannot give agents access is shown, coun
 
   const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${agent.id}`))
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
-  const body = (await saving).postDataJSON()
+  const body = (await saving).postDataJSON().settings
   expect(body.plugins).toEqual([])
   expect(body.access).not.toHaveProperty('plugins')
 })
@@ -693,8 +696,8 @@ test('a GitHub account is granted like any plugin instance, and the server refus
   await expect(review).toContainText('Added: GitHub “Work”')
   await review.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(review).toContainText(refusal)
-  expect(saves.at(-1)!.plugins).toEqual(['work', 'personal'])
-  expect(saves.at(-1)!.access).not.toHaveProperty('github')
+  expect(saves.at(-1)!.settings.plugins).toEqual(['work', 'personal'])
+  expect(saves.at(-1)!.settings.access).not.toHaveProperty('github')
   await review.getByRole('button', { name: 'Back to editing', exact: true }).click()
   // The refusal stays with the plugins section, where the owner removes one account.
   await expect(page.getByRole('alert').filter({ hasText: refusal }).first()).toBeVisible()
@@ -710,8 +713,8 @@ test('when plugins cannot be loaded, plugin access is read-only and no grant loo
     }
 
     const response = await route.fetch()
-    const agents = await response.json()
-    await route.fulfill({ response, json: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) })
+    const { agents } = await response.json()
+    await route.fulfill({ response, json: { agents: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) } })
   })
   let catalogFails = true
   await page.route('**/api/plugins', route => catalogFails
@@ -782,7 +785,7 @@ test('the execution backend chooses which nodes an agent can be granted', async 
       code: invitation.code,
       name: 'native-box',
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: {
         backend: 'native',
         os: 'linux',
@@ -791,7 +794,6 @@ test('the execution backend chooses which nodes an agent can be granted', async 
         memoryMiB: 16384,
         diskMiB: 65536,
         kvm: false,
-        fuse: false,
       },
     },
   })
@@ -898,49 +900,6 @@ test('reloading after a conflict keeps a node granted elsewhere and the owner\'s
   expect([...saved.access.nodes].sort()).toEqual([mine, theirs].sort())
 })
 
-test('on an older installation, live grants are read-only and never sent', async ({ page, workspace }) => {
-  await useRelayForHttpMocks(page)
-  const agent = await workspace.api('/api/agents', 'POST', { name: 'Older grants' })
-  // An installation before live grants on agents, e.g. after a rollback: agents keep their
-  // revision, but lack the capability marker and the grants; it has no preview.
-  await page.route('**/api/agents', async (route) => {
-    if (route.request().method() !== 'GET') {
-      await route.continue()
-      return
-    }
-
-    const response = await route.fetch()
-    const agents = await response.json()
-    await route.fulfill({
-      response,
-      json: agents.map(({
-        grantsOnAgent: _marker,
-        exclusiveNodes: _nodes,
-        plugins: _plugins,
-        ...item
-      }: Record<string, unknown>) => item),
-    })
-  })
-  await page.route(`**/api/agents/${agent.id}/preview`, route => route.fulfill({ status: 404, json: { error: 'Not found' } }))
-  await page.goto(workspacePath(`/agents/${agent.id}?section=plugins`))
-  await authenticateWorkspace(page)
-  await expect(page.getByRole('note').filter({ hasText: 'Update the installation to grant these from the agent page.' })).toBeVisible()
-  await openAgentSection(page, 'Nodes')
-  await expect(page.getByText('Exclusive reservations: Update the installation to grant these from the agent page.')).toBeVisible()
-
-  await openAgentSection(page, 'Identity & instructions')
-  await page.getByLabel('Description', { exact: true }).fill('Saved on an older installation')
-  const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${agent.id}`))
-  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
-  const sent = (await saving).postDataJSON()
-  expect(sent).not.toHaveProperty('exclusiveNodes')
-  expect(sent).not.toHaveProperty('plugins')
-  expect(sent).not.toHaveProperty('revision')
-  expect(sent).not.toHaveProperty('grantsOnAgent')
-  await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
-  await page.unrouteAll({ behavior: 'ignoreErrors' })
-})
-
 test('while the workspace lists cannot load, MCP access is read-only and not reported gone', async ({ page, workspace }) => {
   await workspace.restart()
   await useRelayForHttpMocks(page)
@@ -972,72 +931,18 @@ test('while the workspace lists cannot load, MCP access is read-only and not rep
   await expect(page.getByRole('group', { name: 'MCP connections access' })).toBeVisible()
 })
 
-test('on an older installation, grants read from resources appear once plugins load', async ({ page, workspace }) => {
-  await workspace.restart()
+test('a missing agent preview keeps edits unsaved and reports the error', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
-  const agent = await workspace.api('/api/agents', 'POST', { name: 'Older retry' })
-  await page.route('**/api/agents', async (route) => {
-    if (route.request().method() !== 'GET') {
-      await route.continue()
-      return
-    }
-
-    const response = await route.fetch()
-    const agents = await response.json()
-    await route.fulfill({
-      response,
-      json: agents.map(({
-        grantsOnAgent: _marker,
-        exclusiveNodes: _nodes,
-        plugins: _plugins,
-        ...item
-      }: Record<string, unknown>) => item),
-    })
-  })
-  let pluginsFail = true
-  await page.route('**/api/plugins', async (route) => {
-    if (pluginsFail) {
-      await route.fulfill({ status: 500, json: { error: 'Plugin host unavailable' } })
-      return
-    }
-
-    const response = await route.fetch()
-    const catalog = await response.json()
-    // The older installation records the grant on the instance.
-    await route.fulfill({
-      response,
-      json: {
-        ...catalog,
-        connections: [{
-          id: 'queue',
-          pluginId: 'onepassword',
-          name: 'Support queue',
-          enabled: true,
-          settings: {},
-          agentIds: [agent.id],
-          userIds: [],
-          people: [],
-          accessMode: 'allowlist',
-          agentId: '',
-          projectId: null,
-          maxMessagesPerHour: 0,
-          status: { state: 'ready' },
-          usage: { hour: 0 },
-          requests: [],
-          activity: [],
-        }],
-      },
-    })
-  })
-  await page.goto(workspacePath(`/agents/${agent.id}?section=plugins`))
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Required preview' })
+  await page.route(`**/api/agents/${agent.id}/preview`, route => route.fulfill({ status: 404, json: { error: 'Preview unavailable' } }))
+  await page.goto(workspacePath(`/agents/${agent.id}`))
   await authenticateWorkspace(page)
-  const failure = page.getByRole('alert').filter({ hasText: 'Plugins could not be loaded' })
-  await expect(failure).toBeVisible()
-  pluginsFail = false
-  await failure.getByRole('button', { name: 'Try again', exact: true }).click()
-  const grant = page.getByRole('switch', { name: 'Access to 1Password Support queue' })
-  await expect(grant).toBeChecked()
-  await expect(grant).toBeDisabled()
-  await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
-  await page.unrouteAll({ behavior: 'ignoreErrors' })
+  await openAgentSection(page, 'Identity & instructions')
+  await page.getByLabel('Description', { exact: true }).fill('Unsaved edits')
+  const bar = page.getByRole('region', { name: 'Unsaved changes' })
+  await bar.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.getByText('Preview unavailable', { exact: true })).toBeVisible()
+  await expect(bar).toBeVisible()
+  const stored = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
+  expect(stored.description).not.toBe('Unsaved edits')
 })

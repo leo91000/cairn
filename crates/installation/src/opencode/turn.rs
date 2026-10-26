@@ -23,19 +23,13 @@ const LIMIT: usize = 2_000_000;
 #[serde(rename_all = "camelCase")]
 struct Receipt {
     message_id: String,
-    #[serde(default)]
     submissions: Vec<(String, String)>,
-    #[serde(default)]
     submitted_at: Option<i64>,
-    #[serde(default)]
     delivered: HashSet<String>,
-    #[serde(default)]
     previously_delivered: HashSet<String>,
-    #[serde(default)]
+    operational_notices: HashSet<String>,
     complete: bool,
-    #[serde(default)]
     answer: String,
-    #[serde(default)]
     items: Vec<Value>,
 }
 
@@ -266,6 +260,9 @@ struct Turn<'a> {
 
 impl Turn<'_> {
     async fn deliver(&mut self, id: &str) -> Result<()> {
+        if self.receipt.operational_notices.contains(id) {
+            return Ok(());
+        }
         if self.receipt.delivered.insert(id.into()) {
             self.receipt.save(&self.receipt_path).await?;
             emit(
@@ -312,16 +309,18 @@ impl Turn<'_> {
     }
 
     async fn poll_inbox(&mut self) -> Result<()> {
-        let path = Path::new(text(self.plan, "inputDirectory")).join("messages.json");
-        let Ok(file) = tokio::fs::File::open(path).await else {
+        let directory = Path::new(text(self.plan, "inputDirectory"));
+        let Some(bytes) = crate::chat_inbox::read(directory, LIMIT).await? else {
             return Ok(());
         };
-        let bytes = crate::process::read_bounded(file, LIMIT).await?;
         let Ok(messages) = serde_json::from_slice::<Vec<Value>>(&bytes) else {
             return Ok(());
         };
         for message in messages {
             let id = text(&message, "id");
+            if message["operationalNotice"] == true {
+                self.receipt.operational_notices.insert(id.to_owned());
+            }
             if id.is_empty()
                 || self.submitted.contains(id)
                 || self.receipt.delivered.contains(id)
@@ -597,24 +596,6 @@ impl Turn<'_> {
             .server
             .get(&format!("/session/{}/message?limit=100", self.session))
             .await?;
-        if self.receipt.submitted_at.is_none() {
-            // Older receipts did not record submission time. Infer it from the
-            // native history before checking continuations, regardless of order.
-            self.receipt.submitted_at = messages
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|message| {
-                    message["info"]["role"] == "user"
-                        && self
-                            .receipt
-                            .submissions
-                            .iter()
-                            .any(|(_, wire)| message["info"]["id"] == wire.as_str())
-                })
-                .filter_map(|message| message["info"]["time"]["created"].as_i64())
-                .min();
-        }
         for message in messages.as_array().into_iter().flatten() {
             if message["info"]["role"] == "user" {
                 self.observe_user(&message["info"])?;

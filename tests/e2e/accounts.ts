@@ -1,15 +1,13 @@
 import type { Provider } from '../../packages/contracts/accounts'
-import type { AccountLimits } from '../fixtures/legacy/server/codex-account-types'
 import type { Workspace } from './fixtures'
+import { Buffer } from 'node:buffer'
 import { randomUUID } from 'node:crypto'
 import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { credential } from '../fixtures/codex-account-fixture'
-import { McpVault } from '../fixtures/legacy/server/mcp-vault'
 
 // Synthetic accounts written straight into the native server's database. The fixture Codex
 // app-server reports their usage; Claude accounts sign in through the fixture CLI instead.
-export async function seedCodexAccount(workspace: Workspace, name: string, limits: AccountLimits, options: { enabled?: boolean, maxConcurrentRuns?: number } = {}) {
+export async function seedCodexAccount(workspace: Workspace, name: string, limits: unknown, options: { enabled?: boolean, maxConcurrentRuns?: number } = {}) {
   const id = randomUUID()
   const account = {
     id,
@@ -28,10 +26,10 @@ export async function seedCodexAccount(workspace: Workspace, name: string, limit
     exhausted: null,
     maxConcurrentRuns: options.maxConcurrentRuns ?? 4,
   }
-  const { store, config } = workspace.service
-  store.db.prepare('INSERT OR REPLACE INTO records(id,kind,data,updated_at) VALUES(?,?,?,?)').run(id, 'agentAccounts', JSON.stringify(account), Date.now())
+  const { store, vault } = workspace.service
+  store.put('agentAccounts', account)
   store.set('codex-accounts-enabled', true)
-  new McpVault(store, config.dataDir).set(`codex-account:${id}`, credential(id))
+  vault.set(`codex-account:${id}`, credential(id))
   await workspace.setAccountUsage(id, limits)
   return account
 }
@@ -63,4 +61,28 @@ export async function connectClaude(workspace: Workspace, name = 'Claude', code 
   }
 
   throw new Error('Claude sign-in did not finish')
+}
+
+// Synthetic CLI responses, not persisted account-domain types.
+export function limits(primary = 20, secondary = 40) {
+  return {
+    ordinaryUsageAllowed: true,
+    rateLimits: {
+      limitId: 'codex',
+      limitName: 'Codex',
+      primary: { usedPercent: primary, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 7200 },
+      secondary: { usedPercent: secondary, windowDurationMins: 10080, resetsAt: Math.floor(Date.now() / 1000) + 86400 },
+    },
+  }
+}
+
+function credential(id: string) {
+  return {
+    tokens: {
+      account_id: id,
+      access_token: `synthetic-access-${id}`,
+      refresh_token: `synthetic-refresh-${id}`,
+      id_token: `header.${Buffer.from(JSON.stringify({ sub: id })).toString('base64url')}.signature`,
+    },
+  }
 }

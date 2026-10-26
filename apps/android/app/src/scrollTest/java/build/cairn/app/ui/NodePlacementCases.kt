@@ -106,7 +106,24 @@ abstract class NodePlacementCases {
                                         else ""
                                     """[{"id":"desk","name":"Machine jetable","status":"online","accepting":true,"slots":2,"capabilities":{"backend":"native","nativeModeProtocol":1},"nativeModeObserved":{"mode":"protected","status":"$status"}$requested}]"""
                                 }
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -263,13 +280,26 @@ abstract class NodePlacementCases {
                                         """[{"id":"desk","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
                                     else if (enrolled.get())
                                         """[{"id":"unrelated","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]},{"id":"desk","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
                                     else "[]"
                                 "/api/installations/fixture/api/agents" ->
-                                    """[{"id":"vm","name":"Agent VM","revision":"r1"},{"id":"native","name":"Agent natif","revision":"r1","access":{"backend":"native","nodes":[]}}]"""
+                                    """{"agents":[{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"65a2e5b3-c5e4-5bb1-a839-36064775dd2a","instructions":"","model":"","name":"Agent VM","plugins":[],"provider":"codex","reasoning":"high","revision":"r1","timeoutMinutes":0},{"access":{"backend":"native","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":[],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"38235acc-317f-50db-b506-53809ad1c8a0","instructions":"","model":"","name":"Agent natif","plugins":[],"provider":"codex","reasoning":"high","revision":"r1","timeoutMinutes":0}]}"""
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> if (request.method == "PUT") "{}" else "[]"
+                                "/api/installations/fixture/api/projects" -> """{"projects":[]}"""
+                                else ->
+                                    if (request.method == "PUT") "{}"
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -370,7 +400,7 @@ abstract class NodePlacementCases {
                     .first { it.first == "/api/installations/fixture/api/nodes/desk/agents" }
                     .second
             assertEquals(
-                listOf("native"),
+                listOf("38235acc-317f-50db-b506-53809ad1c8a0"),
                 grant["agentIds"]!!.jsonArray.map { it.jsonPrimitive.content },
             )
             assertEquals(JsonPrimitive(true), grant["add"])
@@ -458,10 +488,48 @@ abstract class NodePlacementCases {
                                 path == "/api/installations/fixture/api/overview" -> "{}"
                                 path == "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
-                                        listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                Agent(
+                                                    exclusiveNodes = emptyList(),
+                                                    plugins = emptyList(),
+                                                    revision = "",
+                                                    createdAt = 0,
+                                                    access =
+                                                        AccessPolicy(
+                                                            mcpTools =
+                                                                build.cairn.contracts.McpTools(
+                                                                    emptyMap()
+                                                                ),
+                                                            projects = null,
+                                                            skills = null,
+                                                            mcps = null,
+                                                        ),
+                                                    id = MAIN_AGENT_ID,
+                                                    name = "Agent principal",
+                                                )
+                                            )
+                                        )
                                     )
                                 path.endsWith("/models") -> """{"models":[]}"""
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -521,7 +589,24 @@ abstract class NodePlacementCases {
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -574,7 +659,24 @@ abstract class NodePlacementCases {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -653,7 +755,24 @@ abstract class NodePlacementCases {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -767,7 +886,24 @@ abstract class NodePlacementCases {
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -889,7 +1025,24 @@ abstract class NodePlacementCases {
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path.endsWith("/overview") -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -973,11 +1126,11 @@ abstract class NodePlacementCases {
                             when {
                                 path == "/api/installations/fixture/api/nodes/enrollments" -> {
                                     enrolled = true
-                                    """{"code":"fixture-enrollment","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/install | bash"}"""
+                                    """{"code":"fixture-enrollment","nodeId":"fresh","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/install | bash"}"""
                                 }
                                 path == "/api/installations/fixture/api/nodes/node/revoke" -> {
                                     revoked = true
-                                    "{}"
+                                    """{"releasedPlacements":0}"""
                                 }
                                 path == "/api/installations/fixture/api/nodes/node" -> {
                                     configured = true
@@ -994,13 +1147,30 @@ abstract class NodePlacementCases {
                                     """{"freedMiB":2048,"failed":0}"""
                                 }
                                 path == "/api/installations/fixture/api/nodes" ->
-                                    """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"storage":{"memoryCacheMiB":512},"agents":[],"exclusiveAgents":[],"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}${if (enrolled) """,{"id":"fresh","name":"Nouvelle node","status":"online","accepting":true,"agents":[{"id":"other","name":"Agent autorisé"},{"id":"main","name":"Agent global","allNodes":true}${if (grantedElsewhere) """,{"id":"late","name":"Agent tardif"}""" else ""}${if (granted) """,{"id":"agent","name":"Agent test"}""" else ""}]}""" else ""}]"""
+                                    """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"storage":{"memoryCacheMiB":512},"agents":[],"exclusiveAgents":[],"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}${if (enrolled) """,{"id":"fresh","name":"Nouvelle node","status":"online","accepting":true,"agents":[{"id":"ebfa691e-a987-5771-8e65-e1e51d1e4bb5","name":"Agent autorisé"},{"id":"ce26d2b8-ac9e-597f-a8ff-d2d679cbe59c","name":"Agent global","allNodes":true}${if (grantedElsewhere) """,{"id":"8d489b40-6d91-5e69-ab94-d43fa270f612","name":"Agent tardif"}""" else ""}${if (granted) """,{"id":"d3153f9f-724b-59c3-9614-ab78f231c4d3","name":"Agent test"}""" else ""}]}""" else ""}]"""
                                 path == "/api/installations/fixture/api/agents" ->
-                                    """[{"id":"agent","name":"Agent test"},{"id":"other","name":"Agent autorisé","access":{"nodes":["fresh"]}},{"id":"late","name":"Agent tardif"},{"id":"main","name":"Agent global","access":{"nodes":null}},{"id":"native","name":"Agent natif","access":{"backend":"native","nodes":[]}}]"""
+                                    """{"agents":[{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"d3153f9f-724b-59c3-9614-ab78f231c4d3","instructions":"","model":"","name":"Agent test","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["fresh"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"ebfa691e-a987-5771-8e65-e1e51d1e4bb5","instructions":"","model":"","name":"Agent autorisé","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"8d489b40-6d91-5e69-ab94-d43fa270f612","instructions":"","model":"","name":"Agent tardif","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":null,"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"ce26d2b8-ac9e-597f-a8ff-d2d679cbe59c","instructions":"","model":"","name":"Agent global","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"native","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":[],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"38235acc-317f-50db-b506-53809ad1c8a0","instructions":"","model":"","name":"Agent natif","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0}]}"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body).apply {
                             // Keep the save busy while the subsequent node refresh is in flight.
@@ -1244,7 +1414,7 @@ abstract class NodePlacementCases {
                     .first { it.first == "/api/installations/fixture/api/nodes/fresh/agents" }
                     .second
             assertEquals(
-                listOf("agent"),
+                listOf("d3153f9f-724b-59c3-9614-ab78f231c4d3"),
                 grant["agentIds"]!!.jsonArray.map { it.jsonPrimitive.content },
             )
             assertEquals(true, grant["add"]?.jsonPrimitive?.booleanOrNull)

@@ -8,30 +8,25 @@ import {
   accessSummary,
   backendOf,
   changes,
-  currentAgentIds,
   draftOf,
   effectiveExclusive,
   errorSection,
   grantableConnection,
   grantablePackages,
   issues,
-  keptAgentIds,
   mergeList,
   nativeReviewNodes,
   needsReview,
   newAgentDraft,
   nodesFor,
-  olderInstallation,
   rebaseDraft,
   reviewLines,
   sandboxOptionsFor,
   savedDraft,
   selectionSummary,
-  sentDraft,
   skillLabel,
   unknownNode,
   withBackend,
-  withResourceGrants,
   withRun,
 } from '../src/agent-access'
 
@@ -134,9 +129,6 @@ it('summarizes an agent for the list and places server errors in their section',
     plugins: ['prod'],
   } as unknown as Agent
   expect(accessSummary(agent, context)).toBe('3 projects · 2 nodes · 1Password')
-  // An older installation records plugin grants on the instances only.
-  expect(accessSummary(agent, { ...context, connections: context.connections.map(connection => ({ ...connection, agentIds: [] })) }, true)).toBe('3 projects · 2 nodes')
-  expect(accessSummary({ ...agent, plugins: [] }, { ...context, connections: context.connections.map(connection => connection.id === 'prod' ? { ...connection, agentIds: ['a'] } : connection) }, true)).toBe('3 projects · 2 nodes · 1Password')
   expect(errorSection('A selected plugin instance no longer exists.')).toBe('plugins')
   // Two instances of a package whose runs use its credentials: GitHub accounts are plugin grants.
   expect(errorSection('Grant one GitHub instance per agent: its runs use that instance\'s credentials.')).toBe('plugins')
@@ -152,6 +144,7 @@ it('starts new agents restricted until the owner widens their access', () => {
     mcps: [],
     mcpTools: {},
     installation: false,
+    delegation: false,
     sandbox: 'yolo',
   })
   expect(newAgentDraft()).toMatchObject({ exclusiveNodes: [], plugins: [] })
@@ -330,6 +323,20 @@ it('lists every addition and removal of powers and grants', () => {
   expect(reviewLines(granted, revoked, context).map(line => line.text)).toEqual([
     'Removed: node gpu-box, exclusive reservation on gpu-box, 1Password “Production”, installation management.',
   ])
+})
+
+it('reviews task delegation as a power and lists its removal', () => {
+  const saved = newAgentDraft()
+  const granted = structuredClone(saved)
+  granted.access.delegation = true
+  expect(changes(saved, granted)).toEqual(['powers'])
+  const added = reviewLines(saved, granted, context)
+  expect(added).toEqual([expect.objectContaining({ kind: 'power', section: 'powers' })])
+  expect(added[0]!.text).toMatch(/^Added: task delegation\./)
+  expect(needsReview(added, null)).toBe(true)
+  const revoked = structuredClone(granted)
+  revoked.access.delegation = false
+  expect(reviewLines(granted, revoked, context).map(line => line.text)).toEqual(['Removed: task delegation.'])
 })
 
 it('treats an exclusive reservation on a runtime without support as inactive', () => {
@@ -573,34 +580,6 @@ it('never sends tool choices of deleted MCP connections', () => {
   expect(savedDraft(draft, ['m1']).access.mcpTools).toEqual({ m1: ['echo'] })
 })
 
-it('recognizes an older installation and reads its grants from the resources', () => {
-  // Revisions survive a rollback: only the capability marker says live grants are on agents.
-  expect(olderInstallation([{ revision: 'r1' }, {}])).toBe(true)
-  expect(olderInstallation([{ revision: 'r1', grantsOnAgent: true }, { grantsOnAgent: true }])).toBe(false)
-  expect(olderInstallation([])).toBe(false)
-  const local = {
-    ...gpu,
-    id: 'runner-record',
-    local: true,
-    exclusiveAgents: ['a'],
-  } as ExecutionNode
-  const draft = withResourceGrants(newAgentDraft(), 'a', [{ ...production, agentIds: ['a'] }, { ...production, id: 'other', agentIds: ['b'] }], [{ ...gpu, exclusiveAgents: ['a'] }, local])
-  expect(draft).toMatchObject({ plugins: ['prod'], exclusiveNodes: ['gpu', LOCAL_NODE_ID] })
-  // An instance save sends its agents back unchanged there, and only there.
-  const older = [{ revision: 'r1' }]
-  expect(keptAgentIds(older, onePassword, { agentIds: ['a'] })).toEqual(['a'])
-  expect(keptAgentIds(older, onePassword, { agentIds: [] })).toBeUndefined()
-  expect(keptAgentIds(older, { manifest: null }, { agentIds: ['a'] })).toBeUndefined()
-  expect(keptAgentIds([{ grantsOnAgent: true }], onePassword, { agentIds: ['a'] })).toBeUndefined()
-  // The marker is never sent back: the draft holds only editable values.
-  expect(draftOf({
-    id: 'a',
-    name: 'Agent',
-    access: {},
-    grantsOnAgent: true,
-  } as unknown as Agent)).not.toHaveProperty('grantsOnAgent')
-})
-
 it('never merges node grants across execution backends', () => {
   const base = newAgentDraft()
   base.access.nodes = ['gpu']
@@ -644,53 +623,18 @@ it('names plugin grants it cannot resolve by count, and claims reservations only
   expect(accessSummary(agent, context)).toBe('No projects · 1 node · 1Password · 1 other plugin · Exclusive reservation')
 })
 
-it('reviews only what an older installation receives', () => {
-  const saved = newAgentDraft()
-  const draft = structuredClone(saved)
-  draft.plugins = ['prod']
-  draft.exclusiveNodes = ['gpu']
-  draft.access.installation = true
-  const kinds = (older: boolean) => reviewLines(saved, sentDraft(saved, draft, older), context).map(line => line.text.split('.')[0])
-  expect(kinds(false)).toEqual(['Added: exclusive reservation on gpu-box', 'Added: installation management', 'Added: 1Password “Production” — effective immediately, including in running conversations'])
-  expect(kinds(true)).toEqual(['Added: installation management'])
-})
-
-it('sends an instance\'s agents back while the agent list is unknown', () => {
-  expect(keptAgentIds([], onePassword, { agentIds: ['a'] })).toEqual(['a'])
-  expect(keptAgentIds([], onePassword, { agentIds: [] })).toBeUndefined()
-  expect(keptAgentIds([], { manifest: null }, { agentIds: ['a'] })).toBeUndefined()
-})
-
 it('never reports the current runner missing when the node list omits it', () => {
   const draft = newAgentDraft()
   draft.exclusiveNodes = [LOCAL_NODE_ID]
   expect(issues(draft, { ...context, nodes: [gpu] }, false)).toEqual([])
 })
 
-it('re-reads an instance\'s agents right before sending them back', async () => {
-  let reads = 0
-  const fresh = async () => {
-    reads++
-    return [{ id: 'prod', agentIds: ['b'] }]
-  }
-
-  // Revoked meanwhile from an agent page: the current list is sent, not the editor's snapshot.
-  expect(await currentAgentIds([], onePassword, { id: 'prod', agentIds: ['a', 'b'] }, fresh)).toEqual(['b'])
-  expect(await currentAgentIds([], onePassword, { id: 'prod', agentIds: ['a'] }, async () => [{ id: 'prod', agentIds: [] }])).toBeUndefined()
-  // A current installation keeps grants itself: nothing is read nor sent.
-  expect(await currentAgentIds([{ grantsOnAgent: true }], onePassword, { id: 'prod', agentIds: ['a'] }, fresh)).toBeUndefined()
-  expect(await currentAgentIds([], { manifest: null }, { id: 'prod', agentIds: ['a'] }, fresh)).toBeUndefined()
-  expect(reads).toBe(1)
-})
-
 it('keeps read-only exclusive reservations when run permissions or the backend change', () => {
   const access = { ...newAgentDraft().access, nodes: ['gpu', 'box'] }
   expect(withRun(access, ['gpu'], 'gpu', false)).toEqual({ nodes: ['box'], exclusiveNodes: [] })
   // An older installation keeps them on its nodes and never receives them: nothing to remove.
-  expect(withRun(access, ['gpu'], 'gpu', false, true)).toEqual({ nodes: ['box'], exclusiveNodes: ['gpu'] })
   expect(withRun(access, ['gpu'], 'other', true)).toEqual({ nodes: ['gpu', 'box', 'other'], exclusiveNodes: ['gpu'] })
-  expect(withBackend(['gpu'])).toEqual({ nodes: [], exclusiveNodes: [] })
-  expect(withBackend(['gpu'], true)).toEqual({ nodes: [], exclusiveNodes: ['gpu'] })
+  expect(withBackend()).toEqual({ nodes: [], exclusiveNodes: [] })
 })
 
 it('reviews administrator node admission as a power even after converting a wildcard grant', () => {
@@ -712,4 +656,23 @@ it('reviews administrator node admission as a power even after converting a wild
   expect(needsReview(lines, null)).toBe(true)
   administrator.nativeReviewedAgents = ['future']
   expect(nativeReviewNodes(draft, ownContext)).toEqual([])
+})
+
+it('edits the Codex speed with the model and preserves it when rebasing', () => {
+  const saved = draftOf({
+    ...newAgentDraft(),
+    id: '00000000-0000-4000-8000-000000000003',
+    name: 'Reviewer',
+    revision: 'initial',
+    createdAt: 0,
+  })
+  expect(saved.speed).toBe('')
+  const mine = structuredClone(saved)
+  mine.speed = 'priority'
+  expect(changes(saved, mine)).toEqual(['model'])
+  const theirs = structuredClone(saved)
+  theirs.reasoning = 'low'
+  const rebased = rebaseDraft(saved, mine, theirs)
+  expect(rebased).toMatchObject({ speed: 'priority', reasoning: 'low' })
+  expect(errorSection('Speed applies only to Codex agents. Remove it or choose Codex.')).toBe('model')
 })

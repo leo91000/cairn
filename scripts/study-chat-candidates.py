@@ -1,7 +1,6 @@
 """C3 SQL/model experiment, never imported by Cairn's scheduler.
 
 Only synthetic SQLite data; no network, agent homes, persistent index or state.
-See docs/CHAT-CANDIDATE-STUDY.md for interpretation and coverage limits.
 """
 
 import argparse

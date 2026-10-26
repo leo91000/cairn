@@ -1,6 +1,7 @@
 package build.cairn.app.data
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
@@ -27,6 +28,8 @@ data class ChatMessage(
     val attachments: List<ChatAttachment> = emptyList(),
     val questionId: String? = null,
     val provider: String = "",
+    /** The Codex speed this message asked for; empty on earlier messages. */
+    val speed: String = "",
 )
 
 @Serializable data class QuestionOption(val label: String, val description: String = "")
@@ -59,6 +62,11 @@ data class ChatWakeup(
     val createdAt: Long,
     val wakeAt: Long,
     val condition: JsonObject? = null,
+    /**
+     * A group's progress, in the order of its conditions: `{ observation, display, nextCheckAt,
+     * lastError }` each. Kept as JSON, like [display].
+     */
+    val members: JsonArray? = null,
     val observation: JsonObject? = null,
     /** Plugin conditions: when Cairn checks again, and why its last check failed. */
     val nextCheckAt: Long? = null,
@@ -94,6 +102,9 @@ data class ChatCompaction(
     val available: Boolean = false,
     val reason: String? = null,
 )
+
+/** The conversation whose agent delegated a conversation. */
+@Serializable data class ChatRequester(val chatId: String, val title: String = "")
 
 @Serializable
 data class Chat(
@@ -132,6 +143,8 @@ data class Chat(
     val lifecycleError: String? = null,
     val wakeup: ChatWakeup? = null,
     val suspendedByExclusive: ExclusiveReservation? = null,
+    /** The conversation that delegated this one, while it still exists. */
+    val requester: ChatRequester? = null,
 ) {
     val exclusiveSuspended
         get() =
@@ -200,6 +213,19 @@ data class HistoryPage(
 
 @Serializable data class ReasoningOption(val reasoningEffort: String, val description: String = "")
 
+/** A speed Codex offers for a model. [description] is Codex's own wording of its usage. */
+@Serializable
+data class ServiceTier(
+    val id: String,
+    val name: String = "",
+    val description: String = "",
+    /**
+     * Not confirmed by every enabled account able to run the model: runs prefer accounts that
+     * confirm it, and each turn says when it runs at Standard or Codex cannot confirm it.
+     */
+    val limited: Boolean = false,
+)
+
 /** One connected provider offering a model, as `provider/model`. */
 @Serializable
 data class ModelRoute(
@@ -223,6 +249,13 @@ data class CodingAgentModel(
     val supportedReasoningEfforts: List<ReasoningOption> = emptyList(),
     /** Models offered by several providers. [model] then runs on the first available route. */
     val routes: List<ModelRoute> = emptyList(),
+    /** Codex speeds besides standard; null in catalogs cached before speeds were listed. */
+    val serviceTiers: List<ServiceTier>? = null,
+    /**
+     * Codex's catalog default tier, applied only by Codex's own terminal client: Cairn runs
+     * Standard when no speed is chosen.
+     */
+    val defaultServiceTier: String? = null,
 )
 
 fun CodingAgentModel.route(value: String): ModelRoute? = routes.find { it.model == value }

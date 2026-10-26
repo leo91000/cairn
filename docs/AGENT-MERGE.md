@@ -47,13 +47,12 @@ request returns `sourceId`, `targetId`, `deleted: true` and `transferred` counts
 The source no longer exists, so an identical retry returns a not-found error;
 read the destination and references before retrying an ambiguous timeout.
 
-## Data compatibility
+## Saved records
 
-The installation data epoch remains unchanged. This operation writes only
+This operation writes only
 existing record fields and IDs through the current store contracts. It adds no
 record format, identity alias, schema, secret envelope or checkpoint format.
-A build using the same data epoch reads the transferred records and can resume
-their sessions; it simply does not expose the merge operation. The audit records the original
+The audit records the original
 profile identity, while saved snapshots keep the original name and settings.
 
 Integration coverage exercises the owner API, both MCP interfaces and their

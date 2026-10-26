@@ -218,55 +218,28 @@ Completed bundles are retained regardless of inactivity: an old queued run or
 dormant conversation can still reference them. Cleanup must establish that all
 snapshot references have been released before reclaiming a bundle; there is no
 automatic collection of completed bundles yet. A missing or malformed recorded
-revision stops preparation with an error. Only snapshots created before bundles
-may use the live skill folder. Reads and saves share a lock so an export or
+revision stops preparation with an error. Reads and saves share a lock so an export or
 freeze sees one complete saved version.
 
 The prompt lists each selected skill by name, description and `SKILL.md` path.
 The agent reads `SKILL.md` and its supporting files when it uses the skill.
 
-## Local storage measurements
+Every coding-agent execution uses the chat protocol and receives this prompt
+once, in its instructions.
+Isolated runs list skill paths inside the run and include the
+[plugin instructions](PLUGINS.md) of their agent. Only chat turns are
+interactive; scheduled work states that it cannot answer questions, as
+[waits](WAIT-FOR.md) require. Its first turn is the task brief after a fixed
+lead-in, so a brief that starts with `/clear` is not run as a Claude Code
+command; a resumed run sends its resume prompt instead. Codex also lists the skills
+installed under `~/.agents/skills` itself.
 
-Reproduce through the isolated backend launcher, with no other builds running:
-
-```sh
-CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 node scripts/test-backend.mjs \
-  -p cairn-installation --test skills skill_bundle_storage_measurements \
-  -- --ignored --nocapture
-```
-
-Measured 2026-10-14 in the agent VM: Linux, 12 virtual Intel Xeon CPUs, 31 GiB
-RAM, no swap, overlay filesystem on a 32 GiB disk. Workload: one 83-byte
-manifest and 64 supporting files of 4,096 bytes, eight executable supporting
-files, one caller. The plain-folder reference, each frozen bundle and each run copy store
-262,227 payload bytes without encoding or compression; snapshot references add
-a 64-character revision. Filesystem allocation and directory metadata are not
-included in that byte count.
-
-Means over 100 reads or 20 writes; CPU uses the process CPU clock across Tokio
-threads. Cold reads request `POSIX_FADV_DONTNEED` for each file before timing;
-warm reads reuse recently read pages. The advisory eviction does not guarantee
-a cold host disk beneath the VM's overlay filesystem.
-
-| Operation | Plain-folder reference wall / CPU | Bundle wall / CPU |
-| --- | --- | --- |
-| Warm read | 0.960 / 1.157 ms | 2.135 / 2.495 ms |
-| Cold read (advisory eviction) | 0.899 / 1.070 ms | 2.167 / 2.541 ms |
-| New copy / freeze write | 1.232 / 1.436 ms | 6.951 / 8.284 ms |
-| Shared run preparation with copy | same copy reference above | 2.372 / 2.758 ms |
-
-Shared run preparation refreshes a 262,227-byte working copy from the canonical
-bundle on each preparation. The measured operation includes ordinary shared-run
-preparation and removing any prior working copy; snapshot creation, agent launch,
-read verification and network requests are outside this timing. Working-copy
-bytes are additional storage per run, and are removed with that run's directory.
-
-The reference reads known paths and copies files directly. Bundle reads also
-scan modes and paths and hash all bytes under the read lock; first-time freezes
-add those reads plus synced file writes and an atomic directory rename. Input
-mutations and reference setup are outside the timed writes. Reusing an existing
-revision avoids writing another copy. These are local filesystem measurements,
-not production network or S3 latency, and do not measure concurrent lock waits.
+Claude Code and OpenCode apply the instructions again at every launch. Codex
+keeps the instructions a thread started with, even when it is resumed with new
+ones. A Codex mission continued in chat therefore receives the interactive rule
+at the start of every chat turn on the mission's thread, since compaction can
+drop earlier messages. A new session started by the chat gets it in its
+instructions.
 
 ## Screens
 

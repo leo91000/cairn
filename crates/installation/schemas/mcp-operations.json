@@ -1,465 +1,24 @@
 [
   {
-    "name": "list_agents",
-    "description": "List configured Codex agent profiles.",
+    "name": "list_models",
+    "description": "List the models a coding agent offers on its enabled accounts: reasoning levels and, for Codex, the speeds (service tiers) each model offers with Codex's own description of their usage. Use a serviceTiers id, or \"standard\", as an agent or message speed. A tier marked limited is not confirmed by every account able to run the model; runs that ask for it prefer an account that confirms it. Before each turn attempt the run checks the tier against its Codex process model list and records a status event when the outcome changes: speed.applied is standard when the turn runs at Standard, speed.confirmed when the Codex process and the account's recent catalog both list the tier and the turn asks for it, speed.unconfirmed when it cannot be confirmed for the account and model (a model list could not be read or does not name the model exactly, or the account's catalog is unknown or older than 30 minutes).",
     "scope": "read",
     "destructive": false,
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
-      "properties": {},
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "save_agent",
-    "description": "Create an agent profile. Execution access is explicit.",
-    "scope": "manage",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
       "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 100
-        },
         "provider": {
-          "default": "codex",
           "type": "string",
           "enum": [
             "codex",
             "claude",
             "opencode"
-          ]
-        },
-        "description": {
-          "default": "",
-          "type": "string",
-          "maxLength": 500
-        },
-        "model": {
-          "default": "",
-          "type": "string",
-          "maxLength": 100
-        },
-        "reasoning": {
-          "default": "high",
-          "type": "string",
-          "maxLength": 40,
-          "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
-        },
-        "instructions": {
-          "default": "",
-          "type": "string",
-          "maxLength": 20000
-        },
-        "timeoutMinutes": {
-          "default": 0,
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 720
-        },
-        "access": {
-          "default": {
-            "backend": "firecracker",
-            "nodes": [
-              "00000000-0000-4000-8000-000000000002"
-            ],
-            "projects": null,
-            "skills": null,
-            "mcps": null,
-            "mcpTools": {},
-            "installation": false,
-            "sandbox": "yolo"
-          },
-          "type": "object",
-          "properties": {
-            "backend": {
-              "default": "firecracker",
-              "type": "string",
-              "enum": [
-                "firecracker",
-                "native"
-              ]
-            },
-            "nodes": {
-              "default": [
-                "00000000-0000-4000-8000-000000000002"
-              ],
-              "anyOf": [
-                {
-                  "maxItems": 100,
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "projects": {
-              "default": null,
-              "anyOf": [
-                {
-                  "maxItems": 100,
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "skills": {
-              "default": null,
-              "anyOf": [
-                {
-                  "maxItems": 100,
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "maxLength": 160
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "mcps": {
-              "default": null,
-              "anyOf": [
-                {
-                  "maxItems": 100,
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "mcpTools": {
-              "default": {},
-              "type": "object",
-              "propertyNames": {
-                "type": "string",
-                "format": "uuid",
-                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-              },
-              "additionalProperties": {
-                "maxItems": 500,
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 200
-                }
-              }
-            },
-            "installation": {
-              "default": false,
-              "type": "boolean"
-            },
-            "sandbox": {
-              "default": "yolo",
-              "type": "string",
-              "enum": [
-                "yolo",
-                "workspace-write",
-                "read-only"
-              ]
-            }
-          },
-          "required": [
-            "backend",
-            "nodes",
-            "projects",
-            "skills",
-            "mcps",
-            "mcpTools",
-            "installation",
-            "sandbox"
           ],
-          "additionalProperties": false
-        },
-        "nativeNodeReviews": {
-          "description": "Owner confirmation of specifically reviewed administrator node IDs already covered by access.nodes, including wildcard access. Reviews only these nodes while preserving the placement selection. These grant unrestricted passwordless sudo on the real host, including access to locally present credentials and services. Never infer confirmation from an all-node grant or conversion. Not saved on the agent; delegated installation agents cannot approve it.",
-          "maxItems": 100,
-          "type": "array",
-          "items": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          }
+          "default": "codex"
         }
       },
-      "required": [
-        "name",
-        "provider",
-        "description",
-        "model",
-        "reasoning",
-        "instructions",
-        "timeoutMinutes",
-        "access"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "update_agent",
-    "description": "Update an existing agent, including MCP connection and tool access. Omitted fields retain their current values; access, when supplied, replaces the entire access policy. Changes apply to new runs. Explicit access to a native administrator node grants host administration only after owner review; all-node and future-node grants never silently grant root. Review unapproved administrator access from node details.",
-    "scope": "manage",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "id": {
-          "type": "string",
-          "format": "uuid",
-          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-        },
-        "agent": {
-          "type": "object",
-          "properties": {
-            "provider": {
-              "type": "string",
-              "enum": [
-                "codex",
-                "claude",
-                "opencode"
-              ]
-            },
-            "name": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 100
-            },
-            "description": {
-              "type": "string",
-              "maxLength": 500
-            },
-            "model": {
-              "type": "string",
-              "maxLength": 100
-            },
-            "reasoning": {
-              "type": "string",
-              "maxLength": 40,
-              "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
-            },
-            "instructions": {
-              "type": "string",
-              "maxLength": 20000
-            },
-            "timeoutMinutes": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 720
-            },
-            "access": {
-              "type": "object",
-              "properties": {
-                "backend": {
-                  "type": "string",
-                  "enum": [
-                    "firecracker",
-                    "native"
-                  ]
-                },
-                "nodes": {
-                  "anyOf": [
-                    {
-                      "maxItems": 100,
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "format": "uuid",
-                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                      }
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "projects": {
-                  "default": null,
-                  "anyOf": [
-                    {
-                      "maxItems": 100,
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "format": "uuid",
-                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                      }
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "skills": {
-                  "default": null,
-                  "anyOf": [
-                    {
-                      "maxItems": 100,
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "maxLength": 160
-                      }
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "mcps": {
-                  "default": null,
-                  "anyOf": [
-                    {
-                      "maxItems": 100,
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "format": "uuid",
-                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                      }
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "mcpTools": {
-                  "default": {},
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  },
-                  "additionalProperties": {
-                    "maxItems": 500,
-                    "type": "array",
-                    "items": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 200
-                    }
-                  }
-                },
-                "installation": {
-                  "type": "boolean"
-                },
-                "sandbox": {
-                  "default": "yolo",
-                  "type": "string",
-                  "enum": [
-                    "yolo",
-                    "workspace-write",
-                    "read-only"
-                  ]
-                }
-              },
-              "required": [
-                "projects",
-                "skills",
-                "mcps",
-                "mcpTools",
-                "sandbox"
-              ],
-              "additionalProperties": false
-            },
-            "nativeNodeReviews": {
-              "description": "Owner confirmation of specifically reviewed administrator node IDs already covered by access.nodes, including wildcard access. Reviews only these nodes while preserving the placement selection. These grant unrestricted passwordless sudo on the real host, including access to locally present credentials and services. Never infer confirmation from an all-node grant or conversion. Not saved on the agent; delegated installation agents cannot approve it.",
-              "maxItems": 100,
-              "type": "array",
-              "items": {
-                "type": "string",
-                "format": "uuid",
-                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-              }
-            }
-          },
-          "additionalProperties": false
-        }
-      },
-      "required": [
-        "id",
-        "agent"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "delete_agent",
-    "description": "Delete an unused agent and its saved credentials, portrait and 1Password assignments. Main, agents referenced by tasks (including archived tasks), and agents with active work cannot be deleted. Completed run history is preserved.",
-    "scope": "manage",
-    "destructive": true,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "id": {
-          "type": "string",
-          "format": "uuid",
-          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "merge_agents",
-    "description": "Merge an idle Firecracker agent into an existing profile, transferring all tasks (including archived), chats (including trash) and run identities atomically. Existing runs retain their engine, model and settings; future task runs use destination defaults. Destination access and live grants must already cover the source. Main can only be the destination. Rejects active/recovering work, native agents and plugin delegations. Does not change destination permissions or credentials. Requires explicit confirmation.",
-    "scope": "manage",
-    "destructive": true,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "sourceId": {
-          "type": "string",
-          "format": "uuid",
-          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-        },
-        "targetId": {
-          "type": "string",
-          "format": "uuid",
-          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-        },
-        "confirm": {
-          "type": "boolean",
-          "const": true
-        }
-      },
-      "required": [
-        "sourceId",
-        "targetId",
-        "confirm"
-      ],
+      "required": [],
       "additionalProperties": false
     }
   },
@@ -810,309 +369,6 @@
     }
   },
   {
-    "name": "list_projects",
-    "description": "List registered project workspaces.",
-    "scope": "read",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {},
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "save_project",
-    "description": "Register an existing directory inside an allowed workspace root.",
-    "scope": "manage",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 100
-        },
-        "path": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 2000
-        },
-        "description": {
-          "default": "",
-          "type": "string",
-          "maxLength": 500
-        },
-        "baseBranch": {
-          "default": "main",
-          "type": "string",
-          "pattern": "^[a-z0-9][\\w/.-]*$"
-        },
-        "sourceMode": {
-          "type": "string",
-          "enum": [
-            "remote",
-            "local"
-          ],
-          "default": "remote"
-        }
-      },
-      "required": [
-        "name",
-        "path",
-        "description",
-        "baseBranch",
-        "sourceMode"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "list_tasks",
-    "description": "List task instructions and schedules.",
-    "scope": "read",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {},
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "create_task",
-    "description": "Create a one-off or scheduled task. This does not execute it immediately.",
-    "scope": "manage",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 100
-        },
-        "prompt": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 50000
-        },
-        "agentId": {
-          "type": "string",
-          "format": "uuid",
-          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-        },
-        "projectId": {
-          "default": null,
-          "anyOf": [
-            {
-              "type": "string",
-              "format": "uuid",
-              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "skills": {
-          "default": null,
-          "anyOf": [
-            {
-              "maxItems": 100,
-              "type": "array",
-              "items": {
-                "type": "string",
-                "maxLength": 160
-              }
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "tags": {
-          "default": [],
-          "maxItems": 10,
-          "type": "array",
-          "items": {
-            "type": "string",
-            "maxLength": 30
-          }
-        },
-        "cron": {
-          "default": null,
-          "anyOf": [
-            {
-              "type": "string",
-              "maxLength": 100
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "timezone": {
-          "default": "Europe/Paris",
-          "type": "string",
-          "maxLength": 100
-        },
-        "enabled": {
-          "default": true,
-          "type": "boolean"
-        },
-        "archived": {
-          "default": false,
-          "type": "boolean"
-        },
-        "worktree": {
-          "default": true,
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "name",
-        "prompt",
-        "agentId",
-        "projectId",
-        "skills",
-        "tags",
-        "cron",
-        "timezone",
-        "enabled",
-        "archived",
-        "worktree"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "update_task",
-    "description": "Update an existing task, including pausing its schedule.",
-    "scope": "manage",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "id": {
-          "type": "string",
-          "format": "uuid",
-          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-        },
-        "task": {
-          "type": "object",
-          "properties": {
-            "name": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 100
-            },
-            "prompt": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 50000
-            },
-            "agentId": {
-              "type": "string",
-              "format": "uuid",
-              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-            },
-            "projectId": {
-              "default": null,
-              "anyOf": [
-                {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "skills": {
-              "default": null,
-              "anyOf": [
-                {
-                  "maxItems": 100,
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "maxLength": 160
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "tags": {
-              "default": [],
-              "maxItems": 10,
-              "type": "array",
-              "items": {
-                "type": "string",
-                "maxLength": 30
-              }
-            },
-            "cron": {
-              "default": null,
-              "anyOf": [
-                {
-                  "type": "string",
-                  "maxLength": 100
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "timezone": {
-              "default": "Europe/Paris",
-              "type": "string",
-              "maxLength": 100
-            },
-            "enabled": {
-              "default": true,
-              "type": "boolean"
-            },
-            "archived": {
-              "default": false,
-              "type": "boolean"
-            },
-            "worktree": {
-              "default": true,
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "name",
-            "prompt",
-            "agentId",
-            "projectId",
-            "skills",
-            "tags",
-            "cron",
-            "timezone",
-            "enabled",
-            "archived",
-            "worktree"
-          ],
-          "additionalProperties": false
-        }
-      },
-      "required": [
-        "id",
-        "task"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
     "name": "run_task",
     "description": "Queue a task using its agent’s resource access and execution mode. YOLO is the default inside a private agent VM. Unattended runs never prompt for approval. May modify allowed code and external services as instructed.",
     "scope": "run",
@@ -1135,7 +391,7 @@
   },
   {
     "name": "cancel_run",
-    "description": "Cancel queued or running work. Already completed external effects are preserved.",
+    "description": "Cancel queued or running work, including a pending automatic retry. Already completed external effects are preserved.",
     "scope": "run",
     "destructive": true,
     "inputSchema": {
@@ -1188,7 +444,7 @@
   },
   {
     "name": "get_run",
-    "description": "Get a run and a byte-bounded page of its event log. Continue with nextAfter while hasMore is true, even when a page has fewer than 100 events. A run or event marked truncated remains available in full through read_run_content.",
+    "description": "Get a run, including retry attempt, limit, nextAttemptAt, deadlineAt and cause when recovering, and a byte-bounded page of its event log. Continue with nextAfter while hasMore is true, even when a page has fewer than 100 events. A run or event marked truncated remains available in full through read_run_content. Claude Code runs also record engine.retry (the engine retrying an API request itself; the turn continues), provider.limit (usage-limit warnings, a limit that stops requests with resetsAt, and its end) and engine.notice (the engine's warnings); their subagent items carry task_id, run_id, parent_task_id and resumed. Codex runs record a status event whose payload.speed states how a faster speed runs for a message (applied: standard, confirmed or unconfirmed; see list_models).",
     "scope": "read",
     "destructive": false,
     "inputSchema": {
@@ -1604,6 +860,12 @@
               "type": "string",
               "maxLength": 40,
               "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
+            },
+            "speed": {
+              "default": "",
+              "type": "string",
+              "maxLength": 40,
+              "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
             }
           },
           "required": [
@@ -1613,7 +875,8 @@
             "mode",
             "provider",
             "model",
-            "reasoning"
+            "reasoning",
+            "speed"
           ],
           "additionalProperties": false
         }
@@ -1687,6 +950,11 @@
             },
             "reasoning": {
               "default": "",
+              "type": "string",
+              "maxLength": 40,
+              "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
+            },
+            "speed": {
               "type": "string",
               "maxLength": 40,
               "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
@@ -1788,7 +1056,7 @@
   },
   {
     "name": "stop_chat",
-    "description": "Stop the current turn, cancel a scheduled wakeup and pause follow-ups. Queued messages remain available for later resumption.",
+    "description": "Stop the current turn or pending automatic retry, cancel a scheduled wakeup and pause follow-ups. Queued messages remain available for later resumption.",
     "scope": "run",
     "destructive": true,
     "inputSchema": {
@@ -2258,7 +1526,7 @@
   },
   {
     "name": "create_node_enrollment",
-    "description": "Create a single-use enrollment for a separate node. To switch an existing machine, choose the other backend, install its runtime on that machine, then wait for this exact nodeId in list_nodes. Configure it and agent grants before offering to retire the previous node. Does not convert existing conversations or install anything.",
+    "description": "Create a single-use enrollment for a separate node. Without managerUrl, the returned installCommand lets Beacon introduce the machine to the manager (route beacon): no address, certificate or open port. They connect directly when the networks allow it; otherwise node traffic, including conversation disks, transits Beacon encrypted end to end to the manager certificate pinned in the command. Pass a direct HTTPS managerUrl reachable from the machine (LAN or VPN) to keep that traffic off Beacon entirely. To switch an existing machine, choose the other backend, install its runtime on that machine, then wait for this exact nodeId in list_nodes. Configure it and agent grants before offering to retire the previous node. Does not convert existing conversations or install anything.",
     "scope": "manage",
     "destructive": false,
     "inputSchema": {
@@ -2280,7 +1548,8 @@
         },
         "managerUrl": {
           "type": "string",
-          "maxLength": 2000
+          "maxLength": 2000,
+          "description": "Optional direct HTTPS manager origin. Omit it to let Beacon introduce the machine to the manager."
         }
       },
       "required": [

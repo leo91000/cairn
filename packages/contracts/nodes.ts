@@ -63,7 +63,6 @@ export interface ExecutionNode {
     os: string
     arch: string
     kvm: boolean
-    fuse?: boolean
   }
   limits: NodeResources
   slots: number
@@ -109,9 +108,11 @@ export interface NodeAgent {
 export interface NativeCaller { id: string, email: string }
 
 export interface NodeEnrollment {
-  nodeId?: string
+  nodeId: string
   backend?: 'firecracker' | 'native'
   installCommand?: string | null
+  // `beacon` when Beacon introduces the machine to the manager, without an address.
+  route?: 'beacon' | 'direct'
   managerUrl?: string | null
   code: string
   expiresAt: number
@@ -138,10 +139,6 @@ export function formatBytes(bytes: number) {
   return formatMiB(bytes / 1048576)
 }
 
-export function formatResources(value: NodeResources) {
-  return `${value.cpu} CPU · ${formatMiB(value.memoryMiB)} RAM · ${formatMiB(value.diskMiB)} disk`
-}
-
 export function relativeAge(since: number, now = Date.now()) {
   const seconds = Math.max(0, Math.floor((now - since) / 1000))
   if (seconds < 60)
@@ -164,8 +161,6 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now()) {
     reasons.push(node.lastSeen != null ? `No contact since ${relativeAge(node.lastSeen, now)}: check that the machine is on, online and that the ${node.capabilities.backend === 'native' ? 'cairn-native-node' : 'cairn-node'} service is running.` : 'The machine has never connected: run the installation command on it.')
   if (node.capabilities.backend !== 'native' && !node.capabilities.kvm)
     reasons.push('KVM is unavailable: enable virtualization in the BIOS and load the kvm module.')
-  if (node.capabilities.backend !== 'native' && !node.capabilities.fuse)
-    reasons.push('FUSE is unavailable: this node cannot mount S3-backed conversation disks.')
   if (node.capabilities.backend === 'native' && !node.capabilities.ublk)
     reasons.push('ublk is unavailable: this node needs a current native runtime and the ublk_drv kernel module (/dev/ublk-control) to mount S3-backed conversation disks.')
   if (node.status !== 'offline' && node.executionReady === false)

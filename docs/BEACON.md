@@ -41,9 +41,8 @@ fixtures are synthetic. Set `CAIRN_BEACON_TEST_DATABASE_URL` to a disposable
 Postgres database and build both binaries plus the web output before
 `pnpm test:e2e`. Handler and worker integration tests retain a test-only relay
 transport and task-author authority (`relay_fixture` / `worker_fixture`); these
-add no local browser login, OAuth issuer or application hosting. Historical
-Node modules under `tests/fixtures/legacy/` remain reference and SQLite seeding code,
-never a shipped server.
+add no local browser login, OAuth issuer or application hosting. See the
+[native browser fixture guide](../tests/e2e/README.md) for setup and fixture boundaries.
 
 ## Production
 
@@ -54,7 +53,7 @@ The existing `deploy/beacon/compose.yaml` remains development-only.
 Follow [production configuration](PRODUCTION-CAIRN-SETUP.md) for a fresh same-server
 installation, proxy trust, email and OAuth. Follow the
 [release runbook](PRODUCTION-CAIRN.md) for subsequent releases, approval and
-Postgres rollback. The [v0.53 cutover](archive/CAIRN-V0.53-MIGRATION.md) is historical.
+Postgres rollback.
 `/health` returns no-store JSON (`status`, `commit`, `runtimeId`) and verifies
 Postgres availability through a cache sampled every five seconds with a
 one-second timeout. HTTP probes never query the database, and startup remains
@@ -91,11 +90,28 @@ needs migration permissions. All filenames use `YYYYMMDDHHmm` versions. The
 upstream SQLx migration macro is imported directly from `sqlx-macros`: the full
 `sqlx` facade resolves a conflicting SQLite dependency even in Postgres-only
 builds. A build script tracks the directory so adding a migration recompiles it.
-This pre-public-deployment renumbering changes versions 1–3 to 202610030001–3.
-An old development database must be backed up and its three ledger versions
-updated to those timestamps before startup (SQL contents/checksums are unchanged),
-or replaced with an empty disposable development database. Do not run the old
-binary against the updated ledger. Rate limits are shared through Postgres.
+Rate limits are shared through Postgres.
+
+### Next release: recreate the Beacon database
+
+The refactor campaign replaces all 28 historical migrations with one initial
+schema. The owner has accepted losing the Beacon database at the next release;
+there is no ledger rewrite or automatic upgrade path. During that release's
+maintenance window:
+
+1. Stop Beacon and keep its public ingress closed.
+2. Recreate its database as an empty database, retaining the configured database
+   role and connection settings. Do not copy the old SQLx ledger or account rows.
+3. Start the new Beacon binary with its matching web bundle. Startup applies the
+   initial migration. Verify account sign-in on the empty database before reopening
+   ingress, then reconnect Android with the matching app version.
+4. Recreate accounts and claim the newly reinstalled installations. Sessions,
+   passkeys, sharing, MCP grants and notification registrations must be set up again.
+
+This runbook is for the next authorized release, not an instruction to alter a
+running production service during the refactor. Existing databases intentionally
+fail SQLx validation. Beacon, installations and apps must use the current protocol;
+a different version is rejected with an update-required message.
 
 Only **one beacon relay process** is supported for deployment. Route all browser
 account/access mutations, installation API requests and relay WebSockets to that
@@ -142,9 +158,7 @@ send a new code within the same per-address delivery budgets. During the cooldow
 or after those budgets are exhausted it returns 429, never a challenge for a dead
 code. A distributed attacker can still exhaust global codes and the address's
 delivery budgets to deny email sign-in temporarily; passkeys and OAuth remain
-available. Already issued challenges preserve their consumed attempts during the
-per-challenge migration, and code failures count toward the new global ceiling.
-Existing codes retain their original challenges when the migration is applied.
+available.
 Code requests are limited to ten per minute per resolved client. New email deliveries
 are limited to one per minute per normalized email;
 verification is limited to thirty per minute per resolved client. Each address
@@ -366,9 +380,7 @@ Dynamic registration permits ten attempts per minute per resolved client
 and per-grant call budgets remain separate. MCP authorization and personal
 tokens stay reserved to installation owners, including the `manage` scope.
 
-The additive `202610080600_mcp_client_retention` migration records `created_at`
-for registrations. Existing rows receive the migration time, giving them thirty
-days of grace rather than guessing their age. Hourly maintenance removes expired
+Registrations record `created_at` when created. Hourly maintenance removes expired
 MCP tokens and grants (cascading their tokens/code tombstones), and expired unused
 codes. Consumed codes of active grants and unexpired used refresh tokens remain
 for replay detection. It then
@@ -411,7 +423,8 @@ other device. Revoking the current session also clears its cookie. Mutations
 require the exact origin and CSRF, are limited to 30 per minute per account,
 and close that session's relay bodies before returning. Other sessions and
 already admitted agent work continue. Session creation and expiry remain the
-same for email, OAuth and passkeys; migrations preserve existing sessions.
+same for email, OAuth and passkeys. The database recreation required for this
+release ends all existing Beacon sessions; users must sign in again.
 
 Deletion requires typing the verified account email and confirmation in the
 web. `POST /api/account/delete` accepts `{ "email": "…" }`, uses the caller's
@@ -428,8 +441,7 @@ Account deletion, installation detachment, definitive installation revocation,
 sign-in method removal, invitations, member removal, personal token creation,
 MCP consent approval and revocation of other devices (individually or together)
 require an email-code or user-verified passkey proof from the last **five minutes**, in the **calling session**. A fresh email
-or passkey sign-in qualifies; OAuth sign-in alone does not. Sessions issued before
-the additive migration remain usable but have no qualifying proof. The web asks
+or passkey sign-in qualifies; OAuth sign-in alone does not. The web asks
 for an explicit confirmation before enabling deletion, including after a reload
 or cancelling and reopening the form. Reconfirm if the five-minute window expires.
 
@@ -437,11 +449,7 @@ The proof grants a **reusable five-minute window**, not a one-use authorization:
 several sensitive actions can use it in that session until it expires. The email
 code or WebAuthn challenge itself is still consumed once. `web_sessions.last_proof_at`
 records the last independent email/passkey proof, not an OAuth login or session
-activity. A new rename migration preserves existing proof timestamps,
-CSRF, cookie digests and deadlines, leaving historical SQLx checksums intact.
-The rename is a forward-only schema change, not an additive compatibility change.
-Update the beacon binary with this migration; older binaries still using the
-previous column name cannot serve that database. Upgrade its web bundle too.
+activity. The web bundle and Android app use the same proof policy.
 
 The installation actions expose **Confirm identity** in their confirmation form;
 after verification the app returns to that form without performing the action.
@@ -497,9 +505,9 @@ audience IDs in the same transaction and retains only pseudonymous incident data
 The journal is **not append-only at database level**: account deletion updates
 its audience IDs to NULL and maintenance deletes expired records. Application
 mutations use a closed action enum and named event fields; operators with write
-access can still alter the database. Existing migration checksums (including the
-audience FK creation/removal) are preserved; the new actor index and proof column
-use an additive migration rather than rewriting an applied migration history.
+access can still alter the database. The initial schema includes the actor index
+and proof column. The release recreation procedure above removes the previous
+Beacon database and its audit history.
 Reads enforce retention immediately; hourly maintenance removes expired rows.
 
 Operators investigate the full retained history using their protected Postgres
@@ -644,8 +652,8 @@ requires the original Cairn session's recent independent email/passkey proof.
 The app session is checked before the provider callback and again under the
 account lock at consent, then at the final exchange. Browser consent does not
 replace this proof. Google native linking applies the same checks before its
-quota, before JWT/JWKS verification and after the account lock. The additive
-consent migration invalidates older in-flight handovers. Never log handover URLs,
+quota, before JWT/JWKS verification and after the account lock. Recreating Beacon
+ends all in-flight handovers; users must restart sign-in. Never log handover URLs,
 confirmation proofs or secrets.
 
 Set `CAIRN_BEACON_ANDROID_CERTIFICATES` to comma-separated SHA-256 fingerprints
@@ -728,8 +736,8 @@ both the canonical origin and its wildcard with valid TLS. The canonical origin
 stays unchanged for login, OAuth callbacks, passkeys, account settings,
 notifications, MCP and installation enrollment. Workspace URLs become
 `https://{installation-slug}.cairn.build/chats/{chat-slug}`. Legacy paths and UUID
-links remain usable. See [readable-workspace-URLs decision](adr/0037-readable-workspace-urls.md) for the
-shared-cookie trust boundary and browser-storage migration.
+links remain usable. See [readable-workspace-URLs decision](adr/0066-readable-workspace-urls.md) for the
+shared-cookie trust boundary and current workspace routing.
 
 For local testing, use the bundled Beacon web build, set the origin to
 `http://cairn.localhost:<port>`, and enable the flag. Plain `localhost` and IP

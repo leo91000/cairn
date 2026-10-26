@@ -161,12 +161,50 @@ abstract class SubagentCases {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
-                                        listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                Agent(
+                                                    exclusiveNodes = emptyList(),
+                                                    plugins = emptyList(),
+                                                    revision = "",
+                                                    createdAt = 0,
+                                                    access =
+                                                        AccessPolicy(
+                                                            mcpTools =
+                                                                build.cairn.contracts.McpTools(
+                                                                    emptyMap()
+                                                                ),
+                                                            projects = null,
+                                                            skills = null,
+                                                            mcps = null,
+                                                        ),
+                                                    id = MAIN_AGENT_ID,
+                                                    name = "Agent principal",
+                                                )
+                                            )
+                                        )
                                     )
                                 "/api/installations/fixture/api/chats/chat" ->
                                     wireJson.encodeToString(chat)
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")

@@ -1,6 +1,6 @@
 import type { Run } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
-import { retryNotice } from '../src/run-retry'
+import { retryNotice, retryState } from '../src/run-retry'
 
 const run = {
   status: 'queued',
@@ -18,6 +18,16 @@ describe('retry notice', () => {
     expect(retryNotice(run, 1000)).toBe('Temporary agent error. Retrying in 30 seconds (attempt 1/3).')
     expect(retryNotice(run, 11_100)).toContain('in 20 seconds')
     expect(retryNotice(run, 31_000)).toContain('Retrying now')
+  })
+
+  it('presents startup recovery and accepts retry records from previous releases', () => {
+    expect(retryState(run, 1000)).toMatchObject({
+      attempt: 1,
+      limit: 3,
+      startup: false,
+      seconds: 30,
+    })
+    expect(retryState({ ...run, retry: { ...run.retry!, limit: 5, cause: { ...run.retry!.cause, startup: true } } }, 1000)).toMatchObject({ limit: 5, startup: true })
   })
 
   it('keeps account and fencing waits visible and stops when the run starts', () => {

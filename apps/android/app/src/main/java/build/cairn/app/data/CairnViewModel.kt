@@ -4,6 +4,13 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import build.cairn.app.BuildConfig
+import build.cairn.contracts.AccountSignInMethod
+import build.cairn.contracts.ListMissionsInput
+import build.cairn.contracts.ListProjectsInput
+import build.cairn.contracts.listAccountMethods
+import build.cairn.contracts.listAgents
+import build.cairn.contracts.listMissions
+import build.cairn.contracts.listProjects
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -51,6 +58,7 @@ data class Workspace(
     val skills: List<Skill> = emptyList(),
     val overview: Overview = Overview(),
     val transportRoute: String = "relay",
+    val protocolError: String? = null,
 ) {
     fun modelCatalog(provider: String): ModelCatalog = modelCatalogs[provider] ?: ModelCatalog()
 
@@ -519,8 +527,8 @@ constructor(
     suspend fun accountOptions(): AccountOptions =
         checkNotNull(accountConnection).get("/account/options")
 
-    suspend fun accountMethods(): AccountMethods =
-        checkNotNull(accountConnection).get("/account/methods")
+    suspend fun accountMethods(): List<AccountSignInMethod> =
+        checkNotNull(accountConnection).listAccountMethods().methods
 
     suspend fun signIn(provider: AccountProvider, credentials: CairnCredentials) {
         val job = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
@@ -672,8 +680,15 @@ constructor(
                 }
             connection = next
             routeCollection = viewModelScope.launch {
-                next.transport.route.collect { route ->
-                    if (connection === next) mutable.update { it.copy(transportRoute = route) }
+                launch {
+                    next.transport.route.collect { route ->
+                        if (connection === next) mutable.update { it.copy(transportRoute = route) }
+                    }
+                }
+                launch {
+                    next.transport.protocolError.collect { error ->
+                        if (connection === next) mutable.update { it.copy(protocolError = error) }
+                    }
                 }
             }
             mutable.update {
@@ -758,9 +773,9 @@ constructor(
     suspend fun refresh() = coroutineScope {
         val target = api
         val owner = state.value.isOwner
-        val agents = async { target.get<List<Agent>>("/agents") }
-        val projects = async { target.get<List<Project>>("/projects") }
-        val tasks = async { target.get<List<Task>>("/tasks") }
+        val agents = async { target.listAgents(build.cairn.contracts.ListAgentsInput()).agents }
+        val projects = async { target.listProjects(ListProjectsInput()).projects }
+        val tasks = async { target.listMissions(ListMissionsInput()).tasks }
         val skills = async { target.get<List<Skill>>("/skills") }
         val mcps = async { if (owner) target.get<List<Mcp>>("/mcps") else emptyList() }
         val catalogs = codingAgents.associate { agent ->
@@ -808,7 +823,8 @@ constructor(
     suspend fun refreshAgentPortraits() {
         val target = api
         val before = state.value.agents.associate { it.id to it.avatar }
-        val portraits = target.get<List<Agent>>("/agents").associateBy { it.id }
+        val portraits =
+            target.listAgents(build.cairn.contracts.ListAgentsInput()).agents.associateBy { it.id }
         if (connection === target && state.value.session.authenticated)
             mutable.update { current ->
                 current.copy(
@@ -878,4 +894,5 @@ data class ChatDraft(
     val submissionKey: String = "",
     val provider: String = "",
     val rejected: List<RejectedAttachment> = emptyList(),
+    val speed: String = "",
 )

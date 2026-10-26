@@ -58,6 +58,14 @@ La mise en relation par Beacon d’une interface et d’une installation pour é
 **Autorisation de connexion directe** :
 La permission signée par Beacon, limitée à une installation, un compte, une session et quelques minutes, sans laquelle l’installation refuse une connexion directe. Sa révocation ou son échéance ferme la connexion.
 
+**Passerelle de node** :
+Service local d’une machine ajoutée sans adresse du manager, par lequel sa node joint le manager : directement quand les réseaux le permettent après une mise en relation par Beacon, sinon par Beacon, toujours chiffré jusqu’au **certificat de node** du manager. Elle ne détient aucun droit : la node et le manager s’authentifient toujours entre eux.
+_Avoid_ : proxy, tunnel de node
+
+**Certificat de node** :
+Certificat persistant du manager sur lequel se terminent les connexions des nodes ajoutées sans adresse. Son empreinte figure dans la commande d’installation, et la passerelle refuse tout autre certificat.
+_Avoid_ : certificat TLS du manager
+
 **Node d’exécution** :
 Machine rattachée à une installation pour y effectuer le travail d’un agent, selon ses capacités et les autorisations accordées. Une node peut être disponible de manière intermittente.
 _Avoid_ : agent (qui désigne l’agent chargé du travail, et non la machine)
@@ -76,6 +84,7 @@ Possibilité de travail vérifiée sur une node, distincte de la seule présence
 
 **Réservation de ressources** :
 Part des ressources d’une node attribuée à une exécution dans les plafonds configurés. Elle est prise en compte avant d’accepter d’autres travaux sur cette node.
+Pour le disque natif compatible, le manager protège aussi la capacité accordée mais encore inutilisée ; il peut l’agrandir automatiquement par incréments dans le budget commun. Le workspace et le `/tmp` géré consomment la même capacité.
 
 **Déplacement d’une conversation** :
 Changement de node d’exécution d’une même conversation, avec une pause puis une reprise de sa session et de son environnement de travail. Il ne conserve pas les processus en cours ni leur mémoire.
@@ -121,9 +130,21 @@ Le nombre maximal d’exécutions simultanées sur un compte. Le réduire laisse
 **Réinitialisation en réserve** :
 Une remise à zéro de fenêtre d’usage offerte par Codex, utilisée automatiquement quand la capacité restante d’un compte actif tombe à 2 %. Elle n’existe pas pour Claude Code.
 
+**Vitesse** :
+Le niveau de service Codex demandé pour un tour (Standard, Fast, Ultrafast…), choisi indépendamment du modèle et du raisonnement pour le prochain message ou par défaut sur un agent. Seuls les niveaux que le catalogue Codex d’un compte annonce pour le modèle sont proposés ; une vitesse plus rapide consomme plus vite l’usage du compte. Claude Code et OpenCode n’en proposent pas.
+_À éviter_ : tier, mode rapide (sauf pour nommer le niveau Fast de Codex).
+
 **Demandeur d’une mission** :
 La conversation ou la mission dont l’agent a lancé l’exécution d’une mission. Une mission bloquée qui attend son demandeur lui revient plutôt qu’à l’utilisateur, tant que ce demandeur existe.
 _Avoid_ : parent, orchestrateur
+
+**Tâche déléguée** :
+Une conversation qu’un agent autorisé à déléguer crée depuis une conversation,
+éventuellement sur un autre agent de code et un autre modèle, pour un travail qui
+lui revient. Elle garde sa conversation demandeuse, s’exécute dans son propre
+espace avec les droits de son agent, que l’agent demandeur doit couvrir, et ne
+délègue pas à son tour.
+_Avoid_ : sous-agent (réservé aux sous-agents natifs d’un agent de code), parent, enfant
 
 **Mise de côté d’un résultat** :
 Le choix d’un compte de retirer de « Pour vous » le résultat bloqué d’une mission : écarté jusqu’à son prochain résultat, ou reporté jusqu’à une heure donnée. Chaque membre met de côté pour lui seul.
@@ -141,12 +162,15 @@ L’emplacement d’où une skill a été importée par la source de skills d’
 
 **Délégation externe d’un plugin** :
 L’accès précis que le propriétaire accorde à des identités externes, par exemple
-à des utilisateurs Discord dans un canal, pour faire travailler un agent dédié et
+à des utilisateurs Discord dans un canal, pour faire travailler l’agent choisi et
 recevoir ses réponses. Ces identités ne deviennent pas membres de l’installation
 et n’obtiennent aucun accès général à son interface, ses conversations ou sa gestion.
 Les conversations créées restent partagées dans Cairn ; les réponses du bot sont
 visibles dans le canal externe autorisé. La délégation reste liée à l’accès courant
 du propriétaire et aux permissions d’agent qu’il a approuvées.
+Pour un agent natif, ce choix conserve l’autorité native du demandeur authentifié ;
+les messages admis agissent par cette délégation révocable, sans devenir des
+identités Cairn.
 
 **Instance de plugin** :
 Une configuration d’un plugin par le propriétaire, par exemple un bot Discord, un

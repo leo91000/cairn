@@ -75,6 +75,21 @@ private fun SubagentState.color(): Color =
 /** The same colour for a subagent in the conversation, the bar and its activity. */
 @Composable
 internal fun SubagentAvatar(agent: Subagent, size: Dp = 28.dp, modifier: Modifier = Modifier) {
+    // A delegated task shows the coding agent it runs on.
+    val delegation = agent.delegation
+    if (delegation != null && delegation.provider.isNotBlank()) {
+        Box(
+            modifier
+                .size(size)
+                .clip(RoundedCornerShape(size * 0.3f))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .clearAndSetSemantics {},
+            contentAlignment = Alignment.Center,
+        ) {
+            ProviderMark(delegation.provider, size * 0.6f)
+        }
+        return
+    }
     Box(
         modifier
             .size(size)
@@ -277,7 +292,11 @@ private fun SubagentRow(agent: Subagent, active: Boolean, now: Long, open: () ->
                         overflow = TextOverflow.Ellipsis,
                     )
                     val kind =
-                        listOf(agent.type, if (agent.background) "arrière-plan" else "")
+                        listOf(
+                                agent.type,
+                                if (agent.background) "arrière-plan" else "",
+                                if (agent.resumed) "relancé" else "",
+                            )
                             .filter { it.isNotBlank() }
                             .joinToString(" · ")
                     // Phones keep the room for the name; the sheet names the type.
@@ -532,7 +551,8 @@ internal fun SubagentSheet(
                             listOf(
                                     agent.type,
                                     if (agent.background) "arrière-plan" else "",
-                                    "lancé par l’agent",
+                                    // Claude Code may resume a subagent itself.
+                                    if (agent.resumed) "relancé" else "lancé par l’agent",
                                 )
                                 .filter { it.isNotBlank() }
                                 .joinToString(" · "),

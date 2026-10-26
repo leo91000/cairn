@@ -295,11 +295,6 @@ fn rate_limit(app: &App, subject: &RateLimitSubject, method: &str, path: &str) -
     Ok(())
 }
 
-fn development_origin(origin: &str) -> bool {
-    std::env::var("NODE_ENV").unwrap_or_default() != "production"
-        && ["http://localhost:5178", "http://127.0.0.1:5178"].contains(&origin)
-}
-
 fn check_security(
     app: &App,
     headers: &HeaderMap,
@@ -327,10 +322,7 @@ fn check_security(
         return Err(Error::forbidden("Unexpected host."));
     }
     let requested = header(headers, "origin");
-    if !requested.is_empty()
-        && requested != app.service.config.public_url
-        && !development_origin(requested)
-    {
+    if !requested.is_empty() && requested != app.service.config.public_url {
         return Err(Error::forbidden("Unexpected origin."));
     }
     rate_limit(app, subject, method, path)?;
@@ -427,8 +419,11 @@ impl Input {
             );
         let limit = if path.starts_with("/internal/node-workspace/") && large {
             2_000_000
-        } else if skill_batch {
-            // A folder move can carry hundreds of paths even when all file contents are staged.
+        } else if skill_batch
+            || path.ends_with("/avatar/upload")
+            || matches!(path, "/mcp" | "/api/mcp" | "/mcp-installation")
+        {
+            // Batch skill moves and base64 avatar uploads use the existing bounded transport limit.
             cairn_protocol::MAX_BODY
         } else {
             150000
@@ -503,6 +498,8 @@ struct Execution {
 struct Tools {
     codex: Option<String>,
     gh: Option<String>,
+    claude: Option<String>,
+    opencode: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -575,6 +572,8 @@ async fn health(State(app): State<App>, request: Request) -> Result<Response> {
         tools: Tools {
             codex: env("APP_CODEX_VERSION"),
             gh: env("APP_GH_VERSION"),
+            claude: env("APP_CLAUDE_VERSION"),
+            opencode: env("APP_OPENCODE_VERSION"),
         },
         toolkit: &app.toolkit,
         execution,

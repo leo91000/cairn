@@ -1,4 +1,8 @@
+use common::MissionFixture;
+
 mod common;
+
+use common::ProjectFixture;
 
 use axum::{Router, body::Body, http::StatusCode};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -412,7 +416,7 @@ async fn skill_bundle_storage_measurements() {
     }
     let task = api
         .service
-        .task(
+        .task_fixture(
             json!({
                 "name": "Storage measurement",
                 "agentId": MAIN_AGENT_ID,
@@ -844,7 +848,7 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
     )
     .await;
     let task = s
-        .task(
+        .task_fixture(
             json!({
                 "name": "Review",
                 "agentId": MAIN_AGENT_ID,
@@ -971,27 +975,22 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
         .is_err()
     );
 
-    // Only snapshots predating bundle revisions may use the live directory.
+    // Missing revisions cannot silently read a live skill folder.
     let mut legacy = next;
     legacy["snapshot"]["skills"][0]
         .as_object_mut()
         .unwrap()
         .remove("bundle");
-    let prepared = cairn_installation::execution::prepare(
-        &legacy,
-        &s.config,
-        &RunCredentials::default(),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        prepared["skills"][0]["path"],
-        api.skill_dir("review")
-            .join("SKILL.md")
-            .to_string_lossy()
-            .as_ref()
+    assert!(
+        cairn_installation::execution::prepare(
+            &legacy,
+            &s.config,
+            &RunCredentials::default(),
+            None,
+            None,
+        )
+        .await
+        .is_err()
     );
 }
 
@@ -1013,7 +1012,7 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
         .await;
     let task = api
         .service
-        .task(
+        .task_fixture(
             json!({
                 "name": "Review",
                 "agentId": MAIN_AGENT_ID,
@@ -1031,16 +1030,7 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
     let gate_path = std::ffi::CString::new(gate.as_os_str().as_encoded_bytes()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(gate_path.as_ptr(), 0o600) }, 0);
     api.service
-        .store
-        .save(
-            "projects",
-            json!({
-                "id": cairn_installation::config::id(),
-                "name": "Listing trigger",
-                "path": project.to_string_lossy(),
-            }),
-            "project.saved",
-        )
+        .project_fixture(json!({ "name": "Listing trigger", "path": project }), None)
         .await
         .unwrap();
     let service = api.service.clone();

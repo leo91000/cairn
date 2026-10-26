@@ -1,6 +1,5 @@
 //! Adapter for the unmodified Claude Code streaming CLI.
 use crate::{
-    accounts::lenient,
     claude,
     config::Config,
     context_usage::ContextUsage,
@@ -332,48 +331,91 @@ fn subagent_report(block: &Value, outcome: &Value) -> String {
 }
 
 /// Saved before a turn completes, so a restart never repeats a finished request.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Receipt {
-    #[serde(default, deserialize_with = "lenient::optional_string")]
-    message_id: Option<String>,
-    #[serde(default, deserialize_with = "lenient::strings")]
+    message_id: String,
     delivered: Vec<String>,
-    #[serde(default, deserialize_with = "lenient::optional_string")]
-    text: Option<String>,
-    #[serde(default, deserialize_with = "lenient::optional_string")]
-    item_id: Option<String>,
+    text: String,
+    item_id: String,
 }
 
 impl Receipt {
     async fn read(path: &Path, message_id: &str) -> Option<Self> {
         let bytes = tokio::fs::read(path).await.ok()?;
         let receipt = serde_json::from_slice::<Self>(&bytes).ok()?;
-        // Older adapters could save an unrelated startup/background result before Claude
-        // consumed this request. Such a receipt must never complete it.
-        let completes = receipt.message_id.as_deref() == Some(message_id)
-            && receipt.delivered.iter().any(|id| id == message_id);
+        let completes =
+            receipt.message_id == message_id && receipt.delivered.iter().any(|id| id == message_id);
         completes.then_some(receipt)
     }
 
     /// Replays a completed request without starting Claude Code.
-    async fn replay(
-        self,
-        plan: &Value,
-        message_id: &str,
-        events: &mpsc::Sender<Value>,
-    ) -> Result<()> {
+    async fn replay(self, plan: &Value, events: &mpsc::Sender<Value>) -> Result<()> {
         for id in &self.delivered {
             emit(events, delivered(id)).await?;
         }
-        let body = self.text.as_deref().unwrap_or_default();
-        atomic_write(Path::new(text(plan, "output")), body.as_bytes()).await?;
-        let item_id = self
-            .item_id
-            .unwrap_or_else(|| format!("{message_id}-recovered"));
-        let item = json!({ "id": item_id, "type": "agent_message", "text": self.text });
+        atomic_write(Path::new(text(plan, "output")), self.text.as_bytes()).await?;
+        let item = json!({ "id": self.item_id, "type": "agent_message", "text": self.text });
         emit(events, json!({ "type": "item.completed", "item": item })).await?;
         emit(events, json!({ "type": "turn.completed" })).await
+    }
+}
+
+/// The subscription usage limit Claude Code reports in a `rate_limit_event`.
+#[derive(Debug, PartialEq)]
+struct UsageLimit {
+    status: &'static str,
+    window: Option<String>,
+    /// Milliseconds since the epoch.
+    resets_at: Option<i64>,
+    extra_usage: Option<&'static str>,
+    using_extra_usage: bool,
+}
+
+impl UsageLimit {
+    fn from(info: &Value) -> Option<Self> {
+        let status = |value: &Value| match value.as_str()? {
+            "allowed" => Some("allowed"),
+            "allowed_warning" => Some("allowed_warning"),
+            "rejected" => Some("rejected"),
+            _ => None,
+        };
+        let window = text(info, "rateLimitType");
+        let window = (!window.is_empty()
+            && window.len() <= 64
+            && window
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_'))
+        .then(|| window.to_owned());
+        // Claude Code reports seconds; accept milliseconds from a future CLI too.
+        let resets_at = info["resetsAt"]
+            .as_f64()
+            .filter(|reset| reset.is_finite() && *reset > 0.0)
+            .map(|reset| if reset < 1e12 { reset * 1000.0 } else { reset } as i64);
+        Some(Self {
+            status: status(&info["status"])?,
+            window,
+            resets_at,
+            extra_usage: status(&info["overageStatus"]),
+            using_extra_usage: info["isUsingOverage"] == true || info["overageInUse"] == true,
+        })
+    }
+
+    /// Requests stop until the window resets: extra usage cannot take over.
+    fn blocks(&self) -> bool {
+        self.status == "rejected"
+            && !matches!(self.extra_usage, Some("allowed" | "allowed_warning"))
+    }
+
+    fn event(&self) -> Value {
+        json!({
+            "type": "provider.limit",
+            "status": self.status,
+            "window": self.window,
+            "resetsAt": self.resets_at,
+            "blocked": self.blocks(),
+            "usingExtraUsage": self.using_extra_usage,
+        })
     }
 }
 
@@ -395,6 +437,7 @@ struct Turn<'a> {
     /// The ID Claude Code knows the request by.
     wire_id: String,
     submitted: HashSet<String>,
+    operational_notices: HashSet<String>,
     delivered: HashSet<String>,
     /// Submitted messages whose turn has not produced a result yet.
     pending: HashSet<String>,
@@ -405,6 +448,24 @@ struct Turn<'a> {
     tools: HashMap<String, Value>,
     /// Subagents still working, by the ID of the tool use that started them.
     subagents: HashMap<String, Value>,
+    /// Subagents that reported back, by the same ID, until a new run resumes them.
+    settled: HashMap<String, Value>,
+    /// The ID of each subagent, by the task ID Claude Code keeps across its runs.
+    tasks: HashMap<String, String>,
+    /// The usage limit Claude Code last reported, unless requests run normally.
+    limit: Option<UsageLimit>,
+    /// Subagents by the tool use that resumed them, such as a SendMessage call: before 2.1.292,
+    /// a resumed subagent's messages may name that call rather than an agent ID.
+    resumed_by: HashMap<String, String>,
+    /// Every tool use of this execution, by tool name, including those that already returned.
+    called: HashMap<String, String>,
+    /// Whether a response streamed since the usage limit was reported: requests went through.
+    answered: bool,
+    /// The error Claude Code gave the agent's latest message: `rate_limit` when the usage limit
+    /// refused its request.
+    api_error: String,
+    /// Tool uses whose progress notice was reported: Claude Code repeats it while the tool runs.
+    tool_notices: HashSet<String>,
     /// Streamed blocks of the current message, by index.
     streams: HashMap<usize, Value>,
     /// Content blocks seen per assistant message.
@@ -445,6 +506,9 @@ impl Turn<'_> {
     }
 
     async fn deliver(&mut self, id: &str) -> Result<()> {
+        if self.operational_notices.contains(id) {
+            return Ok(());
+        }
         if self.delivered.insert(id.to_owned()) {
             self.emit(delivered(id)).await?;
         }
@@ -573,6 +637,9 @@ impl Turn<'_> {
         };
         for message in messages {
             let id = text(&message, "id");
+            if message["operationalNotice"] == true {
+                self.operational_notices.insert(id.to_owned());
+            }
             if self.submitted.contains(id) {
                 continue;
             }
@@ -662,6 +729,12 @@ impl Turn<'_> {
             {
                 self.subagent_task(value).await?;
             }
+            "system" if value["subtype"] == "api_retry" => self.engine_retry(value).await?,
+            "system" if value["subtype"] == "informational" => self.engine_notice(value).await?,
+            // Opt-in (CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS) and not enabled: completion stays
+            // correlated with results, and Cairn answers permission requests itself.
+            "system" if value["subtype"] == "session_state_changed" => {}
+            "rate_limit_event" => self.rate_limit(&value["rate_limit_info"]).await?,
             "user" => self.on_user(value).await?,
             "assistant" => self.on_assistant(value).await?,
             "stream_event" if value["parent_tool_use_id"].is_null() => {
@@ -673,6 +746,89 @@ impl Turn<'_> {
             _ => {}
         }
         Ok(false)
+    }
+
+    /// Claude Code retries a failed API request itself. The turn goes on: this is not a failure,
+    /// and nothing for Cairn to retry or wait for.
+    async fn engine_retry(&self, value: &Value) -> Result<()> {
+        let delay = value["retry_delay_ms"].as_u64().unwrap_or(0);
+        let reason = text(value, "error");
+        let reason = if !reason.is_empty()
+            && reason.len() <= 64
+            && reason
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        {
+            reason
+        } else {
+            "unknown"
+        };
+        let mut retry = json!({
+            "type": "engine.retry",
+            "attempt": value["attempt"].as_u64(),
+            "maxRetries": value["max_retries"].as_u64(),
+            "delayMs": delay,
+            "retryAt": crate::config::now().saturating_add_unsigned(delay),
+            "status": value["error_status"].as_u64(),
+            "reason": reason,
+        });
+        let no_response = &value["no_response"];
+        if no_response.is_object() {
+            retry["noResponse"] = json!({
+                "waitedMs": no_response["waited_ms"].as_u64(),
+                "retryWaitMs": no_response["retry_wait_ms"].as_u64(),
+            });
+        }
+        self.emit(retry).await
+    }
+
+    /// A warning or notice Claude Code raised during the turn.
+    async fn engine_notice(&mut self, value: &Value) -> Result<()> {
+        let message = text(value, "content");
+        if message.trim().is_empty() {
+            return Ok(());
+        }
+        let level = match text(value, "level") {
+            level @ ("info" | "notice" | "suggestion" | "warning") => level,
+            _ => "notice",
+        };
+        // Informational lines naming a tool use report its progress: the first one says it is
+        // running. A warning, a suggestion or a notice that stops the turn is always reported.
+        let tool_use = text(value, "tool_use_id");
+        let progress = matches!(level, "info" | "notice") && value["prevent_continuation"] != true;
+        if progress && !tool_use.is_empty() && !self.tool_notices.insert(tool_use.to_owned()) {
+            return Ok(());
+        }
+        // The worker cuts a long notice once it is redacted.
+        let mut notice = json!({ "type": "engine.notice", "level": level, "message": message });
+        if value["prevent_continuation"] == true {
+            notice["stopsTurn"] = true.into();
+        }
+        self.emit(notice).await
+    }
+
+    /// The subscription's usage-limit state. Only changes are shown: a warning, a limit that
+    /// stops requests, or a return to normal after either.
+    async fn rate_limit(&mut self, info: &Value) -> Result<()> {
+        let Some(limit) = UsageLimit::from(info) else {
+            return Ok(());
+        };
+        if limit.status == "allowed" && self.limit.is_none() {
+            return Ok(());
+        }
+        if self.limit.as_ref() == Some(&limit) {
+            // While the limit refuses requests, Claude Code re-emits it (at most about every 30
+            // seconds per window): a refusal after an answered request. One within that time
+            // falls back to recognizing Claude's wording.
+            if limit.blocks() {
+                self.answered = false;
+            }
+            return Ok(());
+        }
+        self.emit(limit.event()).await?;
+        self.limit = (limit.status != "allowed").then_some(limit);
+        self.answered = false;
+        Ok(())
     }
 
     async fn background_tasks(&mut self, value: &Value) -> Result<()> {
@@ -791,14 +947,33 @@ impl Turn<'_> {
         Ok(())
     }
 
+    /// The subagent a message comes from, or None for the agent's own. Claude Code names the
+    /// tool use that started it and, from 2.1.292, its agent ID (absent on the agent's own
+    /// messages): the task ID it keeps when it is resumed, so a resumed subagent's steps stay
+    /// with it.
+    fn parent(&self, value: &Value) -> Option<String> {
+        let agent = text(value, "agent_id");
+        if let Some(id) = self.tasks.get(agent) {
+            return Some(id.clone());
+        }
+        let tool_use = value["parent_tool_use_id"].as_str();
+        if let Some(id) = tool_use.and_then(|tool_use| self.resumed_by.get(tool_use)) {
+            return Some(id.clone());
+        }
+        tool_use
+            .or_else(|| (!agent.is_empty()).then_some(agent))
+            .map(str::to_owned)
+    }
+
     // Claude Code emits one assistant event per content block, all sharing the message id.
-    // Count blocks per message so ids match the streamed block index. A subagent's messages name
-    // the tool use that started it: they show as its steps, never as the agent's own reply.
+    // Count blocks per message so ids match the streamed block index. A subagent's messages
+    // show as its steps, never as the agent's own reply.
     async fn on_assistant(&mut self, value: &Value) -> Result<()> {
-        let parent = value["parent_tool_use_id"].as_str();
+        let parent = self.parent(value);
         if parent.is_none() {
             // The agent responds again, so it no longer only waits for background tasks.
             self.waiting_for_background = false;
+            self.api_error = text(value, "error").to_owned();
             // Subagents have their own context. Local command replies are not model requests.
             let response = &value["message"];
             if response["model"] != "<synthetic>" {
@@ -814,8 +989,8 @@ impl Turn<'_> {
             let Some(mut item) = item(block, &message, index) else {
                 continue;
             };
-            if let Some(parent) = parent {
-                item["parent_id"] = parent.into();
+            if let Some(parent) = &parent {
+                item["parent_id"] = parent.as_str().into();
                 if item["type"] == "agent_message" {
                     item["type"] = "subagent_message".into();
                 }
@@ -831,6 +1006,8 @@ impl Turn<'_> {
             let running = block["type"] == "tool_use";
             if running {
                 self.tools.insert(text(&item, "id").into(), item.clone());
+                self.called
+                    .insert(text(&item, "id").into(), text(block, "name").into());
             }
             // The plan counts once Claude Code accepts it, with the call's result.
             if item["type"] == "todo_list" {
@@ -851,6 +1028,25 @@ impl Turn<'_> {
     async fn subagent_result(&mut self, item: Value, block: &Value, outcome: &Value) -> Result<()> {
         let id = text(&item, "id").to_owned();
         let mut item = self.subagents.remove(&id).unwrap_or(item);
+        if let Some(agent) = outcome["agentId"]
+            .as_str()
+            .filter(|agent| !agent.is_empty())
+        {
+            self.tasks.insert(agent.to_owned(), id.clone());
+            if item["task_id"].is_null() {
+                item["task_id"] = agent.into();
+            }
+        }
+        // The call that started the subagent can return after a later run resumed it: that run
+        // reports for itself, whether it still works or already reported.
+        if item["resumed"] == true {
+            if item["status"] == "in_progress" {
+                self.subagents.insert(id, item);
+            } else {
+                self.settled.insert(id, item);
+            }
+            return Ok(());
+        }
         let launched = matches!(
             text(outcome, "status"),
             "async_launched" | "remote_launched"
@@ -879,27 +1075,87 @@ impl Turn<'_> {
         // call is complete but the subagent is still working.
         if launched && item["status"] == "in_progress" {
             self.subagents.insert(id, item.clone());
+        } else {
+            self.settled.insert(id, item.clone());
         }
         self.emit(json!({ "type": "item.completed", "item": item }))
             .await
     }
 
-    /// Progress and completion that Claude Code reports for a subagent while it works.
+    /// Progress and completion that Claude Code reports for a subagent while it works. A resumed
+    /// subagent keeps its task ID, while its frames may name another tool use, or none.
     async fn subagent_task(&mut self, value: &Value) -> Result<()> {
-        let id = text(value, "tool_use_id");
-        let Some(item) = self.subagents.get_mut(id) else {
-            return Ok(());
+        let task = text(value, "task_id");
+        let tool_use = text(value, "tool_use_id");
+        let id = if self.subagents.contains_key(tool_use) || self.settled.contains_key(tool_use) {
+            tool_use.to_owned()
+        } else if let Some(id) = self.tasks.get(task) {
+            id.clone()
+        } else {
+            return self.subagent_resumed(value).await;
         };
+        if !task.is_empty() {
+            self.tasks.insert(task.to_owned(), id.clone());
+        }
+        if !tool_use.is_empty() && tool_use != id {
+            self.resumed_by.insert(tool_use.to_owned(), id.clone());
+        }
+        let started = value["subtype"] == "task_started";
+        if !self.subagents.contains_key(&id) {
+            // Only a new run reopens a subagent that reported back: other frames, and another
+            // start of the run that reported, are late and leave it settled.
+            let run = text(value, "run_id");
+            let reopens = started
+                && self.settled.get(&id).is_some_and(|item| {
+                    let reported = text(item, "run_id");
+                    run.is_empty() || reported.is_empty() || run > reported
+                });
+            if !reopens {
+                return Ok(());
+            }
+            let item = self.settled.remove(&id).unwrap();
+            self.subagents.insert(id.clone(), item);
+        }
+        let item = self.subagents.get_mut(&id).unwrap();
+
+        // Claude Code promises that a task's run IDs sort, by plain string comparison, in the
+        // order its runs opened: a frame naming an earlier run is late.
+        let run = text(value, "run_id");
+        let current = text(item, "run_id").to_owned();
+        if !run.is_empty() && !current.is_empty() && run < current.as_str() {
+            return Ok(());
+        }
         let before = item.clone();
-        if !text(value, "task_id").is_empty() {
-            item["task_id"] = value["task_id"].clone();
+        if !task.is_empty() {
+            item["task_id"] = task.into();
+        }
+        if !run.is_empty() {
+            item["run_id"] = run.into();
         }
         let usage = &value["usage"];
         match text(value, "subtype") {
             "task_started" => {
+                // A start naming another run is a resumption, even before the earlier run's tool
+                // result; another start of the current run is not. Frames without run IDs
+                // (before 2.1.292) only start again once the subagent finished.
+                let resumed = if !current.is_empty() && !run.is_empty() {
+                    run != current
+                } else {
+                    before["status"] != "in_progress"
+                };
+                if resumed {
+                    item["status"] = "in_progress".into();
+                    item["resumed"] = true.into();
+                    // Its new run reports again; until then the earlier report stays shown.
+                    item["activity"] = Value::Null;
+                    item["result"] = Value::Null;
+                }
                 item["background"] = (value["is_backgrounded"] == true).into();
                 if item["agent_type"].is_null() {
                     item["agent_type"] = value["subagent_type"].clone();
+                }
+                if !text(value, "parent_task_id").is_empty() {
+                    item["parent_task_id"] = value["parent_task_id"].clone();
                 }
             }
             "task_progress" => {
@@ -932,10 +1188,70 @@ impl Turn<'_> {
         }
         let item = item.clone();
         // A foreground subagent's tool result follows its notification and completes it.
-        if item["status"] != "in_progress" && !self.tools.contains_key(id) {
-            self.subagents.remove(id);
+        if item["status"] != "in_progress" && !self.tools.contains_key(&id) {
+            self.subagents.remove(&id);
+            self.settled.insert(id, item.clone());
         }
         self.emit(json!({ "type": "item.updated", "item": item }))
+            .await
+    }
+
+    /// A subagent an earlier execution started, resumed in this one: by a SendMessage call, or
+    /// by Claude Code itself. It keeps its task ID, but this execution never saw the tool use that
+    /// started it, so it shows as a new row of this execution marked resumed. Its run names the
+    /// SendMessage call or, when Claude Code resumed it, the earlier execution's call that
+    /// started it. Another tool use of this execution, such as a workflow's, starts its own
+    /// agents; a start naming no call is a new agent, such as a forked slash command. A call this
+    /// execution never made only names a resumed subagent the agent itself started: a nested
+    /// agent may start from work this execution does not see.
+    async fn subagent_resumed(&mut self, value: &Value) -> Result<()> {
+        let task = text(value, "task_id");
+        let tool_use = text(value, "tool_use_id");
+        let top_level = text(value, "parent_task_id").is_empty()
+            && value["spawn_depth"].as_u64().is_none_or(|depth| depth <= 1);
+        let resumes = match self.called.get(tool_use) {
+            Some(tool) => tool == "SendMessage",
+            None => !tool_use.is_empty() && top_level,
+        };
+        // Housekeeping agents Claude Code starts itself stay out of the transcript.
+        if value["subtype"] != "task_started"
+            || value["task_type"] != "local_agent"
+            || value["skip_transcript"] == true
+            || value["ambient"] == true
+            || task.is_empty()
+            || !resumes
+        {
+            return Ok(());
+        }
+        let input = json!({
+            "description": value["description"],
+            "subagent_type": value["subagent_type"],
+            "prompt": value["prompt"],
+        });
+        // Clients key rows by run and item ID, and a run's later executions may resume the same
+        // subagent again: each row gets its own ID, named after the subagent's run when known.
+        let row = match text(value, "run_id") {
+            "" => format!("{task}:{}", crate::config::id()),
+            run => format!("{task}:{run}"),
+        };
+        let mut item = subagent(&row, &input);
+        item["resumed"] = true.into();
+        item["task_id"] = task.into();
+        item["background"] = (value["is_backgrounded"] == true).into();
+        for key in ["run_id", "parent_task_id"] {
+            if !text(value, key).is_empty() {
+                item[key] = value[key].clone();
+            }
+        }
+        if let Some(parent) = self.tasks.get(text(value, "parent_task_id")) {
+            item["parent_id"] = parent.as_str().into();
+        }
+        self.tasks.insert(task.to_owned(), row.clone());
+        if !tool_use.is_empty() {
+            self.resumed_by.insert(tool_use.to_owned(), row.clone());
+        }
+        self.subagents.insert(row, item.clone());
+        self.emit(json!({ "type": "item.started", "item": item }))
             .await
     }
 
@@ -944,6 +1260,7 @@ impl Turn<'_> {
         match text(event, "type") {
             "message_start" => {
                 self.waiting_for_background = false;
+                self.answered = true;
                 self.stream_message = text(&event["message"], "id").into();
                 self.streams.clear();
             }
@@ -1052,6 +1369,28 @@ impl Turn<'_> {
             } else {
                 result
             };
+            // Claude Code said the usage limit stops requests, and refused the agent's request
+            // for it: report it as such rather than leaving its wording to be recognized. A limit
+            // it answered after (a limit on another model's window, or one a subagent hit), or
+            // whose reset passed, does not explain the failure.
+            let now = crate::config::now();
+            if let Some(limit) = self.limit.as_ref().filter(|limit| {
+                limit.blocks()
+                    && self.api_error == "rate_limit"
+                    && !self.answered
+                    && limit.resets_at.is_none_or(|reset| reset > now)
+            }) {
+                self.emit(json!({
+                    "type": "turn.failed",
+                    "error": {
+                        "message": message,
+                        "code": "usage_limit_reached",
+                        "window": limit.window,
+                        "resetsAt": limit.resets_at,
+                    },
+                }))
+                .await?;
+            }
             return Err(Error::bad_gateway(message));
         }
         if compacting(self.plan) && self.compactions == 0 {
@@ -1097,10 +1436,10 @@ impl Turn<'_> {
         // A compaction has no reply to replay: a restart compacts again instead.
         if !compacting(self.plan) {
             let receipt = Receipt {
-                message_id: Some(self.initial_id.into()),
+                message_id: self.initial_id.into(),
                 delivered: self.delivered.iter().cloned().collect(),
-                text: Some(self.last.clone()),
-                item_id: Some(self.last_id.clone()),
+                text: self.last.clone(),
+                item_id: self.last_id.clone(),
             };
             // Save the receipt before completion so restart cannot repeat a finished request.
             atomic_write(&self.receipt, &serde_json::to_vec(&receipt)?).await?;
@@ -1184,7 +1523,7 @@ pub async fn run(
     let receipt = Path::new(text(&plan, "output")).with_extension("claude-receipt.json");
     let initial_id = text(&plan["execution"], "messageId");
     if let Some(saved) = Receipt::read(&receipt, initial_id).await {
-        return saved.replay(&plan, initial_id, &events).await;
+        return saved.replay(&plan, &events).await;
     }
 
     if compacting(&plan) && !plan["sessionId"].is_string() {
@@ -1251,12 +1590,21 @@ pub async fn run(
         initial_id,
         wire_id,
         submitted: HashSet::from([initial_id.to_owned()]),
+        operational_notices: HashSet::new(),
         delivered: HashSet::new(),
         pending: HashSet::from([initial_id.to_owned()]),
         consumed: HashSet::new(),
         questions: HashMap::new(),
         tools: HashMap::new(),
         subagents: HashMap::new(),
+        settled: HashMap::new(),
+        tasks: HashMap::new(),
+        limit: None,
+        resumed_by: HashMap::new(),
+        called: HashMap::new(),
+        answered: false,
+        api_error: String::new(),
+        tool_notices: HashSet::new(),
         streams: HashMap::new(),
         blocks: HashMap::new(),
         stream_message: String::new(),

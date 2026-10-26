@@ -60,8 +60,25 @@ async fn personal_mcp_token_enforces_scopes_and_revocation() {
 
     let result: Value = response.json().await.unwrap();
     assert!(
-        result["result"]["structuredContent"]["result"].is_array(),
+        result["result"]["structuredContent"]["result"]["agents"].is_array(),
         "{result}"
+    );
+
+    // Account actions are outside the public installation catalogue.
+    let account_denied: Value = call("list_account_methods", json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        account_denied["result"]["isError"], true,
+        "{account_denied}"
+    );
+    assert!(
+        account_denied.to_string().contains("Unknown operation"),
+        "{account_denied}"
     );
 
     let denied: Value = call(
@@ -92,6 +109,14 @@ async fn personal_mcp_token_enforces_scopes_and_revocation() {
 
     assert_eq!(
         call("list_agents", json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call("list_account_methods", json!({}))
             .send()
             .await
             .unwrap()
@@ -447,7 +472,7 @@ async fn detaching_and_reclaiming_an_installation_permanently_revokes_its_mcp_gr
             "/api/relay/device-claim/start",
             json!({
                 "name": "Reclaimed machine",
-                "protocol": 1,
+                "protocol": cairn_protocol::PROTOCOL_VERSION,
                 "identity": { "installationId": id, "token": identity["token"] },
             }),
         )
@@ -688,8 +713,10 @@ async fn slow_mcp_uploads_cannot_block_owner_access_even_after_revocation() {
             "arguments": {
                 "code": "return await cairn.save_project(input);",
                 "input": {
-                    "name": "Rejected after revocation",
-                    "path": relay.root.path().to_str().unwrap(),
+                    "settings": {
+                        "name": "Rejected after revocation",
+                        "path": relay.root.path().to_str().unwrap(),
+                    },
                 },
             },
         },
@@ -724,7 +751,7 @@ async fn slow_mcp_uploads_cannot_block_owner_access_even_after_revocation() {
         .json()
         .await
         .unwrap();
-    assert_eq!(projects, json!([]));
+    assert_eq!(projects, json!({ "projects": [] }));
     relay.close().await;
 }
 

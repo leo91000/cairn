@@ -124,22 +124,21 @@ fn terminal(record: &Value) -> bool {
     matches!(text(record, "state"), "released" | "failed" | "expired")
 }
 
-fn enabled(node: &Value, agent: &str) -> bool {
-    node["exclusiveAgents"]
-        .as_array()
-        .is_some_and(|agents| agents.iter().any(|id| id == agent))
-}
-
 fn authorize_run(db: &Db<'_>, run: &Value, node_id: &str) -> Result<String> {
     let denied = || Error::forbidden("Exclusive node access is unavailable or was revoked.");
     let node = db.get("nodes", node_id)?.ok_or_else(denied)?;
     let agent_id = super::run_agent(run);
-    let agent = db.get("agents", agent_id)?.ok_or_else(denied)?;
+    let profile = db.agent(agent_id)?.ok_or_else(denied)?;
+    let agent = serde_json::to_value(&profile)?;
     if run["status"] != RunStatus::Running
         || !run["cancelRequestedAt"].is_null()
         || run["moveRequest"].is_object()
         || node["revoked"] == true
-        || !enabled(&node, agent_id)
+        || !profile
+            .settings
+            .exclusive_nodes
+            .iter()
+            .any(|node| node == node_id)
         || !super::agent_allows(&agent, node_id)
         || !crate::service::covers(&agent, &run["snapshot"]["agent"])
     {

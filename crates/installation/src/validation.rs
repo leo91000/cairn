@@ -91,8 +91,7 @@ pub fn parse(kind: &str, mut value: Value) -> Result<Value> {
 
 fn trim_text(kind: &str, value: &mut Value) {
     let trims: &[&str] = match kind {
-        "agent" | "project" => &["name"],
-        "task" => &["name", "prompt"],
+        "agent" => &["name"],
         "message" => &["text", "model"],
         "mcp" => &["name", "command", "clientId", "scopes"],
         _ => &[],

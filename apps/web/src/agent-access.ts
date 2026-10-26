@@ -7,20 +7,7 @@ import { LOCAL_NODE_ID } from '../../../packages/contracts/nodes'
 
 // Everything an agent can reach or do is edited on its page, as one draft.
 export type AgentAccess = Agent['access']
-export interface AgentDraft {
-  name: string
-  description: string
-  instructions: string
-  provider: Agent['provider']
-  model: string
-  reasoning: string
-  timeoutMinutes: number
-  access: AgentAccess
-  // Live grants, kept beside `access` rather than inside it: nodes the agent may reserve
-  // exclusively and plugin instances it may use.
-  exclusiveNodes: string[]
-  plugins: string[]
-}
+export type AgentDraft = import('../../../packages/contracts/generated/typescript/AgentSettings').AgentSettings
 
 export type SectionId
   = | 'identity'
@@ -89,7 +76,8 @@ export function newAgentDraft(): AgentDraft {
     instructions: '',
     provider: 'codex',
     model: '',
-    reasoning: '',
+    reasoning: 'high',
+    speed: '',
     timeoutMinutes: 0,
     access: {
       backend: 'firecracker',
@@ -99,6 +87,7 @@ export function newAgentDraft(): AgentDraft {
       mcps: [],
       mcpTools: {},
       installation: false,
+      delegation: false,
       sandbox: 'yolo',
     },
     exclusiveNodes: [],
@@ -106,7 +95,7 @@ export function newAgentDraft(): AgentDraft {
   }
 }
 
-/** The editable part of a saved agent, with the defaults older records omit. */
+/** The editable part of a saved agent. */
 export function draftOf(agent: Agent): AgentDraft {
   const access = (agent.access ?? {}) as Partial<AgentAccess>
   return {
@@ -116,6 +105,7 @@ export function draftOf(agent: Agent): AgentDraft {
     provider: agent.provider ?? 'codex',
     model: agent.model ?? '',
     reasoning: agent.reasoning ?? '',
+    speed: agent.speed,
     timeoutMinutes: agent.timeoutMinutes ?? 0,
     access: {
       backend: access.backend ?? 'firecracker',
@@ -125,6 +115,7 @@ export function draftOf(agent: Agent): AgentDraft {
       mcps: access.mcps ? [...access.mcps] : null,
       mcpTools: structuredClone(JSON.parse(JSON.stringify(access.mcpTools ?? {}))),
       installation: access.installation ?? false,
+      delegation: access.delegation ?? false,
       sandbox: access.sandbox ?? 'yolo',
     },
     // Responses omit empty live grants: absent means none.
@@ -191,6 +182,7 @@ export function rebaseDraft(base: AgentDraft, mine: AgentDraft, theirs: AgentDra
     provider: pick(base.provider, mine.provider, theirs.provider),
     model: pick(base.model, mine.model, theirs.model),
     reasoning: pick(base.reasoning, mine.reasoning, theirs.reasoning),
+    speed: pick(base.speed, mine.speed, theirs.speed),
     timeoutMinutes: pick(base.timeoutMinutes, mine.timeoutMinutes, theirs.timeoutMinutes),
     access: access as unknown as AgentAccess,
     exclusiveNodes: backendChanged
@@ -214,60 +206,6 @@ export function savedDraft(draft: AgentDraft, existingMcps?: string[]): AgentDra
     return draft
   return { ...draft, access: { ...draft.access, mcpTools: granted } }
 }
-
-/**
- * An installation that predates live grants on the agent ignores top-level `exclusiveNodes` and
- * `plugins` and keeps them on the resources, as Android handles it. Current installations mark
- * every listed agent with the computed `grantsOnAgent` capability; revisions alone are not proof,
- * since agents keep them after a rollback.
- */
-export function olderInstallation(agents: object[]) {
-  return agents.length > 0 && !agents.some(agent => (agent as { grantsOnAgent?: unknown }).grantsOnAgent === true)
-}
-
-/** The draft as the server applies it: an older installation never receives live grant changes. */
-export function sentDraft(saved: AgentDraft, draft: AgentDraft, older: boolean): AgentDraft {
-  return older ? { ...draft, exclusiveNodes: saved.exclusiveNodes, plugins: saved.plugins } : draft
-}
-
-/** On an older installation, the agent's live grants as its resources record them. */
-export function withResourceGrants(draft: AgentDraft, agentId: string, connections: Pick<PluginConnection, 'id' | 'agentIds'>[], nodes: Pick<ExecutionNode, 'id' | 'local' | 'exclusiveAgents'>[]): AgentDraft {
-  return {
-    ...draft,
-    plugins: connections.filter(connection => connection.agentIds?.includes(agentId)).map(connection => connection.id),
-    exclusiveNodes: nodes.filter(node => node.exclusiveAgents?.includes(agentId)).map(node => node.local ? LOCAL_NODE_ID : node.id),
-  }
-}
-
-/**
- * The agents an instance save must send back unchanged on an older installation (or one not known
- * yet), which replaces the list when it is omitted; undefined when it should be omitted.
- */
-export function keptAgentIds(agents: object[], entry: Pick<PluginEntry, 'manifest'> | undefined, connection: Pick<PluginConnection, 'agentIds'> | null | undefined) {
-  // Main always exists: no agent at all means the list did not load, and the installation is unknown.
-  const unknown = agents.length === 0
-  if (!(unknown || olderInstallation(agents)) || !entry?.manifest?.agentAccess || !connection?.agentIds?.length)
-    return undefined
-  return [...connection.agentIds]
-}
-
-/**
- * `keptAgentIds` from the instance as it is now, re-read right before saving: an agent revoked
- * meanwhile from its page is not granted back. Undefined when nothing has to be sent.
- */
-export async function currentAgentIds(
-  agents: object[],
-  entry: Pick<PluginEntry, 'manifest'> | undefined,
-  connection: Pick<PluginConnection, 'id' | 'agentIds'> | null | undefined,
-  connections: () => Promise<Pick<PluginConnection, 'id' | 'agentIds'>[]>,
-) {
-  if (!connection || keptAgentIds(agents, entry, { agentIds: ['?'] }) === undefined)
-    return undefined
-  const fresh = (await connections()).find(item => item.id === connection.id)
-  return keptAgentIds(agents, entry, fresh ?? connection)
-}
-
-export const updateForGrants = 'Update the installation to grant these from the agent page.'
 
 /** "All, including future" | "3 of 12" | "None". */
 export function selectionSummary(selected: string[] | null, total: number) {
@@ -377,20 +315,19 @@ export function runProblem(id: string, access: AgentAccess, nodes: ExecutionNode
 
 /**
  * Node access after allowing or forbidding a node: forbidding it also drops its exclusive
- * reservation, which could never be used, unless reservations are read-only (an older installation
- * keeps them on its nodes and never receives them from here).
+ * reservation, which could never be used.
  */
-export function withRun(access: AgentAccess, exclusiveNodes: string[], node: string, on: boolean, readOnlyGrants = false) {
+export function withRun(access: AgentAccess, exclusiveNodes: string[], node: string, on: boolean) {
   const nodes = (access.nodes ?? []).filter(id => id !== node)
   return {
     nodes: on ? [...nodes, node] : nodes,
-    exclusiveNodes: on || readOnlyGrants ? exclusiveNodes : exclusiveNodes.filter(id => id !== node),
+    exclusiveNodes: on ? exclusiveNodes : exclusiveNodes.filter(id => id !== node),
   }
 }
 
 /** Node access for another execution backend: the choices start over, read-only reservations stay. */
-export function withBackend(exclusiveNodes: string[], readOnlyGrants = false) {
-  return { nodes: [] as string[], exclusiveNodes: readOnlyGrants ? exclusiveNodes : [] }
+export function withBackend() {
+  return { nodes: [] as string[], exclusiveNodes: [] }
 }
 
 /** Whether the agent may run on a node: listed, or every node allowed. */
@@ -493,7 +430,7 @@ export function changes(saved: AgentDraft, draft: AgentDraft) {
 
   for (const key of ['name', 'description', 'instructions'] as const)
     add('identity', Number(saved[key] !== draft[key]))
-  for (const key of ['provider', 'model', 'reasoning'] as const)
+  for (const key of ['provider', 'model', 'reasoning', 'speed'] as const)
     add('model', Number(saved[key] !== draft[key]))
   add('advanced', Number(saved.timeoutMinutes !== draft.timeoutMinutes))
   add('projects', listCount(saved.access.projects, draft.access.projects))
@@ -507,7 +444,7 @@ export function changes(saved: AgentDraft, draft: AgentDraft) {
   for (const connection of tools)
     add('mcps', Number(asSet(savedTools[connection]) !== asSet(draftTools[connection])))
   add('sandbox', Number(saved.access.sandbox !== draft.access.sandbox))
-  add('powers', Number(saved.access.installation !== draft.access.installation))
+  add('powers', Number(saved.access.installation !== draft.access.installation) + Number(!!saved.access.delegation !== !!draft.access.delegation))
   add('nodes', Number(backendOf(saved.access) !== backendOf(draft.access)))
   add('nodes', listCount(saved.access.nodes, draft.access.nodes))
   // Responses omit empty live grants: absent means none.
@@ -565,6 +502,8 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     lines.push({ kind: 'power', section: 'nodes', text: `Added: native execution. ${nativeHelp}` })
   if (draft.access.installation && !saved.access.installation)
     lines.push({ kind: 'power', section: 'powers', text: 'Added: installation management. This agent will be able to create and change agents, projects, skills, MCP connections, missions and runs on your behalf.' })
+  if (draft.access.delegation && !saved.access.delegation)
+    lines.push({ kind: 'power', section: 'powers', text: 'Added: task delegation. This agent will be able to start conversations that report back to it, on any coding agent and model, as itself or as an agent whose access it covers.' })
   for (const id of listChanges(saved.plugins ?? [], draft.plugins ?? []).added)
     lines.push({ kind: 'secret', section: 'plugins', text: `Added: ${connectionLabel(id, context)} — effective immediately, including in running conversations.` })
 
@@ -591,6 +530,8 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     removed.push(connectionLabel(id, context))
   if (saved.access.installation && !draft.access.installation)
     removed.push('installation management')
+  if (saved.access.delegation && !draft.access.delegation)
+    removed.push('task delegation')
   if (backendOf(saved.access) === 'native' && backendOf(draft.access) !== 'native')
     removed.push('native execution')
   if (sandboxStrictness[draft.access.sandbox] > sandboxStrictness[saved.access.sandbox]) {
@@ -612,28 +553,9 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
 }
 
 /** A plugin delegation answering as the agent, as `POST /agents/{id}/preview` reports it. */
-export interface DelegationEffect {
-  id: string
-  pluginId: string
-  name: string
-  enabled: boolean
-  suspended: boolean
-  // The saved agent already no longer matches the delegation's approval, before this edit.
-  alreadySuspended?: boolean
-  // Why the new access cannot be reapproved, when it cannot.
-  blocked: string | null
-}
+export type DelegationEffect = import('../../../packages/contracts/generated/typescript/AgentDelegationEffect').AgentDelegationEffect
+export type Preview = import('../../../packages/contracts/generated/typescript/AgentPreview').AgentPreview
 
-export interface Preview {
-  runs: { queued: number, running: number }
-  delegations: DelegationEffect[]
-}
-
-/**
- * Whether saving needs the review first: a power or a secret added, interrupted work, or a
- * delegation this edit suspends. A delegation already suspended by an earlier change, blocked or
- * not, is listed when the review opens, but never opens it.
- */
 export function needsReview(lines: ReviewLine[], preview: Preview | null) {
   const runs = preview ? preview.runs.queued + preview.runs.running : 0
   const delegations = preview?.delegations.some(item => item.suspended && !item.alreadySuspended) ?? false
@@ -713,12 +635,9 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean, age
 }
 
 /** "3 projects · 2 nodes · 1Password" for the agents list. */
-export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 'connections'> & { nodes?: ExecutionNode[] }, older = false) {
+export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 'connections'> & { nodes?: ExecutionNode[] }) {
   const access = agent.access ?? {} as AgentAccess
-  // An older installation keeps plugin grants on its instances (unknown to members, who get none).
-  const plugins = older
-    ? context.connections.filter(connection => connection.agentIds?.includes(agent.id)).map(connection => connection.id)
-    : agent.plugins ?? []
+  const plugins = agent.plugins ?? []
   const count = (value: string[] | null | undefined, noun: string, all: string) => value === null || value === undefined
     ? all
     : `${value.length || 'No'} ${noun}${value.length === 1 ? '' : 's'}`
@@ -744,10 +663,12 @@ export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 
   if (unnamed)
     parts.push(`${unnamed} ${packages.size ? 'other ' : ''}plugin${unnamed === 1 ? '' : 's'}`)
   // Only an effective reservation, which the node list says; without it, none is claimed.
-  if (!older && agent.exclusiveNodes?.length && context.nodes && effectiveExclusive({ access, exclusiveNodes: agent.exclusiveNodes }, context.nodes).length)
+  if (agent.exclusiveNodes?.length && context.nodes && effectiveExclusive({ access, exclusiveNodes: agent.exclusiveNodes }, context.nodes).length)
     parts.push('Exclusive reservation')
   if (access.installation)
     parts.push('Installation management')
+  if (access.delegation)
+    parts.push('Task delegation')
   return parts.join(' · ')
 }
 
@@ -761,7 +682,7 @@ export function errorSection(message: string): SectionId | undefined {
     ['mcps', /mcp|tool/],
     ['skills', /skill/],
     ['projects', /project/],
-    ['model', /model|provider|reasoning|codex|claude|opencode/],
+    ['model', /model|provider|reasoning|speed|codex|claude|opencode/],
     ['advanced', /time limit|timeout/],
     ['identity', /name|description|instruction/],
   ]

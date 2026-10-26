@@ -129,7 +129,6 @@ impl Drop for Volume {
 
 pub fn exists(directory: &Path) -> bool {
     directory.join("lazy/journal-v2.sqlite").exists()
-        || directory.join("lazy/journal.sqlite").exists()
 }
 
 pub fn live(directory: &Path) -> Option<Arc<Volume>> {
@@ -576,9 +575,6 @@ impl Volume {
         let blocked = reason.is_some();
         let pending = self.transition.lock().map_err(Error::internal)?.is_some();
         if blocked != self.paused() || pending {
-            if self.paused() || pending {
-                suspension::adopt_storage_state(state, attempt, self.paused(), pending).await?;
-            }
             let transition_started = std::time::Instant::now();
             tracing::info!(target: "cairn_performance", operation = "storage_backpressure", id = attempt, phase = "requested", paused = blocked, reason = reason.unwrap_or("ready"));
             let result = suspension::set_reason(state, attempt, &Reason::Storage, blocked).await;
@@ -886,7 +882,10 @@ pub async fn materialize(directory: &Path, stop: &CancellationToken) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{BlockSource, environment, remote::RemoteSource};
+    use crate::{
+        microvm::suspension,
+        storage::{BlockSource, environment, remote::RemoteSource},
+    };
     use serde_json::json;
 
     fn prepared_manifest() -> Value {
@@ -1119,7 +1118,11 @@ mod tests {
         assert!(volume.inspect().await.unwrap()["grantId"].is_null());
         assert!(volume.source.grant_id().is_err());
         assert_eq!(
-            volume.source.fetch(&"a".repeat(64)).unwrap_err().kind(),
+            volume
+                .source
+                .fetch(&format!("b3-{}", "a".repeat(64)))
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::PermissionDenied
         );
         let wrong = environment::ownership(state.path(), &crate::config::id(), "busy")
@@ -1163,7 +1166,7 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let context = prepared_context();
         let mut remote = prepared_manifest();
-        remote["blocks"][0]["hash"] = "a".repeat(64).into();
+        remote["blocks"][0]["hash"] = format!("b3-{}", "a".repeat(64)).into();
         let physical = state.path().join("environments").join(crate::config::id());
         assert!(
             create_prepared(&physical.join("lazy"), &remote, &context)
@@ -1322,7 +1325,15 @@ mod tests {
         let vm = uuid::Uuid::new_v4().to_string();
         let jail = root.join("jails/firecracker").join(&vm).join("root");
         std::fs::create_dir_all(&jail).unwrap();
-        std::fs::write(root.join("attempt.vm.json"), json!({"vmId":vm}).to_string()).unwrap();
+        suspension::prepare_attempt(root, &attempt, &vm)
+            .await
+            .unwrap();
+        std::fs::write(
+            root.join("attempt.vm.json"),
+            json!({"vmId":vm,"runId":"run"}).to_string(),
+        )
+        .unwrap();
+        suspension::bind_attempt(root, &attempt, &vm).await.unwrap();
         (
             volume,
             attempt,
@@ -1473,29 +1484,7 @@ mod tests {
     #[tokio::test]
     async fn cache_admission_contention_does_not_interrupt_the_vm() {
         let root = tempfile::tempdir().unwrap();
-        let directory = root.path().join("disks/conversation");
-        let context = json!({
-            "master": "http://127.0.0.1:1/", "grant": "fixture",
-            "policy": { "reserveMiB": 64, "reservePercent": 1 }
-        });
-        drop(
-            create(
-                &directory.join("lazy"),
-                &json!({
-                    "version": 1, "size": 4096, "blockSize": 4194304,
-                    "blocks": [{"offset": 0, "size": 4096, "hash": null}]
-                }),
-                &context,
-            )
-            .await
-            .unwrap(),
-        );
-        let volume = load(&directory).await.unwrap();
-        std::fs::write(
-            root.path().join("attempt.vm.json"),
-            json!({"vmId":uuid::Uuid::new_v4().to_string()}).to_string(),
-        )
-        .unwrap();
+        let (volume, _, _api) = controller_fixture(root.path()).await;
         let (ready, acquired) = std::sync::mpsc::channel();
         let admission = std::thread::spawn(move || {
             let _guard = super::super::cache::admission().unwrap();
@@ -1572,7 +1561,7 @@ mod tests {
                 "version": 1,
                 "size": 4096,
                 "blockSize": 4194304,
-                "blocks": [{"offset": 0,"size": 4096,"hash": "a".repeat(64)}]
+                "blocks": [{"offset": 0,"size": 4096,"hash": format!("b3-{}", "a".repeat(64))}]
             }),
             source,
         )

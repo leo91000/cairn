@@ -50,16 +50,7 @@ internal fun JsonElement?.plain(): String = (this as? JsonPrimitive)?.contentOrN
 
 internal fun RunEvent.activityData(): JsonObject? =
     // Stderr can itself look like a protocol event; it is always process output.
-    if (type == "diagnostic") null
-    else
-        payload?.let(::JsonObject)
-            ?: runCatching {
-                if (text.firstOrNull { !it.isWhitespace() } != '{') return@runCatching null
-                (wireJson.parseToJsonElement(text) as? JsonObject)?.takeIf {
-                    type == "chat.wait_ready" || it.string("type") == type || it.containsKey("item")
-                }
-            }
-                .getOrNull()
+    if (type == "diagnostic") null else payload?.let(::JsonObject)
 
 internal fun readableField(value: String): String =
     value
@@ -241,17 +232,9 @@ internal fun expectedOutcome(view: CommandView, code: Int?): String? {
     }
 }
 
-// CSI sequences (colors, cursor moves), OSC sequences (titles, links) and two-byte escapes.
-private val terminalEscape =
-    Regex("\u001B(?:\\[[0-?]*[ -/]*[@-~]|\\][^\u0007\u001B]*(?:\u0007|\u001B\\\\)?|[@-Z\\\\-_])")
-
-/** Agent stderr recorded by older runners keeps its terminal styling. */
-internal fun withoutTerminalStyling(text: String) = text.replace(terminalEscape, "")
-
 internal fun presentActivity(event: RunEvent): ActivityPresentation =
     if (event.type == "diagnostic")
-        presentEvent(event.copy(text = withoutTerminalStyling(event.text)))
-            .copy(title = "Diagnostic de l’agent", verbatim = true)
+        presentEvent(event).copy(title = "Diagnostic de l’agent", verbatim = true)
     else presentEvent(event)
 
 private fun presentEvent(event: RunEvent): ActivityPresentation {
@@ -299,13 +282,6 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                 command = command.source,
                 paths = command.paths,
                 output = item.string("aggregated_output").ifBlank { item.string("output") },
-            )
-        "saved_output" ->
-            base.copy(
-                kind = ActivityKind.OUTPUT,
-                title = "Résultat enregistré",
-                subtitle = "Étape issue de l’historique",
-                output = item.string("text"),
             )
         "file_change" ->
             base.copy(
@@ -386,9 +362,15 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                         else "En attente de tâches en arrière-plan"
                     "turn.failed",
                     "error" -> "L’agent a rencontré une erreur"
+                    "engine.retry" -> engineRetryTitle(data)
+                    "provider.limit" -> usageLimitTitle(data)
+                    "engine.notice" -> engineNoticeTitle(data)
                     "status" ->
                         when {
                             account != null -> "Compte ${account.first} sélectionné"
+                            speedFallback(data) -> "Ce tour passe en vitesse Standard"
+                            speedUnconfirmed(data) -> "Vitesse non confirmée pour ce tour"
+                            speedConfirmed(data) -> "Vitesse choisie demandée pour ce tour"
                             event.text.lowercase() in
                                 listOf(
                                     "succeeded",
@@ -417,6 +399,14 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
             val usage = data?.get("usage").asObject()
             val subtitle =
                 if (account != null) account.second
+                else if (event.type == "status" && speedFallback(data))
+                    "Codex ne liste pas la vitesse choisie pour ce modèle ici : Cairn demande Standard"
+                else if (event.type == "status" && speedConfirmed(data))
+                    "Codex la liste pour ce modèle ici ; l’offre du compte décide si elle s’applique"
+                else if (event.type == "status" && speedUnconfirmed(data))
+                    "Elle n’a pas pu être confirmée pour ce compte et ce modèle ; ce tour peut passer en Standard"
+                else if (event.type == "engine.retry") engineRetryDetail(data)
+                else if (event.type == "provider.limit") usageLimitDetail(data)
                 else if (backgroundTasks.isNotEmpty()) backgroundTasks.joinToString(" · ")
                 else if (usage != null)
                     listOf("input_tokens" to "entrée", "output_tokens" to "sortie")
@@ -432,6 +422,9 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                     else ActivityKind.NOTICE,
                 title = title,
                 subtitle = subtitle,
+                state =
+                    if (data?.get(RECOVERED.first) == JsonPrimitive(true)) RECOVERED_STATE
+                    else base.state,
                 output =
                     if (
                         event.type in
@@ -559,3 +552,17 @@ private fun accountUsed(text: String): Pair<String, String>? =
         ->
         agent to name.trim()
     }
+
+/** A turn whose selected speed Codex does not offer for its model runs at Standard. */
+internal fun speedFallback(data: JsonObject?): Boolean =
+    data?.get("speed").asObject().string("applied") == STANDARD_SPEED
+
+/**
+ * Codex lists the selected speed for the turn's model, possibly after an earlier attempt did not.
+ */
+internal fun speedConfirmed(data: JsonObject?): Boolean =
+    data?.get("speed").asObject()?.get("confirmed") == JsonPrimitive(true)
+
+/** A turn asking for a speed Codex could not confirm for its model may run at Standard. */
+internal fun speedUnconfirmed(data: JsonObject?): Boolean =
+    data?.get("speed").asObject()?.get("unconfirmed") == JsonPrimitive(true)

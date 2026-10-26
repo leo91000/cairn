@@ -1,21 +1,15 @@
 //! Live grants an agent holds on resources: exclusive reservations of nodes and
 //! plugin instances such as 1Password service accounts.
 //!
-//! The owner edits them on the agent (`exclusiveNodes`, `plugins`). Nodes and plugin
-//! instances keep a copy (`exclusiveAgents`, `agentIds`) written in the same
-//! transaction: enforcement reads it, and so do releases that predate agent-side
-//! grants. Those releases only edit the copy, so at startup any difference means the
-//! copy is newer and the agent side is rebuilt from it.
+//! All current permissions live in SQL. The unconverted node/plugin wire views
+//! project their agent lists from these relations; they never persist a copy.
 //!
-//! These grants are live, not part of a run's snapshot. They sit beside `access`
-//! rather than in it: [`crate::service::policy`] (and the previous release's, which
-//! merges every `access` key) never sees them, so changing them neither blocks queued
-//! work nor changes the access a plugin delegation approved, before or after a
-//! rollback. Granting a plugin instance still suspends a delegation open to everyone,
-//! which must never reach secrets.
+//! These grants are live, outside a run's access snapshot. Changing them does not
+//! broaden its frozen policy. Delegation reapproval continues to compare the
+//! approved access policy, independently of these live grants (ADR-0068).
 
 use crate::{
-    error::{Error, Result},
+    error::{Error, Result, required},
     plugins::connections::KIND as PLUGIN_INSTANCES,
     store::Db,
     validation::text,
@@ -24,9 +18,6 @@ use serde_json::{Value, json};
 
 pub const EXCLUSIVE_NODES: &str = "exclusiveNodes";
 pub const PLUGINS: &str = "plugins";
-
-/// The most grants of each kind one agent may hold.
-const MAX_GRANTS: usize = 100;
 
 fn ids(value: &Value) -> Vec<String> {
     let mut ids = Vec::new();
@@ -53,59 +44,64 @@ pub fn plugins(agent: &Value) -> Vec<String> {
     ids(&agent[PLUGINS])
 }
 
-/// Stores both grant lists without duplicates. Exclusive reservations need permission
-/// to run on the node and a Firecracker agent, so losing either also removes them.
-pub(crate) fn normalize(agent: &mut Value) {
-    let access = crate::service::policy(agent);
-    let native = crate::native::policy::native(agent);
-    let exclusive = exclusive_nodes(agent)
-        .into_iter()
-        .filter(|node| !native && crate::service::allowed(&access["nodes"], node))
-        .collect::<Vec<_>>();
-    agent[EXCLUSIVE_NODES] = json!(exclusive);
-    agent[PLUGINS] = json!(plugins(agent));
-}
-
-/// Exclusive reservations suspend Firecracker VMs, so only a Firecracker agent can
-/// reserve a Firecracker node.
-fn reservable(agent: &Value, node: &Value) -> bool {
-    !crate::native::policy::native(agent) && !crate::native::policy::node_native(node)
-}
-
-/// Checks the grants an owner selected: existing, not revoked, and only on plugin
-/// instances that give agents access. Instances the agent already holds stay accepted
-/// while their package awaits review, so unrelated edits still save.
-pub(crate) fn validate(db: &Db<'_>, agent: &Value, accepts_agents: &[String]) -> Result<()> {
-    let held = db
-        .get("agents", text(agent, "id"))?
-        .map(|saved| plugins(&saved))
+/// Validate targets in the publication transaction, including references whose
+/// domain still lives in records. Projects additionally have an SQL foreign key.
+pub(crate) fn validate(
+    db: &Db<'_>,
+    agent: &cairn_contracts::Agent,
+    accepts_agents: &[String],
+) -> Result<()> {
+    let current = db.agent(&agent.id.to_string())?;
+    let held = current
+        .as_ref()
+        .map(|saved| saved.settings.plugins.as_slice())
         .unwrap_or_default();
-    let nodes = exclusive_nodes(agent);
-    let instances = plugins(agent);
-    if nodes.len() > MAX_GRANTS || instances.len() > MAX_GRANTS {
-        return Err(Error::bad(
-            "Select at most 100 nodes and 100 plugin instances.",
-        ));
+    let settings = &agent.settings;
+    for project in settings.access.projects.as_ref().into_iter().flatten() {
+        required(db.project(project)?, "Project no longer exists")?;
     }
-    for node in &nodes {
+    for connection in settings
+        .access
+        .mcps
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .chain(settings.access.mcp_tools.keys())
+    {
+        required(
+            db.get("mcps", connection)?,
+            "MCP connection no longer exists",
+        )?;
+    }
+    for connection in settings.access.mcp_tools.keys() {
+        if settings
+            .access
+            .mcps
+            .as_ref()
+            .is_some_and(|connections| !connections.contains(connection))
+        {
+            return Err(Error::bad(
+                "Tool permissions require access to the MCP connection.",
+            ));
+        }
+    }
+    for node in &settings.exclusive_nodes {
         let record = db.get("nodes", node)?.ok_or_else(|| {
             Error::bad("A node selected for exclusive reservations no longer exists.")
         })?;
         if record["revoked"] == true {
             return Err(Error::bad("A revoked node cannot be reserved."));
         }
-        if !reservable(agent, &record) {
+        if settings.access.backend == "native" || crate::native::policy::node_native(&record) {
             return Err(Error::bad(
                 "Exclusive reservations need a Firecracker VM node used by a Firecracker agent.",
             ));
         }
     }
-    for instance in &instances {
+    for instance in &settings.plugins {
         db.get(PLUGIN_INSTANCES, instance)?
             .ok_or_else(|| Error::bad("A selected plugin instance no longer exists."))?;
-        let accepted =
-            accepts_agents.iter().any(|id| id == instance) || held.iter().any(|id| id == instance);
-        if !accepted {
+        if !accepts_agents.contains(instance) && !held.contains(instance) {
             return Err(Error::bad(
                 "A selected plugin instance does not give agents access.",
             ));
@@ -114,220 +110,487 @@ pub(crate) fn validate(db: &Db<'_>, agent: &Value, accepts_agents: &[String]) ->
     Ok(())
 }
 
-/// Copies the agent's grants to every node and plugin instance, adding or removing
-/// the agent so the resources list exactly the grants saved on the agent.
-pub(crate) fn mirror(db: &Db<'_>, agent: &Value) -> Result<()> {
-    let id = text(agent, "id");
-    let nodes = exclusive_nodes(agent);
-    let instances = plugins(agent);
-
-    for mut node in db.list("nodes")? {
-        let granted = nodes.iter().any(|node_id| node["id"] == *node_id);
-        if set_member(&mut node["exclusiveAgents"], id, granted) {
-            db.put("nodes", &node)?;
-        }
-    }
-
-    for mut instance in db.list(PLUGIN_INSTANCES)? {
-        let granted = instances
-            .iter()
-            .any(|instance_id| instance["id"] == *instance_id);
-        if set_member(&mut instance["agentIds"], id, granted) {
-            db.put(PLUGIN_INSTANCES, &instance)?;
-        }
-    }
-    Ok(())
-}
-
-/// Adds or removes `id` from a JSON list. Returns whether the list changed.
-fn set_member(list: &mut Value, id: &str, present: bool) -> bool {
-    if !list.is_array() {
-        if !present {
-            return false;
-        }
-        *list = json!([]);
-    }
-    let Some(items) = list.as_array_mut() else {
-        return false;
-    };
-    let listed = items.iter().any(|item| item == id);
-    if listed == present {
-        return false;
-    }
-    if present {
-        items.push(id.into());
-    } else {
-        items.retain(|item| item != id);
-    }
-    true
-}
-
-/// Sets which agents hold a grant on one resource, updating those agents.
-/// Used when a client still edits grants from the resource side.
-fn grant_resource(db: &Db<'_>, key: &str, resource: &str, agents: &[String]) -> Result<()> {
-    for mut agent in db.list("agents")? {
-        let granted = agents.iter().any(|id| agent["id"] == *id);
-        if set_member(&mut agent[key], resource, granted) {
-            crate::service::touch(&mut agent);
-            db.put("agents", &agent)?;
-        }
-    }
-    Ok(())
-}
-
-/// Records the agents allowed to reserve a node, on the agents and on the node. Only
-/// agents allowed to run on it can reserve it.
-pub(crate) fn set_node_agents(db: &Db<'_>, node: &mut Value, agents: &[String]) -> Result<()> {
-    let node_id = text(node, "id").to_owned();
-    let mut runnable = Vec::new();
-    for agent in agents {
-        let may_run = db.get("agents", agent)?.is_some_and(|saved| {
-            crate::service::allowed(&crate::service::policy(&saved)["nodes"], &node_id)
-                && reservable(&saved, node)
-        });
-        if may_run {
-            runnable.push(agent.clone());
-        }
-    }
-    grant_resource(db, EXCLUSIVE_NODES, &node_id, &runnable)?;
-    node["exclusiveAgents"] = json!(runnable);
-    Ok(())
-}
-
-/// Records the agents allowed to use a plugin instance on those agents. The
-/// instance itself stores the same list as `agentIds`.
+/// Update the grants on typed profiles; resource-side projections are read-only.
 pub(crate) fn set_instance_agents(db: &Db<'_>, instance: &str, agents: &[String]) -> Result<()> {
-    grant_resource(db, PLUGINS, instance, agents)
-}
-
-/// Removes one agent's exclusive reservation of a node, on the agent and the node.
-pub(crate) fn release_node(db: &Db<'_>, agent: &mut Value, node: &str) -> Result<()> {
-    if !set_member(&mut agent[EXCLUSIVE_NODES], node, false) {
-        return Ok(());
-    }
-    if let Some(mut record) = db.get("nodes", node)?
-        && set_member(&mut record["exclusiveAgents"], text(agent, "id"), false)
-    {
-        db.put("nodes", &record)?;
+    for mut agent in db.agents()? {
+        let granted = agents.iter().any(|id| *id == agent.id.to_string());
+        let present = agent.settings.plugins.iter().any(|id| id == instance);
+        if granted == present {
+            continue;
+        }
+        if granted {
+            agent.settings.plugins.push(instance.to_owned());
+        } else {
+            agent.settings.plugins.retain(|id| id != instance);
+        }
+        agent.revision = crate::config::id();
+        db.save_agent(&agent)?;
     }
     Ok(())
 }
 
-/// Removes a deleted agent from every resource copy.
-pub(crate) fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
-    mirror(db, &json!({ "id": id }))
-}
-
-/// Removes a revoked node or a deleted plugin instance from every agent.
+/// A deleted instance or revoked node cannot remain in a current profile.
 pub(crate) fn forget_resource(db: &Db<'_>, key: &str, resource: &str) -> Result<()> {
-    grant_resource(db, key, resource, &[])
+    for mut agent in db.agents()? {
+        let grants = match key {
+            EXCLUSIVE_NODES => &mut agent.settings.exclusive_nodes,
+            PLUGINS => &mut agent.settings.plugins,
+            _ => return Err(Error::bad("Unknown permission relation.")),
+        };
+        let before = grants.len();
+        grants.retain(|id| id != resource);
+        if before != grants.len() {
+            agent.revision = crate::config::id();
+            db.save_agent(&agent)?;
+        }
+    }
+    Ok(())
 }
 
-/// Rebuilds the agent side from the resource copies, drops copies that name agents
-/// which no longer exist, and gives every agent a revision. Idempotent; runs at
-/// every startup after the other agent migrations.
-pub(crate) fn reconcile(db: &Db<'_>) -> Result<()> {
-    let agents = db.list("agents")?;
-    let known = |id: &Value| agents.iter().any(|agent| agent["id"] == *id);
-
-    let mut nodes = db.list("nodes")?;
-    for node in &mut nodes {
-        let Some(list) = node["exclusiveAgents"].as_array_mut() else {
+pub(crate) fn save_profile(
+    db: &Db<'_>,
+    mut agent: cairn_contracts::Agent,
+    owner_review: bool,
+    native_reviews: &[String],
+) -> Result<cairn_contracts::Agent> {
+    let current = db.agent(&agent.id.to_string())?;
+    let access = &agent.settings.access;
+    // Keep previously selected nodes only while the execution backend is unchanged.
+    let previous_nodes = current
+        .as_ref()
+        .filter(|saved| saved.settings.access.backend == access.backend)
+        .and_then(|saved| saved.settings.access.nodes.as_ref());
+    let held = |node: &String| previous_nodes.is_some_and(|nodes| nodes.contains(node));
+    for node in access.nodes.as_ref().into_iter().flatten() {
+        if node == crate::nodes::LOCAL_NODE_ID {
+            if access.backend == "native" && !held(node) {
+                return Err(Error::bad(
+                    "Native agents need explicit native nodes: the current runner only runs Firecracker VMs.",
+                ));
+            }
             continue;
-        };
-        let before = list.len();
-        list.retain(known);
-        if list.len() != before {
-            db.put("nodes", node)?;
+        }
+        let record = required(db.get("nodes", node)?, "Node not found")?;
+        if record["revoked"] == true {
+            return Err(Error::bad("A revoked node cannot be authorized."));
+        }
+        if !held(node)
+            && crate::native::policy::node_native(&record) != (access.backend == "native")
+        {
+            return Err(Error::bad(
+                "Choose nodes that use this agent's execution backend.",
+            ));
         }
     }
-
-    let mut instances = db.list(PLUGIN_INSTANCES)?;
-    for instance in &mut instances {
-        let Some(list) = instance["agentIds"].as_array_mut() else {
-            continue;
-        };
-        let before = list.len();
-        list.retain(known);
-        if list.len() != before {
-            db.put(PLUGIN_INSTANCES, instance)?;
-        }
+    if let Some(current) = &current {
+        agent.avatar = current.avatar.clone();
     }
+    // Native node admission is still owned by A10: its snapshot boundary is explicit.
+    crate::nodes::native_mode::review_agent(
+        db,
+        &serde_json::to_value(&agent)?,
+        current
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?
+            .as_ref(),
+        owner_review,
+        native_reviews,
+    )?;
+    agent.revision = crate::config::id();
+    db.save_agent(&agent)?;
+    db.audit("agent.saved", &json!({ "id": agent.id }))?;
+    Ok(agent)
+}
 
-    for mut agent in agents.clone() {
-        let id = agent["id"].clone();
-        let lists = |resources: &[Value], key: &str, skip_revoked: bool| {
-            resources
-                .iter()
-                .filter(|resource| !(skip_revoked && resource["revoked"] == true))
-                .filter(|resource| {
-                    resource[key]
-                        .as_array()
-                        .is_some_and(|list| list.contains(&id))
-                })
-                .map(|resource| resource["id"].clone())
-                .collect::<Vec<_>>()
-        };
-        let access = crate::service::policy(&agent);
-        let (exclusive, unrunnable): (Vec<_>, Vec<_>) = lists(&nodes, "exclusiveAgents", true)
-            .into_iter()
-            .partition(|node| {
-                let record = nodes.iter().find(|record| record["id"] == *node);
-                crate::service::allowed(&access["nodes"], node.as_str().unwrap_or(""))
-                    && record.is_some_and(|record| reservable(&agent, record))
-            });
-        // A previous release can remove node access without the reservation.
-        for node in &unrunnable {
-            if let Some(record) = nodes.iter_mut().find(|record| record["id"] == *node)
-                && set_member(&mut record["exclusiveAgents"], text(&agent, "id"), false)
-            {
-                db.put("nodes", record)?;
+/// Whether a current typed permission set still covers the saved run policy.
+/// Placement nodes are checked separately because existing work can be moved.
+pub(crate) fn covers(
+    current: &cairn_contracts::AccessPolicy,
+    granted: &cairn_contracts::AccessPolicy,
+) -> bool {
+    let scopes = [
+        (&current.projects, &granted.projects),
+        (&current.skills, &granted.skills),
+        (&current.mcps, &granted.mcps),
+    ]
+    .into_iter()
+    .all(|(current, granted)| selection_covers(current.as_deref(), granted.as_deref()));
+    let tools = current.mcp_tools.iter().all(|(server, selection)| {
+        selection_covers(
+            Some(selection),
+            granted.mcp_tools.get(server).map(Vec::as_slice),
+        )
+    });
+    let rank = |sandbox: &str| match sandbox {
+        "yolo" => 2,
+        "workspace-write" => 1,
+        _ => 0,
+    };
+    current.backend == granted.backend
+        && scopes
+        && tools
+        && (current.installation || !granted.installation)
+        && (current.delegation || !granted.delegation)
+        && rank(&current.sandbox) >= rank(&granted.sandbox)
+}
+
+pub(crate) fn selection_covers(current: Option<&[String]>, granted: Option<&[String]>) -> bool {
+    current.is_none_or(|current| {
+        granted.is_some_and(|granted| granted.iter().all(|item| current.contains(item)))
+    })
+}
+
+pub(crate) const SCHEMA: &str = "
+CREATE TABLE agent_permissions(
+ agent_id TEXT PRIMARY KEY NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+ backend TEXT NOT NULL CHECK(backend IN ('firecracker','native')),
+ sandbox TEXT NOT NULL CHECK(sandbox IN ('yolo','workspace-write','read-only')),
+ installation INTEGER NOT NULL CHECK(installation IN (0,1)),
+ delegation INTEGER NOT NULL CHECK(delegation IN (0,1)),
+ all_projects INTEGER NOT NULL CHECK(all_projects IN (0,1)),
+ all_skills INTEGER NOT NULL CHECK(all_skills IN (0,1)),
+ all_nodes INTEGER NOT NULL CHECK(all_nodes IN (0,1)),
+ all_mcps INTEGER NOT NULL CHECK(all_mcps IN (0,1))
+) WITHOUT ROWID;
+CREATE TABLE agent_projects(
+ agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+ project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+ position INTEGER NOT NULL CHECK(position>=0),
+ PRIMARY KEY(agent_id,project_id), UNIQUE(agent_id,position)
+) WITHOUT ROWID;
+CREATE INDEX agent_projects_resource ON agent_projects(project_id,agent_id);
+CREATE TABLE agent_skills(
+ agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+ skill TEXT NOT NULL CHECK(length(skill)<=160),
+ position INTEGER NOT NULL CHECK(position>=0),
+ PRIMARY KEY(agent_id,skill), UNIQUE(agent_id,position)
+) WITHOUT ROWID;
+CREATE TABLE agent_nodes(
+ agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+ node_id TEXT NOT NULL CHECK(length(node_id)=36),
+ position INTEGER NOT NULL CHECK(position>=0),
+ PRIMARY KEY(agent_id,node_id), UNIQUE(agent_id,position)
+) WITHOUT ROWID;
+CREATE INDEX agent_nodes_resource ON agent_nodes(node_id,agent_id);
+CREATE TABLE agent_mcps(
+ agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+ mcp_id TEXT NOT NULL CHECK(length(mcp_id)=36),
+ position INTEGER NOT NULL CHECK(position>=0),
+ PRIMARY KEY(agent_id,mcp_id), UNIQUE(agent_id,position)
+) WITHOUT ROWID;
+CREATE INDEX agent_mcps_resource ON agent_mcps(mcp_id,agent_id);
+CREATE TABLE agent_mcp_selections(
+ agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+ mcp_id TEXT NOT NULL CHECK(length(mcp_id)=36),
+ PRIMARY KEY(agent_id,mcp_id)
+) WITHOUT ROWID;
+CREATE TABLE agent_mcp_tools(
+ agent_id TEXT NOT NULL,
+ mcp_id TEXT NOT NULL,
+ tool TEXT NOT NULL CHECK(length(tool) BETWEEN 1 AND 200),
+ position INTEGER NOT NULL CHECK(position>=0),
+ PRIMARY KEY(agent_id,mcp_id,tool), UNIQUE(agent_id,mcp_id,position),
+ FOREIGN KEY(agent_id,mcp_id) REFERENCES agent_mcp_selections(agent_id,mcp_id) ON DELETE CASCADE
+) WITHOUT ROWID;
+CREATE TABLE agent_plugins(
+ agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+ instance_id TEXT NOT NULL CHECK(length(instance_id)=36),
+ position INTEGER NOT NULL CHECK(position>=0),
+ PRIMARY KEY(agent_id,instance_id), UNIQUE(agent_id,position)
+) WITHOUT ROWID;
+CREATE INDEX agent_plugins_resource ON agent_plugins(instance_id,agent_id);
+CREATE TABLE agent_exclusive_nodes(
+ agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+ node_id TEXT NOT NULL CHECK(length(node_id)=36),
+ position INTEGER NOT NULL CHECK(position>=0),
+ PRIMARY KEY(agent_id,node_id), UNIQUE(agent_id,position)
+) WITHOUT ROWID;
+CREATE INDEX agent_exclusive_nodes_resource ON agent_exclusive_nodes(node_id,agent_id);
+";
+
+pub(crate) struct Permissions {
+    pub access: cairn_contracts::AccessPolicy,
+    pub exclusive_nodes: Vec<String>,
+    pub plugins: Vec<String>,
+}
+
+fn permission_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, Permissions)> {
+    Ok((
+        row.get(0)?,
+        Permissions {
+            access: cairn_contracts::AccessPolicy {
+                backend: row.get(1)?,
+                sandbox: row.get(2)?,
+                installation: row.get(3)?,
+                delegation: row.get(4)?,
+                projects: if row.get::<_, bool>(5)? {
+                    None
+                } else {
+                    Some(Vec::new())
+                },
+                skills: if row.get::<_, bool>(6)? {
+                    None
+                } else {
+                    Some(Vec::new())
+                },
+                nodes: if row.get::<_, bool>(7)? {
+                    None
+                } else {
+                    Some(Vec::new())
+                },
+                mcps: if row.get::<_, bool>(8)? {
+                    None
+                } else {
+                    Some(Vec::new())
+                },
+                mcp_tools: std::collections::BTreeMap::new(),
+            },
+            exclusive_nodes: Vec::new(),
+            plugins: Vec::new(),
+        },
+    ))
+}
+
+const PERMISSION_COLUMNS: &str =
+    "agent_id,backend,sandbox,installation,delegation,all_projects,all_skills,all_nodes,all_mcps";
+
+impl Db<'_> {
+    pub(crate) fn agent_permissions(&self, id: &str) -> rusqlite::Result<Permissions> {
+        let (_, mut permissions) = self
+            .0
+            .prepare_cached(&format!(
+                "SELECT {PERMISSION_COLUMNS} FROM agent_permissions WHERE agent_id=?"
+            ))?
+            .query_row([id], permission_row)?;
+        let access = &mut permissions.access;
+        for (sql, selection) in [
+            (
+                "SELECT project_id FROM agent_projects WHERE agent_id=? ORDER BY position",
+                &mut access.projects,
+            ),
+            (
+                "SELECT skill FROM agent_skills WHERE agent_id=? ORDER BY position",
+                &mut access.skills,
+            ),
+            (
+                "SELECT node_id FROM agent_nodes WHERE agent_id=? ORDER BY position",
+                &mut access.nodes,
+            ),
+            (
+                "SELECT mcp_id FROM agent_mcps WHERE agent_id=? ORDER BY position",
+                &mut access.mcps,
+            ),
+        ] {
+            if let Some(selection) = selection {
+                *selection = self
+                    .0
+                    .prepare_cached(sql)?
+                    .query_map([id], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
             }
         }
-        let instance_grants = lists(&instances, "agentIds", false);
-        let same = |key: &str, expected: &[Value]| {
-            let saved = ids(&agent[key]);
-            agent[key].is_array()
-                && saved.len() == expected.len()
-                && expected
-                    .iter()
-                    .all(|id| saved.iter().any(|known| id == known))
-        };
-        let changed = !(same(EXCLUSIVE_NODES, &exclusive) && same(PLUGINS, &instance_grants));
-        // Drafts of this change stored the grants inside `access`, where the previous
-        // release would merge them into the delegation policy.
-        let nested = agent["access"].as_object_mut().is_some_and(|access| {
-            let exclusive = access.remove(EXCLUSIVE_NODES).is_some();
-            let plugins = access.remove(PLUGINS).is_some();
-            exclusive || plugins
-        });
-        // Agents saved before revisions existed get one, so editors detect later changes.
-        let unversioned = !agent["revision"]
-            .as_str()
-            .is_some_and(|revision| !revision.is_empty());
-        if changed || nested || unversioned {
-            agent[EXCLUSIVE_NODES] = exclusive.into();
-            agent[PLUGINS] = instance_grants.into();
-            crate::service::touch(&mut agent);
-            db.put("agents", &agent)?;
+        let connections = self
+            .0
+            .prepare_cached(
+                "SELECT mcp_id FROM agent_mcp_selections WHERE agent_id=? ORDER BY mcp_id",
+            )?
+            .query_map([id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for connection in connections {
+            let tools = self.0.prepare_cached("SELECT tool FROM agent_mcp_tools WHERE agent_id=? AND mcp_id=? ORDER BY position")?.query_map(rusqlite::params![id, connection], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+            access.mcp_tools.insert(connection, tools);
         }
+        let exclusive = self
+            .0
+            .prepare_cached(
+                "SELECT node_id FROM agent_exclusive_nodes WHERE agent_id=? ORDER BY position",
+            )?
+            .query_map([id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let plugins = self
+            .0
+            .prepare_cached(
+                "SELECT instance_id FROM agent_plugins WHERE agent_id=? ORDER BY position",
+            )?
+            .query_map([id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        permissions.exclusive_nodes = exclusive;
+        permissions.plugins = plugins;
+        Ok(permissions)
     }
-    Ok(())
-}
 
-#[cfg(test)]
-mod tests {
-    use super::set_member;
-    use serde_json::json;
+    /// The catalogue reads each relation once under its caller's SQLite snapshot,
+    /// rather than issuing one set of queries for every agent in the list.
+    pub(crate) fn agent_permission_sets(
+        &self,
+    ) -> rusqlite::Result<std::collections::BTreeMap<String, Permissions>> {
+        type Selection = fn(&mut Permissions) -> Option<&mut Vec<String>>;
 
-    #[test]
-    fn membership_changes_only_when_needed() {
-        let mut list = json!(null);
-        assert!(!set_member(&mut list, "a", false));
-        assert!(set_member(&mut list, "a", true));
-        assert!(!set_member(&mut list, "a", true));
-        assert_eq!(list, json!(["a"]));
-        assert!(set_member(&mut list, "a", false));
-        assert_eq!(list, json!([]));
+        let mut permissions = self
+            .0
+            .prepare_cached(&format!(
+                "SELECT {PERMISSION_COLUMNS} FROM agent_permissions"
+            ))?
+            .query_map([], permission_row)?
+            .collect::<rusqlite::Result<std::collections::BTreeMap<_, _>>>()?;
+        let selections: [(&str, Selection); 6] = [
+            (
+                "SELECT agent_id,project_id FROM agent_projects ORDER BY agent_id,position",
+                |p| p.access.projects.as_mut(),
+            ),
+            (
+                "SELECT agent_id,skill FROM agent_skills ORDER BY agent_id,position",
+                |p| p.access.skills.as_mut(),
+            ),
+            (
+                "SELECT agent_id,node_id FROM agent_nodes ORDER BY agent_id,position",
+                |p| p.access.nodes.as_mut(),
+            ),
+            (
+                "SELECT agent_id,mcp_id FROM agent_mcps ORDER BY agent_id,position",
+                |p| p.access.mcps.as_mut(),
+            ),
+            (
+                "SELECT agent_id,instance_id FROM agent_plugins ORDER BY agent_id,position",
+                |p| Some(&mut p.plugins),
+            ),
+            (
+                "SELECT agent_id,node_id FROM agent_exclusive_nodes ORDER BY agent_id,position",
+                |p| Some(&mut p.exclusive_nodes),
+            ),
+        ];
+        for (sql, selection) in selections {
+            let mut statement = self.0.prepare_cached(sql)?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (agent, resource) = row?;
+                let profile = permissions
+                    .get_mut(&agent)
+                    .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                if let Some(values) = selection(profile) {
+                    values.push(resource);
+                }
+            }
+        }
+        let mut statement = self.0.prepare_cached(
+            "SELECT agent_id,mcp_id FROM agent_mcp_selections ORDER BY agent_id,mcp_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (agent, connection) = row?;
+            permissions
+                .get_mut(&agent)
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?
+                .access
+                .mcp_tools
+                .insert(connection, Vec::new());
+        }
+        let mut statement = self.0.prepare_cached(
+            "SELECT agent_id,mcp_id,tool FROM agent_mcp_tools ORDER BY agent_id,mcp_id,position",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (agent, connection, tool) = row?;
+            permissions
+                .get_mut(&agent)
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?
+                .access
+                .mcp_tools
+                .get_mut(&connection)
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?
+                .push(tool);
+        }
+        Ok(permissions)
+    }
+
+    pub(crate) fn save_permissions(&self, agent: &cairn_contracts::Agent) -> Result<()> {
+        let id = agent.id.to_string();
+        let access = &agent.settings.access;
+        self.0.prepare_cached("INSERT INTO agent_permissions VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET backend=excluded.backend,sandbox=excluded.sandbox,installation=excluded.installation,delegation=excluded.delegation,all_projects=excluded.all_projects,all_skills=excluded.all_skills,all_nodes=excluded.all_nodes,all_mcps=excluded.all_mcps")?.execute(rusqlite::params![id,access.backend,access.sandbox,access.installation,access.delegation,access.projects.is_none(),access.skills.is_none(),access.nodes.is_none(),access.mcps.is_none()])?;
+        for (delete, insert, selection) in [
+            (
+                "DELETE FROM agent_projects WHERE agent_id=?",
+                "INSERT INTO agent_projects VALUES(?,?,?)",
+                access.projects.as_deref().unwrap_or_default(),
+            ),
+            (
+                "DELETE FROM agent_skills WHERE agent_id=?",
+                "INSERT INTO agent_skills VALUES(?,?,?)",
+                access.skills.as_deref().unwrap_or_default(),
+            ),
+            (
+                "DELETE FROM agent_nodes WHERE agent_id=?",
+                "INSERT INTO agent_nodes VALUES(?,?,?)",
+                access.nodes.as_deref().unwrap_or_default(),
+            ),
+            (
+                "DELETE FROM agent_mcps WHERE agent_id=?",
+                "INSERT INTO agent_mcps VALUES(?,?,?)",
+                access.mcps.as_deref().unwrap_or_default(),
+            ),
+            (
+                "DELETE FROM agent_plugins WHERE agent_id=?",
+                "INSERT INTO agent_plugins VALUES(?,?,?)",
+                &agent.settings.plugins,
+            ),
+            (
+                "DELETE FROM agent_exclusive_nodes WHERE agent_id=?",
+                "INSERT INTO agent_exclusive_nodes VALUES(?,?,?)",
+                &agent.settings.exclusive_nodes,
+            ),
+        ] {
+            self.0.prepare_cached(delete)?.execute([&id])?;
+            let mut statement = self.0.prepare_cached(insert)?;
+            for (position, value) in selection.iter().enumerate() {
+                statement.execute(rusqlite::params![id, value, position as i64])?;
+            }
+        }
+        self.0
+            .prepare_cached("DELETE FROM agent_mcp_selections WHERE agent_id=?")?
+            .execute([&id])?;
+        for (connection, tools) in &access.mcp_tools {
+            self.0
+                .prepare_cached("INSERT INTO agent_mcp_selections VALUES(?,?)")?
+                .execute(rusqlite::params![id, connection])?;
+            for (position, tool) in tools.iter().enumerate() {
+                self.0
+                    .prepare_cached("INSERT INTO agent_mcp_tools VALUES(?,?,?,?)")?
+                    .execute(rusqlite::params![id, connection, tool, position as i64])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Projection for domains awaiting A9/A12. Persisted resource JSON is never an authority.
+    pub(crate) fn resource_grants(&self, kind: &str, value: &mut Value) -> Result<()> {
+        let (sql, field) = match kind {
+            "nodes" => (
+                "SELECT agent_id FROM agent_exclusive_nodes WHERE node_id=? ORDER BY agent_id",
+                "exclusiveAgents",
+            ),
+            PLUGIN_INSTANCES => (
+                "SELECT agent_id FROM agent_plugins WHERE instance_id=? ORDER BY agent_id",
+                "agentIds",
+            ),
+            _ => return Ok(()),
+        };
+        let agents = self
+            .0
+            .prepare_cached(sql)?
+            .query_map([text(value, "id")], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        value[field] = json!(agents);
+        Ok(())
     }
 }

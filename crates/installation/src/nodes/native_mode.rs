@@ -48,12 +48,8 @@ pub fn applied(node: &Value) -> bool {
     if !valid_generation {
         return false;
     }
-    if node["nativeModeRequest"].is_object() && node["capabilities"]["nativeModeProtocol"] != 1 {
+    if node["capabilities"]["nativeModeProtocol"] != 1 {
         return false;
-    }
-    // An old controller remains usable only with the unchanged protected default.
-    if node["nativeModeObserved"].is_null() && node["nativeModeRequest"].is_null() {
-        return true;
     }
     node["nativeModeObserved"]["status"] == "applied"
         && node["nativeModeObserved"]["mode"] == request["mode"]
@@ -177,7 +173,7 @@ pub(crate) fn forget_agent(db: &Db<'_>, agent_id: &str) -> Result<()> {
 fn snapshot(db: &Db<'_>, node: &Value, mode: Mode) -> Result<Value> {
     let node_id = text(node, "id");
     let agents = db
-        .list("agents")?
+        .agent_snapshots()?
         .into_iter()
         .filter(|agent| crate::native::policy::native(agent) && super::agent_allows(agent, node_id))
         .map(|agent| json!({ "id": agent["id"], "name": agent["name"], "revision": agent["revision"], "access": policy(&agent) }))
@@ -236,10 +232,10 @@ fn snapshot(db: &Db<'_>, node: &Value, mode: Mode) -> Result<Value> {
         }
     }
     let tasks = db
-        .list("tasks")?
+        .missions()?
         .into_iter()
-        .filter(|task| agents.iter().any(|agent| agent["id"] == task["agentId"]))
-        .map(|task| json!({ "id": task["id"], "name": task["name"], "agentId": task["agentId"] }))
+        .filter(|task| agents.iter().any(|agent| agent["id"] == task.settings.agent_id.to_string()))
+        .map(|task| json!({ "id": task.id, "name": task.settings.name, "agentId": task.settings.agent_id }))
         .collect::<Vec<_>>();
     Ok(json!({
         "nodeId": node_id, "mode": mode, "request": requested(node),
@@ -324,6 +320,19 @@ pub async fn change(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_fixture::StoreAgentFixture;
+
+    #[test]
+    fn protected_mode_requires_the_current_controller_acknowledgement() {
+        let mut node = json!({ "capabilities": { "nativeModeProtocol": 1 } });
+        assert!(!applied(&node));
+        node["nativeModeObserved"] = json!({
+            "mode": "protected", "generation": null, "status": "applied",
+        });
+        assert!(applied(&node));
+        node["capabilities"]["nativeModeProtocol"] = Value::Null;
+        assert!(!applied(&node));
+    }
 
     #[tokio::test]
     async fn plan_acknowledgement_preserves_a_newer_transition_interruption() {
@@ -348,7 +357,7 @@ mod tests {
             "nativePrincipals": [person], "nativeAuthorityNodes": [node_id], "nativeProvenanceUnknown": false,
         });
         store.put("nodes", node.clone()).await.unwrap();
-        store.put("agents", agent).await.unwrap();
+        store.put_agent_fixture(agent).await.unwrap();
         store.put("node-attempts", json!({ "id": attempt_id, "runId": run_id, "nodeId": node_id, "nativeMode": mode, "released": false })).await.unwrap();
         store
             .set(
@@ -414,8 +423,7 @@ mod tests {
         run["snapshot"] = json!({ "agent": { "id": agent_id, "access": { "backend": "native", "nodes": [node_id] } } });
         run["backendMigration"] = json!({ "sourceReadReady": true, "grant": grant });
         store
-            .put(
-                "agents",
+            .put_agent_fixture(
                 json!({ "id": agent_id, "access": { "backend": "firecracker", "nodes": [] } }),
             )
             .await

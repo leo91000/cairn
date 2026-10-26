@@ -99,13 +99,7 @@ fun ExecutionNode.grantedAgents(agents: List<Agent> = emptyList()): Set<String> 
         this.agents.filter { !it.allNodes }.map { it.id }.toSet() +
             agents.filter { it.access.nodes?.contains(id) == true }.map { it.id }
 
-/**
- * Grants a node to the agents newly [chosen] (already allowed ones in [granted] are skipped) with
- * `PUT /nodes/{id}/agents` `{ agentIds, add: true }`, which never revokes anyone. Nothing is sent
- * when no agent is new. An older installation rejects the unknown `add` field (400): the request is
- * then sent once without it, with the full list, since that form replaces the node's list. Any
- * other rejection is reported.
- */
+/** Grant only newly chosen agents, preserving concurrent grants. */
 suspend fun grantNodeAgents(
     chosen: List<String>,
     granted: Set<String>,
@@ -114,28 +108,13 @@ suspend fun grantNodeAgents(
 ) {
     val added = chosen.distinct().filter { it !in granted }
     if (added.isEmpty()) return
-
-    fun body(ids: List<String>, grantOnly: Boolean) = buildJsonObject {
-        put("agentIds", buildJsonArray { ids.forEach { add(JsonPrimitive(it)) } })
-        if (grantOnly) put("add", true)
-        if (confirmNativeAdministration) put("confirmNativeAdministration", true)
-    }
-    try {
-        send(body(added, grantOnly = true))
-    } catch (e: ApiException) {
-        if (!rejectsGrantOnly(e)) throw e
-        send(body((granted + added).toList(), grantOnly = false))
-    }
-}
-
-/**
- * An installation that predates `add` refuses the unknown field while decoding the request, with
- * its generic "Invalid node request." (or a serde "unknown field" message).
- */
-private fun rejectsGrantOnly(error: ApiException): Boolean {
-    val message = error.message.orEmpty().trim()
-    return error.status == 400 &&
-        (message == "Invalid node request." || "unknown field" in message.lowercase())
+    send(
+        buildJsonObject {
+            put("agentIds", buildJsonArray { added.forEach { add(JsonPrimitive(it)) } })
+            put("add", true)
+            if (confirmNativeAdministration) put("confirmNativeAdministration", true)
+        }
+    )
 }
 
 @Serializable
@@ -207,13 +186,13 @@ data class NodeEnrollment(
     val expiresAt: Long,
     val installCommand: String? = null,
     val backend: String = "firecracker",
-    val nodeId: String? = null,
+    val nodeId: String,
 )
 
 @Serializable data class NativeCaller(val id: String, val email: String)
 
-/** Reply to a revocation; older installations omit the released placement count. */
-@Serializable data class NodeRevocation(val releasedPlacements: Int = 0)
+/** Reply to a revocation. */
+@Serializable data class NodeRevocation(val releasedPlacements: Int)
 
 @Serializable
 data class NodeConfiguration(
@@ -254,9 +233,6 @@ fun formatMiB(value: Long): String {
     return if (value % 1024 == 0L) "${value / 1024} Gio"
     else "${"%.1f".format(java.util.Locale.FRANCE, gib)} Gio"
 }
-
-fun formatResources(value: NodeResources) =
-    "${value.cpu} CPU · ${formatMiB(value.memoryMiB)} RAM · ${formatMiB(value.diskMiB)} disque"
 
 fun relativeAge(since: Long, now: Long = System.currentTimeMillis()): String {
     val seconds = ((now - since) / 1000).coerceAtLeast(0)

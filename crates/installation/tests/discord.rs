@@ -1,6 +1,8 @@
 //! The Discord package runs entirely in Luau: its Gateway session over the generic
 //! `socket` capability, its setup form, its test and its panel. Discord is simulated
 //! by local HTTP and WebSocket servers.
+use common::AgentFixture;
+
 mod common;
 
 use axum::{
@@ -38,10 +40,10 @@ async fn service() -> (TempDir, Arc<Service>, Value) {
     s.plugins
         .use_worker(PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Discord agent",
-                "access": { "projects": [], "skills": [], "mcps": [], "github": false, "installation": false },
+                "access": { "projects": [], "skills": [], "mcps": [], "installation": false },
             }),
             None,
         )
@@ -643,6 +645,80 @@ fn closes(commands: &[socket::Command]) -> Vec<u16> {
 }
 
 #[tokio::test]
+async fn unused_session_budget_connects_and_identifies() {
+    let (_root, s, agent) = service().await;
+    let saved = save(&s, &agent, json!({ "guildId": "100", "channelId": "200" }))
+        .await
+        .unwrap();
+    let connection: Connection = serde_json::from_value(saved).unwrap();
+    let (origin, server, gateway) = rest_with_gateway().await;
+
+    // A bot that has never identified has its full budget and no reset countdown.
+    gateway.remaining(1000, 0);
+    s.plugins.route_http_to(Some(origin));
+    let package = registry::active(&s, "discord").await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    let (link, mut commands) = socket::Link::channel();
+    let mut on = async |event: Value| {
+        handle(&s, &connection, &mut session, &link, &mut commands, event).await
+    };
+    on(json!({ "type": "start", "settings": connection.settings })).await;
+    let issued = on(json!({ "type": "tick", "name": "connect" })).await;
+    assert_eq!(
+        connected_to(&issued).0,
+        "wss://gateway-test.discord.gg/?v=10&encoding=json"
+    );
+    on(json!({ "type": "open" })).await;
+    let issued = on(frame(
+        &json!({ "op": 10, "d": { "heartbeat_interval": 41250 } }),
+    ))
+    .await;
+    assert_eq!(sent(&issued)[0]["op"], 2);
+    on(frame(&json!({
+        "op": 0,
+        "s": 1,
+        "t": "READY",
+        "d": {
+            "session_id": "synthetic_session",
+            "user": { "id": "400", "username": "Cairn", "bot": true },
+            "resume_gateway_url": "wss://gateway-test.discord.gg",
+        },
+    })))
+    .await;
+    let status = s
+        .store
+        .kv(&format!("plugin-status:{}", connection.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status["state"], "connected");
+
+    // Zero reset time never grants a session when the balance is exhausted.
+    gateway.remaining(0, 0);
+    let issued = on(json!({ "type": "close", "code": 1000, "reason": "" })).await;
+    assert_eq!(
+        timer(&issued, "connect"),
+        Some((Duration::from_secs(1), None))
+    );
+    assert!(
+        !issued
+            .iter()
+            .any(|command| matches!(command, socket::Command::Connect { .. }))
+    );
+    session.stop().await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn gateway_lifecycle_matches_discord_and_discord_js() {
     let (_root, s, agent) = service().await;
     let saved = save(&s, &agent, json!({ "guildId": "100", "channelId": "200" }))
@@ -847,6 +923,8 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
             } }),
         )
         .await;
+        // Queue an earlier heartbeat, as the random first heartbeat can do.
+        send(&mut socket, json!({ "op": 1 })).await;
         // A large server's GUILD_CREATE, well over what a script receives whole.
         let channels = (0..12_000)
             .map(|index| json!({ "id": format!("{}", 10_000 + index), "type": 0, "name": "x".repeat(80) }))
@@ -869,9 +947,22 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
         )
         .await;
         send(&mut socket, json!({ "op": 1 })).await;
-        let heartbeat = tokio::time::timeout(Duration::from_secs(1), receive(&mut socket))
-            .await
-            .expect("oversized thread routing must not block heartbeats on REST");
+        let heartbeat = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let heartbeat = receive(&mut socket).await;
+                let caught_up = heartbeat["d"]
+                    .as_u64()
+                    .is_some_and(|sequence| sequence >= 3);
+                if heartbeat["op"] != 1 || caught_up {
+                    break heartbeat;
+                }
+                // A periodic heartbeat can precede the requested one. Acknowledge
+                // it while waiting for the response after the large dispatch.
+                send(&mut socket, json!({ "op": 11 })).await;
+            }
+        })
+        .await
+        .expect("oversized thread routing must not block heartbeats on REST");
         assert_eq!(
             heartbeat,
             json!({ "op": 1, "d": 3 }),
@@ -1239,20 +1330,23 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     // Instructions are not part of the approved access.
     let mut described = agent.clone();
     described["instructions"] = "Be brief.".into();
-    let preview = s.agent_preview(described, &id).await.unwrap();
+    let preview = s.agent_preview_fixture(described, &id).await.unwrap();
     assert_eq!(effect(&preview)["id"], connection);
     assert_eq!(effect(&preview)["suspended"], false);
 
     // A stricter sandbox changes the access the owner approved for Discord people.
     let mut stricter = agent.clone();
     stricter["access"]["sandbox"] = "read-only".into();
-    let preview = s.agent_preview(stricter.clone(), &id).await.unwrap();
+    let preview = s
+        .agent_preview_fixture(stricter.clone(), &id)
+        .await
+        .unwrap();
     assert_eq!(effect(&preview)["suspended"], true);
     assert_eq!(effect(&preview)["blocked"], Value::Null);
     assert_eq!(effect(&preview)["alreadySuspended"], false);
 
     stricter["reapproveDelegations"] = json!([connection]);
-    let updated = s.agent(stricter, Some(&id)).await.unwrap();
+    let updated = s.agent_fixture(stricter, Some(&id)).await.unwrap();
     let stored: Connection = serde_json::from_value(
         s.store
             .get(connections::KIND, &connection)
@@ -1270,16 +1364,19 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     // The owner may approve installation access for Discord people too.
     let mut installation = updated.clone();
     installation["access"]["installation"] = true.into();
-    let preview = s.agent_preview(installation.clone(), &id).await.unwrap();
+    let preview = s
+        .agent_preview_fixture(installation.clone(), &id)
+        .await
+        .unwrap();
     assert_eq!(effect(&preview)["suspended"], true);
     assert_eq!(effect(&preview)["blocked"], Value::Null);
     installation["reapproveDelegations"] = json!([connection]);
-    let updated = s.agent(installation, Some(&id)).await.unwrap();
+    let updated = s.agent_fixture(installation, Some(&id)).await.unwrap();
 
     // Without reapproval the save succeeds and the bot waits for the owner.
     let mut wider = updated.clone();
     wider["access"]["sandbox"] = "yolo".into();
-    let widened = s.agent(wider, Some(&id)).await.unwrap();
+    let widened = s.agent_fixture(wider, Some(&id)).await.unwrap();
     let stored = s
         .store
         .get(connections::KIND, &connection)
@@ -1293,7 +1390,7 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     // A later unrelated edit reports that the bot was already suspended.
     let mut renamed = widened.clone();
     renamed["description"] = "Renamed".into();
-    let preview = s.agent_preview(renamed.clone(), &id).await.unwrap();
+    let preview = s.agent_preview_fixture(renamed.clone(), &id).await.unwrap();
     assert_eq!(effect(&preview)["suspended"], true);
     assert_eq!(effect(&preview)["alreadySuspended"], true);
 
@@ -1303,7 +1400,7 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     s.store.put(connections::KIND, previous).await.unwrap();
     let mut restored = renamed.clone();
     restored["access"] = updated["access"].clone();
-    let preview = s.agent_preview(restored, &id).await.unwrap();
+    let preview = s.agent_preview_fixture(restored, &id).await.unwrap();
     assert_eq!(effect(&preview)["suspended"], false);
     assert!(effect(&preview)["blocked"].is_string());
     assert_eq!(effect(&preview)["alreadySuspended"], true);
@@ -1341,12 +1438,12 @@ async fn plugin_grants_keep_a_bot_anyone_can_reach_answering() {
     // The approved policy is unchanged: the owner chose who may reach this agent.
     let mut secret = agent.clone();
     secret["plugins"] = json!([account["id"]]);
-    let preview = s.agent_preview(secret.clone(), &id).await.unwrap();
+    let preview = s.agent_preview_fixture(secret.clone(), &id).await.unwrap();
     let effect = &preview["delegations"][0];
     assert_eq!(effect["id"], saved["id"]);
     assert_eq!(effect["suspended"], false);
     assert_eq!(effect["blocked"], Value::Null);
-    s.agent(secret, Some(&id)).await.unwrap();
+    s.agent_fixture(secret, Some(&id)).await.unwrap();
     let stored: Connection = serde_json::from_value(
         s.store
             .get(connections::KIND, text(&saved, "id"))

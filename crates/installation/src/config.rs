@@ -44,7 +44,7 @@ impl Config {
             "claudeBin": get("CLAUDE_BIN", "claude"),
             "opencodeBin": get("OPENCODE_BIN", "opencode"),
             "concurrency": concurrency()?,
-            "logger": get("NODE_ENV", "") != "test",
+            "logger": true,
             "workerEnabled": get("WORKER_ENABLED", "true") != "false",
             "runnerUrl": get("RUNNER_URL", ""),
         });

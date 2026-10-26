@@ -70,15 +70,30 @@ class NativeParityPreviewTest {
             val now = System.currentTimeMillis()
             val task =
                 Task(
-                    "task",
+                    "85aac3c3-27f5-5b76-a34d-d59120d410eb",
                     "Revue hebdomadaire du projet",
                     "Vérifier les changements et préparer le compte rendu.",
                     MAIN_AGENT_ID,
                     cron = "0 9 * * 1",
                     nextRun = now + 86400000,
                 )
-            val agent = Agent(MAIN_AGENT_ID, "Agent principal")
-            val project = Project("project", "Cairn")
+            val agent =
+                Agent(
+                    exclusiveNodes = emptyList(),
+                    plugins = emptyList(),
+                    revision = "",
+                    createdAt = 0,
+                    access =
+                        AccessPolicy(
+                            mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                            projects = null,
+                            skills = null,
+                            mcps = null,
+                        ),
+                    id = MAIN_AGENT_ID,
+                    name = "Agent principal",
+                )
+            val project = Project("46d045dd-9bce-51e3-8a99-65aa9384efc9", "Cairn")
             val outcome =
                 TaskOutcome(
                     "completed",
@@ -96,7 +111,8 @@ class NativeParityPreviewTest {
                     taskId = task.id,
                     status = "succeeded",
                     taskName = task.name,
-                    snapshot = Snapshot(task = task, agent = agent, project = project),
+                    snapshot =
+                        Snapshot(task = task.runTaskSnapshot(), agent = agent, project = project),
                     outcome = outcome,
                 )
             val chat =
@@ -207,20 +223,46 @@ class NativeParityPreviewTest {
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
-                                        listOf(Agent("custom", "Agent spécialisé"), agent)
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                Agent(
+                                                    exclusiveNodes = emptyList(),
+                                                    plugins = emptyList(),
+                                                    revision = "",
+                                                    createdAt = 0,
+                                                    access =
+                                                        AccessPolicy(
+                                                            mcpTools =
+                                                                build.cairn.contracts.McpTools(
+                                                                    emptyMap()
+                                                                ),
+                                                            projects = null,
+                                                            skills = null,
+                                                            mcps = null,
+                                                        ),
+                                                    id = "b918f201-4801-5816-afec-b8facde634f4",
+                                                    name = "Agent spécialisé",
+                                                ),
+                                                agent,
+                                            )
+                                        )
                                     )
                                 "/api/installations/fixture/api/projects" ->
-                                    wireJson.encodeToString(listOf(project))
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListProjectsOutput(listOf(project))
+                                    )
                                 "/api/installations/fixture/api/tasks" ->
                                     wireJson.encodeToString(
-                                        listOf(
-                                            task,
-                                            task.copy(
-                                                id = "next",
-                                                name = "Préparer la prochaine version",
-                                                cron = null,
-                                                nextRun = null,
-                                            ),
+                                        build.cairn.contracts.ListMissionsOutput(
+                                            listOf(
+                                                task,
+                                                task.copy(
+                                                    id = "00000000-0000-4000-8000-000000000099",
+                                                    name = "Préparer la prochaine version",
+                                                    cron = null,
+                                                    nextRun = null,
+                                                ),
+                                            )
                                         )
                                     )
                                 "/api/installations/fixture/api/tasks/activity" ->

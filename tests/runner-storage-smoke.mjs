@@ -173,7 +173,7 @@ export async function storageSmoke({
   }
 
   async function publish(id) {
-    const point = await (await api(`/runs/${id}/snapshot`, 'POST', {})).json()
+    const point = await (await api(`/runs/${id}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
     const hashes = new Set()
     for (const block of point.manifest.blocks) {
       if (!block.hash || hashes.has(block.hash))

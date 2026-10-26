@@ -92,8 +92,8 @@ copie de l’historique.
 ## Conséquences
 
 - Le protocole du relais gagne des trames de signalisation, de renouvellement et
-  de révocation des connexions directes, négociées par version comme les
-  précédentes ; une installation ou un client trop ancien reste sur le relais.
+  de révocation des connexions directes. Depuis la campagne de refacto (2026-10-25),
+  seule la version courante est acceptée ; toute autre version exige une mise à jour.
 - Une requête en cours lors d’une bascule n’est rejouée que si elle est sans
   effet (lecture, flux repris avec son curseur) ou porte un identifiant client
   (envoi de message : l’identifiant déjà utilisé vaut succès). Les autres
@@ -105,5 +105,3 @@ copie de l’historique.
 - Sur le DataChannel, les trames sont fragmentées en messages de 16 Kio au
   plus, pour l’interopérabilité et pour qu’un gros message ne bloque pas les
   autres requêtes du canal ordonné.
-
-Sources : [DIRECT-TRANSPORT-RESEARCH.md](../DIRECT-TRANSPORT-RESEARCH.md).

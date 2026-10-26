@@ -50,13 +50,26 @@ internal fun chatQuota(run: Run?, events: List<RunEvent>): ChatQuota? {
     if (run == null) return null
     val current = events.filter { it.runId == run.id }
     var failureMessage = ""
+    // When the engine reported the limit, it said when the limit resets.
+    var failureReset: Long? = null
     for (event in current) {
         val turnBoundary = event.type in listOf("chat.user", "turn.started", "turn.completed")
         val executionBoundary =
             event.type == "status" &&
                 event.text in listOf("queued", "succeeded", "cancelled", "interrupted")
-        if (turnBoundary || executionBoundary) failureMessage = ""
-        failureMessage = quotaFailure(event).ifEmpty { failureMessage }
+        if (turnBoundary || executionBoundary) {
+            failureMessage = ""
+            failureReset = null
+        }
+        val failure = quotaFailure(event)
+        if (failure.isNotEmpty()) {
+            // The runner repeats the engine's failure without its reset.
+            val reset =
+                (event.activityData()?.get("error").asObject()?.get("resetsAt") as? JsonPrimitive)
+                    ?.longOrNull
+            failureReset = reset ?: failureReset.takeIf { failure == failureMessage }
+            failureMessage = failure
+        }
     }
     val exhausted =
         run.active &&
@@ -83,7 +96,8 @@ internal fun chatQuota(run: Run?, events: List<RunEvent>): ChatQuota? {
             ?.get(1)
             ?.trim()
             ?.removeSuffix(".")
-            ?.ifEmpty { null },
+            ?.ifEmpty { null }
+            ?: limitReset(failureReset).takeIf { it.isNotEmpty() && message == failureMessage },
         // Pausing the follow-up queue does not pause an execution's capacity wait.
         waiting,
     )
@@ -93,7 +107,6 @@ private data class QuotaEcho(var text: String = "", val ids: MutableList<Long> =
 
 private data class QuotaTurn(
     var exhausted: Boolean = false,
-    var legacyTool: Boolean = false,
     val causes: MutableSet<String> = mutableSetOf(),
     val failures: MutableSet<String> = mutableSetOf(),
     val messages: MutableMap<String, QuotaEcho> = mutableMapOf(),
@@ -111,11 +124,7 @@ internal fun quotaHiddenEvents(events: List<RunEvent>): Set<Long> {
             turns[event.runId] = QuotaTurn()
         val turn = turns.getValue(event.runId)
         val item = event.item()
-        val legacy = event.activityData() == null
-        val legacyMessage = legacy && event.type == "item.completed" && !turn.legacyTool
-        if (legacy && event.type == "item.started") turn.legacyTool = true
-        if (legacy && event.type == "item.completed") turn.legacyTool = false
-        if (item.string("type") == "agent_message" || legacyMessage) {
+        if (item.string("type") == "agent_message") {
             val key = item.string("id").ifBlank { event.id.toString() }
             val message = turn.messages.getOrPut(key) { QuotaEcho() }
             message.text = item.string("text").ifBlank { event.text }

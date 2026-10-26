@@ -1,9 +1,7 @@
 use crate::{
-    config::now,
     error::{Error, Result},
     http::Input,
-    service::{Service, next_occurrences},
-    store::RUN_SUMMARY,
+    service::Service,
     validation::text,
 };
 use serde_json::{Value, json};
@@ -82,9 +80,9 @@ async fn overview(s: &Service) -> Result<Value> {
         .read(move |db| {
             Ok(json!({
                 "counts": db.stats()?,
-                "agents": db.list("agents")?.len(),
-                "projects": db.list("projects")?.len(),
-                "tasks": db.list("tasks")?,
+                "agents": db.agent_snapshots()?.len(),
+                "projects": db.projects()?.len(),
+                "tasks": db.missions()?,
                 "runs": db.runs(None, None, 8, 0, false)?,
                 "concurrency": concurrency,
             }))
@@ -94,6 +92,111 @@ async fn overview(s: &Service) -> Result<Value> {
 
 /// Agents, projects, tasks and their scheduling.
 async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
+    let agent_command = match route {
+        ("GET", ["agents"]) => Some(("list_agents", json!({}))),
+        ("GET", ["agents", id]) => Some(("get_agent", json!({ "agentId": id }))),
+        ("POST", ["agents"]) => Some(("save_agent", input.body.clone())),
+        ("PUT", ["agents", id]) | ("POST", ["agents", id, "preview"]) => {
+            if input.body["agentId"] != *id {
+                return Err(Error::bad("Agent identity does not match the path."));
+            }
+            Some((
+                if route.0 == "PUT" {
+                    "replace_agent"
+                } else {
+                    "preview_agent"
+                },
+                input.body.clone(),
+            ))
+        }
+        ("POST", ["agents", id, "merge"]) => {
+            if input.body["sourceId"] != *id {
+                return Err(Error::bad("Agent identity does not match the path."));
+            }
+            Some(("merge_agents", input.body.clone()))
+        }
+        ("DELETE", ["agents", id]) => Some(("delete_agent", json!({ "agentId": id }))),
+        ("GET", ["agent-avatars"]) => Some(("get_agent_avatar_configuration", json!({}))),
+        ("POST", ["agents", id, "avatar", "upload"]) => {
+            if input.body["agentId"] != *id {
+                return Err(Error::bad("Agent identity does not match the path."));
+            }
+            Some(("set_agent_avatar", input.body.clone()))
+        }
+        ("POST", ["agents", id, "avatar", "generate"]) => {
+            Some(("generate_agent_avatar", json!({ "agentId": id })))
+        }
+        _ => None,
+    };
+    if let Some((name, body)) = agent_command {
+        let context = crate::capabilities::ResumeContext::http(input)?;
+        return Ok(Some(
+            crate::capabilities::agent_operation(name)
+                .expect("agent operation")
+                .invoke(s, body, context)
+                .await?,
+        ));
+    }
+    let project_command = match route {
+        ("GET", ["projects"]) => Some(("list_projects", json!({}))),
+        ("GET", ["projects", id]) => Some(("get_project", json!({ "projectId": id }))),
+        ("POST", ["projects"]) => Some(("save_project", input.body.clone())),
+        ("PUT", ["projects", id]) => {
+            if input.body["projectId"] != *id {
+                return Err(Error::bad("Project identity does not match the path."));
+            }
+            Some(("replace_project", input.body.clone()))
+        }
+        ("DELETE", ["projects", id]) => Some(("delete_project", json!({ "projectId": id }))),
+        _ => None,
+    };
+    if let Some((name, body)) = project_command {
+        let context = crate::capabilities::ResumeContext::http(input)?;
+        let output = crate::capabilities::project_operation(name)
+            .expect("project operation")
+            .invoke(s, body, context)
+            .await?;
+        return Ok(Some(output));
+    }
+    let mission_command = match route {
+        ("GET", ["tasks"]) => Some(("list_tasks", json!({}))),
+        ("GET", ["tasks", "activity"]) => Some(("list_task_activity", json!({}))),
+        ("GET", ["tasks", id]) => Some(("get_task", json!({ "taskId": id }))),
+        ("POST", ["tasks"]) => Some(("create_task", input.body.clone())),
+        ("PUT", ["tasks", id]) | ("POST", ["tasks", id, "state"]) => {
+            if input.body["taskId"] != *id {
+                return Err(Error::bad("Mission identity does not match the path."));
+            }
+            Some((
+                if route.0 == "PUT" {
+                    "replace_task"
+                } else {
+                    "set_task_state"
+                },
+                input.body.clone(),
+            ))
+        }
+        ("DELETE", ["tasks", id]) => Some(("delete_task", json!({ "taskId": id }))),
+        ("POST", ["schedule", "preview"]) => Some(("preview_schedule", input.body.clone())),
+        _ => None,
+    };
+    if let Some((name, body)) = mission_command {
+        let operation = crate::capabilities::mission_operation(name).expect("mission operation");
+        let identity = input
+            .identity
+            .as_ref()
+            .ok_or_else(|| Error::unauthorized("A verified identity is required."))?;
+        let result = if identity.mcp_scopes.is_some() {
+            operation
+                .invoke(s, body, crate::capabilities::ResumeContext::http(input)?)
+                .await?
+        } else {
+            operation
+                .invoke_as(s, body, crate::missions::Actor::Human(identity.clone()))
+                .await?
+        };
+        return Ok(Some(result));
+    }
     let result = match route {
         ("POST", ["projects", "import"]) => {
             static IMPORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -103,76 +206,14 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
             crate::plugins::projects::import(s, &input.body).await?
         }
         ("GET", ["overview"]) => overview(s).await?,
-        ("GET", ["agent-avatars"]) => json!({ "configured": s.avatars.configured(s).await? }),
-        ("POST", ["agents", id, "avatar", "generate"]) => s.avatars.generate(s, id).await?,
-        ("POST", ["agents", id, "preview"]) => s.agent_preview(input.body.clone(), id).await?,
-        ("POST", ["agents", id, "merge"]) => {
-            let mut args = input.body.clone();
-            if !args.is_object() {
-                return Err(Error::bad(
-                    "Enter a destination agent and confirm the merge.",
-                ));
-            }
-            args["sourceId"] = (*id).into();
-            s.merge_agents(args).await?
-        }
-        ("GET", ["agents"]) => {
-            // Never stored: clients tell this release from an earlier or rolled-back one,
-            // which does not keep grants on agents.
-            let mut agents = s.store.list("agents").await?;
-            for agent in &mut agents {
-                agent["grantsOnAgent"] = true.into();
-            }
-            agents.into()
-        }
-        ("GET", [kind @ ("projects" | "tasks")]) => s.store.list(kind).await?.into(),
         ("POST", ["task-authors", "refresh"]) => {
             s.synchronize_task_authors().await?;
             json!({ "updated": true })
         }
-        ("POST", [kind @ ("agents" | "projects" | "tasks")]) => save(s, kind, input, None).await?,
-        ("PUT", [kind @ ("agents" | "projects" | "tasks"), id]) => {
-            save(s, kind, input, Some(id)).await?
-        }
-        ("DELETE", [kind @ ("agents" | "projects" | "tasks"), id]) => {
-            s.remove(kind, id).await?;
-            json!({ "deleted": true })
-        }
         ("POST", ["tasks", id, "run"]) => s.enqueue(id, "manual", None).await?,
-        ("POST", ["schedule", "preview"]) => {
-            let occurrences = next_occurrences(
-                input.string("cron", 500)?,
-                input.string("timezone", 100)?,
-                now(),
-                3,
-            )?;
-            json!({ "occurrences": occurrences })
-        }
-        ("GET", ["tasks", "activity"]) => task_activity(s, crate::reads::account(input)?).await?,
         _ => return Ok(None),
     };
     Ok(Some(result))
-}
-
-/// The latest run of every task, with what the account has not read yet.
-async fn task_activity(s: &Service, account: &str) -> Result<Value> {
-    let query = format!(
-        "SELECT {RUN_SUMMARY} FROM runs
-         WHERE id IN (
-           SELECT (SELECT id FROM runs WHERE task_id=records.id ORDER BY created_at DESC,id DESC LIMIT 1)
-           FROM records WHERE kind='tasks'
-         )
-         ORDER BY created_at DESC,id DESC"
-    );
-    crate::reads::begin(s, account).await?;
-    let account = account.to_owned();
-    s.store
-        .read(move |db| {
-            let mut runs = db.json_rows(&query, [])?;
-            crate::reads::Reads::load(db, &account)?.runs(db, &mut runs)?;
-            Ok(runs.into())
-        })
-        .await
 }
 
 async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
@@ -308,9 +349,9 @@ async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resu
     let result = match route {
         ("GET", ["skills"]) => {
             let mut items = s.skills.list("global", None).await?;
-            for project in s.store.list("projects").await? {
-                let path = Path::new(text(&project, "path"));
-                items.extend(s.skills.list(text(&project, "id"), Some(path)).await?);
+            for project in s.store.projects().await? {
+                let path = Path::new(&project.settings.path);
+                items.extend(s.skills.list(&project.id.to_string(), Some(path)).await?);
             }
             sources::attach(s, &mut items).await?;
             items.into()
@@ -467,10 +508,11 @@ async fn delete_skill(
     project: Option<&Path>,
 ) -> Result<Value> {
     let key = format!("{scope}/{name}");
-    let selected = s.store.list("tasks").await?.iter().any(|task| {
-        task["skills"]
-            .as_array()
-            .is_some_and(|skills| skills.iter().any(|skill| skill == &key))
+    let selected = s.store.missions().await?.iter().any(|task| {
+        task.settings
+            .skills
+            .as_ref()
+            .is_some_and(|skills| skills.contains(&key))
     });
     if selected {
         return Err(Error::conflict(
@@ -537,23 +579,11 @@ async fn settings_routes(
     Ok(Some(result))
 }
 
-async fn save(s: &Arc<Service>, kind: &str, input: &Input, id: Option<&str>) -> Result<Value> {
-    match kind {
-        "agents" => s.agent(input.body.clone(), id).await,
-        "projects" => s.project(input.body.clone(), id).await,
-        _ => {
-            s.task_as(input.body.clone(), id, input.identity.as_ref())
-                .await
-        }
-    }
-}
-
 async fn skill_project(s: &Service, scope: &str) -> Result<Option<PathBuf>> {
     if scope == "global" {
         return Ok(None);
     }
-    Ok(Some(PathBuf::from(text(
-        &s.get("projects", scope).await?,
-        "path",
-    ))))
+    Ok(Some(PathBuf::from(
+        s.get_project(scope).await?.settings.path,
+    )))
 }

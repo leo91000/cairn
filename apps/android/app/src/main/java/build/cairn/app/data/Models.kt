@@ -3,6 +3,8 @@ package build.cairn.app.data
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.encodeToJsonElement
 
 @Serializable
 data class Session(
@@ -28,96 +30,45 @@ data class Installation(
     val name: String,
     val role: InstallationRole = InstallationRole.Member,
     val online: Boolean = false,
+    val updateRequired: Boolean = false,
 )
+
+const val DRAFT_AGENT_ID = "00000000-0000-4000-8000-000000000000"
 
 const val MAIN_AGENT_ID = "00000000-0000-4000-8000-000000000001"
 
-@Serializable
-data class AccessPolicy(
-    /** Nodes its conversations may run on; null means every node, including future ones. */
-    val nodes: List<String>? = listOf(LOCAL_NODE_ID),
-    /** Projects the agent may open; null means every project, including future ones. */
-    val projects: List<String>? = null,
-    val skills: List<String>? = null,
-    val mcps: List<String>? = null,
-    val mcpTools: Map<String, List<String>> = emptyMap(),
-    val installation: Boolean = false,
-    val sandbox: String = "yolo",
-    val backend: String = "firecracker",
-)
+typealias AccessPolicy = build.cairn.contracts.AccessPolicy
 
-@Serializable
-data class AgentPortrait(
-    val status: String = "ready",
-    val revision: String = "",
-    val url: String? = null,
-    val error: String? = null,
-)
+typealias AgentPortrait = build.cairn.contracts.AgentAvatar
 
-@Serializable
-data class Agent(
-    val id: String = "",
-    val name: String = "",
-    val description: String = "",
-    val model: String = "",
-    val reasoning: String = "high",
-    val instructions: String = "",
-    val timeoutMinutes: Int = 0,
-    val access: AccessPolicy = AccessPolicy(),
-    /**
-     * Nodes on which the agent may suspend every other conversation during intensive work. Only
-     * effective where it may also run. A live grant: it applies immediately, even in running
-     * conversations. Kept outside [access] so it never enters a run's frozen policy.
-     */
-    val exclusiveNodes: List<String> = emptyList(),
-    /**
-     * Plugin instances (e.g. 1Password service accounts) whose commands and tools it gets. A live
-     * grant, kept outside [access] like [exclusiveNodes].
-     */
-    val plugins: List<String> = emptyList(),
-    val provider: String = "codex",
-    val avatar: AgentPortrait? = null,
-    /**
-     * Set by installations that store live grants on the agent (computed, never stored, never
-     * sent). Absent on earlier or rolled-back releases, which keep them on the resources.
-     */
-    val grantsOnAgent: Boolean = false,
-    /** Changes on every save; sent back so a stale editor cannot overwrite newer access. */
-    val revision: String = "",
-)
+typealias Agent = build.cairn.contracts.Agent
 
-@Serializable
-data class Project(
-    val id: String = "",
-    val name: String = "",
-    val path: String = "",
-    val description: String = "",
-    val baseBranch: String = "main",
-    val origin: String? = null,
-    val sourceMode: String = "remote",
-)
+typealias Project = build.cairn.contracts.Project
 
-@Serializable
-data class Task(
-    val id: String = "",
-    val name: String = "",
-    val prompt: String = "",
-    val agentId: String = "",
-    val projectId: String? = null,
-    val skills: List<String>? = null,
-    val tags: List<String> = emptyList(),
-    val cron: String? = null,
-    val timezone: String = "Europe/Paris",
-    val enabled: Boolean = true,
-    val archived: Boolean = false,
-    val worktree: Boolean = true,
-    val nextRun: Long? = null,
-    /** The latest scheduled occurrence that could not start; read-only. */
-    val scheduleFailure: ScheduleFailure? = null,
-)
+typealias Task = build.cairn.contracts.Mission
 
-@Serializable
-data class ScheduleFailure(val message: String = "", val scheduledFor: Long = 0, val at: Long = 0)
+typealias ScheduleFailure = build.cairn.contracts.ScheduleFailure
+
+fun Task.settings(): build.cairn.contracts.MissionSettings =
+    build.cairn.contracts.MissionSettings(
+        name = name,
+        prompt = prompt,
+        agentId = agentId,
+        projectId = projectId,
+        skills = skills,
+        tags = tags,
+        cron = cron,
+        timezone = timezone,
+        enabled = enabled,
+        archived = archived,
+        worktree = worktree,
+    )
+
+fun Task.runTaskSnapshot(): build.cairn.contracts.RunTaskSnapshot =
+    wireJson.decodeFromJsonElement(
+        build.cairn.contracts.RunTaskSnapshot.serializer(),
+        wireJson.encodeToJsonElement(build.cairn.contracts.Mission.serializer(), this),
+    )
 
 @Serializable
 data class Skill(
@@ -145,14 +96,37 @@ data class SnapshotSkill(
 
 @Serializable
 data class Snapshot(
-    val task: Task = Task(),
-    val agent: Agent = Agent(),
+    val task: build.cairn.contracts.RunTaskSnapshot =
+        build.cairn.contracts.RunTaskSnapshot(
+            id = "00000000-0000-4000-8000-000000000000",
+            name = "",
+            prompt = "",
+            agentId = MAIN_AGENT_ID,
+            skills = null,
+        ),
+    val agent: Agent =
+        Agent(
+            exclusiveNodes = emptyList(),
+            plugins = emptyList(),
+            id = "00000000-0000-4000-8000-000000000000",
+            name = "",
+            revision = "",
+            createdAt = 0,
+            access =
+                AccessPolicy(
+                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                    projects = null,
+                    skills = null,
+                    mcps = null,
+                ),
+        ),
     val project: Project? = null,
     val projects: List<Project> = emptyList(),
     val skills: List<SnapshotSkill> = emptyList(),
 )
 
-@Serializable data class RunRetryCause(val kind: String, val message: String)
+@Serializable
+data class RunRetryCause(val kind: String, val message: String, val startup: Boolean = false)
 
 @Serializable
 data class RunRetry(
@@ -160,6 +134,8 @@ data class RunRetry(
     val limit: Int,
     val nextAttemptAt: Long? = null,
     val cause: RunRetryCause,
+    val startedAt: Long? = null,
+    val deadlineAt: Long? = null,
 )
 
 @Serializable
@@ -277,7 +253,7 @@ data class Audit(
     val detail: String = "",
 )
 
-@Serializable data class Occurrences(val occurrences: List<Long>)
+typealias Occurrences = build.cairn.contracts.SchedulePreviewOutput
 
 @Serializable data class FileContent(val content: String)
 

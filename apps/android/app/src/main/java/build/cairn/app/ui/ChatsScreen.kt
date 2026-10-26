@@ -46,6 +46,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.SecureFlagPolicy
 import build.cairn.app.data.*
+import build.cairn.contracts.ResumeRunInput
+import build.cairn.contracts.resumeRun
 import java.io.File
 import java.util.UUID
 import kotlinx.serialization.json.*
@@ -375,6 +377,7 @@ internal fun ChatPage(
     var provider by rememberSaveable(id) { mutableStateOf(savedDraft.provider) }
     var model by rememberSaveable(id) { mutableStateOf(savedDraft.model) }
     var reasoning by rememberSaveable(id) { mutableStateOf(savedDraft.reasoning) }
+    var speed by rememberSaveable(id) { mutableStateOf(savedDraft.speed) }
     var attachments by rememberForm(savedDraft.attachments)
     // Per-file states of the composer: refused before upload, uploading, or failed to upload.
     var rejected by rememberForm(savedDraft.rejected)
@@ -410,6 +413,7 @@ internal fun ChatPage(
                     submissionKey,
                     provider,
                     rejected,
+                    speed,
                 )
     }
     SideEffect { persistDraft() }
@@ -445,7 +449,11 @@ internal fun ChatPage(
                 live.state?.artifacts.orEmpty(),
             )
         }
-    val timeline = remember(history, live.events) { quotaTimeline(history, live.events) }
+    val chats = conversations.state?.chats
+    val timeline =
+        remember(history, live.events, chats) {
+            quotaTimeline(history, live.events).followingDelegations(chats)
+        }
     var asking by remember { mutableStateOf<ChatQuestion?>(null) }
     var stopping by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<ChatMessage?>(null) }
@@ -475,8 +483,15 @@ internal fun ChatPage(
     // A subagent's full activity opens in a sheet. The current request's subagents stay in sight
     // above the composer while one of them works.
     var openedSubagent by rememberSaveable(id) { mutableStateOf<String?>(null) }
-    val openSubagent = remember { { agent: String -> openedSubagent = agent } }
     val subagentTeams = remember(timeline) { subagentTeams(timeline) }
+    // A delegated task is a conversation of its own: open it rather than a sheet.
+    val openSubagent =
+        remember(subagentTeams) {
+            { agent: String ->
+                val delegation = subagentTeams.flatten().find { it.id == agent }?.delegation
+                if (delegation != null) openChat(delegation.chatId) else openedSubagent = agent
+            }
+        }
     val currentSubagents = remember(timeline) { currentSubagents(timeline) }
     val subagentBar =
         !fullscreen && currentSubagents.any { it.state(active) == SubagentState.RUNNING }
@@ -523,10 +538,12 @@ internal fun ChatPage(
         else selectedAgent?.takeIf { it.provider == chosenProvider }
     val defaultModel = inheritedAssistant?.model.orEmpty()
     val defaultReasoning = inheritedAssistant?.reasoning.orEmpty()
+    val defaultSpeed = inheritedAssistant?.speed.orEmpty()
     fun chooseProvider(value: String) {
         provider = value
         model = ""
         reasoning = ""
+        speed = ""
     }
     val skillOptions =
         remember(state.skills, selectedAgent, chat?.projectId, project, chat == null) {
@@ -661,12 +678,15 @@ internal fun ChatPage(
             val selectedReasoning = reasoning.ifBlank {
                 if (model.isBlank()) defaultReasoning else ""
             }
+            // The speed survives a model change, so it is inherited even with a new model.
+            val selectedSpeed = speed.ifBlank { defaultSpeed }
             val content = buildJsonObject {
                 put("text", draft.trim())
                 put("mode", mode)
                 put("provider", chosenProvider)
                 put("model", selectedModel)
                 put("reasoning", selectedReasoning)
+                put("speed", selectedSpeed)
                 put(
                     "attachmentIds",
                     wireJson.encodeToJsonElement(attachments.map { it.attachment.id }),
@@ -691,6 +711,7 @@ internal fun ChatPage(
                         System.currentTimeMillis(),
                         attachments.map { it.attachment },
                         provider = chosenProvider,
+                        speed = selectedSpeed,
                     )
             try {
                 api.request(
@@ -721,6 +742,7 @@ internal fun ChatPage(
         provider = message.provider.ifBlank { currentProvider }
         model = message.model
         reasoning = message.reasoning
+        speed = message.speed
         attachments = message.attachments.map { DraftAttachment(it) }
     }
     fun steerQueued(message: ChatMessage) {
@@ -735,6 +757,7 @@ internal fun ChatPage(
                     put("provider", message.provider)
                     put("model", message.model)
                     put("reasoning", message.reasoning)
+                    put("speed", message.speed)
                     put(
                         "attachmentIds",
                         wireJson.encodeToJsonElement(message.attachments.map { it.id }),
@@ -806,6 +829,11 @@ internal fun ChatPage(
                         agentKey = chat?.agentId ?: agent,
                         status = conversation.status,
                         wakeup = scheduledWakeup(chat),
+                        requester = chat?.requester,
+                        openRequester = {
+                            persistDraft()
+                            openChat(it)
+                        },
                         live = conversation.live,
                         harness = chat?.provider,
                         liveSince = waitingTasks?.since ?: chat?.run?.startedAt,
@@ -1015,6 +1043,9 @@ internal fun ChatPage(
                         )
                         Text(chat?.agentName ?: selectedAgent?.name.orEmpty())
                         Text(chat?.projectName ?: "Tous les projets autorisés")
+                        chat?.requester?.let {
+                            Text("Délégué par ${it.title.ifBlank { "Nouvelle conversation" }}")
+                        }
                         Text(
                             if (chat?.paused == true) "En pause"
                             else if (chat?.exclusiveSuspended == true) "Suspendue (exclusivité)"
@@ -1095,7 +1126,20 @@ internal fun ChatPage(
                         )
                         ActionIcon("Masquer l’erreur", CairnIcons.Close) { errorDismissed = true }
                     }
-                if (quota == null) ChatRunWaitingNotice(chat?.run, openConnections, state.isOwner)
+                if (quota == null)
+                    ChatRunWaitingNotice(
+                        chat?.run,
+                        openConnections,
+                        state.isOwner,
+                        state.busy,
+                        {
+                            chat?.let { current ->
+                                vm.perform {
+                                    api.request("POST", "/chats/${segment(current.id)}/stop")
+                                }
+                            }
+                        },
+                    )
                 if (gallery) {
                     ModalBottomSheet(
                         onDismissRequest = { gallery = false },
@@ -1257,6 +1301,8 @@ internal fun ChatPage(
                                                         pauseWait,
                                                         settled = it.run?.status == "succeeded",
                                                         busy = state.busy,
+                                                        openRun = openRun,
+                                                        openChat = openChat,
                                                     )
                                                 },
                                         ) {
@@ -1282,9 +1328,8 @@ internal fun ChatPage(
                                                     chat?.let { current ->
                                                         vm.perform {
                                                             if (current.run?.status == "failed")
-                                                                api.request(
-                                                                    "POST",
-                                                                    "/runs/${segment(current.run.id)}/resume",
+                                                                api.resumeRun(
+                                                                    ResumeRunInput(current.run.id)
                                                                 )
                                                             api.request(
                                                                 "POST",
@@ -1441,6 +1486,7 @@ internal fun ChatPage(
                                             steer = ::steerQueued,
                                             remove = { removing = it },
                                             togglePause = { chat?.let(::togglePause) },
+                                            models = state.modelCatalog("codex").models,
                                             attachments = {
                                                 MessageAttachments(
                                                     vm,
@@ -1590,6 +1636,9 @@ internal fun ChatPage(
                                                 provider = chosenProvider,
                                                 changeProvider = ::chooseProvider,
                                                 switching = switchingProvider,
+                                                speed = speed,
+                                                defaultSpeed = defaultSpeed,
+                                                changeSpeed = { speed = it },
                                             ) { m, r ->
                                                 model = m
                                                 reasoning = r

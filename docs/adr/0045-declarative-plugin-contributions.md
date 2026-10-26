@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0046](0046-plugin-transports-and-forms-in-luau.md) pour les transports/formulaires, [ADR-0047](0047-multi-file-plugin-packages.md) pour les packages et [ADR-0049](0049-plugin-program-installers-and-toml-manifests.md) pour les installateurs de programmes ; les contributions déclaratives restent applicables.
+
 # Declarative plugin contributions and declared programs
 
 Date: 2026-10-16.
@@ -40,7 +42,7 @@ Cairn renders it on the web and Android, authorizes it and calls the script:
 The built-in 1Password plugin becomes an ordinary v2 package: service accounts are
 instances with a secret token and agent grants, `cairn plugin onepassword …` and the
 `onepassword` tool are declared commands and tools, and `op` is a declared program.
-Existing accounts, IDs, grants and tokens migrate in place. `onepassword.read` and
+`onepassword.read` and
 the built-in-only rule are removed; no Cairn code is specific to 1Password.
 
 Long-lived workers start only for packages that need them (a transport,

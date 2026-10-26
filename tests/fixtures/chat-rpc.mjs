@@ -8,9 +8,13 @@ import {
 } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
+import activityEvents from './activity-events.json' with { type: 'json' }
 
 export function chatFixture() {
   const file = path.join(process.env.CODEX_HOME, 'fixture-conversation.json')
+  // The thread's model: the requested one, else one the fixture's configuration sets.
+  const configModel = path.join(process.env.CODEX_HOME, 'fixture-config-model')
+  const threadModel = params => params.model || (existsSync(configModel) ? readFileSync(configModel, 'utf8').trim() : 'fixture-fast')
   const emit = value => process.stdout.write(`${JSON.stringify(value)}\n`)
   const notify = (method, params) => emit({ method, params })
   let thread
@@ -19,6 +23,8 @@ export function chatFixture() {
   let hold = false
   let questionRequest
   let asked = false
+  let resumed = false
+  let completionText
   // Like Codex, `last` is the latest request (the active context) and `total` the whole thread.
   const tokenUsage = (turnId, last, total) => notify('thread/tokenUsage/updated', {
     threadId: thread.id,
@@ -41,7 +47,11 @@ export function chatFixture() {
   const finish = () => {
     if (!active)
       return
-    const text = `I reviewed the workspace. **The approach looks good.**\n\n${active.items.filter(item => item.type === 'userMessage').map(item => item.content[0].text).join('\n\n')}\n\nReady for the next step.`
+    const scheduledBrief = thread.fixtureInstructions.includes('This unattended task cannot answer clarification questions')
+      && active.items.some(item => item.type === 'userMessage' && item.content[0].text.startsWith('Task brief:\n'))
+    const text = completionText || (scheduledBrief
+      ? '# Complete\nThe fixture task passed.'
+      : `I reviewed the workspace. **The approach looks good.**\n\n${active.items.filter(item => item.type === 'userMessage').map(item => item.content[0].text).join('\n\n')}\n\nReady for the next step.`)
     const item = { id: `reply-${thread.fixtureGeneration || 'legacy'}-${active.id}`, type: 'agentMessage', text }
     active.items.push(item)
     active.status = 'completed'
@@ -126,18 +136,21 @@ export function chatFixture() {
         turns: [],
         parentThreadId: null,
         fixtureConfig: params.config,
+        fixtureInstructions: params.developerInstructions || '',
       }
       save()
-      emit({ id: request.id, result: { thread } })
+      emit({ id: request.id, result: { thread, model: threadModel(params) } })
     }
 
     if (method === 'thread/resume') {
+      resumed = true
       if (!existsSync(file))
         throw new Error('No conversation')
       thread = JSON.parse(readFileSync(file, 'utf8'))
       thread.fixtureConfig = params.config
+      thread.fixtureInstructions = params.developerInstructions || ''
       counter = thread.turns.length
-      emit({ id: request.id, result: { thread: { ...thread, turns: [] } } })
+      emit({ id: request.id, result: { thread: { ...thread, turns: [] }, model: threadModel(params) } })
     }
 
     if (method === 'thread/turns/list' || method === 'thread/items/list') {
@@ -163,13 +176,14 @@ export function chatFixture() {
       }
 
       if (method === 'turn/start') {
-        hold = params.input[0].text.includes('fixture:chat-hang') && !params.input[0].text.startsWith('Continue the interrupted')
+        hold = (params.input[0].text.includes('fixture:chat-hang') || params.input[0].text.includes('fixture:hang')) && !params.input[0].text.startsWith('Continue the interrupted')
         active = {
           id: `turn-${++counter}`,
           status: 'inProgress',
           items: [],
           model: params.model,
           effort: params.effort,
+          serviceTier: params.serviceTier,
         }
         thread.turns.push(active)
         notify('turn/started', { threadId: thread.id, turn: active })
@@ -204,6 +218,57 @@ export function chatFixture() {
       }
 
       const text = params.input[0].text
+
+      const marker = path.join(process.env.CODEX_HOME, 'fixture-restart.json')
+      if (text.includes('fixture:restart') || (resumed && existsSync(marker))) {
+        if (resumed && existsSync(marker)) {
+          const previous = JSON.parse(readFileSync(marker, 'utf8'))
+          if (previous.cwd !== process.cwd() || readFileSync(path.join(process.cwd(), 'restart-work.txt'), 'utf8') !== 'preserved before restart')
+            throw new Error('Restart lost workspace')
+          completionText = '# Resumed\nThe saved conversation and work survived the restart.'
+        }
+        else {
+          writeFileSync(marker, JSON.stringify({ cwd: process.cwd() }))
+          writeFileSync(path.join(process.cwd(), 'restart-work.txt'), 'preserved before restart')
+          hold = true
+        }
+      }
+
+      if (text.includes('fixture:activity')) {
+        for (const event of activityEvents.filter(event => event.type.startsWith('item.'))) {
+          const { item } = event
+          if (item.type === 'todo_list') {
+            notify('turn/plan/updated', { threadId: thread.id, turnId: active.id, plan: item.items.map(step => ({ step: step.text, status: step.completed ? 'completed' : 'pending' })) })
+            continue
+          }
+
+          const types = {
+            agent_message: 'agentMessage',
+            command_execution: 'commandExecution',
+            web_search: 'webSearch',
+            file_change: 'fileChange',
+            mcp_tool_call: 'mcpToolCall',
+          }
+          const native = {
+            ...item,
+            type: types[item.type],
+            aggregatedOutput: item.aggregated_output,
+            exitCode: item.exit_code,
+          }
+          active.items.push(native)
+          notify(event.type === 'item.started' ? 'item/started' : 'item/completed', { threadId: thread.id, item: native })
+        }
+      }
+
+      if (text.includes('fixture:fail')) {
+        active.status = 'failed'
+        active.error = { message: 'The fixture task failed.' }
+        save()
+        notify('turn/completed', { threadId: thread.id, turn: active })
+        active = null
+        return true
+      }
+
       if (text.includes('fixture:codex-reconnect')) {
         for (const scope of [
           { threadId: 'another-thread', turnId: active.id, willRetry: true },

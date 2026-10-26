@@ -80,7 +80,24 @@ abstract class SavedConversationCases {
                                 "/api/account/session" -> beaconAccountFixture()
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }

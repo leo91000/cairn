@@ -1,3 +1,5 @@
+use common::MissionFixture;
+
 mod common;
 
 use common::relay_fixture::router;
@@ -50,7 +52,7 @@ async fn manual_run(s: &Service, name: &str, prompt: &str) -> Value {
         "prompt": prompt,
         "worktree": false,
     });
-    let task = s.task(task, None).await.unwrap();
+    let task = s.task_fixture(task, None).await.unwrap();
     s.enqueue(task["id"].as_str().unwrap(), "manual", None)
         .await
         .unwrap()
@@ -199,6 +201,43 @@ async fn assert_large_metadata_is_chunked_consistently(
         true,
         "changed metadata must require a fresh read"
     );
+}
+
+#[tokio::test]
+async fn run_history_includes_the_engine_retries_limits_and_notices() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let (s, origin, server) = served(&root).await;
+    let token = common::relay_fixture::grant(&s, &["read"]).await;
+    let run = manual_run(&s, "Engine", "Engine reports").await;
+    let run_id = run["id"].as_str().unwrap();
+    let reports = [
+        json!({ "type": "engine.retry", "attempt": 1, "maxRetries": 10, "delayMs": 500, "reason": "overloaded" }),
+        json!({ "type": "provider.limit", "status": "allowed_warning", "window": "five_hour", "resetsAt": 1_893_499_200_000_i64, "blocked": false }),
+        json!({ "type": "engine.notice", "level": "warning", "message": "Context is almost full." }),
+    ];
+    for report in &reports {
+        let kind = report["type"].as_str().unwrap();
+        s.store
+            .event(run_id, kind, kind, Some(report.clone()))
+            .await
+            .unwrap();
+    }
+    let mcp = Mcp {
+        http: reqwest::Client::new(),
+        endpoint: format!("{origin}/mcp"),
+        token,
+    };
+    let response = mcp.call("get_run", json!({ "runId": run_id })).await;
+    let payloads: Vec<_> = result(&response)["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["type"] != "status")
+        .map(|event| event["payload"].clone())
+        .collect();
+    assert_eq!(payloads, reports);
+    server.abort();
 }
 
 #[tokio::test]
@@ -492,7 +531,7 @@ for (const version of ['2026-07-28', '2025-11-25', '2025-06-18']) {
     const catalog = await client.listTools();
     if (catalog.tools.map(t => t.name).join(',') !== 'search,execute') throw Error('invalid compact tools');
     const agents = await client.callTool({ name: 'execute', arguments: {code: 'return await cairn.list_agents({});'} });
-    if (agents.isError || agents.structuredContent.result.length !== 1) throw Error('invalid result ' + JSON.stringify(agents));
+    if (agents.isError || agents.structuredContent.result.agents.length !== 1) throw Error('invalid result ' + JSON.stringify(agents));
     const denied = await client.callTool({ name: 'execute', arguments: {code: 'return await cairn.create_task(input);', input: { name: 'Denied', prompt: 'No' }} });
     if (!denied.isError || !denied._meta['mcp/www_authenticate']) throw Error('scope bypass');
     await client.close();

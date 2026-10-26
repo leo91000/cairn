@@ -1,5 +1,6 @@
 import type { LiveBatch } from '../../../packages/contracts/live'
 import { apiUrl, installationTransport } from './api'
+import { ProtocolMismatch } from './direct-channel'
 import { observeTransport } from './transport-observation'
 
 export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'offline'
@@ -54,7 +55,21 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
     const windowed = path !== '/chats/stream'
     const recent = windowed && cursor !== '0' && followsLatest?.()
     const route = `${path}?after=${cursor}${history ? `&history=${encodeURIComponent(history)}` : ''}${windowed ? '&window=1' : ''}${recent ? '&recent=1' : ''}${query}`
-    const current = installationTransport.source(route, apiUrl(route))
+    let current: EventSource
+    try {
+      current = installationTransport.source(route, apiUrl(route))
+    }
+    catch (error) {
+      if (error instanceof ProtocolMismatch) {
+        stopped = true
+        status('offline')
+        return
+      }
+
+      retry()
+      return
+    }
+
     source = current
     alive()
     current.addEventListener('ping', () => {

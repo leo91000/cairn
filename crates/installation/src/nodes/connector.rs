@@ -43,7 +43,6 @@ struct HeartbeatRequest<'a> {
     execution_ready: bool,
     data_root: &'a Value,
     capabilities: &'a Value,
-    runtimes: &'a Value,
     pool: &'a Value,
     usage: &'a Value,
     pressure: &'a Value,
@@ -54,6 +53,7 @@ struct HeartbeatRequest<'a> {
     backend: &'a Value,
     node_protocol: &'a Value,
     native_mode: &'a Value,
+    disk_growth: &'a Value,
 }
 
 pub(crate) fn master(input: &str) -> Result<url::Url> {
@@ -119,11 +119,6 @@ fn client() -> Result<reqwest::Client> {
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(Error::internal)
-}
-
-fn runtime() -> String {
-    std::env::var("APP_RUNTIME_ID")
-        .unwrap_or_else(|_| format!("cairn-{}", env!("CARGO_PKG_VERSION")))
 }
 
 fn mi_b(blocks: libc::fsblkcnt_t, block_size: libc::c_ulong) -> u64 {
@@ -232,7 +227,6 @@ pub fn capabilities(path: &Path) -> Result<Value> {
         }
         .into(),
         kvm,
-        fuse: device_opens("/dev/fuse").is_some(),
         ublk: device_opens("/dev/ublk-control").is_some(),
         native_mode_protocol: u32::from(crate::native::enabled()),
         cpu: u32::try_from(cpu).unwrap_or(u32::MAX),
@@ -276,7 +270,7 @@ async fn register(origin: &url::Url, directory: &Path, file: &mut tokio::fs::Fil
         name: "Linux node",
         protocol: 1,
         capabilities: capabilities(directory)?,
-        runtime_id: runtime(),
+        runtime_id: super::component_runtime(),
     };
     let response = client()?
         .post(
@@ -352,6 +346,49 @@ pub async fn connect(directory: &Path, stop: CancellationToken) -> Result<()> {
     result
 }
 
+/// Binds this node's loopback origin when it reaches the manager through the
+/// host's gateway to Beacon. A Firecracker container has its own loopback, so
+/// [`serve_gateway`] forwards it to the gateway's socket mounted from the host.
+/// Returns `None` for a node with a direct manager address.
+pub async fn bind_gateway(directory: &Path) -> Result<Option<tokio::net::TcpListener>> {
+    let identity: Identity =
+        serde_json::from_slice(&tokio::fs::read(directory.join("identity.json")).await?)?;
+    let origin = master(&identity.master)?;
+    let loopback = origin.host_str().is_some_and(|host| {
+        host.parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    });
+    if origin.scheme() != "http" || !loopback {
+        return Ok(None);
+    }
+    let address = origin
+        .socket_addrs(|| None)
+        .map_err(Error::internal)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::bad("Invalid gateway origin."))?;
+    Ok(Some(tokio::net::TcpListener::bind(address).await?))
+}
+
+pub async fn serve_gateway(
+    listener: tokio::net::TcpListener,
+    socket: std::path::PathBuf,
+    stop: CancellationToken,
+) -> Result<()> {
+    loop {
+        let (mut connection, _) = tokio::select! {
+            () = stop.cancelled() => return Ok(()),
+            accepted = listener.accept() => accepted?,
+        };
+        let socket = socket.clone();
+        tokio::spawn(async move {
+            if let Ok(mut gateway) = tokio::net::UnixStream::connect(&socket).await {
+                let _ = tokio::io::copy_bidirectional(&mut connection, &mut gateway).await;
+            }
+        });
+    }
+}
+
 /// The local controller's health report, or `null` when it is unreachable.
 async fn local_health(client: &reqwest::Client, runner: &str) -> Value {
     if runner.is_empty() {
@@ -393,24 +430,8 @@ fn controller_ready(health: &Value) -> bool {
     health["status"] == "ok"
         && health["pool"]["quarantined"] != true
         && health["nodeProtocol"] == NODE_PROTOCOL
+        && health["runtimeId"] == super::component_runtime()
         && health["dataRoot"] == super::node_data_dir().to_string_lossy().as_ref()
-}
-
-/// Older native controllers do not participate in foreground-preemption locks.
-/// They remain executable, but cannot safely share storage with this warmer.
-fn archive_catalog(
-    health: &Value,
-    reply: &Value,
-) -> Result<Option<Vec<crate::project_archives::Archive>>> {
-    if health["projectArchives"] != 1 {
-        return Ok(None);
-    }
-    reply
-        .get("projectArchives")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(Error::from)
 }
 
 async fn heartbeat(
@@ -426,16 +447,21 @@ async fn heartbeat(
         let started = super::boot_ms();
         let runner = std::env::var("RUNNER_URL").unwrap_or_default();
         let health = local_health(&controller, &runner).await;
+        if health["status"] == "ok"
+            && (health["runtimeId"] != super::component_runtime()
+                || health["nodeProtocol"] != NODE_PROTOCOL)
+        {
+            return Err(Error::conflict(
+                "Controller version mismatch; deploy all components at the same version.",
+            ));
+        }
         let ready = controller_ready(&health);
         let report = HeartbeatRequest {
             image_digest: std::env::var("CAIRN_NODE_IMAGE").ok(),
-            runtime_id: health["runtimeId"]
-                .as_str()
-                .map_or_else(runtime, str::to_owned),
+            runtime_id: super::component_runtime(),
             execution_ready: ready,
             data_root: &health["dataRoot"],
             capabilities: &health["capabilities"],
-            runtimes: &health["runtimes"],
             pool: &health["pool"],
             usage: &health["usage"],
             pressure: &health["pressure"],
@@ -446,6 +472,7 @@ async fn heartbeat(
             backend: &health["backend"],
             node_protocol: &health["nodeProtocol"],
             native_mode: &health["nativeMode"],
+            disk_growth: &health["diskGrowth"],
         };
         let request = client
             .post(
@@ -485,15 +512,17 @@ async fn heartbeat(
                 }
                 if ready {
                     if let Ok(guard) = archive_warmer.clone().try_lock_owned()
-                        && let Some(descriptors) = archive_catalog(&health, &value)?
+                        && let Some(catalog) = value.get("projectArchives")
                     {
+                        let descriptors: Vec<crate::project_archives::Archive> =
+                            serde_json::from_value(catalog.clone())?;
                         let (client, origin, token, stop) = (
                             client.clone(),
                             origin.clone(),
                             identity.token.clone(),
                             stop.clone(),
                         );
-                        let warm_bases = health["nativeProjectBases"] == 1;
+                        let warm_bases = health["backend"] == "native";
                         tokio::spawn(async move {
                             let _guard = guard;
                             let warming = descriptors.clone();
@@ -517,6 +546,18 @@ async fn heartbeat(
                         });
                     }
                     forward_leases(&controller, &runner, &value, started).await?;
+                    if health["diskGrowth"]["protocol"] == 1 && value["diskGrowth"]["protocol"] == 1
+                    {
+                        // The manager commits grants before this response. A lost
+                        // acknowledgement is retried with the same allowance.
+                        let _ = controller
+                            .post(format!("{}/disk-growth", runner.trim_end_matches('/')))
+                            .bearer_auth(runner_credential().await?)
+                            .json(&value["diskGrowth"])
+                            .timeout(Duration::from_secs(3))
+                            .send()
+                            .await;
+                    }
                     let budget = json!({ "slots": value["slots"], "limits": value["limits"] });
                     if health["budget"].is_object() && health["budget"] != budget {
                         let response = controller
@@ -582,6 +623,7 @@ mod capacity_tests {
         let mut health = json!({
             "status": "ok",
             "nodeProtocol": NODE_PROTOCOL,
+            "runtimeId": super::super::component_runtime(),
             "dataRoot": super::super::node_data_dir(),
             "pool": { "quarantined": false },
         });
@@ -607,21 +649,6 @@ mod capacity_tests {
 #[cfg(test)]
 mod origin_tests {
     use super::*;
-
-    #[test]
-    fn legacy_controllers_never_start_archive_warming() {
-        let legacy = serde_json::json!({ "status": "ok", "backend": "native", "nodeProtocol": 2 });
-        let incompatible_catalog =
-            serde_json::json!({ "projectArchives": ["unsupported archive descriptor"] });
-        assert!(
-            super::archive_catalog(&legacy, &incompatible_catalog)
-                .unwrap()
-                .is_none()
-        );
-        let current = serde_json::json!({ "projectArchives": 1 });
-        let reply = serde_json::json!({ "projectArchives": [] });
-        assert!(super::archive_catalog(&current, &reply).unwrap().is_some());
-    }
 
     #[test]
     fn only_the_recorded_manager_origin_relaxes_the_https_rule() {

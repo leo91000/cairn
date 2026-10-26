@@ -1,12 +1,15 @@
 //! Plugin API v2 end to end, through the built-in 1Password package: an ordinary
 //! package with a secret setting, agent grants, commands, a tool, instructions, a
 //! declared program, a view, actions and a test.
+use common::AgentFixture;
+use common::MissionFixture;
+
 mod common;
 
 use axum::{body::Body, http::StatusCode};
 use cairn_installation::{
     config::{MAIN_AGENT_ID, id},
-    plugins::{agents, connections, legacy, panels},
+    plugins::{agents, connections, panels},
     run_output,
     service::Service,
     validation::text,
@@ -44,7 +47,7 @@ async fn fixture() -> Fixture {
     write_program(&program, OP);
     s.plugins.use_program("onepassword", "op", program.clone());
     let task = s
-        .task(
+        .task_fixture(
             json!({ "name": "Probe", "agentId": MAIN_AGENT_ID, "prompt": "Hello" }),
             None,
         )
@@ -119,7 +122,10 @@ async fn service_accounts_are_instances_with_encrypted_tokens_and_live_grants() 
     // Nothing is granted by default, including Main agent.
     assert_eq!(run(&f, read.clone()).await, Err(403));
     assert_eq!(run(&f, command("accounts", &[])).await, Err(403));
-    let mut update = json!({ "name": "Production", "enabled": true, "agentIds": [MAIN_AGENT_ID] });
+    s.agent_fixture(json!({ "plugins": [account] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
+    let mut update = json!({ "name": "Production", "enabled": true });
     save(s, update.clone(), Some(&account)).await; // an omitted token is kept
     assert_eq!(
         run(&f, command("accounts", &[])).await.unwrap()["value"]["accounts"],
@@ -174,11 +180,15 @@ async fn service_accounts_are_instances_with_encrypted_tokens_and_live_grants() 
     save(s, update.clone(), Some(&account)).await;
     assert_eq!(run(&f, read.clone()).await, Err(403));
     update["enabled"] = json!(true);
-    update["agentIds"] = json!([]);
+    s.agent_fixture(json!({ "plugins": [] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
     save(s, update.clone(), Some(&account)).await;
     assert_eq!(run(&f, read.clone()).await, Err(403));
 
-    update["agentIds"] = json!([MAIN_AGENT_ID]);
+    s.agent_fixture(json!({ "plugins": [account] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
     update["secrets"] = json!({ "token": "ops_rotated" });
     save(s, update.clone(), Some(&account)).await;
     let secrets = s
@@ -191,11 +201,34 @@ async fn service_accounts_are_instances_with_encrypted_tokens_and_live_grants() 
     // The fake CLI only accepts the original token.
     assert_eq!(run(&f, read.clone()).await, Err(502));
 
-    let temporary = s.agent(json!({ "name": "Temporary" }), None).await.unwrap();
-    update["agentIds"] = json!([MAIN_AGENT_ID, temporary["id"]]);
+    let temporary = s
+        .agent_fixture(json!({ "name": "Temporary" }), None)
+        .await
+        .unwrap();
+    s.agent_fixture(
+        json!({ "plugins": [account] }),
+        Some(text(&temporary, "id")),
+    )
+    .await
+    .unwrap();
     update.as_object_mut().unwrap().remove("secrets");
     save(s, update.clone(), Some(&account)).await;
-    s.remove("agents", text(&temporary, "id")).await.unwrap();
+    cairn_installation::api::dispatch(
+        s,
+        &cairn_installation::http::Input {
+            method: "DELETE".into(),
+            path: format!("/api/agents/{}", text(&temporary, "id")),
+            query: std::collections::HashMap::default(),
+            headers: axum::http::HeaderMap::default(),
+            body: Value::Null,
+            identity: Some(cairn_installation::auth::InstallationIdentity::trusted(
+                cairn_installation::auth::InstallationRole::Owner,
+                "fixture-owner",
+            )),
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(
         s.get(connections::KIND, &account).await.unwrap()["agentIds"],
         json!([MAIN_AGENT_ID])
@@ -486,55 +519,6 @@ async fn owners_see_the_package_view_run_its_actions_and_test_it() {
             .unwrap_err()
             .message
             .contains("1Password request failed")
-    );
-}
-
-#[tokio::test]
-async fn legacy_service_accounts_move_into_instances_once() {
-    let f = fixture().await;
-    let s = &f.s;
-    let account = id();
-    s.store
-        .put(
-            "onepassword",
-            json!({
-                "id": account, "name": "Legacy", "enabled": true,
-                "agentIds": [MAIN_AGENT_ID], "updatedAt": 1,
-            }),
-        )
-        .await
-        .unwrap();
-    let encrypted = s
-        .vault
-        .encrypt(
-            &format!("onepassword:{account}"),
-            &json!({ "token": "ops_fixture" }),
-        )
-        .unwrap();
-    s.store
-        .set(
-            &format!("mcp-secret:onepassword:{account}"),
-            encrypted,
-            None,
-        )
-        .await
-        .unwrap();
-    legacy::migrate(s).await.unwrap();
-    legacy::migrate(s).await.unwrap();
-    assert!(s.store.list("onepassword").await.unwrap().is_empty());
-    let instance = s.get(connections::KIND, &account).await.unwrap();
-    assert_eq!(instance["pluginId"], "onepassword");
-    assert_eq!(instance["name"], "Legacy");
-    assert_eq!(instance["agentIds"], json!([MAIN_AGENT_ID]));
-    // Agents keep their account IDs and the token still reaches op.
-    assert_eq!(
-        run(
-            &f,
-            command("read", &["--account", &account, "op://vault/item/password"])
-        )
-        .await
-        .unwrap()["value"],
-        "secret-with-no-newline"
     );
 }
 

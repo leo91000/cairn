@@ -1,9 +1,13 @@
+use common::AgentFixture;
+use common::MissionFixture;
+use common::ProjectFixture;
+
 mod common;
 
 use axum::{body::Body, http::StatusCode};
 use cairn_installation::{
     auth::hex_digest, config::MAIN_AGENT_ID, mcps::channel, run_status::RunStatus,
-    service::Service, validation::parse,
+    service::Service, validation::text,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -18,7 +22,7 @@ async fn service(root: &TempDir) -> Arc<Service> {
 
 async fn active_run(s: &Service, agent: &Value) -> (Value, Value) {
     let task = s
-        .task(
+        .task_fixture(
             json!({
                 "name": "Inspect Cairn", "prompt": "Inspect runs", "agentId": agent["id"],
                 "worktree": false,
@@ -44,7 +48,7 @@ async fn active_run(s: &Service, agent: &Value) -> (Value, Value) {
 }
 
 async fn enabled_main(s: &Arc<Service>) -> Value {
-    s.agent(
+    s.agent_fixture(
         json!({ "name": "Main agent", "access": { "installation": true } }),
         Some(MAIN_AGENT_ID),
     )
@@ -69,7 +73,53 @@ async fn request(
     (status, common::read_json(response).await)
 }
 
+fn create_profile(mut settings: Value) -> Value {
+    let mut access = json!({ "backend": "firecracker", "nodes": [], "projects": [], "skills": [], "mcps": [], "mcpTools": {}, "installation": false, "delegation": false, "sandbox": "read-only" });
+    if settings["provider"] == "opencode" {
+        access["sandbox"] = "yolo".into();
+    }
+    if let Some(selected) = settings.get("access") {
+        cairn_installation::store::merge(&mut access, selected);
+    }
+    settings["access"] = access;
+    if settings.get("exclusiveNodes").is_none() {
+        settings["exclusiveNodes"] = json!([]);
+    }
+    if settings.get("plugins").is_none() {
+        settings["plugins"] = json!([]);
+    }
+    json!({ "settings": settings, "review": {} })
+}
+
+async fn replacement(s: &Service, args: Value) -> Value {
+    let current = s
+        .store
+        .agent(args["id"].as_str().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut settings = serde_json::to_value(&current.settings).unwrap();
+    let mut patch = args["agent"].clone();
+    let review = json!({ "nativeNodeReviews": patch.as_object_mut().unwrap().remove("nativeNodeReviews").unwrap_or_else(|| json!([])), "reapproveDelegations": patch.as_object_mut().unwrap().remove("reapproveDelegations").unwrap_or_else(|| json!([])) });
+    if let Some(access) = patch.get_mut("access") {
+        let mut complete = settings["access"].clone();
+        cairn_installation::store::merge(&mut complete, access);
+        *access = complete;
+    }
+    cairn_installation::store::merge(&mut settings, &patch);
+    json!({ "agentId": current.id, "revision": current.revision, "settings": settings, "review": review })
+}
+
 async fn call(s: &Arc<Service>, configuration: &Value, name: &str, args: Value) -> Value {
+    let args = if name == "save_agent" && args.get("settings").is_none() {
+        create_profile(args)
+    } else if name == "replace_agent" && args.get("settings").is_none() {
+        replacement(s, args).await
+    } else if name == "delete_agent" && args.get("id").is_some() {
+        json!({ "agentId": args["id"] })
+    } else {
+        args
+    };
     let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
         .as_str()
         .unwrap();
@@ -111,7 +161,7 @@ async fn enroll_management_node(app: &axum::Router, invitation: &Value) -> Value
         "code": invitation["code"],
         "name": "Desk",
         "protocol": 1,
-        "runtimeId": "fixture",
+        "runtimeId": "development",
         "capabilities": {
             "os": "linux",
             "arch": "x86_64",
@@ -132,6 +182,70 @@ async fn enroll_management_node(app: &axum::Router, invitation: &Value) -> Value
     let identity = common::read_json(response).await;
     assert_eq!(identity["nodeId"], invitation["nodeId"]);
     identity
+}
+
+#[tokio::test]
+async fn pending_recovery_can_be_inspected_and_cancelled_through_both_tool_interfaces() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let owner_token = common::relay_fixture::grant(&s, &["read", "run", "manage"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    for (endpoint, token) in [
+        ("/mcp", owner_token.as_str()),
+        ("/mcp-installation", agent_token),
+    ] {
+        for chat_retry in [true, false] {
+            let chat = s.chat_create(json!({})).await.unwrap();
+            s.chat_send(
+                chat["id"].as_str().unwrap(),
+                json!({ "text": "Keep this request", "id": uuid::Uuid::new_v4().to_string() }),
+            )
+            .await
+            .unwrap();
+            s.chat_tick(&std::collections::HashSet::default())
+                .await
+                .unwrap();
+            let chat = s.chat_detail(chat["id"].as_str().unwrap()).await.unwrap();
+            let run_id = chat["runId"].as_str().unwrap();
+            let retry = json!({
+                "attempt": 2,
+                "limit": 5,
+                "nextAttemptAt": cairn_installation::config::now() + 60_000,
+                "startedAt": cairn_installation::config::now(),
+                "deadlineAt": cairn_installation::config::now() + 600_000,
+                "cause": { "kind": "timeout", "message": "Temporary timeout", "startup": true },
+            });
+            s.store
+                .patch_run(run_id, json!({ "retry": retry }))
+                .await
+                .unwrap();
+            let (_, history) =
+                node_management_call(&app, endpoint, token, "get_run", json!({ "runId": run_id }))
+                    .await;
+            assert_eq!(result(&history)["run"]["retry"], retry);
+            let (name, args) = if chat_retry {
+                ("stop_chat", json!({ "chatId": chat["id"] }))
+            } else {
+                ("cancel_run", json!({ "runId": run_id }))
+            };
+            let (status, response) = node_management_call(&app, endpoint, token, name, args).await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            result(&response);
+            let stopped = s.store.run(run_id).await.unwrap();
+            assert_eq!(stopped["status"], RunStatus::Cancelled);
+            assert!(stopped["retry"].is_null());
+            let retained = s.chat_detail(chat["id"].as_str().unwrap()).await.unwrap();
+            assert_eq!(retained["messages"].as_array().unwrap().len(), 1);
+            if chat_retry {
+                assert_eq!(retained["paused"], true);
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -304,7 +418,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
     .await;
     assert_eq!(denied["result"]["isError"], true, "{denied}");
     assert!(denied["result"]["_meta"]["mcp/www_authenticate"].is_string());
-    s.agent(
+    s.agent_fixture(
         json!({ "name": "Main agent", "access": { "installation": false } }),
         Some(MAIN_AGENT_ID),
     )
@@ -436,7 +550,7 @@ async fn node_storage_controls_share_probes_persistence_and_permissions_across_b
     )
     .await;
     assert_eq!(denied["result"]["isError"], true, "{denied}");
-    s.agent(
+    s.agent_fixture(
         json!({ "name": "Main agent", "access": { "installation": false } }),
         Some(MAIN_AGENT_ID),
     )
@@ -480,21 +594,17 @@ async fn agent_catalog_accepts_current_providers_and_reasoning_through_native_mc
         &s,
         &configuration,
         "search",
-        json!({ "names": ["save_agent", "update_agent"], "detail": "schema" }),
+        json!({ "names": ["save_agent", "replace_agent"], "detail": "schema" }),
     )
     .await;
     let operations = result(&catalog)["operations"].as_array().unwrap();
     assert_eq!(operations.len(), 2);
-    for name in ["save_agent", "update_agent"] {
+    for name in ["save_agent", "replace_agent"] {
         let tool = operations.iter().find(|tool| tool["name"] == name).unwrap();
-        let schema = if name == "save_agent" {
-            &tool["inputSchema"]
-        } else {
-            &tool["inputSchema"]["properties"]["agent"]
-        };
+        let schema = &tool["inputSchema"]["definitions"]["AgentSettings"];
         assert_eq!(
-            schema["properties"]["provider"]["enum"],
-            json!(["codex", "claude", "opencode"])
+            schema["properties"]["provider"]["pattern"],
+            json!("^(codex|claude|opencode)$")
         );
         assert!(schema["properties"]["reasoning"].get("enum").is_none());
     }
@@ -533,7 +643,7 @@ async fn agent_catalog_accepts_current_providers_and_reasoning_through_native_mc
             }
         );
         assert_eq!(
-            s.get("agents", agent["id"].as_str().unwrap())
+            s.agent_snapshot(agent["id"].as_str().unwrap())
                 .await
                 .unwrap()["provider"],
             provider
@@ -556,31 +666,31 @@ async fn agent_catalog_accepts_current_providers_and_reasoning_through_native_mc
 }
 
 #[tokio::test]
-async fn agent_updates_preserve_omitted_settings_and_accept_new_engine_settings() {
+async fn agent_replacements_keep_explicit_settings_and_accept_new_engine_settings() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let main = enabled_main(&s).await;
     let (_, configuration) = active_run(&s, &main).await;
-    let saved = call(
-        &s,
-        &configuration,
-        "save_agent",
-        json!({
-            "name": "Restricted Claude",
-            "provider": "claude",
-            "reasoning": "max",
-            "model": "claude-opus-4-6",
-            "instructions": "Preserve these settings",
-            "timeoutMinutes": 37,
-            "access": { "nodes": [], "installation": true },
-        }),
-    )
-    .await;
-    let original = result(&saved);
+    let saved = s
+        .agent_fixture(
+            json!({
+                "name": "Restricted Claude",
+                "provider": "claude",
+                "reasoning": "max",
+                "model": "claude-opus-4-6",
+                "instructions": "Preserve these settings",
+                "timeoutMinutes": 37,
+                "access": { "nodes": [], "installation": true },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let original = &saved;
     let updated = call(
         &s,
         &configuration,
-        "update_agent",
+        "replace_agent",
         json!({
             "id": original["id"],
             "agent": { "description": "New description" },
@@ -602,7 +712,7 @@ async fn agent_updates_preserve_omitted_settings_and_accept_new_engine_settings(
     let updated = call(
         &s,
         &configuration,
-        "update_agent",
+        "replace_agent",
         json!({
             "id": original["id"],
             "agent": {
@@ -623,7 +733,7 @@ async fn agent_updates_preserve_omitted_settings_and_accept_new_engine_settings(
     let updated = call(
         &s,
         &configuration,
-        "update_agent",
+        "replace_agent",
         json!({
             "id": original["id"],
             "agent": { "reasoning": "" },
@@ -639,13 +749,13 @@ async fn agent_updates_preserve_omitted_settings_and_accept_new_engine_settings(
         json!({ "reasoning": "INVALID" }),
     ] {
         let before = s
-            .get("agents", original["id"].as_str().unwrap())
+            .agent_snapshot(original["id"].as_str().unwrap())
             .await
             .unwrap();
         let rejected = call(
             &s,
             &configuration,
-            "update_agent",
+            "replace_agent",
             json!({
                 "id": original["id"],
                 "agent": patch,
@@ -654,7 +764,7 @@ async fn agent_updates_preserve_omitted_settings_and_accept_new_engine_settings(
         .await;
         assert_eq!(rejected["result"]["isError"], true, "{rejected}");
         assert_eq!(
-            s.get("agents", original["id"].as_str().unwrap())
+            s.agent_snapshot(original["id"].as_str().unwrap())
                 .await
                 .unwrap(),
             before
@@ -663,10 +773,133 @@ async fn agent_updates_preserve_omitted_settings_and_accept_new_engine_settings(
 }
 
 #[tokio::test]
-async fn installation_access_is_opt_in_and_older_profile_updates_preserve_it() {
+async fn model_speeds_and_agent_speeds_match_public_mcp_and_installation_tools() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let config = cairn_installation::config::Config {
+        codex_bin: common::fixture("codex.mjs"),
+        ..common::config(root.path())
+    };
+    let s = Service::new(config).await.unwrap();
+    common::relay_fixture::claimed(&s).await.unwrap();
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+
+    let internal = call(&s, &configuration, "list_models", json!({})).await;
+    let public = public_call(&s, &["read"], "list_models", json!({ "provider": "codex" })).await;
+    assert_eq!(result(&internal), result(&public));
+    let fast = result(&public)["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["model"] == "fixture-fast")
+        .unwrap()
+        .clone();
+    assert_eq!(fast["serviceTiers"][0]["id"], "priority");
+    assert_eq!(fast["serviceTiers"][0]["name"], "Fast");
+    let denied = public_call(&s, &["run"], "list_models", json!({})).await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+
+    let saved = call(
+        &s,
+        &configuration,
+        "save_agent",
+        json!({ "name": "Fast reviewer", "speed": "priority" }),
+    )
+    .await;
+    let agent = result(&saved).clone();
+    assert_eq!(agent["speed"], "priority");
+    let kept = public_call(
+        &s,
+        &["manage"],
+        "replace_agent",
+        json!({ "id": agent["id"], "agent": { "description": "Keeps its speed" } }),
+    )
+    .await;
+    assert_eq!(result(&kept)["speed"], "priority");
+    let standard = call(
+        &s,
+        &configuration,
+        "replace_agent",
+        json!({ "id": agent["id"], "agent": { "speed": "standard" } }),
+    )
+    .await;
+    assert_eq!(result(&standard)["speed"], "standard");
+
+    // Speed belongs to Codex: other coding agents reject it, and switching drops it.
+    let rejected = public_call(
+        &s,
+        &["manage"],
+        "save_agent",
+        json!({ "name": "Claude", "provider": "claude", "speed": "priority" }),
+    )
+    .await;
+    assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+    let rejected = call(
+        &s,
+        &configuration,
+        "replace_agent",
+        json!({ "id": agent["id"], "agent": { "provider": "claude", "speed": "priority" } }),
+    )
+    .await;
+    assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+    let switched = call(
+        &s,
+        &configuration,
+        "replace_agent",
+        json!({ "id": agent["id"], "agent": { "provider": "claude", "reasoning": "max", "speed": "" } }),
+    )
+    .await;
+    assert_eq!(result(&switched)["provider"], "claude");
+    assert_eq!(result(&switched)["speed"], "");
+
+    // A queued message keeps its speed through edits that do not send one, on both tools.
+    let chat = s.chat_create(json!({})).await.unwrap();
+    let chat_id = chat["id"].as_str().unwrap();
+    s.chat_pause(chat_id, true).await.unwrap();
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let sent = public_call(
+        &s,
+        &["run"],
+        "send_chat_message",
+        json!({
+            "chatId": chat_id,
+            "message": { "id": message_id, "text": "Next", "provider": "codex", "speed": "priority" },
+        }),
+    )
+    .await;
+    assert_eq!(result(&sent)["speed"], "priority", "{sent}");
+    let edited = public_call(
+        &s,
+        &["run"],
+        "edit_chat_message",
+        json!({ "chatId": chat_id, "messageId": message_id, "message": { "text": "Reworded" } }),
+    )
+    .await;
+    assert_eq!(result(&edited)["speed"], "priority", "{edited}");
+    let edited = call(
+        &s,
+        &configuration,
+        "edit_chat_message",
+        json!({ "chatId": chat_id, "messageId": message_id, "message": { "text": "Again" } }),
+    )
+    .await;
+    assert_eq!(result(&edited)["speed"], "priority", "{edited}");
+    let standard = call(
+        &s,
+        &configuration,
+        "edit_chat_message",
+        json!({ "chatId": chat_id, "messageId": message_id, "message": { "text": "Again", "speed": "standard" } }),
+    )
+    .await;
+    assert_eq!(result(&standard)["speed"], "standard", "{standard}");
+}
+
+#[tokio::test]
+async fn installation_access_is_opt_in_and_complete_profile_replacements_preserve_it() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
-    let main = s.get("agents", MAIN_AGENT_ID).await.unwrap();
+    let main = s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
     let (_, disabled) = active_run(&s, &main).await;
     assert!(disabled["codexConfig"].get("cairn_installation").is_none());
     assert!(
@@ -687,7 +920,7 @@ async fn installation_access_is_opt_in_and_older_profile_updates_preserve_it() {
     );
     assert!(configuration.get("claudeMcps").is_none());
     let claude = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Claude", "provider": "claude",
                 "access": { "installation": true },
@@ -712,19 +945,13 @@ async fn installation_access_is_opt_in_and_older_profile_updates_preserve_it() {
             .contains(&json!(token))
     );
     let saved = s
-        .agent(
+        .agent_fixture(
             json!({ "name": "Older editor", "access": { "nodes": null } }),
             Some(MAIN_AGENT_ID),
         )
         .await
         .unwrap();
     assert_eq!(saved["access"]["installation"], true);
-    let update = parse(
-        "mcp:update_agent",
-        json!({ "id": MAIN_AGENT_ID, "agent": { "access": {} } }),
-    )
-    .unwrap();
-    assert!(update["agent"]["access"].get("installation").is_none());
     assert_eq!(
         request(&s, token, "tools/list", json!({})).await.0,
         StatusCode::OK
@@ -778,7 +1005,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     }
     let public: Value =
         serde_json::from_str(include_str!("../schemas/mcp-operations.json")).unwrap();
-    let public_names: std::collections::BTreeSet<_> = public
+    let mut public_names: std::collections::BTreeSet<_> = public
         .as_array()
         .unwrap()
         .iter()
@@ -788,6 +1015,32 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
+    public_names.insert(cairn_contracts::RESUME_RUN_ID);
+    public_names.extend([
+        "set_agent_avatar",
+        "list_agents",
+        "get_agent",
+        "save_agent",
+        "replace_agent",
+        "preview_agent",
+        "merge_agents",
+        "delete_agent",
+        "get_agent_avatar_configuration",
+        "generate_agent_avatar",
+        "list_tasks",
+        "get_task",
+        "create_task",
+        "replace_task",
+        "set_task_state",
+        "delete_task",
+        "preview_schedule",
+        "list_task_activity",
+        "list_projects",
+        "get_project",
+        "save_project",
+        "replace_project",
+        "delete_project",
+    ]);
     assert_eq!(installed_names, public_names);
     assert!(tools.iter().all(|tool| tool.get("_meta").is_none()));
     let deletion = tools
@@ -801,10 +1054,10 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         &s,
         &configuration,
         "create_task",
-        json!({
+        json!({ "settings": {
             "name": "Weekly audit", "prompt": "Audit", "agentId": MAIN_AGENT_ID,
             "cron": "0 9 * * 1", "timezone": "UTC", "worktree": false,
-        }),
+        } }),
     )
     .await;
     let task = result(&created);
@@ -812,7 +1065,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     assert_eq!(task["authorId"], "fixture-owner");
     let tasks = call(&s, &configuration, "list_tasks", json!({})).await;
     assert!(
-        result(&tasks)
+        result(&tasks)["tasks"]
             .as_array()
             .unwrap()
             .iter()
@@ -823,8 +1076,8 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     let updated = call(
         &s,
         &configuration,
-        "update_task",
-        json!({ "id": task["id"], "task": update }),
+        "replace_task",
+        json!({ "taskId": task["id"], "revision": task["revision"], "settings": mission_settings(&update) }),
     )
     .await;
     assert_eq!(result(&updated)["nextRun"], Value::Null);
@@ -852,8 +1105,26 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         s.store.run(queued_id.as_str().unwrap()).await.unwrap()["status"],
         RunStatus::Cancelled
     );
+    // The engine's own retries and usage limits read as the app shows them.
+    let engine =
+        json!({ "type": "engine.retry", "attempt": 2, "maxRetries": 10, "reason": "overloaded" });
+    s.store
+        .event(
+            run["id"].as_str().unwrap(),
+            "engine.retry",
+            "retry",
+            Some(engine.clone()),
+        )
+        .await
+        .unwrap();
     let history = call(&s, &configuration, "get_run", json!({ "runId": run["id"] })).await;
     assert_eq!(result(&history)["run"]["id"], run["id"]);
+    let events = result(&history)["events"].as_array().unwrap().clone();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "engine.retry" && event["payload"] == engine)
+    );
     let chunk = call(
         &s,
         &configuration,
@@ -871,7 +1142,7 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
     let main = enabled_main(&s).await;
     let (_, configuration) = active_run(&s, &main).await;
     let agent = s
-        .agent(json!({ "name": "Retired maintainer" }), None)
+        .agent_fixture(json!({ "name": "Retired maintainer" }), None)
         .await
         .unwrap();
     let id = agent["id"].as_str().unwrap();
@@ -883,7 +1154,7 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
         )
         .await
         .unwrap();
-    s.remove("tasks", run["taskId"].as_str().unwrap())
+    s.remove_mission_fixture(run["taskId"].as_str().unwrap())
         .await
         .unwrap();
     s.store
@@ -899,11 +1170,18 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
                 db.put(
                     "plugin-connections",
                     &json!({
-                        "id": "fixture-account",
+                        "id": "00000000-0000-4000-8000-000000000099",
                         "pluginId": "onepassword",
-                        "agentIds": [id, MAIN_AGENT_ID],
                     }),
                 )?;
+                for agent_id in [id.as_str(), MAIN_AGENT_ID] {
+                    let mut agent = db.agent(agent_id)?.unwrap();
+                    agent
+                        .settings
+                        .plugins
+                        .push("00000000-0000-4000-8000-000000000099".into());
+                    db.save_agent(&agent)?;
+                }
                 Ok(())
             }
         })
@@ -912,7 +1190,7 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
 
     let deleted = call(&s, &configuration, "delete_agent", json!({ "id": id })).await;
     assert_eq!(result(&deleted)["deleted"], true);
-    assert!(s.store.get("agents", id).await.unwrap().is_none());
+    assert!(s.store.agent_snapshot(id).await.unwrap().is_none());
     assert!(
         s.store
             .kv(&format!("agent-avatar:{id}"))
@@ -922,7 +1200,7 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
     );
     assert_eq!(
         s.store
-            .get("plugin-connections", "fixture-account")
+            .get("plugin-connections", "00000000-0000-4000-8000-000000000099")
             .await
             .unwrap()
             .unwrap()["agentIds"],
@@ -956,12 +1234,12 @@ async fn delete_agent_rejects_main_task_references_and_active_work() {
     );
 
     let agent = s
-        .agent(json!({ "name": "Assigned maintainer" }), None)
+        .agent_fixture(json!({ "name": "Assigned maintainer" }), None)
         .await
         .unwrap();
     let id = agent["id"].as_str().unwrap();
     let task = s
-        .task(
+        .task_fixture(
             json!({
                 "name": "Archived maintenance",
                 "prompt": "Maintain",
@@ -978,22 +1256,22 @@ async fn delete_agent_rejects_main_task_references_and_active_work() {
         assigned["result"]["content"][0]["text"],
         "This item is used by a task. Update or remove that task first."
     );
-    s.remove("tasks", task["id"].as_str().unwrap())
+    s.remove_mission_fixture(task["id"].as_str().unwrap())
         .await
         .unwrap();
 
     let (run, _) = active_run(&s, &agent).await;
     let task_id = run["taskId"].as_str().unwrap();
-    let mut task = s.get("tasks", task_id).await.unwrap();
+    let mut task = s.mission_snapshot_fixture(task_id).await.unwrap();
     task["agentId"] = MAIN_AGENT_ID.into();
-    s.task(task, Some(task_id)).await.unwrap();
+    s.task_fixture(task, Some(task_id)).await.unwrap();
     let busy = call(&s, &configuration, "delete_agent", json!({ "id": id })).await;
     assert_eq!(busy["result"]["isError"], true);
     assert_eq!(
         busy["result"]["content"][0]["text"],
         "This item has active work. Cancel or wait for the run first."
     );
-    assert!(s.store.get("agents", id).await.unwrap().is_some());
+    assert!(s.store.agent_snapshot(id).await.unwrap().is_some());
 }
 
 #[tokio::test]
@@ -1003,7 +1281,7 @@ async fn delete_agent_cannot_use_a_revoked_installation_grant() {
     let main = enabled_main(&s).await;
     let (run, configuration) = active_run(&s, &main).await;
     let agent = s
-        .agent(json!({ "name": "Keep this profile" }), None)
+        .agent_fixture(json!({ "name": "Keep this profile" }), None)
         .await
         .unwrap();
     s.mcps
@@ -1019,14 +1297,14 @@ async fn delete_agent_cannot_use_a_revoked_installation_grant() {
         "tools/call",
         json!({
             "name": "delete_agent",
-            "arguments": { "id": agent["id"] },
+            "arguments": { "agentId": agent["id"] },
         }),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(
         s.store
-            .get("agents", agent["id"].as_str().unwrap())
+            .agent_snapshot(agent["id"].as_str().unwrap())
             .await
             .unwrap()
             .is_some()
@@ -1040,7 +1318,7 @@ async fn merge_agents_cannot_use_a_revoked_installation_grant() {
     let main = enabled_main(&s).await;
     let (run, configuration) = active_run(&s, &main).await;
     let agent = s
-        .agent(json!({ "name": "Keep this profile" }), None)
+        .agent_fixture(json!({ "name": "Keep this profile" }), None)
         .await
         .unwrap();
     s.mcps
@@ -1065,7 +1343,7 @@ async fn merge_agents_cannot_use_a_revoked_installation_grant() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(
         s.store
-            .get("agents", agent["id"].as_str().unwrap())
+            .agent_snapshot(agent["id"].as_str().unwrap())
             .await
             .unwrap()
             .is_some()
@@ -1076,10 +1354,10 @@ async fn merge_agents_cannot_use_a_revoked_installation_grant() {
 async fn installation_access_manages_resources_and_other_agents_work() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
-    let main = s.get("agents", MAIN_AGENT_ID).await.unwrap();
+    let main = s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
     let (foreign, _) = active_run(&s, &main).await;
     let manager = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Manager",
                 "access": {
@@ -1087,7 +1365,6 @@ async fn installation_access_manages_resources_and_other_agents_work() {
                     "projects": [],
                     "skills": [],
                     "mcps": [],
-                    "github": false,
                     "sandbox": "read-only"
                 }
             }),
@@ -1108,7 +1385,7 @@ async fn installation_access_manages_resources_and_other_agents_work() {
     let updated = call(
         &s,
         &configuration,
-        "update_agent",
+        "replace_agent",
         json!({
             "id": agent["id"],
             "agent": { "description": "Updated through MCP" }
@@ -1118,7 +1395,7 @@ async fn installation_access_manages_resources_and_other_agents_work() {
     assert_eq!(result(&updated)["description"], "Updated through MCP");
     let agents = call(&s, &configuration, "list_agents", json!({})).await;
     assert!(
-        result(&agents)
+        result(&agents)["agents"]
             .as_array()
             .unwrap()
             .iter()
@@ -1132,16 +1409,14 @@ async fn installation_access_manages_resources_and_other_agents_work() {
         &configuration,
         "save_project",
         json!({
-            "name": "Managed project",
-            "path": project_path,
-            "sourceMode": "local"
+            "settings": { "name": "Managed project", "path": project_path, "sourceMode": "local" }
         }),
     )
     .await;
     let project_id = result(&project)["id"].clone();
     let projects = call(&s, &configuration, "list_projects", json!({})).await;
     assert!(
-        result(&projects)
+        result(&projects)["projects"]
             .as_array()
             .unwrap()
             .iter()
@@ -1206,12 +1481,12 @@ async fn installation_access_manages_resources_and_other_agents_work() {
         &s,
         &configuration,
         "create_task",
-        json!({
+        json!({ "settings": {
             "name": "Delegate",
             "prompt": "Inspect",
             "agentId": MAIN_AGENT_ID,
             "worktree": false
-        }),
+        } }),
     )
     .await;
     assert_eq!(result(&created)["agentId"], MAIN_AGENT_ID);
@@ -1219,17 +1494,17 @@ async fn installation_access_manages_resources_and_other_agents_work() {
         &s,
         &configuration,
         "create_task",
-        json!({
+        json!({ "settings": {
             "name": "Continue",
             "prompt": "Continue",
             "worktree": false
-        }),
+        } }),
     )
     .await;
     assert_eq!(result(&own_default)["agentId"], manager["id"]);
     let tasks = call(&s, &configuration, "list_tasks", json!({})).await;
     assert!(
-        result(&tasks)
+        result(&tasks)["tasks"]
             .as_array()
             .unwrap()
             .iter()
@@ -1252,10 +1527,11 @@ async fn installation_access_manages_resources_and_other_agents_work() {
     let updated = call(
         &s,
         &configuration,
-        "update_task",
+        "replace_task",
         json!({
-            "id": task["id"],
-            "task": task
+            "taskId": task["id"],
+            "revision": task["revision"],
+            "settings": mission_settings(&task)
         }),
     )
     .await;
@@ -1283,15 +1559,14 @@ async fn installation_access_can_save_global_and_project_skills() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let manager = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Skill author",
                 "access": {
                     "installation": true,
                     "projects": [],
                     "skills": [],
-                    "github": false
-                }
+                    }
             }),
             None,
         )
@@ -1301,7 +1576,7 @@ async fn installation_access_can_save_global_and_project_skills() {
     let project_path = root.path().join("project");
     std::fs::create_dir(&project_path).unwrap();
     let project = s
-        .project(
+        .project_fixture(
             json!({
                 "name": "Skill project",
                 "path": project_path,
@@ -1554,7 +1829,7 @@ async fn run_grants_enforce_revocation_completion_and_chat_turn_binding() {
         .patch_run(id, json!({ "chatExecution": null }))
         .await
         .unwrap();
-    s.agent(
+    s.agent_fixture(
         json!({ "name": "Main", "access": { "installation": false } }),
         Some(MAIN_AGENT_ID),
     )
@@ -1658,6 +1933,13 @@ async fn legacy_grants_do_not_acquire_installation_access_and_vm_channels_bind_t
 }
 
 async fn public_call(s: &Arc<Service>, scopes: &[&str], name: &str, args: Value) -> Value {
+    let args = if name == "save_agent" && args.get("settings").is_none() {
+        create_profile(args)
+    } else if name == "replace_agent" && args.get("settings").is_none() {
+        replacement(s, args).await
+    } else {
+        args
+    };
     let token = common::relay_fixture::grant(s, scopes).await;
     let app = common::relay_fixture::router(s.clone()).await.unwrap();
     let request = common::request("POST", "/mcp")
@@ -2022,9 +2304,9 @@ async fn chat_tools_preserve_scopes_caller_defaults_and_revocation() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
-                "name": "Delegated manager", "access": { "installation": true, "projects": [], "github": false },
+                "name": "Delegated manager", "access": { "installation": true, "projects": [] },
             }),
             None,
         )
@@ -2379,7 +2661,10 @@ async fn chat_recovery_tools_preserve_confirmation_and_retention_rules() {
     let (target, _) = active_run(&s, &main).await;
     let run_id = target["id"].as_str().unwrap();
     s.store
-        .patch_run(run_id, json!({ "status": RunStatus::Failed }))
+        .patch_run(
+            run_id,
+            json!({ "status": RunStatus::Failed, "restoredAt": 1 }),
+        )
         .await
         .unwrap();
     s.store
@@ -2392,7 +2677,6 @@ async fn chat_recovery_tools_preserve_confirmation_and_retention_rules() {
         .unwrap();
     let mut chat = s.chat_create(json!({})).await.unwrap();
     chat["runId"] = target["id"].clone();
-    chat["restoredAt"] = 1.into();
     let chat_id = chat["id"].as_str().unwrap().to_owned();
     s.store.put("chats", chat).await.unwrap();
     let denied = call(
@@ -2543,16 +2827,16 @@ async fn code_mode_checks_each_operations_scopes_and_revocation_without_rolling_
         "execute",
         json!({
             "code": r#"
-            await cairn.update_agent(input);
+            await cairn.replace_agent(input);
             return await cairn.list_chats({});
         "#,
-            "input": { "id": MAIN_AGENT_ID, "agent": { "access": access } },
+            "input": replacement(&s, json!({ "id": MAIN_AGENT_ID, "agent": { "access": access } })).await,
         }),
     )
     .await;
     assert_eq!(revoked["result"]["isError"], true);
     let agents = public_call(&s, &["read"], "list_agents", json!({})).await;
-    let main = result(&agents)
+    let main = result(&agents)["agents"]
         .as_array()
         .unwrap()
         .iter()
@@ -2635,7 +2919,7 @@ async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
     .unwrap();
     let account = account["id"].clone();
     let manager = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Manager",
                 "access": { "installation": true },
@@ -2651,7 +2935,7 @@ async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
     call(
         &s,
         &configuration,
-        "update_agent",
+        "replace_agent",
         json!({
             "id": manager["id"],
             "agent": { "description": "Edited", "plugins": [], "exclusiveNodes": [] }
@@ -2659,7 +2943,7 @@ async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
     )
     .await;
     let stored = s
-        .get("agents", manager["id"].as_str().unwrap())
+        .agent_snapshot(manager["id"].as_str().unwrap())
         .await
         .unwrap();
     assert_eq!(stored["plugins"], json!([account]));
@@ -2672,7 +2956,7 @@ async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
     )
     .await;
     // The published contract has no live grants: the request is refused or ignored.
-    let agents = s.store.list("agents").await.unwrap();
+    let agents = s.store.agent_snapshots().await.unwrap();
     for agent in agents.iter().filter(|agent| agent["id"] != manager["id"]) {
         assert_eq!(agent["plugins"], json!([]), "{created}");
     }
@@ -2702,7 +2986,7 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
     let chat = cairn_installation::config::id();
     let run = cairn_installation::config::id();
     let node = cairn_installation::config::id();
-    s.store.put("nodes", json!({ "id": node, "runtimeId": "fixture", "capabilities": { "backend": "native" }, "nativeEnabled": true, "nativeAccounts": [] })).await.unwrap();
+    s.store.put("nodes", json!({ "id": node, "runtimeId": "development", "capabilities": { "backend": "native" }, "nativeEnabled": true, "nativeAccounts": [] })).await.unwrap();
     s.store
         .set(
             "native-authority",
@@ -2713,7 +2997,7 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
         .unwrap();
     // Neither caller has a traced native host grant. Management access alone
     // must not allow the migration to manufacture that authority.
-    let profile = s.agent(json!({ "name": "Native destination", "access": { "backend": "native", "nodes": [node] } }), None).await.unwrap();
+    let profile = s.agent_fixture(json!({ "name": "Native destination", "access": { "backend": "native", "nodes": [node] } }), None).await.unwrap();
     let mut previous = profile.clone();
     previous["access"]["backend"] = "firecracker".into();
     common::add_run(&s.store, &json!({ "id": run, "taskId": "fixture", "status": "succeeded", "createdAt": 0, "snapshot": { "agent": previous } })).await;
@@ -2766,7 +3050,7 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
     .await;
     assert_eq!(denied["result"]["isError"], true);
     assert!(denied["result"]["_meta"]["mcp/www_authenticate"].is_string());
-    s.agent(
+    s.agent_fixture(
         json!({ "name": "Main agent", "access": { "installation": false } }),
         Some(MAIN_AGENT_ID),
     )
@@ -2845,7 +3129,7 @@ async fn waiting_missions_are_visible_and_cancellable_through_both_installation_
 }
 
 #[tokio::test]
-async fn owner_mcp_can_review_one_wildcard_administrator_node_without_broadening_other_admission() {
+async fn neither_agent_interface_can_review_an_administrator_node() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let main = enabled_main(&s).await;
@@ -2856,7 +3140,7 @@ async fn owner_mcp_can_review_one_wildcard_administrator_node_without_broadening
     let owner_token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
     let app = common::relay_fixture::router(s.clone()).await.unwrap();
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({ "name": "Wildcard native", "access": { "backend": "native", "nodes": null } }),
             None,
         )
@@ -2872,12 +3156,16 @@ async fn owner_mcp_can_review_one_wildcard_administrator_node_without_broadening
         })).await.unwrap();
         nodes.push(node);
     }
-    let args = json!({ "id": agent["id"], "agent": { "nativeNodeReviews": [nodes[0]] } });
+    let args = replacement(
+        &s,
+        json!({ "id": agent["id"], "agent": { "nativeNodeReviews": [nodes[0]] } }),
+    )
+    .await;
     let (_, denied) = node_management_call(
         &app,
         "/mcp-installation",
         agent_token,
-        "update_agent",
+        "replace_agent",
         args.clone(),
     )
     .await;
@@ -2889,22 +3177,10 @@ async fn owner_mcp_can_review_one_wildcard_administrator_node_without_broadening
             .is_empty()
     );
     let (_, response) =
-        node_management_call(&app, "/mcp", &owner_token, "update_agent", args).await;
-    let saved = result(&response);
-    assert_eq!(saved["id"], agent["id"], "{response}");
-    assert!(
-        saved["access"]["nodes"].is_null(),
-        "Scoped review must preserve wildcard placement"
-    );
-    assert!(saved["nativeNodeReviews"].is_null());
+        node_management_call(&app, "/mcp", &owner_token, "replace_agent", args).await;
+    assert_eq!(response["result"]["isError"], true, "{response}");
     assert!(
         s.get("nodes", &nodes[0]).await.unwrap()["nativeReviewedAgents"]
-            .as_array()
-            .unwrap()
-            .contains(&agent["id"])
-    );
-    assert!(
-        s.get("nodes", &nodes[1]).await.unwrap()["nativeReviewedAgents"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -2988,4 +3264,507 @@ async fn chat_compaction_matches_public_mcp_and_installation_tools() {
             run["chatExecution"]
         );
     }
+}
+
+async fn saved_mission(s: &Service, agent: &Value) -> Value {
+    let (run, _) = active_run(s, agent).await;
+    let id = text(&run, "id");
+    common::set_checkpoint(
+        &s.store,
+        id,
+        json!({
+            "launched": true,
+            "prepared": { "cwd": "/saved/workspace", "marker": "retained" },
+            "generation": "retained-generation",
+            "remainingMs": 0,
+        }),
+    )
+    .await;
+    s.store
+        .patch_run(
+            id,
+            json!({
+                "status": "failed",
+                "sessionId": "saved-provider-session",
+                "workspace": "/saved/workspace",
+                "resumeAvailable": true,
+                "retry": { "attempt": 5 },
+            }),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn resume_run_is_one_capability_on_http_public_and_installation() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let public = common::relay_fixture::grant(&s, &["run"]).await;
+    let read = common::relay_fixture::grant(&s, &["read"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let owner = common::RelayContext::new(&common::relay_fixture::context(&s).await);
+    let member =
+        common::RelayContext::new(&common::relay_fixture::member_context(&s, "other-member").await);
+    let agent_token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    for surface in ["owner", "member", "public", "installation"] {
+        let before = saved_mission(&s, &main).await;
+        let id = text(&before, "id");
+        let (_, denied) =
+            node_management_call(&app, "/mcp", &read, "resume_run", json!({ "runId": id })).await;
+        assert_eq!(denied["result"]["isError"], true);
+        assert!(denied["result"]["_meta"]["mcp/www_authenticate"].is_string());
+        assert_eq!(s.store.run(id).await.unwrap(), before);
+        let output = if matches!(surface, "owner" | "member") {
+            let context = if surface == "owner" { &owner } else { &member };
+            let request = context
+                .authorize(common::request("POST", &format!("/api/runs/{id}/resume")))
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+            let response = common::send(&app, request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            common::read_json(response).await
+        } else {
+            let (endpoint, token) = if surface == "public" {
+                ("/mcp", public.as_str())
+            } else {
+                ("/mcp-installation", agent_token)
+            };
+            let (_, response) =
+                node_management_call(&app, endpoint, token, "resume_run", json!({ "runId": id }))
+                    .await;
+            result(&response).clone()
+        };
+        assert_eq!(output, json!({ "runId": id }));
+        let after = s.store.run(id).await.unwrap();
+        for field in ["id", "taskId", "workspace", "sessionId", "snapshot"] {
+            assert_eq!(after[field], before[field], "{surface}: {field}");
+        }
+        assert_eq!(after["status"], "queued");
+        assert!(after["retry"].is_null());
+        let checkpoint = s
+            .store
+            .kv(&format!("run-checkpoint:{id}"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            checkpoint["prepared"],
+            json!({ "cwd": "/saved/workspace", "marker": "retained" })
+        );
+        assert_eq!(checkpoint["generation"], "retained-generation");
+        assert_ne!(checkpoint["remainingMs"], 0);
+        let repeated = call(&s, &configuration, "resume_run", json!({ "runId": id })).await;
+        assert_eq!(repeated["result"]["isError"], true);
+        s.worker.cancel(&s, id).await.unwrap();
+        assert!(s.store.run(id).await.unwrap()["cancelRequestedAt"].is_number());
+    }
+    let missing = cairn_installation::config::id();
+    let request = owner
+        .authorize(common::request(
+            "POST",
+            &format!("/api/runs/{missing}/resume"),
+        ))
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let response = common::send(&app, request).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let error: cairn_contracts::ResumeRunError =
+        serde_json::from_value(common::read_json(response).await).unwrap();
+    assert_eq!(error.error, "Run not found");
+    for run_id in ["not-a-uuid".to_owned(), cairn_installation::config::id()] {
+        let response = call(&s, &configuration, "resume_run", json!({ "runId": run_id })).await;
+        assert_eq!(response["result"]["isError"], true);
+    }
+    let page = call(
+        &s,
+        &configuration,
+        "search",
+        json!({ "query": "resume_run", "detail": "schema" }),
+    )
+    .await;
+    let operation = result(&page)["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "resume_run")
+        .unwrap();
+    assert_eq!(
+        operation["inputSchema"]["properties"]["runId"]["format"],
+        "uuid"
+    );
+    assert_eq!(
+        operation["outputSchema"]["properties"]["runId"]["format"],
+        "uuid"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_resume_run_publishes_once_and_a_revoked_grant_cannot_resume() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let target = saved_mission(&s, &main).await;
+    let id = text(&target, "id");
+    let args = json!({ "runId": id });
+    let (one, two) = tokio::join!(
+        call(&s, &configuration, "resume_run", args.clone()),
+        call(&s, &configuration, "resume_run", args),
+    );
+    let successes = [&one, &two]
+        .iter()
+        .filter(|response| response["result"]["isError"] != true)
+        .count();
+    assert_eq!(successes, 1, "{one} {two}");
+    let run_id = id.to_owned();
+    let events = s
+        .store
+        .read(move |db| db.events(&run_id, 0, 100))
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["text"] == "Resume requested")
+            .count(),
+        1
+    );
+    s.worker.cancel(&s, id).await.unwrap();
+    s.agent_fixture(
+        json!({ "name": "Main agent", "access": { "installation": false } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    let (status, _) = request(
+        &s,
+        token,
+        "tools/call",
+        common::mcp_arguments("resume_run", &json!({ "runId": id })),
+    )
+    .await;
+    assert!(matches!(
+        status,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ));
+    assert!(s.store.run(id).await.unwrap()["cancelRequestedAt"].is_number());
+}
+
+#[tokio::test]
+async fn beacon_account_methods_are_absent_from_both_tools() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    let public = common::relay_fixture::grant(&s, &["read", "write", "run", "manage"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    for (endpoint, bearer) in [("/mcp", public.as_str()), ("/mcp-installation", token)] {
+        let (_, discovery) = node_management_call(
+            &app,
+            endpoint,
+            bearer,
+            "search",
+            json!({ "names": ["list_account_methods"], "detail": "schema" }),
+        )
+        .await;
+        let operations = result(&discovery)["operations"].as_array().unwrap();
+        assert!(operations.is_empty(), "{discovery}");
+
+        let (_, denied) =
+            node_management_call(&app, endpoint, bearer, "list_account_methods", json!({})).await;
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+        assert!(denied.to_string().contains("Unknown operation"), "{denied}");
+    }
+}
+
+#[tokio::test]
+async fn typed_project_lifecycle_has_the_same_contract_on_both_tools() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let owner_token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+    let read_token = common::relay_fixture::grant(&s, &["read"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    for (endpoint, token) in [
+        ("/mcp", owner_token.as_str()),
+        ("/mcp-installation", agent_token),
+    ] {
+        let input = json!({ "creationId": cairn_installation::config::id(), "settings": { "name": "Typed project", "path": root.path() } });
+        let (_, created) =
+            node_management_call(&app, endpoint, token, "save_project", input.clone()).await;
+        let first = result(&created).clone();
+        let project_id = first["id"].clone();
+        let (_, read) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "get_project",
+            json!({ "projectId": project_id }),
+        )
+        .await;
+        assert_eq!(result(&read), &first);
+        let replacement = json!({ "projectId": project_id, "revision": first["revision"], "settings": { "name": "Replaced", "path": root.path(), "sourceMode": "local" } });
+        let (_, replaced) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "replace_project",
+            replacement.clone(),
+        )
+        .await;
+        assert_eq!(result(&replaced)["name"], "Replaced");
+        let (_, stale) =
+            node_management_call(&app, endpoint, token, "replace_project", replacement).await;
+        assert_eq!(stale["result"]["isError"], true, "{stale}");
+        let (_, replay) = node_management_call(&app, endpoint, token, "save_project", input).await;
+        assert_eq!(result(&replay), result(&replaced));
+        let (_, listing) =
+            node_management_call(&app, endpoint, token, "list_projects", json!({})).await;
+        assert!(
+            result(&listing)["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p == result(&replaced))
+        );
+        let (_, denied) = node_management_call(
+            &app,
+            "/mcp",
+            &read_token,
+            "delete_project",
+            json!({ "projectId": project_id }),
+        )
+        .await;
+        assert_eq!(denied["result"]["isError"], true);
+        let (_, deleted) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "delete_project",
+            json!({ "projectId": project_id }),
+        )
+        .await;
+        assert_eq!(result(&deleted)["deleted"], true);
+        let (_, missing) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "get_project",
+            json!({ "projectId": project_id }),
+        )
+        .await;
+        assert_eq!(missing["result"]["isError"], true);
+    }
+}
+
+#[tokio::test]
+async fn typed_agent_profiles_preview_and_avatars_match_on_both_tools() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let connection = s.mcps.save(&s, json!({
+        "name": "Selected tools", "transport": "http", "url": "http://127.0.0.1:9/mcp", "allowPrivateNetwork": true,
+    }), None).await.unwrap();
+    let connection_id = connection["id"].as_str().unwrap();
+    for installation in [false, true] {
+        let invoke = |name, args| {
+            let configuration = &configuration;
+            let s = &s;
+            let token = &token;
+            let app = &app;
+            async move {
+                if installation {
+                    call(s, configuration, name, args).await
+                } else {
+                    let (status, response) =
+                        node_management_call(app, "/mcp", token, name, args).await;
+                    assert_eq!(status, StatusCode::OK);
+                    response
+                }
+            }
+        };
+        let malformed: Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/agent-contracts.json"))
+                .unwrap();
+        for command in malformed["invalidCreates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .skip(7)
+        {
+            let rejected = invoke("save_agent", command.clone()).await;
+            assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+        }
+        let command = create_profile(json!({ "name": "Typed profile" }));
+        let created = invoke("save_agent", command).await;
+        let created: cairn_contracts::Agent =
+            serde_json::from_value(result(&created).clone()).unwrap();
+        let settings = created.settings.clone();
+        let replacing = cairn_contracts::ReplaceAgentInput {
+            agent_id: created.id,
+            revision: created.revision.clone(),
+            settings: settings.clone(),
+            review: cairn_contracts::AgentReview::default(),
+        };
+        // Creation starts avatar work independently. Settle it before observing preview writes.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let profile = s
+                    .store
+                    .agent(&created.id.to_string())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if profile
+                    .avatar
+                    .as_ref()
+                    .is_none_or(|avatar| avatar.status != "generating")
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let before = s.store.revision();
+        let preview = invoke("preview_agent", serde_json::to_value(&replacing).unwrap()).await;
+        let preview: cairn_contracts::AgentPreview =
+            serde_json::from_value(result(&preview).clone()).unwrap();
+        assert_eq!(preview.runs.queued + preview.runs.running, 0);
+        assert!(preview.delegations.is_empty());
+        assert_eq!(
+            s.store.revision(),
+            before,
+            "Preview must not write or notify"
+        );
+        let replaced = invoke("replace_agent", serde_json::to_value(&replacing).unwrap()).await;
+        let replaced: cairn_contracts::Agent =
+            serde_json::from_value(result(&replaced).clone()).unwrap();
+        assert_ne!(created.revision, replaced.revision);
+        let stale = invoke("replace_agent", serde_json::to_value(&replacing).unwrap()).await;
+        assert_eq!(stale["result"]["isError"], true);
+        let mut expanded = replacing.clone();
+        expanded.revision = replaced.revision.clone();
+        expanded.settings.access.projects = None;
+        let denied = invoke("replace_agent", serde_json::to_value(expanded).unwrap()).await;
+        assert_eq!(
+            denied["result"]["isError"], true,
+            "An agent cannot expand permissions"
+        );
+        assert_eq!(
+            s.store
+                .agent(&created.id.to_string())
+                .await
+                .unwrap()
+                .unwrap(),
+            replaced
+        );
+        let configured = invoke("get_agent_avatar_configuration", json!({})).await;
+        assert_eq!(result(&configured), &json!({ "configured": false }));
+        let unavailable = invoke("generate_agent_avatar", json!({ "agentId": created.id })).await;
+        assert_eq!(unavailable["result"]["isError"], true);
+        let mut image = include_bytes!("../../../tests/fixtures/artifacts/thumbnail.png").to_vec();
+        image.resize(200_000, 0); // A valid image beyond the ordinary small-command body limit.
+        let uploaded = invoke(
+            "set_agent_avatar",
+            json!({ "agentId": created.id, "data": STANDARD.encode(image) }),
+        )
+        .await;
+        let uploaded: cairn_contracts::Agent =
+            serde_json::from_value(result(&uploaded).clone()).unwrap();
+        assert_eq!(uploaded.avatar.as_ref().unwrap().status, "ready");
+        assert_eq!(
+            uploaded.revision, replaced.revision,
+            "Portrait completion preserves the settings revision"
+        );
+        let read = invoke("get_agent", json!({ "agentId": created.id })).await;
+        assert_eq!(result(&read), &serde_json::to_value(&uploaded).unwrap());
+        // The owner grants a restricted connection. Agents may remove it, but cannot
+        // turn its selected tools into unrestricted tools while retaining the connection.
+        let granted = s
+            .agent_fixture(
+                json!({ "access": {
+            "mcps": [connection_id], "mcpTools": { connection_id: ["read"] },
+        } }),
+                Some(&created.id.to_string()),
+            )
+            .await
+            .unwrap();
+        let granted: cairn_contracts::Agent = serde_json::from_value(granted).unwrap();
+        let mut reduced = cairn_contracts::ReplaceAgentInput {
+            agent_id: granted.id,
+            revision: granted.revision.clone(),
+            settings: granted.settings,
+            review: cairn_contracts::AgentReview::default(),
+        };
+        reduced.settings.access.mcp_tools.clear();
+        let expanded = invoke("replace_agent", serde_json::to_value(&reduced).unwrap()).await;
+        assert_eq!(expanded["result"]["isError"], true, "{expanded}");
+        assert_eq!(
+            s.store
+                .agent(&created.id.to_string())
+                .await
+                .unwrap()
+                .unwrap()
+                .revision,
+            reduced.revision
+        );
+        reduced.settings.access.mcps = Some(Vec::new());
+        let removed = invoke("replace_agent", serde_json::to_value(reduced).unwrap()).await;
+        assert_eq!(result(&removed)["access"]["mcps"], json!([]));
+        assert_eq!(result(&removed)["access"]["mcpTools"], json!({}));
+
+        let deleted = invoke("delete_agent", json!({ "agentId": created.id })).await;
+        assert_eq!(result(&deleted), &json!({ "deleted": true }));
+        assert!(
+            s.store
+                .agent(&created.id.to_string())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            s.store
+                .kv(&format!("agent-avatar:{}", created.id))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+fn mission_settings(mission: &Value) -> Value {
+    let mut settings = mission.clone();
+    settings.as_object_mut().unwrap().retain(|key, _| {
+        [
+            "name",
+            "prompt",
+            "agentId",
+            "projectId",
+            "skills",
+            "tags",
+            "cron",
+            "timezone",
+            "enabled",
+            "archived",
+            "worktree",
+        ]
+        .contains(&key.as_str())
+    });
+    settings
 }

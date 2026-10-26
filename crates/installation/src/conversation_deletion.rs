@@ -172,10 +172,8 @@ async fn detach_worktrees(s: &Service, chat: &Value) -> Result<()> {
         s.store.run(run_id).await?
     };
     let root = s.config.data_dir.join("runs").join(run_id);
-    let mut workspaces = array(&chat["legacyWorkspaces"]);
-    workspaces.extend(array(&run["workspaces"]));
-    let mut projects = array(&chat["legacyProjects"]);
-    projects.extend(crate::service::run_projects(&run));
+    let workspaces = array(&run["workspaces"]);
+    let projects = crate::service::run_projects(&run);
     for workspace in workspaces.iter().filter(|w| w["kind"] == "worktree") {
         let target = Path::new(text(workspace, "path"));
         if !target.is_dir() {
@@ -234,6 +232,7 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
     }
     for key in [
         format!("run-checkpoint:{run}"),
+        format!("turn-speed:{run}"),
         format!("chat-error:{cid}"),
         format!("chat-title-pending:{cid}"),
         format!("chat-title-checked:{cid}"),
@@ -267,4 +266,29 @@ pub async fn purge(s: &Service, chat: Value) -> Result<()> {
     crate::nodes::publication::purge(s, &run).await?;
     files(s, &chat).await?;
     s.store.transaction(move |db| forget(db, &cid, &run)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn forgetting_a_conversation_removes_its_run_records() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.put("chats", &json!({ "id": "chat", "runId": "run" }))?;
+                for key in ["run-checkpoint:run", "turn-speed:run", "chat-error:chat"] {
+                    db.set(key, &json!({ "messageId": "message" }), None)?;
+                }
+                forget(db, "chat", "run")?;
+                for key in ["run-checkpoint:run", "turn-speed:run", "chat-error:chat"] {
+                    assert!(db.kv(key)?.is_none(), "{key}");
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 }

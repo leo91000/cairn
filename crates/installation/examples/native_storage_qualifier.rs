@@ -1,5 +1,9 @@
 //! Test-only manager for the disposable native-runtime/S3 qualification.
 //! JSONL stays on private pipes: responses include synthetic scoped read grants.
+#[path = "../tests/common/agent_fixture.rs"]
+mod agent_fixture;
+
+use agent_fixture::{AgentFixture, StoreAgentFixture};
 use cairn_installation::{
     config::{Config, id, now},
     error::{Error, Result},
@@ -33,13 +37,13 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
     match command["op"].as_str().unwrap_or("") {
         "create" => {
             cairn_installation::validation::uuid(run_id)?;
-            let mut agent = s.agent(json!({ "name": "Fixture" }), None).await?;
+            let mut agent = s.agent_fixture(json!({ "name": "Fixture" }), None).await?;
             // The reserved local ID is a VM runner in production. Only this
             // disposable manager seeds it as native to route through the private
             // fixture bridge; do not weaken the real agent-save prohibition.
             agent["access"]["backend"] = "native".into();
             agent["access"]["nodes"] = json!([nodes::LOCAL_NODE_ID]);
-            s.store.put("agents", agent.clone()).await?;
+            s.store.put_agent_fixture(agent.clone()).await?;
             let run = json!({
                 "id": run_id, "taskId": id(), "projectId": "", "status": "succeeded", "createdAt": now(),
                 "isolated": true, "nodeId": nodes::LOCAL_NODE_ID, "executionBackend": "native",
@@ -191,7 +195,7 @@ async fn main() -> Result<()> {
     tokio::fs::write(&wrapper, script).await?;
     tokio::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).await?;
     tokio::fs::write(
-        data.join("archive-s3.json"),
+        data.join("storage-s3.json"),
         serde_json::to_vec(&json!({ "bucket": "cairn-node-test", "awsBinary": wrapper }))?,
     )
     .await?;
@@ -216,7 +220,14 @@ async fn main() -> Result<()> {
     s.store.put("nodes", json!({
         "id": nodes::LOCAL_NODE_ID, "local": true, "name": "Disposable fixture", "accepting": true,
         "nativeEnabled": true, "nativeAccounts": [TRUSTED], "lastSeen": now(),
-        "capabilities": { "backend": "native", "ublk": true, "os": "linux", "arch": "x86_64" },
+        "capabilities": {
+            "backend": "native",
+            "ublk": true,
+            "nativeModeProtocol": 1,
+            "os": "linux",
+            "arch": "x86_64",
+        },
+        "nativeModeObserved": { "mode": "protected", "generation": null, "status": "applied" },
         "storage": { "reserveMiB": 64, "reservePercent": 1, "memoryCacheMiB": 4, "cacheMiB": 128 }
     })).await?;
     let requests = Arc::new(AtomicU64::new(0));

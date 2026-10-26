@@ -1,3 +1,5 @@
+use common::MissionFixture;
+
 mod common;
 
 use cairn_installation::{
@@ -13,7 +15,7 @@ async fn fixture() -> (tempfile::TempDir, std::sync::Arc<Service>, Value, Value)
     common::managed_codex_home(&root.path().join("home"));
     let service = Service::new(common::config(root.path())).await.unwrap();
     let task = service
-        .task(
+        .task_fixture(
             json!({
                 "name": "Review a deployment",
                 "prompt": "Check the deployment",
@@ -25,6 +27,9 @@ async fn fixture() -> (tempfile::TempDir, std::sync::Arc<Service>, Value, Value)
         .await
         .unwrap();
     let mut run = service.snapshot(task.clone(), "manual").await.unwrap();
+    run["nativeProvenanceUnknown"] = true.into();
+    run["nativePrincipals"] = json!([]);
+    run["nativeAuthorityNodes"] = json!([]);
     run["status"] = "succeeded".into();
     run["sessionId"] = "saved-session".into();
     run["summary"] = "Deployment reviewed".into();
@@ -57,7 +62,13 @@ async fn mission_conversion_preserves_history_session_workspace_and_schedule() {
     assert_eq!(service.chat_list().await.unwrap().len(), 1);
     assert_eq!(chat["title"], task["name"]);
     assert_eq!(chat["runId"], original["id"]);
-    assert_eq!(service.get("tasks", text(&task, "id")).await.unwrap(), task);
+    assert_eq!(
+        service
+            .mission_snapshot_fixture(text(&task, "id"))
+            .await
+            .unwrap(),
+        task
+    );
     assert_eq!(service.store.kv(&checkpoint_key).await.unwrap(), checkpoint);
     let converted = service.store.run(run_id).await.unwrap();
     assert_eq!(converted["taskId"], chat["id"]);
@@ -97,10 +108,14 @@ async fn mission_conversion_preserves_history_session_workspace_and_schedule() {
     service.chat_tick(&HashSet::new()).await.unwrap();
     let continued = service.store.run(run_id).await.unwrap();
     assert_eq!(continued["status"], "queued");
-    assert_eq!(
-        continued["chatExecution"]["text"],
-        "What should I monitor next?"
+    // Codex keeps the unattended instructions the mission thread started with.
+    let turn = text(&continued["chatExecution"], "text");
+    assert!(
+        turn.contains(cairn_installation::run_output::INTERACTIVE),
+        "{turn}"
     );
+    assert!(turn.ends_with("\n\nWhat should I monitor next?"), "{turn}");
+    assert_eq!(continued["sourceSessionId"], "saved-session");
     assert_eq!(continued["sessionId"], "saved-session");
     assert_eq!(continued["workspace"], "/saved/workspace");
     assert_eq!(continued["snapshot"]["task"]["id"], chat["id"]);
@@ -149,7 +164,13 @@ async fn mission_conversion_keeps_delegated_work_attached_to_its_requester() {
         service.store.run(text(&unrelated, "id")).await.unwrap(),
         unrelated
     );
-    assert_eq!(service.get("tasks", text(&task, "id")).await.unwrap(), task);
+    assert_eq!(
+        service
+            .mission_snapshot_fixture(text(&task, "id"))
+            .await
+            .unwrap(),
+        task
+    );
 }
 
 #[tokio::test]

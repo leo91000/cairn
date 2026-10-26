@@ -76,7 +76,26 @@ class AccountsJourneyTest {
                                     "/api/installations/fixture/api/overview",
                                     "/api/installations/fixture/api/codex/models",
                                     "/api/installations/fixture/api/claude/models" -> "{}"
-                                    else -> "[]"
+                                    else ->
+                                        if (
+                                            request.requestUrl
+                                                ?.encodedPath
+                                                ?.endsWith("/api/projects") == true
+                                        )
+                                            """{"projects":[]}"""
+                                        else if (
+                                            request.requestUrl
+                                                ?.encodedPath
+                                                ?.endsWith("/api/agents") == true
+                                        )
+                                            """{"agents":[]}"""
+                                        else if (
+                                            request.requestUrl
+                                                ?.encodedPath
+                                                ?.endsWith("/api/tasks") == true
+                                        )
+                                            """{"tasks":[]}"""
+                                        else "[]"
                                 }
                         return MockResponse().setBody(result)
                     }
@@ -269,10 +288,8 @@ class AccountsJourneyTest {
     }
 
     @Test
-    fun `old agents default to Codex and the Claude provider survives serialization`() {
-        val old = wireJson.decodeFromString<Agent>("""{"name":"Existing"}""")
-        assertEquals("codex", old.provider)
-        val claude = old.copy(provider = "claude", model = "sonnet", reasoning = "high")
+    fun `the generated Claude profile survives serialization`() {
+        val claude = newAgent().copy(provider = "claude", model = "sonnet", reasoning = "high")
         assertEquals(claude, wireJson.decodeFromString<Agent>(wireJson.encodeToString(claude)))
     }
 

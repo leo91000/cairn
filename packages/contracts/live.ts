@@ -12,7 +12,7 @@ export interface LiveState {
 export interface LiveBatch {
   oldest?: number
   hasOlder?: boolean
-  /** Append-only history identity and retention revision; absent on older servers. */
+  /** Append-only history identity and retention revision for conversation streams. */
   history?: string
   events: RunEvent[]
   state?: LiveState

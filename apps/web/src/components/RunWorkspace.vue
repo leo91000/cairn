@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
+import { resumeRun } from '../../../../packages/contracts/generated/resume-run'
 import {
   api,
   date,
@@ -23,7 +24,7 @@ import {
 } from '../icons'
 import { useMissionRuns } from '../mission-runs'
 import { localReads, useReadWhileOpen } from '../reads'
-import { useRetryNotice } from '../run-retry'
+import { useRetryState } from '../run-retry'
 import { exclusiveSuspensionLabel, isExclusivelySuspended, runDisplayStatus } from '../run-status'
 import { filOf } from '../signal'
 import { useLiveRun } from '../use-live-run'
@@ -36,6 +37,7 @@ import Markdown from './Markdown.vue'
 import MissionOutcomeActions from './MissionOutcomeActions.vue'
 import Modal from './Modal.vue'
 import Outcome from './Outcome.vue'
+import RecoveryNotice from './RecoveryNotice.vue'
 import RunDetails from './RunDetails.vue'
 import Status from './Status.vue'
 import UiAlert from './UiAlert.vue'
@@ -60,13 +62,15 @@ const live = useLiveRun(() => `/runs/${props.runId}/stream`)
 const { events, connectionNotice, catchingUp: loading } = live
 const run = computed(() => live.snapshot.value?.run ?? undefined)
 const suspended = computed(() => isExclusivelySuspended(run.value))
-const retryNotice = useRetryNotice(() => run.value)
+const recovery = useRetryState(() => run.value)
 // What the run waits for, above its tabs: its scheduled continuation, a retry or an account.
 const waitNotice = computed(() => {
   const wakeup = run.value?.wakeup
   if (run.value?.status === 'waiting' && wakeup)
     return { title: recordedTitle(wakeup), detail: wakeup.reason }
-  const reason = retryNotice.value ?? run.value?.accountWaitReason
+  if (recovery.value)
+    return undefined
+  const reason = run.value?.accountWaitReason
   return reason ? { title: 'Waiting', detail: reason } : undefined
 })
 const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
@@ -119,7 +123,7 @@ async function cancel() {
 async function resume() {
   tab.value = 'events'
   try {
-    await api(`/runs/${run.value!.id}/resume`, { method: 'POST' })
+    await resumeRun(api, { runId: run.value!.id })
     notify('Resuming saved conversation')
   }
   catch (e) { error.value = (e as Error).message }
@@ -221,8 +225,14 @@ async function copy() {
           </div>
         </div>
       </div>
+      <RecoveryNotice
+        v-if="recovery"
+        :recovery="recovery"
+        :busy="!!run.cancelRequestedAt"
+        @cancel="cancel"
+      />
       <UiNotice
-        v-if="waitNotice"
+        v-else-if="waitNotice"
         role="status"
         class="mt-0 mb-3 shrink-0"
         :icon="Hourglass"

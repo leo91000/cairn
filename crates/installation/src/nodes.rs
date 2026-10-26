@@ -3,6 +3,7 @@ pub mod alerts;
 pub mod checkpoint;
 pub mod connector;
 pub mod coordination;
+pub(crate) mod disk_capacity;
 pub mod disk_grants;
 pub(crate) mod eviction;
 pub mod exclusive;
@@ -253,8 +254,6 @@ struct Capabilities {
     backend: String,
     kvm: bool,
     #[serde(default)]
-    fuse: bool,
-    #[serde(default)]
     ublk: bool,
     #[serde(default)]
     native_mode_protocol: u32,
@@ -467,7 +466,7 @@ impl Usage<'_> {
     }
 }
 
-/// Legacy nodes inherit the runner's slot count, or the historical four slots.
+/// Fresh nodes inherit controller capacity until the owner configures a slot budget.
 pub(crate) fn slots(node: &Value) -> u64 {
     node["slots"]
         .as_u64()
@@ -480,7 +479,7 @@ pub(crate) fn slots(node: &Value) -> u64 {
 pub async fn inventory(s: &Service) -> Result<Vec<Value>> {
     let attempts = s.store.list("node-attempts").await?;
     let volumes = s.store.list("node-volumes").await?;
-    let agents = s.store.list("agents").await?;
+    let agents = s.store.agent_snapshots().await?;
     let stale = stale_disks(s, &volumes, &attempts).await?;
     let usage = Usage {
         attempts: &attempts,
@@ -657,8 +656,6 @@ struct Configuration {
     #[serde(default)]
     slots: Option<u64>,
     accepting: bool,
-    #[serde(default, rename = "exclusiveAgents")]
-    exclusive_agents: Option<Vec<String>>,
     #[serde(default, rename = "nativeEnabled")]
     native_enabled: Option<bool>,
     #[serde(default, rename = "nativeAccounts")]
@@ -702,14 +699,6 @@ pub(crate) async fn configure_node(
         return Err(Error::bad(
             "Use at most 32 tags of 1 to 40 letters, digits or -_:./.",
         ));
-    }
-    if let Some(agents) = &request.exclusive_agents {
-        if agents.len() > 256 {
-            return Err(Error::bad("Use at most 256 exclusive node grants."));
-        }
-        for agent in agents {
-            crate::validation::uuid(agent)?;
-        }
     }
     let node = node.to_owned();
     s.store
@@ -774,14 +763,6 @@ pub(crate) async fn configure_node(
                 record["nativeAccounts"] = accounts.into();
             }
             record["accepting"] = request.accepting.into();
-            // Older clients still send this list; the grants live on each agent.
-            if let Some(agents) = request.exclusive_agents {
-                for agent in &agents {
-                    db.get("agents", agent)?
-                        .ok_or_else(|| Error::bad("Exclusive agent missing."))?;
-                }
-                crate::agent_grants::set_node_agents(db, &mut record, &agents)?;
-            }
             db.put("nodes", &record)?;
             db.audit("node.configured", &json!({ "nodeId": node }))?;
             Ok(public(record))
@@ -810,9 +791,30 @@ pub(crate) async fn invite(
         return Err(Error::bad("Unknown execution backend."));
     }
     let backend = request.backend;
-    let origin = match request.manager_url {
+    let direct = match request.manager_url {
         Some(value) => Some(connector::master(value.trim())?),
-        None => connector::master(&s.config.public_url).ok(),
+        None => None,
+    };
+    // Without an address, Beacon introduces the node to a claimed
+    // installation: no address, certificate or incoming port on the manager.
+    // The node pins the manager's node certificate from its command.
+    let beacon = match direct {
+        Some(_) => None,
+        None => match crate::relay::node_channel_route(&s.config.data_dir).await? {
+            Some((beacon, installation)) => {
+                let certificate = crate::relay::nodes::NodeCertificate::load(
+                    &s.config.data_dir.join("installation-relay"),
+                )
+                .await?;
+                Some((beacon, installation, certificate.pin.clone()))
+            }
+            None => None,
+        },
+    };
+    let origin = match (direct, &beacon) {
+        (Some(direct), _) => Some(direct),
+        (None, None) => connector::master(&s.config.public_url).ok(),
+        (None, Some(_)) => None,
     };
     let manager_url = origin
         .as_ref()
@@ -828,10 +830,17 @@ pub(crate) async fn invite(
             db.set(&key, &invitation, Some(expires))
         })
         .await?;
-    let install = (backend == "native" || maintenance::release().is_ok())
-        .then_some(origin)
-        .flatten()
-        .map(|origin| {
+    let installable = backend == "native" || maintenance::release().is_ok();
+    let route = if beacon.is_some() { "beacon" } else { "direct" };
+    let install = match (installable, beacon, origin) {
+        (false, _, _) => None,
+        (true, Some((beacon, installation, pin)), _) => {
+            let script = format!("{beacon}/install/node.sh").replace('\'', "'\\''");
+            Some(format!(
+                "curl --fail --silent --show-error '{script}' | sudo bash -s -- '{installation}' {backend} {pin}"
+            ))
+        }
+        (true, None, Some(origin)) => {
             let mut script = origin.clone();
             script.set_path(if backend == "native" {
                 "/internal/nodes/native-install.sh"
@@ -840,11 +849,16 @@ pub(crate) async fn invite(
             });
             let quoted = script.as_str().replace('\'', "'\\''");
             let manager = origin.as_str().trim_end_matches('/').replace('\'', "'\\''");
-            format!("curl --fail --silent --show-error '{quoted}' | sudo bash -s -- '{manager}'")
-        });
+            Some(format!(
+                "curl --fail --silent --show-error '{quoted}' | sudo bash -s -- '{manager}'"
+            ))
+        }
+        (true, None, None) => None,
+    };
     Ok(json!({
         "code": code,
         "expiresAt": expires,
+        "route": route,
         "managerUrl": manager_url,
         "installCommand": install,
         "backend": backend,
@@ -906,8 +920,12 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
             if record["revoked"] == true {
                 return Err(Error::conflict("This node is revoked."));
             }
-            for agent in db.list("agents")? {
-                let granted = request.agent_ids.iter().any(|id| agent["id"] == *id);
+            for profile in db.agents()? {
+                let agent = serde_json::to_value(&profile)?;
+                let granted = request
+                    .agent_ids
+                    .iter()
+                    .any(|id| *id == profile.id.to_string());
                 if request.add && !granted {
                     continue;
                 }
@@ -938,7 +956,7 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
                     }
                     record["nativeReviewedAgents"] = reviewed.into();
                 }
-                set_node_grant(db, agent, &node, granted)?;
+                set_node_grant(db, profile, &node, granted)?;
             }
             // Revoking placement can also release exclusive reservations on
             // this record. Persist only our admission field onto that new copy.
@@ -956,30 +974,26 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
         .await
 }
 
-fn set_node_grant(db: &Db<'_>, mut agent: Value, node: &str, granted: bool) -> Result<()> {
-    // Agents allowed on every node keep that broader grant.
-    let Some(mut nodes) = crate::service::policy(&agent)["nodes"].as_array().cloned() else {
+fn set_node_grant(
+    db: &Db<'_>,
+    mut agent: cairn_contracts::Agent,
+    node: &str,
+    granted: bool,
+) -> Result<()> {
+    let Some(nodes) = &mut agent.settings.access.nodes else {
         return Ok(());
     };
-    let present = nodes.iter().any(|id| id == node);
-    if granted == present {
+    if granted == nodes.iter().any(|id| id == node) {
         return Ok(());
     }
     if granted {
-        nodes.push(node.into());
+        nodes.push(node.to_owned());
     } else {
         nodes.retain(|id| id != node);
+        agent.settings.exclusive_nodes.retain(|id| id != node);
     }
-    if !agent["access"].is_object() {
-        agent["access"] = json!({});
-    }
-    agent["access"]["nodes"] = nodes.into();
-    // Exclusive reservations need permission to run on the node.
-    if !granted {
-        crate::agent_grants::release_node(db, &mut agent, node)?;
-    }
-    crate::service::touch(&mut agent);
-    db.put("agents", &agent)?;
+    agent.revision = crate::config::id();
+    db.save_agent(&agent)?;
     Ok(())
 }
 
@@ -1019,20 +1033,22 @@ pub(crate) async fn revoke(
                     db.delete(&key)?;
                 }
             }
-            for mut agent in db.list("agents")? {
-                let Some(nodes) = agent["access"]["nodes"].as_array_mut() else {
-                    continue;
-                };
-                let before = nodes.len();
-                nodes.retain(|id| id != &node);
-                if nodes.len() != before {
-                    crate::service::touch(&mut agent);
-                    db.put("agents", &agent)?;
+            for mut agent in db.agents()? {
+                let mut changed = false;
+                if let Some(nodes) = &mut agent.settings.access.nodes {
+                    let before = nodes.len();
+                    nodes.retain(|id| id != &node);
+                    changed |= before != nodes.len();
+                }
+                let before = agent.settings.exclusive_nodes.len();
+                agent.settings.exclusive_nodes.retain(|id| id != &node);
+                changed |= before != agent.settings.exclusive_nodes.len();
+                if changed {
+                    agent.revision = crate::config::id();
+                    db.save_agent(&agent)?;
                 }
             }
-            crate::agent_grants::forget_resource(db, crate::agent_grants::EXCLUSIVE_NODES, &node)?;
-            record["exclusiveAgents"] = json!([]);
-            db.put("nodes", &record)?;
+            record = db.put("nodes", &record)?;
 
             let mut released = 0_u64;
             if request.release_placements {
@@ -1131,6 +1147,11 @@ async fn enroll(s: &Service, body: Value) -> Result<Value> {
     if request.protocol != 1 {
         return Err(Error::conflict("Unsupported node protocol."));
     }
+    if request.runtime_id != component_runtime() {
+        return Err(Error::conflict(
+            "Node version mismatch; deploy manager and nodes at the same version.",
+        ));
+    }
     request.capabilities.validate()?;
     name(&request.name)?;
     let runtime = name(&request.runtime_id)?;
@@ -1145,14 +1166,18 @@ async fn enroll(s: &Service, body: Value) -> Result<Value> {
             let invitation = db
                 .kv(&key)?
                 .ok_or_else(|| Error::unauthorized("Invalid or expired enrollment code."))?;
-            let expected = invitation["backend"].as_str().unwrap_or("firecracker");
+            let expected = invitation["backend"]
+                .as_str()
+                .ok_or_else(|| Error::bad("Missing enrollment backend."))?;
             if request.capabilities.backend != expected {
                 return Err(Error::forbidden(
                     "Enrollment backend differs from the owner's invitation.",
                 ));
             }
-            // Invitations issued before identity tracking remain consumable.
-            let node_id = invitation["nodeId"].as_str().map_or_else(id, str::to_owned);
+            let node_id = invitation["nodeId"]
+                .as_str()
+                .ok_or_else(|| Error::bad("Missing enrollment node identity."))?
+                .to_owned();
             db.delete(&key)?;
             let capabilities = request.capabilities;
             let node = EnrolledNode {
@@ -1189,6 +1214,14 @@ async fn enroll(s: &Service, body: Value) -> Result<Value> {
         .await
 }
 
+pub(crate) fn component_runtime() -> String {
+    std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into())
+}
+
+fn matches_component_version(observation: &Value) -> bool {
+    observation["runtimeId"] == component_runtime() && observation["nodeProtocol"] == 2
+}
+
 /// What the master expects from a node before it may execute conversations.
 struct Expectations {
     data_root: String,
@@ -1212,6 +1245,8 @@ struct HeartbeatReply {
     limits: Value,
     leases: Vec<Lease>,
     native_mode: Value,
+    #[serde(skip_serializing_if = "Value::is_null")]
+    disk_growth: Value,
     heartbeat_interval_ms: i64,
     disconnect_timeout_ms: i64,
 }
@@ -1221,14 +1256,17 @@ async fn heartbeat(s: &Service, input: &Input) -> Result<Value> {
         .filter(|token| token.len() == 43)
         .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
     let key = format!("node-token:{}", digest(credential));
-    let capabilities = if input.body["capabilities"].is_object() {
+    // Rejected versions must reach the authenticated readiness fence even when
+    // their capabilities are malformed or native authority is unavailable.
+    let matching_version = matches_component_version(&input.body);
+    let capabilities = if matching_version && input.body["capabilities"].is_object() {
         let value: Capabilities = decode(input.body["capabilities"].clone())?;
         value.validate()?;
         Some(serde_json::to_value(value)?)
     } else {
         None
     };
-    if input.body["capabilities"]["backend"] == "native" {
+    if matching_version && input.body["capabilities"]["backend"] == "native" {
         crate::native::policy::refresh(s).await?;
     }
     let expected = Expectations {
@@ -1240,12 +1278,12 @@ async fn heartbeat(s: &Service, input: &Input) -> Result<Value> {
     let reply = s
         .store
         .transaction(move |db| record_heartbeat(db, &key, &body, capabilities, &expected))
-        .await?;
+        .await??;
     for lease in &reply.leases {
         record_lease(s, &lease.id, lease.remaining_ms).await;
     }
     let mut value = serde_json::to_value(&reply)?;
-    // Older connectors ignore this optional, credential-free cache catalogue.
+    // Catalogue failures must not interrupt current execution leases.
     match crate::project_archives::catalog(s, &reply.node_id).await {
         Ok(archives) => value["projectArchives"] = serde_json::to_value(archives)?,
         Err(error) => tracing::warn!(
@@ -1262,7 +1300,7 @@ fn record_heartbeat(
     body: &Value,
     capabilities: Option<Value>,
     expected: &Expectations,
-) -> Result<HeartbeatReply> {
+) -> Result<Result<HeartbeatReply>> {
     let node_id = db
         .kv(key)?
         .and_then(|v| v.as_str().map(str::to_owned))
@@ -1271,10 +1309,15 @@ fn record_heartbeat(
         .get("nodes", &node_id)?
         .filter(|v| v["revoked"] != true)
         .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
-    if let Some(runtime) = body.get("runtimeId") {
-        node["runtimeId"] = name(runtime.as_str().unwrap_or(""))?.into();
+    if !matches_component_version(body) {
+        node["executionReady"] = false.into();
+        db.put("nodes", &node)?;
+        // Commit the readiness fence before reporting the rejected observation.
+        return Ok(Err(Error::conflict(
+            "Node/controller version mismatch; deploy all components at the same version.",
+        )));
     }
-    node["runtimes"] = body["runtimes"].clone();
+    node["runtimeId"] = name(text(body, "runtimeId"))?.into();
     node["lastSeen"] = now().into();
     node["runtimeSlots"] = body["pool"]["capacity"].clone();
     node["retainedRuns"] = body["pool"]["retained_runs"].clone();
@@ -1316,10 +1359,12 @@ fn record_heartbeat(
         .into();
     }
     node["executionReady"] = execution_ready(&node, body, expected).into();
+    let disk_growth = disk_capacity::report(db, &mut node, &body["diskGrowth"])?;
     db.put("nodes", &node)?;
     let leases = renew_leases(db, &node_id, expected.lease_ms)?;
-    Ok(HeartbeatReply {
+    Ok(Ok(HeartbeatReply {
         native_mode: native_mode::requested(&node),
+        disk_growth,
         node_id,
         accepting: node["accepting"].clone(),
         slots: slots(&node),
@@ -1327,15 +1372,15 @@ fn record_heartbeat(
         leases,
         heartbeat_interval_ms: HEARTBEAT_INTERVAL_MS,
         disconnect_timeout_ms: HEARTBEAT_TIMEOUT_MS,
-    })
+    }))
 }
 
 fn execution_ready(node: &Value, body: &Value, expected: &Expectations) -> bool {
-    // A node whose update failed keeps running its previous image.
+    // Only the image approved by this manager may execute.
     let current_image = expected
         .image
         .as_ref()
-        .is_none_or(|image| node["imageDigest"] == *image || node["updateError"].is_string());
+        .is_none_or(|image| node["imageDigest"] == *image);
     if crate::native::policy::node_native(node) {
         return native_mode::applied(node)
             && body["executionReady"] == true
@@ -1350,7 +1395,6 @@ fn execution_ready(node: &Value, body: &Value, expected: &Expectations) -> bool 
         && body["pool"]["quarantined"] != true
         && body["sharedResources"] == true
         && body["budget"] == json!({ "slots": slots(node), "limits": node["limits"] })
-        && node["capabilities"]["fuse"] == true
         && body["dataRoot"] == expected.data_root
         && current_image
 }
@@ -1365,7 +1409,7 @@ fn renew_leases(db: &Db<'_>, node_id: &str, lease_ms: u64) -> Result<Vec<Lease>>
         let run_id = text(&attempt, "runId");
         let run = db.run(run_id)?.unwrap_or_default();
         let checkpoint = db_checkpoint(db, run_id)?;
-        let agent = db.get("agents", run_agent(&run))?.unwrap_or_default();
+        let agent = db.agent_snapshot(run_agent(&run))?.unwrap_or_default();
         let owns_execution = run["status"] == RunStatus::Running
             && run["cancelRequestedAt"].is_null()
             && checkpoint["runnerId"] == attempt["id"]
@@ -1409,6 +1453,15 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
         .json::<Value>()
         .await
         .map_err(Error::internal)?;
+    if health["runtimeId"] != component_runtime() || health["nodeProtocol"] != 2 {
+        if let Some(mut node) = s.store.get("nodes", LOCAL_NODE_ID).await? {
+            node["executionReady"] = false.into();
+            s.store.put("nodes", node).await?;
+        }
+        return Err(Error::conflict(
+            "Local controller version mismatch; deploy all components at the same version.",
+        ));
+    }
     let capabilities = health["capabilities"].clone();
     if !capabilities.is_object() {
         return Ok(());
@@ -1459,12 +1512,10 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
                 }),
             };
             record["systemTags"] = detected.tags().into();
-            record["runtimes"] = health["runtimes"].clone();
             record["capabilities"] = capabilities;
             record["runtimeId"] = health["runtimeId"].clone();
             record["storage"] = serde_json::to_value(Policy::for_node(&record["storage"])?)?;
             record["executionReady"] = (health["status"] == "ok"
-                && detected.fuse
                 && health["sharedResources"] == true
                 && health["budget"]
                     == json!({ "slots": slots(&record), "limits": record["limits"] }))
@@ -1507,6 +1558,18 @@ pub async fn daemon(
         }
     });
     let directory = directory.to_owned();
+    // Bound before the connector starts, so its first request finds the gateway.
+    if let Some(socket) = std::env::var_os("CAIRN_NODE_GATEWAY_SOCKET")
+        && let Some(listener) = connector::bind_gateway(&directory).await?
+    {
+        let gateway_stop = stop.child_token();
+        let socket = std::path::PathBuf::from(socket);
+        tokio::spawn(async move {
+            if let Err(error) = connector::serve_gateway(listener, socket, gateway_stop).await {
+                tracing::warn!(%error, "Node gateway bridge stopped");
+            }
+        });
+    }
     let connector_stop = stop.child_token();
     let mut connector =
         tokio::spawn(async move { connector::connect(&directory, connector_stop).await });

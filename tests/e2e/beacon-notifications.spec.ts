@@ -9,9 +9,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
-import { config as loadConfig } from '../fixtures/legacy/server/config'
-import { Service as SeedService } from '../fixtures/legacy/server/service'
-import { Store } from '../fixtures/legacy/server/store'
 import { expireAccountProof } from './beacon-relay-fixture'
 
 test('a browser registers once for all Cairn installations and can disable account push', async ({ page, context }) => {
@@ -32,7 +29,6 @@ test('a browser registers once for all Cairn installations and can disable accou
   mail.listen(0, '127.0.0.1')
   await once(mail, 'listening')
   const url = 'http://localhost:4394'
-  let seed: SeedService | undefined
   const registrations: string[] = []
   page.on('request', (request) => {
     if (request.method() === 'POST' && request.url().endsWith('/api/account/notifications/subscriptions'))
@@ -125,13 +121,6 @@ test('a browser registers once for all Cairn installations and can disable accou
     await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
     const code = await page.getByLabel('Installation claim code').inputValue()
     await Promise.all(['data', 'home', 'second-data', 'second-home'].map(path => mkdir(join(root, path))))
-    seed = new SeedService(new Store(join(root, 'data')), loadConfig({
-      dataDir: join(root, 'data'),
-      home: join(root, 'home'),
-      workspaceRoots: [root],
-      workerEnabled: false,
-      logger: false,
-    }))
     const installation = start('target/debug/cairn', {
       DATA_DIR: join(root, 'data'),
       AGENT_HOME: join(root, 'home'),
@@ -231,8 +220,6 @@ test('a browser registers once for all Cairn installations and can disable accou
       child.kill('SIGTERM')
       await exited
     }))
-    await seed?.accounts.close()
-    seed?.store.close()
     await new Promise<void>(resolve => mail.close(() => resolve()))
     await rm(root, { recursive: true, force: true })
   }

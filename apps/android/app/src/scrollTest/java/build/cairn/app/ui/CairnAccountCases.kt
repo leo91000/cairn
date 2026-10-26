@@ -165,7 +165,7 @@ abstract class CairnAccountCases {
                                             .setBody("""{"error":"Owner only"}""")
                                     when (resource) {
                                         "/agents" ->
-                                            """[{"id":"same-agent","name":"Agent $installation"}]"""
+                                            """{"agents":[{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"30e39606-47c3-5441-b913-01ef3e934e2d","instructions":"","model":"","name":"Agent $installation","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0}]}"""
                                         "/overview",
                                         "/codex/models",
                                         "/claude/models" -> "{}"
@@ -176,7 +176,26 @@ abstract class CairnAccountCases {
                                                 .setBody(
                                                     "event: batch\ndata: {\"state\":{\"chats\":[]},\"events\":[],\"cursor\":0}\n\n"
                                                 )
-                                        else -> "[]"
+                                        else ->
+                                            if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/projects") == true
+                                            )
+                                                """{"projects":[]}"""
+                                            else if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/agents") == true
+                                            )
+                                                """{"agents":[]}"""
+                                            else if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/tasks") == true
+                                            )
+                                                """{"tasks":[]}"""
+                                            else "[]"
                                     }
                                 }
                             }
@@ -422,7 +441,26 @@ abstract class CairnAccountCases {
                                                 .setBody(
                                                     "event: snapshot\ndata: {\"state\":{\"chats\":[]},\"cursor\":0}\n\n"
                                                 )
-                                        else -> "[]"
+                                        else ->
+                                            if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/projects") == true
+                                            )
+                                                """{"projects":[]}"""
+                                            else if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/agents") == true
+                                            )
+                                                """{"agents":[]}"""
+                                            else if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/tasks") == true
+                                            )
+                                                """{"tasks":[]}"""
+                                            else "[]"
                                     }
                                 }
                             }

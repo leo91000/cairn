@@ -30,7 +30,14 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.currentStateAsState
 import build.cairn.app.data.*
-import kotlinx.serialization.json.encodeToJsonElement
+import build.cairn.contracts.CreateMissionInput
+import build.cairn.contracts.MissionInput
+import build.cairn.contracts.MissionStateInput
+import build.cairn.contracts.SchedulePreviewInput
+import build.cairn.contracts.createMission
+import build.cairn.contracts.deleteMission
+import build.cairn.contracts.previewSchedule
+import build.cairn.contracts.setMissionState
 
 private val filters =
     listOf(
@@ -268,13 +275,7 @@ fun MissionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Un
         TaskEditor(
             vm,
             state,
-            state.tasks.find { it.id == id }
-                ?: Task(
-                    agentId =
-                        state.agents.firstOrNull { it.id == MAIN_AGENT_ID }?.id
-                            ?: state.agents.firstOrNull()?.id.orEmpty(),
-                    timezone = java.time.ZoneId.systemDefault().id,
-                ),
+            state.tasks.find { it.id == id },
             onSaved = { task ->
                 query = ""
                 filter = if (task.archived) "archived" else "all"
@@ -293,7 +294,8 @@ fun MissionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Un
             { deleting = null },
         ) {
             vm.perform {
-                delete("/tasks/${segment(id)}")
+                api.deleteMission(MissionInput(taskId = id))
+                refresh()
                 deleting = null
             }
         }
@@ -485,7 +487,8 @@ internal fun MissionPanel(
             { deleting = false },
         ) {
             vm.perform {
-                delete("/tasks/${segment(task.id)}")
+                api.deleteMission(MissionInput(taskId = task.id))
+                refresh()
                 deleting = false
                 removed()
             }
@@ -501,6 +504,7 @@ private fun MissionDetail(
     actions: MissionActions,
     sheet: Boolean,
 ) {
+    val canEdit = state.isOwner || task.authorId == state.session.account?.id
     var history by remember(task.id) { mutableStateOf<List<Run>?>(null) }
     var occurrences by
         remember(task.id, task.cron, task.timezone, task.enabled) {
@@ -523,10 +527,8 @@ private fun MissionDetail(
             occurrences =
                 try {
                     vm.api
-                        .send<Occurrences>(
-                            "POST",
-                            "/schedule/preview",
-                            body("cron" to cron, "timezone" to task.timezone),
+                        .previewSchedule(
+                            SchedulePreviewInput(cron = cron, timezone = task.timezone)
                         )
                         .occurrences
                         .take(2)
@@ -538,7 +540,15 @@ private fun MissionDetail(
     val agent = state.agents.find { it.id == task.agentId }
     val project = state.projects.find { it.id == task.projectId }
     fun toggle(copy: Task) = vm.perform {
-        save("tasks", task.id, wireJson.encodeToJsonElement(copy))
+        api.setMissionState(
+            MissionStateInput(
+                taskId = task.id,
+                revision = task.revision,
+                enabled = copy.enabled,
+                archived = copy.archived,
+            )
+        )
+        refresh()
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
         AgentAvatar(agent?.name ?: "?", task.agentId, 30.dp)
@@ -568,24 +578,25 @@ private fun MissionDetail(
                     onClick = {
                         menu = false
                         vm.perform {
-                            save(
-                                "tasks",
-                                "",
-                                wireJson.encodeToJsonElement(
-                                    task.copy(
-                                        id = "",
-                                        name = task.name.take(92) + " (copie)",
-                                        enabled = false,
-                                        archived = false,
-                                    )
-                                ),
+                            api.createMission(
+                                CreateMissionInput(
+                                    settings =
+                                        task
+                                            .settings()
+                                            .copy(
+                                                name = task.name.take(92) + " (copie)",
+                                                enabled = false,
+                                                archived = false,
+                                            )
+                                )
                             )
+                            refresh()
                         }
                     },
                 )
                 DropdownMenuItem(
                     text = { Text(if (task.archived) "Restaurer (en pause)" else "Archiver") },
-                    enabled = !state.busy,
+                    enabled = !state.busy && (!task.archived || canEdit),
                     onClick = {
                         menu = false
                         toggle(task.copy(archived = !task.archived, enabled = false))
@@ -599,13 +610,14 @@ private fun MissionDetail(
                             actions.openRun(run.id)
                         },
                     )
-                DropdownMenuItem(
-                    text = { Text("Supprimer", color = MaterialTheme.colorScheme.error) },
-                    onClick = {
-                        menu = false
-                        actions.delete(task)
-                    },
-                )
+                if (state.isOwner)
+                    DropdownMenuItem(
+                        text = { Text("Supprimer", color = MaterialTheme.colorScheme.error) },
+                        onClick = {
+                            menu = false
+                            actions.delete(task)
+                        },
+                    )
             }
         }
         if (sheet)
@@ -683,6 +695,24 @@ private fun MissionDetail(
                 }
         }
     }
+    if (!canEdit)
+        Text(
+            "Seuls l’auteur ou le propriétaire peuvent modifier ou reprendre cette mission. Dupliquez-la pour prendre votre propre engagement.",
+            Modifier.padding(top = 12.dp),
+            style = MaterialTheme.typography.bodySmall,
+        )
+    if (task.authorRemoved && task.cron != null)
+        Text(
+            "L’accès de cet auteur a pris fin. Dupliquez la mission pour la planifier à nouveau.",
+            Modifier.padding(top = 12.dp),
+            style = MaterialTheme.typography.bodySmall,
+        )
+    if (task.scheduleWaitReason != null && task.cron != null && task.enabled && !task.archived)
+        Text(
+            "Planification en attente : ${task.scheduleWaitReason}",
+            Modifier.padding(top = 12.dp),
+            style = MaterialTheme.typography.bodySmall,
+        )
     task.scheduleFailure
         ?.takeIf { task.enabled && !task.archived && task.cron != null }
         ?.let {
@@ -754,7 +784,12 @@ private fun MissionDetail(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        RoundAction("Modifier la mission", CairnIcons.Pencil, size = 52.dp, enabled = !state.busy) {
+        RoundAction(
+            "Modifier la mission",
+            CairnIcons.Pencil,
+            size = 52.dp,
+            enabled = !state.busy && canEdit,
+        ) {
             actions.edit(task)
         }
         if (!task.archived && task.cron != null)
@@ -762,7 +797,7 @@ private fun MissionDetail(
                 if (task.enabled) "Mettre en pause" else "Reprendre la planification",
                 if (task.enabled) CairnIcons.Pause else CairnIcons.Clock,
                 size = 52.dp,
-                enabled = !state.busy,
+                enabled = !state.busy && !task.authorRemoved && (task.enabled || canEdit),
             ) {
                 toggle(task.copy(enabled = !task.enabled))
             }

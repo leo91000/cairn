@@ -1,6 +1,6 @@
 # Coding-agent accounts
 
-Codex, Claude Code and OpenCode accounts share one model. **Connections → Add account** asks for the coding agent and a name, then follows its official sign-in or saves a model-provider API key for OpenCode. Each coding agent can have up to ten accounts. An account can be renamed, paused, reconnected or removed. Accounts that are running something cannot be reconnected or removed until their runs finish. Pausing stops the account from being picked for new runs. Web and Android show the same list, detail panel and sign-in steps. See [shared-account-pool decision](adr/0002-one-account-pool-for-coding-agents.md) for the design.
+Codex, Claude Code and OpenCode accounts share one model. **Connections → Add account** asks for the coding agent and a name, then follows its official sign-in or saves a model-provider API key for OpenCode. Each coding agent can have up to ten accounts. An account can be renamed, paused, reconnected or removed. Accounts that are running something cannot be reconnected or removed until their runs finish. Pausing stops the account from being picked for new runs. Web and Android show the same list, detail panel and sign-in steps. See [shared-account-pool decision](adr/0061-one-account-pool-for-coding-agents.md) for the design.
 
 ## What the list shows
 
@@ -20,7 +20,7 @@ Opening an account shows every usage window with its reset time (including model
 
 ## Selection and parallel runs
 
-A new run picks the enabled, signed-in account of its coding agent with a free slot and the most remaining capacity. Ties prefer the least recently used account. Remaining capacity is the lowest remaining percentage among the windows that limit the run's model: windows scoped to other models are ignored. **Parallel runs** is any positive integer (default 4). VM conversations use the execution slots configured on each node, independently of the manager’s `CONCURRENCY` setting. To run more tasks at once, increase node slots and account limits while checking the node’s shared RAM and disk headroom. `CONCURRENCY` and project locks still bound direct host execution in development. Lowering a limit or pausing an account lets its current runs finish.
+A new run picks the enabled, signed-in account of its coding agent with a free slot and the most remaining capacity. Ties prefer the least recently used account. Remaining capacity is the lowest remaining percentage among the windows that limit the run's model: windows scoped to other models are ignored. A Codex run with a [speed](chats.md#speed) other than Standard prefers, among the accounts able to take it now, those whose catalog confirms that speed for the model, before those that lack it or cannot tell. The speed never holds a run back or blocks a usage switch: when none of them can take it, the run goes to another available account. Before the turn starts, each attempt checks the speed against the model list of the Codex process that will run it, and the conversation shows a change of outcome: a speed it, or the account's recent catalog, does not list for the model runs at Standard with a visible notice; a listed speed is requested with a notice that the account's plan decides whether it applies; and a speed that cannot be checked (a list could not be read, is outdated, or does not name the model exactly) is still requested, with a notice that the turn may run at Standard. **Parallel runs** is any positive integer (default 4). VM conversations use the execution slots configured on each node, independently of the manager’s `CONCURRENCY` setting. To run more tasks at once, increase node slots and account limits while checking the node’s shared RAM and disk headroom. `CONCURRENCY` and project locks still bound direct host execution in development. Lowering a limit or pausing an account lets its current runs finish.
 
 When no account can take a run, it stays queued with a visible reason. Runs record which account they used (`accountId`, `accountName`). When the reason needs you (no connected account, one to reconnect, or every account paused), the run also carries `accountRequired` with its coding agent, and the account list names that coding agent in `required`. Conversations then offer a link to Connections, and the Android Atelier shows a banner. Usage exhaustion only makes the run wait: an account that ran out returns once usage read afterwards shows it recovered. When no usage can be read, a Claude Code account is tried again after 15 minutes.
 
@@ -46,9 +46,9 @@ Requires a Codex CLI with `account/read`, `account/rateLimits/read`, `account/ra
 
 Sign-in runs `claude auth login --claudeai` in a private temporary home. Open Anthropic's page, then paste the authorization code it shows. Passwords are entered only on Anthropic's page. The account is connected once `claude auth status` confirms the identity, which must not already belong to another Claude account. Its CLI files then move into the account's private home, `DATA_DIR/claude-accounts/<id>`. Include that directory in encrypted server backups. The link expires after 15 minutes, and a server restart ends an unfinished sign-in.
 
-The manager rotates each account's OAuth login with the refresh endpoint and client ID of the pinned CLI (or the one saved with the login), under the account lock, and persists rotated state before replying. Runs keep an access-only credential snapshot next to their session and refresh it every 30 seconds. A temporary broker outage keeps a conversation alive while its token is valid; an expired login produces an explicit recoverable error and the account is marked **Reconnect**.
+The manager rotates each account's OAuth login with the refresh endpoint and client ID of the official CLI (or the one saved with the login), under the account lock, and persists rotated state before replying. Runs keep an access-only credential snapshot next to their session and refresh it every 30 seconds. A temporary broker outage keeps a conversation alive while its token is valid; an expired login produces an explicit recoverable error and the account is marked **Reconnect**.
 
-Usage is read every five minutes per account with the CLI's `get_usage` control response (`skip_behaviors: true`), without sending a prompt, including while the account runs. The pinned CLI 2.1.280 reports utilization as a percentage and reset dates as ISO 8601 timestamps. Five-hour and weekly windows limit every model. Opus, Sonnet and model-scoped weekly windows only limit the models of their family, including catalog aliases that run it, such as `default` when it resolves to Opus. This protocol is experimental: when usage is unavailable, the last known windows stay visible, and runs can still use the account. Only allowlisted quota fields are exposed, and a quota error never changes the account's connection.
+Usage is read every five minutes per account with the CLI's `get_usage` control response (`skip_behaviors: true`), without sending a prompt, including while the account runs. Claude Code reports utilization as a percentage and reset dates as ISO 8601 timestamps. CI checks that every resolved release answers `get_usage`; quota values are checked with a real account (see [tool versions](CLI-UPDATES.md)). Five-hour and weekly windows limit every model. Opus, Sonnet and model-scoped weekly windows only limit the models of their family, including catalog aliases that run it, such as `default` when it resolves to Opus. A saved model no window names, such as one the current catalog no longer lists, stays limited by its family when its name gives it exactly: an alias with a context variant, such as `opus[1m]`, or a model ID, such as `claude-opus-4-6[1m]`. Other names are matched as saved; Codex and OpenCode windows match the exact model. This protocol is experimental: when usage is unavailable, the last known windows stay visible, and runs can still use the account. Only allowlisted quota fields are exposed, and a quota error never changes the account's connection.
 
 ## OpenCode
 
@@ -81,16 +81,13 @@ or the first model request checks authentication. A provider rejection asks you 
 limit enters the shared exhaustion flow and retries the account after five minutes
 when no readable quota is available.
 
-Install **OpenCode 1.19.0** on the manager and runners, or set `OPENCODE_BIN` to its
-executable. The runner image installs this pinned release and startup rejects a
-version mismatch. Initial OpenCode agents require **YOLO** access because the native
+Install **OpenCode 1.19.0 or later** on the manager and runners, or set `OPENCODE_BIN`
+to its executable. Each image build installs the OpenCode release CI resolved,
+and CI qualifies it before the image is validated (see
+[tool versions](CLI-UPDATES.md)). Startup rejects older releases. Initial OpenCode agents require **YOLO** access because the native
 engine does not implement Cairn's read-only/workspace-write sandbox. Production
 runner isolation still applies. OAuth, custom endpoints and quota reporting are
 outside this first integration. See [ADR 0042](adr/0042-opencode-api-key-integration.md).
-
-## Migration
-
-The first start of this version migrates existing data once: Codex account records and their raw rate limits move into the shared collection, runs record `accountId`/`accountName` instead of their Codex-only fields, and the single Claude login in `DATA_DIR/claude` becomes an account named **Claude** with its email, plan and simultaneous-conversation limit. Local runs keep their Claude sessions, which are copied into each run. A login still marked by the earlier serialized credential transfer (`sync-required`) is migrated as **Reconnect**, because a guest may have rotated its refresh token. Drain existing runs with the deployment lease before upgrading, and keep the data volume and encryption key: nobody needs to reconnect. Rolling back to an earlier version would not see the migrated accounts; restore the backup taken before upgrading instead.
 
 Screenshots use synthetic accounts: [desktop](screenshots/agent-accounts/desktop-light.png) · [account detail](screenshots/agent-accounts/detail-light.png) · [mobile, dark theme](screenshots/agent-accounts/mobile-dark.png) · [Android](screenshots/agent-accounts/android-light.png).
 
@@ -100,7 +97,7 @@ Screenshots use synthetic accounts: [desktop](screenshots/agent-accounts/desktop
 | --- | --- |
 | `GET /api/accounts` | `{accounts, signIn, required}`: every account, the sign-in in progress, and the coding agents whose runs wait for you |
 | `POST /api/accounts` | `{provider, name}` starts sign-in; OpenCode additionally requires `{modelProvider, apiKey}` |
-| `GET /api/accounts/providers/opencode` | Supported API-key model providers from the pinned native catalog |
+| `GET /api/accounts/providers/opencode` | Supported API-key model providers from the installed native catalog |
 | `POST /api/accounts/order` | `{provider, ids}` saves the order Auto tries OpenCode connections in; `ids` lists every account once |
 | `POST /api/accounts/{id}/api-key` | `{modelProvider, apiKey}` replaces an OpenCode key when the account is idle |
 | `POST /api/accounts/{id}/sign-in` | Signs an existing account in again |
@@ -112,4 +109,4 @@ Screenshots use synthetic accounts: [desktop](screenshots/agent-accounts/desktop
 
 ## Validation
 
-`crates/installation/tests/accounts.rs` covers the migration and per-agent selection, `crates/installation/tests/codex.rs` and `crates/installation/tests/claude.rs` each driver's sign-in, usage, rotation and parallel limits against synthetic CLIs, and `crates/installation/tests/worker.rs` real runs, exhaustion failover and simultaneous Claude conversations. `tests/e2e/accounts.spec.ts` drives the web page in Chromium and WebKit, and `AccountsJourneyTest` and `AccountsDeviceTest` the Android screen. These fixtures never contact OpenAI or Anthropic and never spend subscription allowance or banked resets.
+`crates/installation/tests/accounts.rs` covers per-agent selection, `crates/installation/tests/codex.rs` and `crates/installation/tests/claude.rs` each driver's sign-in, usage, rotation and parallel limits against synthetic CLIs, and `crates/installation/tests/worker.rs` real runs, exhaustion failover and simultaneous Claude conversations. `tests/e2e/accounts.spec.ts` drives the web page in Chromium and WebKit, and `AccountsJourneyTest` and `AccountsDeviceTest` the Android screen. These fixtures never contact OpenAI or Anthropic and never spend subscription allowance or banked resets.

@@ -1,11 +1,10 @@
 //! Guest-only bridge. All filesystem operations here run inside the microVM.
 mod codex;
 mod filesystems;
-mod restored;
 
 use super::{
     plan::{CHAT_INBOX, Plan},
-    protocol::{ArchiveFrame, Encoding, Event, GuestRequest, GuestStatus, Reply},
+    protocol::{Encoding, Event, GuestRequest, GuestStatus, Reply},
     wire,
 };
 use crate::{
@@ -117,36 +116,8 @@ async fn handle(
     match request {
         GuestRequest::Freeze => freeze(&mut write, true).await,
         GuestRequest::Thaw => freeze(&mut write, false).await,
-        GuestRequest::MountWorkspace => {
-            let _running = running
-                .try_lock()
-                .map_err(|_| Error::conflict("Guest already running."))?;
-            let _filesystem = FILESYSTEM_CONTROL.lock().await;
-            filesystems::mount().await?;
-            wire::write(&mut write, &Reply::ok(true)).await
-        }
-        GuestRequest::RestoreClone { identity } => {
-            let _running = running
-                .try_lock()
-                .map_err(|_| Error::conflict("Guest already running."))?;
-            let _filesystem = FILESYSTEM_CONTROL.lock().await;
-            if Path::new(INITIALIZED).exists() || filesystems::mounted() {
-                return Err(Error::conflict(
-                    "Only an anonymous unmounted VM can be cloned.",
-                ));
-            }
-            restored::validate(&identity)?;
-            let mut timing =
-                crate::performance::Operation::new("guest_clone", &identity.id, "unfreeze");
-            filesystems::freeze(false).await?;
-            timing.next("entropy_and_network");
-            restored::renew(&identity).await?;
-            // VMGenID cannot reset randomness cached by an arbitrary userspace
-            // library. Recreate the native process before granting an account.
-            timing.next("native_restart");
-            codex.restart(stop, timing_endpoint.as_deref()).await?;
-            timing.finish();
-            wire::write(&mut write, &Reply::ok(true)).await
+        GuestRequest::MountWorkspace | GuestRequest::RestoreClone { .. } => {
+            Err(Error::bad("Unknown guest operation."))
         }
         GuestRequest::ArtifactExport { path, root } => {
             export_artifact(&mut write, Path::new(&path), &root).await
@@ -155,14 +126,9 @@ async fn handle(
         GuestRequest::Status => {
             let status = GuestStatus {
                 version: 1,
-                binary_imports: true,
-                filesystem_snapshots: true,
+                executable_digest: super::entrypoint::digest().await?.to_owned(),
                 initialized: Path::new(INITIALIZED).exists(),
-                codex_service: true,
                 codex_ready: codex.ready(),
-                workspace_disks: true,
-                snapshot_clones: restored::kvm_is_deferred(),
-                entrypoint_reuse: true,
             };
             wire::write(&mut write, &status).await
         }
@@ -331,7 +297,7 @@ impl ImportRequest<'_> {
     fn trace_id(&self) -> &str {
         self.trace_id
             .filter(|id| uuid::Uuid::parse_str(id).is_ok())
-            .unwrap_or("legacy")
+            .unwrap_or("untraced")
     }
 }
 
@@ -429,7 +395,6 @@ async fn extract(
     timing.next("receive_archive");
     let metrics = match import.encoding {
         Encoding::Binary => receive_binary(read, &mut input).await?,
-        Encoding::Json => receive_frames(read, &mut input).await?,
     };
     metrics.record(timing.id(), "guest");
     drop(input);
@@ -479,39 +444,9 @@ async fn receive_binary(
     }
 }
 
-async fn receive_frames(
-    read: &mut (impl AsyncBufRead + Unpin),
-    input: &mut (impl AsyncWrite + Unpin),
-) -> Result<StreamMetrics> {
-    let mut metrics = StreamMetrics::default();
-    loop {
-        let read_started = Instant::now();
-        let frame = wire::read(read)
-            .await?
-            .ok_or_else(|| Error::bad("Guest import was interrupted."))?;
-        let data = match wire::decode(frame, "Invalid import chunk.")? {
-            ArchiveFrame::End => {
-                metrics.read += read_started.elapsed();
-                return Ok(metrics);
-            }
-            ArchiveFrame::Chunk { data } => data,
-        };
-        let bytes = STANDARD
-            .decode(data)
-            .map_err(|_| Error::bad("Invalid import bytes."))?;
-        metrics.read += read_started.elapsed();
-        let write_started = Instant::now();
-        input.write_all(&bytes).await?;
-        metrics.write += write_started.elapsed();
-        metrics.bytes += bytes.len() as u64;
-        metrics.chunks += 1;
-    }
-}
-
-/// Marks the disk initialized, saves the plan and applies its filesystem policy.
 async fn prepare_run(plan: &Plan) -> Result<()> {
     if plan.as_value()["chat"].is_object()
-        && plan.chat_provider()? == crate::provider::Provider::Codex
+        && plan.chat_provider()? == Some(crate::provider::Provider::Codex)
     {
         let timing = Operation::new("codex_state_seed", plan.run_id(), "install");
         let count = seed_codex().await?;
@@ -560,12 +495,6 @@ async fn seed_codex() -> Result<usize> {
 
 /// Warmup never reads a previous conversation or an imported configuration.
 async fn prepare_anonymous_codex() -> Result<()> {
-    if filesystems::mounted() {
-        return Err(Error::conflict(
-            "Only a fresh VM can initialize anonymous Codex.",
-        ));
-    }
-
     prepare_anonymous_codex_home(
         Path::new("/home/node/.codex"),
         Path::new("/opt/cairn-codex-state"),
@@ -655,7 +584,7 @@ fn spawn_agent(
     let socket = codex.socket()?;
     if let Some(socket) = socket {
         if !plan.as_value()["chat"].is_object()
-            || plan.chat_provider()? != crate::provider::Provider::Codex
+            || plan.chat_provider()? != Some(crate::provider::Provider::Codex)
             || plan.command() != Some(vec![super::plan::ENTRYPOINT, "runner-entry"])
         {
             return Err(Error::conflict(
@@ -902,29 +831,21 @@ mod tests {
     #[tokio::test]
     async fn measured_import_streams_preserve_bytes_and_reject_missing_end_markers() {
         let chunks: [&[u8]; 2] = [b"archive\0\n{}", b"second chunk"];
-        for encoding in [Encoding::Binary, Encoding::Json] {
+        for encoding in [Encoding::Binary] {
             let mut encoded = Vec::new();
             for chunk in chunks {
                 match encoding {
                     Encoding::Binary => wire::write_chunk(&mut encoded, chunk).await.unwrap(),
-                    Encoding::Json => {
-                        let frame = ArchiveFrame::Chunk {
-                            data: STANDARD.encode(chunk),
-                        };
-                        wire::write(&mut encoded, &frame).await.unwrap();
-                    }
                 }
             }
             let truncated = encoded.clone();
             match encoding {
                 Encoding::Binary => wire::write_chunk(&mut encoded, &[]).await.unwrap(),
-                Encoding::Json => wire::write(&mut encoded, &ArchiveFrame::End).await.unwrap(),
             }
             let mut output = Vec::new();
             let mut read = encoded.as_slice();
             let metrics = match encoding {
                 Encoding::Binary => receive_binary(&mut read, &mut output).await.unwrap(),
-                Encoding::Json => receive_frames(&mut read, &mut output).await.unwrap(),
             };
             assert_eq!(output, chunks.concat());
             assert_eq!(metrics.bytes, output.len() as u64);
@@ -933,7 +854,6 @@ mod tests {
             let mut read = truncated.as_slice();
             let result = match encoding {
                 Encoding::Binary => receive_binary(&mut read, &mut Vec::new()).await,
-                Encoding::Json => receive_frames(&mut read, &mut Vec::new()).await,
             };
             assert!(result.is_err());
         }
@@ -949,7 +869,7 @@ mod tests {
                 encoding: Encoding::Binary,
                 trace_id,
             };
-            assert_eq!(import.trace_id(), "legacy");
+            assert_eq!(import.trace_id(), "untraced");
         }
     }
 }

@@ -16,8 +16,8 @@ services:
       CAIRN_INSTALLATION_CLAIM_CODE: ${CAIRN_INSTALLATION_CLAIM_CODE:-}
       CAIRN_INSTALLATION_NAME: ${CAIRN_INSTALLATION_NAME:-My installation}
       RUNNER_URL: http://runner:4311
-      STORAGE_S3_BUCKET: ${STORAGE_S3_BUCKET:-${ARCHIVE_S3_BUCKET:-}}
-      STORAGE_S3_ENDPOINT: ${STORAGE_S3_ENDPOINT:-${ARCHIVE_S3_ENDPOINT:-}}
+      STORAGE_S3_BUCKET: ${STORAGE_S3_BUCKET:-}
+      STORAGE_S3_ENDPOINT: ${STORAGE_S3_ENDPOINT:-}
       STORAGE_S3_REGION: ${STORAGE_S3_REGION:-}
       STORAGE_S3_SERVER_SIDE_ENCRYPTION: ${STORAGE_S3_SERVER_SIDE_ENCRYPTION:-}
       STORAGE_S3_PRIVATE_BUCKET_CONFIRMED: ${STORAGE_S3_PRIVATE_BUCKET_CONFIRMED:-}
@@ -45,14 +45,12 @@ services:
     environment:
       DATA_DIR: /data
       CONCURRENCY: ${CONCURRENCY:-4}
-      CAIRN_BLOCK_TRANSPORT: ublk
     read_only: true
     cap_drop: [ALL]
     cap_add: [SYS_ADMIN, SYS_PTRACE, SYS_NICE, NET_ADMIN, SYS_CHROOT, SETUID, SETGID, MKNOD, CHOWN, FOWNER, KILL, DAC_OVERRIDE, SYS_RESOURCE]
     security_opt: [apparmor:unconfined, seccomp:unconfined]
     devices:
       - /dev/kvm:/dev/kvm
-      - /dev/fuse:/dev/fuse
       - /dev/net/tun:/dev/net/tun
       - /dev/ublk-control:/dev/ublk-control
     # Set these from /proc/devices after loading ublk_drv on this host.

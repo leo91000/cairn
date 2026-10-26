@@ -266,23 +266,18 @@ fn selected_tools(server: &McpServer, selection: &Value) -> Option<Vec<String>> 
 /// Removes a deleted connection from every agent's access policy. Other settings,
 /// including live grants such as 1Password, are kept as saved.
 fn revoke_agent_access(db: &Db<'_>, id: &str) -> Result<()> {
-    for mut agent in db.list("agents")? {
-        let mut access = policy(&agent);
+    for mut agent in db.agents()? {
         let mut changed = false;
-        if let Some(mcps) = access["mcps"].as_array_mut() {
+        if let Some(mcps) = &mut agent.settings.access.mcps {
             let before = mcps.len();
-            mcps.retain(|m| m != id);
-            changed |= mcps.len() != before;
+            mcps.retain(|mcp| mcp != id);
+            changed |= before != mcps.len();
         }
-        if let Some(tools) = access["mcpTools"].as_object_mut() {
-            changed |= tools.remove(id).is_some();
+        changed |= agent.settings.access.mcp_tools.remove(id).is_some();
+        if changed {
+            agent.revision = crate::config::id();
+            db.save_agent(&agent)?;
         }
-        if !changed {
-            continue;
-        }
-        agent["access"] = access;
-        crate::service::touch(&mut agent);
-        db.put("agents", &agent)?;
     }
     Ok(())
 }
@@ -662,7 +657,7 @@ impl Mcps {
                 }
                 let agent = &run["snapshot"]["agent"];
                 let current = db
-                    .get("agents", text(agent, "id"))?
+                    .agent_snapshot(text(agent, "id"))?
                     .ok_or_else(|| Error::forbidden("Agent permissions changed."))?;
                 if !covers(&current, agent) {
                     return Err(Error::forbidden("Agent permissions were reduced."));

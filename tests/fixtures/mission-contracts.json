@@ -1,0 +1,98 @@
+{
+  "creates": [
+    {
+      "settings": {
+        "name": "Mission",
+        "prompt": "Do the work",
+        "agentId": "00000000-0000-4000-8000-000000000001"
+      }
+    },
+    {
+      "creationId": "7bbc74e2-a443-4a4c-a62d-a05ca6cf858c",
+      "settings": {
+        "name": "Scheduled",
+        "prompt": "Check",
+        "agentId": "00000000-0000-4000-8000-000000000001",
+        "projectId": null,
+        "skills": [],
+        "tags": [
+          "code",
+          "code"
+        ],
+        "cron": "0 9 * * *",
+        "timezone": "UTC",
+        "enabled": false,
+        "archived": true,
+        "worktree": false
+      }
+    }
+  ],
+  "invalidCreates": [
+    {
+      "settings": {
+        "name": "",
+        "prompt": "Do",
+        "agentId": "00000000-0000-4000-8000-000000000001"
+      }
+    },
+    {
+      "settings": {
+        "name": "Mission",
+        "prompt": "",
+        "agentId": "00000000-0000-4000-8000-000000000001"
+      }
+    },
+    {
+      "settings": {
+        "name": "Mission",
+        "prompt": "Do",
+        "agentId": "invalid"
+      }
+    },
+    {
+      "settings": {
+        "name": "Mission",
+        "prompt": "Do",
+        "agentId": "00000000-0000-4000-8000-000000000001",
+        "tags": [
+          "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        ]
+      }
+    },
+    {
+      "settings": {
+        "name": "Mission",
+        "prompt": "Do",
+        "agentId": "00000000-0000-4000-8000-000000000001",
+        "skills": [
+          "sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+        ]
+      }
+    },
+    {
+      "creationId": null,
+      "settings": {
+        "name": "Mission",
+        "prompt": "Do",
+        "agentId": "00000000-0000-4000-8000-000000000001"
+      }
+    },
+    {
+      "settings": {
+        "name": "Mission",
+        "prompt": "Do",
+        "agentId": "00000000-0000-4000-8000-000000000001",
+        "authorId": "forged"
+      }
+    }
+  ],
+  "serverInvalid": [
+    {
+      "settings": {
+        "name": " ",
+        "prompt": "Do",
+        "agentId": "00000000-0000-4000-8000-000000000001"
+      }
+    }
+  ]
+}

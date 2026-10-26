@@ -9,14 +9,12 @@ use crate::{
     validation::{text, uuid},
 };
 use axum::{
-    Json,
-    body::to_bytes,
     extract::Request,
     http::header,
     response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use serde::Serialize;
+use cairn_contracts::{Agent, AgentAvatar};
 use serde_json::{Value, json};
 use std::{io::Cursor, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, Semaphore};
@@ -28,34 +26,9 @@ const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 const INTERRUPTED: &str = "Portrait generation was interrupted. You can try again.";
 const TIMED_OUT: &str = "Codex portrait generation timed out. Try again.";
 
-/// The status of an agent's `avatar`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum Status {
-    Generating,
-    Failed,
-    Ready,
-}
-
-impl Status {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Generating => "generating",
-            Self::Failed => "failed",
-            Self::Ready => "ready",
-        }
-    }
-}
-
-impl PartialEq<Status> for Value {
-    fn eq(&self, other: &Status) -> bool {
-        self.as_str() == Some(other.as_str())
-    }
-}
-
-fn fail(avatar: &mut Value, message: &str) {
-    avatar["status"] = Status::Failed.as_str().into();
-    avatar["error"] = message.into();
+fn fail(avatar: &mut AgentAvatar, message: &str) {
+    avatar.status = "failed".into();
+    avatar.error = Some(message.into());
 }
 
 pub struct AgentAvatars {
@@ -97,10 +70,12 @@ impl AgentAvatars {
     pub async fn recover(&self, s: &Service) -> Result<()> {
         s.store
             .transaction(|db| {
-                for mut agent in db.list("agents")? {
-                    if agent["avatar"]["status"] == Status::Generating {
-                        fail(&mut agent["avatar"], INTERRUPTED);
-                        db.put("agents", &agent)?;
+                for mut agent in db.agents()? {
+                    if let Some(avatar) = &mut agent.avatar
+                        && avatar.status == "generating"
+                    {
+                        fail(avatar, INTERRUPTED);
+                        db.save_agent(&agent)?;
                     }
                 }
                 Ok(())
@@ -108,7 +83,19 @@ impl AgentAvatars {
             .await
     }
 
-    pub async fn generate(&self, s: &Arc<Service>, agent_id: &str) -> Result<Value> {
+    pub async fn generate(&self, s: &Arc<Service>, agent_id: &str) -> Result<Agent> {
+        self.generate_authorized(s, agent_id, |_| Ok(())).await
+    }
+
+    pub(crate) async fn generate_authorized<F>(
+        &self,
+        s: &Arc<Service>,
+        agent_id: &str,
+        authorize: F,
+    ) -> Result<Agent>
+    where
+        F: FnOnce(&crate::store::Db<'_>) -> Result<()> + Send + 'static,
+    {
         uuid(agent_id)?;
         // Serialize registration with close: no job may escape the shutdown drain.
         let tasks = self.tasks.lock().await;
@@ -126,14 +113,23 @@ impl AgentAvatars {
         let agent = s
             .store
             .transaction(move |db| {
-                let mut agent = required(db.get("agents", &agent_id)?, "Agent not found")?;
-                if agent["avatar"]["status"] == Status::Generating {
+                authorize(db)?;
+                let mut agent = required(db.agent(&agent_id)?, "Agent not found")?;
+                if agent
+                    .avatar
+                    .as_ref()
+                    .is_some_and(|avatar| avatar.status == "generating")
+                {
                     return Err(Error::conflict("A portrait is already being generated."));
                 }
-                let url = agent["avatar"]["url"].clone();
-                agent["avatar"] =
-                    json!({ "status": Status::Generating, "revision": job, "url": url });
-                db.put("agents", &agent)
+                let url = agent.avatar.as_ref().and_then(|avatar| avatar.url.clone());
+                agent.avatar = Some(AgentAvatar {
+                    status: "generating".into(),
+                    revision: job,
+                    url,
+                    error: None,
+                });
+                db.save_agent(&agent)
             })
             .await?;
         let s = s.clone();
@@ -141,26 +137,63 @@ impl AgentAvatars {
         tasks.spawn(async move {
             // render owns cancellation so it always releases its account lease.
             let result = s.avatars.render(&s, &snapshot).await;
-            if let Err(error) = finish(&s, text(&snapshot, "id"), &revision, result).await {
+            if let Err(error) = finish(&s, &snapshot.id.to_string(), &revision, result).await {
                 tracing::warn!(%error, "could not save agent portrait");
             }
         });
         Ok(agent)
     }
 
-    async fn render(&self, s: &Service, agent: &Value) -> Result<Vec<u8>> {
+    pub(crate) async fn upload<F>(
+        &self,
+        s: &Service,
+        agent_id: &str,
+        data: &str,
+        authorize: F,
+    ) -> Result<Agent>
+    where
+        F: FnOnce(&crate::store::Db<'_>) -> Result<()> + Send + 'static,
+    {
+        if data.len() > MAX_UPLOAD.div_ceil(3) * 4 {
+            return Err(Error::too_large("Choose an image smaller than 5 MB."));
+        }
+        let bytes = STANDARD
+            .decode(data)
+            .map_err(|_| Error::bad("Invalid portrait encoding."))?;
+        if bytes.len() > MAX_UPLOAD {
+            return Err(Error::too_large("Choose an image smaller than 5 MB."));
+        }
+        let bytes = portrait(bytes).await?;
+        let agent_id = agent_id.to_owned();
+        s.store
+            .transaction(move |db| {
+                authorize(db)?;
+                let mut agent = required(db.agent(&agent_id)?, "Agent not found")?;
+                save_portrait(db, &mut agent, &bytes, &id())?;
+                db.save_agent(&agent)
+            })
+            .await
+    }
+
+    async fn render(&self, s: &Service, agent: &Agent) -> Result<Vec<u8>> {
         let _slot = tokio::select! {
             () = s.shutdown.cancelled() => return Err(Error::unavailable(INTERRUPTED)),
             () = self.stop.cancelled() => return Err(Error::unavailable(INTERRUPTED)),
             slot = self.slots.acquire() => slot.map_err(|_| Error::unavailable(INTERRUPTED))?,
         };
         // An upload or deletion while queued supersedes this request before using quota.
-        if s.get("agents", text(agent, "id")).await?["avatar"] != agent["avatar"] {
+        if required(
+            s.store.agent(&agent.id.to_string()).await?,
+            "Agent not found",
+        )?
+        .avatar
+            != agent.avatar
+        {
             return Err(Error::conflict("Portrait request superseded."));
         }
         let identity = json!({
-            "name": agent["name"],
-            "role": agent["description"],
+            "name": agent.settings.name,
+            "role": agent.settings.description,
             "variation": id(),
         });
         let prompt = format!(
@@ -297,20 +330,25 @@ async fn finish(
     let (agent_id, revision) = (agent_id.to_owned(), revision.to_owned());
     s.store
         .transaction(move |db| {
-            let Some(mut agent) = db.get("agents", &agent_id)? else {
+            let Some(mut agent) = db.agent(&agent_id)? else {
                 return Ok(());
             };
-            let avatar = &agent["avatar"];
-            let superseded =
-                avatar["revision"] != revision.as_str() || avatar["status"] != Status::Generating;
+            let superseded = agent
+                .avatar
+                .as_ref()
+                .is_none_or(|avatar| avatar.revision != revision || avatar.status != "generating");
             if superseded {
                 return Ok(());
             }
             match result {
                 Ok(bytes) => save_portrait(db, &mut agent, &bytes, &revision)?,
-                Err(error) => fail(&mut agent["avatar"], &error.message),
+                Err(error) => {
+                    if let Some(avatar) = &mut agent.avatar {
+                        fail(avatar, &error.message);
+                    }
+                }
             }
-            db.put("agents", &agent)?;
+            db.save_agent(&agent)?;
             Ok(())
         })
         .await
@@ -318,28 +356,29 @@ async fn finish(
 
 fn save_portrait(
     db: &crate::store::Db<'_>,
-    agent: &mut Value,
+    agent: &mut Agent,
     bytes: &[u8],
     revision: &str,
 ) -> Result<()> {
-    let agent_id = text(agent, "id").to_owned();
+    let agent_id = agent.id.to_string();
     // A small normalized portrait is stored atomically with its metadata and backed up with the DB.
     db.set(
         &format!("agent-avatar:{agent_id}"),
         &json!(STANDARD.encode(bytes)),
         None,
     )?;
-    agent["avatar"] = json!({
-        "status": Status::Ready,
-        "revision": revision,
-        "url": format!("/api/agents/{agent_id}/avatar?v={revision}"),
+    agent.avatar = Some(AgentAvatar {
+        status: "ready".into(),
+        revision: revision.into(),
+        url: Some(format!("/api/agents/{agent_id}/avatar?v={revision}")),
+        error: None,
     });
     Ok(())
 }
 
 pub async fn http(s: &Arc<Service>, agent_id: &str, request: Request) -> Result<Response> {
     uuid(agent_id)?;
-    s.get("agents", agent_id).await?;
+    s.agent_snapshot(agent_id).await?;
     match request.method().as_str() {
         "GET" => {
             let data = required(
@@ -350,22 +389,6 @@ pub async fn http(s: &Arc<Service>, agent_id: &str, request: Request) -> Result<
                 .decode(data.as_str().unwrap_or(""))
                 .map_err(Error::internal)?;
             Ok(([(header::CONTENT_TYPE, "image/png")], bytes).into_response())
-        }
-        "PUT" => {
-            let bytes = to_bytes(request.into_body(), MAX_UPLOAD)
-                .await
-                .map_err(|_| Error::too_large("Choose an image smaller than 5 MB."))?;
-            let bytes = portrait(bytes.to_vec()).await?;
-            let agent_id = agent_id.to_owned();
-            let agent = s
-                .store
-                .transaction(move |db| {
-                    let mut agent = required(db.get("agents", &agent_id)?, "Agent not found")?;
-                    save_portrait(db, &mut agent, &bytes, &id())?;
-                    db.put("agents", &agent)
-                })
-                .await?;
-            Ok(Json(agent).into_response())
         }
         _ => Err(Error::method_not_allowed("Method not allowed.")),
     }

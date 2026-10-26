@@ -30,9 +30,20 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.AgentInput
+import build.cairn.contracts.CreateAgentInput
+import build.cairn.contracts.ListAgentsInput
+import build.cairn.contracts.ReplaceAgentInput
+import build.cairn.contracts.createAgent
+import build.cairn.contracts.deleteAgent
+import build.cairn.contracts.listAgents
+import build.cairn.contracts.previewAgent
+import build.cairn.contracts.replaceAgent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.encodeToJsonElement
 
 /** Purple marks rights that can affect other agents or the whole installation. */
 @Composable
@@ -52,10 +63,6 @@ private fun agentSaver() =
         save = { wireJson.encodeToString(Agent.serializer(), it.value) },
         restore = { mutableStateOf(wireJson.decodeFromString(Agent.serializer(), it)) },
     )
-
-/** Shown where an older installation cannot take grants set on the agent. */
-private const val UPDATE_FOR_GRANTS =
-    "Mettez à jour l’installation pour accorder ces accès depuis la fiche de l’agent."
 
 /** The review shown before saving sensitive changes. */
 private class PendingReview(
@@ -182,15 +189,7 @@ private fun AgentPage(
             skillsLoaded = state.agents.isNotEmpty(),
         )
     val errors = agentErrors(draft)
-    // An older installation keeps live grants on its resources and ignores them on the agent:
-    // they are shown from there, read-only, and checked as shown.
-    val legacy = olderInstallation(state.agents)
-    val shown =
-        if (legacy) draft.copy(agent = draft.agent.withResourceGrants(catalog, nodes)) else draft
-    val issues = agentIssues(shown.agent, resources)
-    // Live grants (and the revision guarding them) are only sent to an installation known to
-    // keep them on the agent.
-    val liveGrants = state.agents.isNotEmpty() && !legacy
+    val issues = agentIssues(draft.agent, resources)
     val current = AgentSection.entries.find { it.name == section }
 
     fun update(change: (Agent) -> Agent) {
@@ -218,7 +217,7 @@ private fun AgentPage(
         nativeNodes: List<String> = emptyList(),
     ) {
         // A profile already saved (only its reload failed) is not sent again.
-        val profilePending = baseline.id.isBlank() || profileChanged(baseline, edited)
+        val profilePending = (creating && creation.id.isBlank()) || profileChanged(baseline, edited)
         val saved: Agent =
             when {
                 !profilePending -> baseline
@@ -232,24 +231,39 @@ private fun AgentPage(
                                 "/agents",
                                 value = {
                                     agentSaveBody(
-                                        edited.copy(revision = baseline.revision),
+                                        edited.copy(id = baseline.id, revision = baseline.revision),
                                         approved,
                                         mcpIds,
-                                        liveGrants,
                                         nativeNodeReviews = nativeNodes,
                                     )
                                 },
                                 createValue = {
                                     agentSaveBody(
-                                        edited.copy(revision = ""),
-                                        approved,
-                                        mcpIds,
-                                        liveGrants,
-                                        nativeNodeReviews = nativeNodes,
-                                    )
+                                            edited.copy(revision = ""),
+                                            approved,
+                                            mcpIds,
+                                            nativeNodeReviews = nativeNodes,
+                                        )
+                                        .let { JsonObject(it - "agentId" - "revision") }
                                 },
                                 onCreated = {
                                     baseline = wireJson.decodeFromJsonElement<Agent>(it)
+                                },
+                                request = { method, _, payload ->
+                                    val saved =
+                                        if (method == "POST")
+                                            vm.api.createAgent(
+                                                wireJson.decodeFromJsonElement<CreateAgentInput>(
+                                                    payload
+                                                )
+                                            )
+                                        else
+                                            vm.api.replaceAgent(
+                                                wireJson.decodeFromJsonElement<ReplaceAgentInput>(
+                                                    payload
+                                                )
+                                            )
+                                    wireJson.encodeToJsonElement(saved)
                                 },
                             )
                         } catch (e: Exception) {
@@ -265,16 +279,15 @@ private fun AgentPage(
                     wireJson.decodeFromJsonElement<Agent>(response)
                 }
                 else ->
-                    vm.api.send(
-                        "PUT",
-                        "/agents/${segment(agentId)}",
-                        agentSaveBody(
-                            edited,
-                            approved,
-                            mcpIds,
-                            liveGrants,
-                            nativeNodeReviews = nativeNodes,
-                        ),
+                    vm.api.replaceAgent(
+                        wireJson.decodeFromJsonElement<ReplaceAgentInput>(
+                            agentSaveBody(
+                                edited,
+                                approved,
+                                mcpIds,
+                                nativeNodeReviews = nativeNodes,
+                            )
+                        )
                     )
             }
 
@@ -321,16 +334,14 @@ private fun AgentPage(
                 val preview =
                     if (creating) null
                     else
-                        optionalPreview {
-                            vm.api.send<AgentPreview>(
-                                "POST",
-                                "/agents/${segment(agentId)}/preview",
-                                agentSaveBody(edited, mcpIds = mcpIds, liveGrants = liveGrants),
+                        vm.api.previewAgent(
+                            wireJson.decodeFromJsonElement<ReplaceAgentInput>(
+                                agentSaveBody(edited, mcpIds = mcpIds)
                             )
-                        }
+                        )
                 val lines =
                     agentReview(
-                        reviewBaseline(baseline, edited, legacy),
+                        baseline,
                         edited,
                         resources,
                         preview,
@@ -353,8 +364,9 @@ private fun AgentPage(
         scope.launch {
             try {
                 val theirs =
-                    vm.api.get<List<Agent>>("/agents").find { it.id == agentId }
-                        ?: error("Cet agent n’existe plus.")
+                    vm.api.listAgents(build.cairn.contracts.ListAgentsInput()).agents.find {
+                        it.id == agentId
+                    } ?: error("Cet agent n’existe plus.")
                 // Tool choices of connections deleted meanwhile cannot be saved: read the
                 // connections again first.
                 val refreshed = runCatching { vm.refresh() }.isSuccess
@@ -401,12 +413,13 @@ private fun AgentPage(
                 when (current) {
                     null ->
                         AgentOverview(
-                            shown,
+                            draft,
                             resources,
                             creating,
                             issues,
                             errors.keys + listOfNotNull(errorSection),
                             changes.toSet(),
+                            state.modelCatalog("codex").models,
                         ) {
                             section = it.name
                         }
@@ -442,10 +455,8 @@ private fun AgentPage(
                             )
                     AgentSection.Plugins ->
                         PluginsSection(
-                            shown.agent,
+                            draft.agent,
                             catalog,
-                            legacy,
-                            !liveGrants,
                             catalogFailed,
                             retry = { catalogAttempt++ },
                             navigate = { navigate(it) },
@@ -453,10 +464,8 @@ private fun AgentPage(
                         )
                     AgentSection.Nodes ->
                         NodesSection(
-                            shown.agent,
+                            draft.agent,
                             nodes,
-                            legacy,
-                            !liveGrants,
                             nodesLoaded,
                             nodesFailed,
                             retry = { nodesAttempt++ },
@@ -468,7 +477,7 @@ private fun AgentPage(
                         }
                     AgentSection.Powers ->
                         PowersSection(
-                            shown.agent,
+                            draft.agent,
                             nodes,
                             nodesLoaded,
                             { section = it.name },
@@ -569,7 +578,9 @@ private fun AgentPage(
             { deleting = false },
         ) {
             vm.perform {
-                delete("/agents/${segment(agentId)}")
+                api.deleteAgent(AgentInput(agentId))
+                refresh()
+                notify("Suppression effectuée")
                 deleting = false
                 back()
             }
@@ -789,6 +800,8 @@ private fun AgentOverview(
     issues: List<AgentIssue>,
     errors: Set<AgentSection>,
     changed: Set<AgentSection>,
+    /** Codex's catalog, to name the agent's speed as its model runs it. */
+    codexModels: List<CodingAgentModel>,
     open: (AgentSection) -> Unit,
 ) {
     val agent = draft.agent
@@ -911,15 +924,16 @@ private fun AgentOverview(
             AgentSection.Powers,
             when {
                 !resources.nodesLoaded -> NOT_LOADED
-                exclusive.isEmpty() && !access.installation -> "Aucun"
+                exclusive.isEmpty() && !access.installation && access.delegation != true -> "Aucun"
                 exclusive.isEmpty() -> ""
-                access.installation -> ""
+                access.installation || access.delegation == true -> ""
                 else -> "· gestion désactivée"
             },
             changed = AgentSection.Powers in changed,
             chips = {
                 if (exclusive.isNotEmpty()) PowerChip("Exclusivité")
                 if (access.installation) PowerChip("Gestion de l’installation")
+                if (access.delegation == true) PowerChip("Délégation de tâches")
             },
         ) {
             open(AgentSection.Powers)
@@ -935,10 +949,11 @@ private fun AgentOverview(
         }
         OverviewRow(
             AgentSection.Engine,
-            listOf(
+            listOfNotNull(
                     providerLabel(agent.provider),
                     agent.model.ifBlank { "modèle par défaut" },
                     effortLabel(agent.reasoning).lowercase(),
+                    speedNote(agent.speed, agent.model, codexModels),
                 )
                 .joinToString(" · "),
             error = AgentSection.Engine in errors,
@@ -1347,9 +1362,11 @@ private fun McpTools(
                 change {
                     it.copy(
                         mcpTools =
-                            if (all) it.mcpTools - mcp.id
-                            // Choosing starts with no tool selected, as on the web.
-                            else it.mcpTools + (mcp.id to emptyList())
+                            build.cairn.contracts.McpTools(
+                                if (all) it.mcpTools - mcp.id
+                                // Choosing starts with no tool selected, as on the web.
+                                else it.mcpTools + (mcp.id to emptyList())
+                            )
                     )
                 }
             }
@@ -1360,8 +1377,10 @@ private fun McpTools(
                             val old = it.mcpTools[mcp.id].orEmpty()
                             it.copy(
                                 mcpTools =
-                                    it.mcpTools +
-                                        (mcp.id to if (on) old + tool.name else old - tool.name)
+                                    build.cairn.contracts.McpTools(
+                                        it.mcpTools +
+                                            (mcp.id to if (on) old + tool.name else old - tool.name)
+                                    )
                             )
                         }
                     }
@@ -1516,14 +1535,11 @@ private fun SwitchRow(
 private fun PluginsSection(
     agent: Agent,
     catalog: PluginCatalog?,
-    legacy: Boolean,
-    locked: Boolean,
     failed: Boolean,
     retry: () -> Unit,
     navigate: (String) -> Unit,
     change: ((Agent) -> Agent) -> Unit,
 ) {
-    if (legacy) Note(UPDATE_FOR_GRANTS)
     if (catalog == null) {
         if (!failed) {
             LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -1585,7 +1601,7 @@ private fun PluginsSection(
                             else -> "Non accordé"
                         },
                         on,
-                        enabled = !locked,
+                        enabled = true,
                         description = "Accès à ${connection.name}",
                     ) { allowed ->
                         change {
@@ -1632,16 +1648,15 @@ private fun PluginsSection(
                     style = MaterialTheme.typography.titleSmall,
                 )
                 ToneChip(PluginBadge("Indisponible", PluginTone.ATTENTION))
-                if (!locked)
-                    TextButton(
-                        onClick = { change { it.copy(plugins = it.plugins - connection.id) } },
-                        modifier =
-                            Modifier.semantics {
-                                contentDescription = "Retirer ${connection.name}"
-                            },
-                    ) {
-                        Text("Retirer")
-                    }
+                TextButton(
+                    onClick = { change { it.copy(plugins = it.plugins - connection.id) } },
+                    modifier =
+                        Modifier.semantics {
+                            contentDescription = "Retirer ${connection.name}"
+                        },
+                ) {
+                    Text("Retirer")
+                }
             }
             Note(
                 "Ce plugin ne donne plus d’accès aux agents (version non approuvée, invalide ou sans accès agent). L’accès est conservé, mais ne donne rien tant qu’il ne redevient pas disponible."
@@ -1653,10 +1668,9 @@ private fun PluginsSection(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Instance supprimée", Modifier.weight(1f))
             ToneChip(PluginBadge("Introuvable", PluginTone.ATTENTION))
-            if (!locked)
-                TextButton(onClick = { change { it.copy(plugins = it.plugins - id) } }) {
-                    Text("Retirer")
-                }
+            TextButton(onClick = { change { it.copy(plugins = it.plugins - id) } }) {
+                Text("Retirer")
+            }
         }
     }
     val delegations = catalog.connections.filter { agent.id.isNotBlank() && it.agentId == agent.id }
@@ -1699,8 +1713,6 @@ private fun nodeStatus(node: ExecutionNode): PluginBadge =
 private fun NodesSection(
     agent: Agent,
     nodes: List<ExecutionNode>,
-    legacy: Boolean,
-    locked: Boolean,
     loaded: Boolean,
     failed: Boolean,
     retry: () -> Unit,
@@ -1709,7 +1721,6 @@ private fun NodesSection(
     val access = agent.access
     // Without the machine list, any change could restrict the agent to the current runner.
     val editable = loaded && !failed
-    if (legacy) Note(UPDATE_FOR_GRANTS)
     if (!loaded && !failed) LinearProgressIndicator(Modifier.fillMaxWidth())
     if (failed)
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1734,7 +1745,7 @@ private fun NodesSection(
         enabled = editable,
         power = true,
     ) { on ->
-        change { it.withBackend(on, locked) }
+        change { it.withBackend(on) }
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     SwitchRow(
@@ -1777,7 +1788,7 @@ private fun NodesSection(
                     else PluginBadge("Introuvable", PluginTone.ATTENTION)
                 )
                 TextButton(
-                    onClick = { change { it.withNodeRun(held.id, false, locked) } },
+                    onClick = { change { it.withNodeRun(held.id, false) } },
                     modifier =
                         Modifier.semantics {
                             contentDescription = "Retirer ${held.name ?: held.id}"
@@ -1837,7 +1848,7 @@ private fun NodesSection(
                     power = administrator,
                     description = "Exécuter ses conversations sur ${node.name}",
                 ) { on ->
-                    change { it.withNodeRun(node.id, on, locked) }
+                    change { it.withNodeRun(node.id, on) }
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 val supported = node.exclusiveReservations
@@ -1849,7 +1860,7 @@ private fun NodesSection(
                         else -> "Suspend les autres conversations"
                     },
                     exclusive,
-                    enabled = editable && !locked && runs && supported,
+                    enabled = editable && runs && supported,
                     power = true,
                     description = "Réserver ${node.name} en exclusivité",
                 ) { on ->
@@ -1862,10 +1873,9 @@ private fun NodesSection(
                             else "Inactif tant que le runtime n’est pas mis à jour.",
                             Modifier.weight(1f),
                         )
-                        if (!locked)
-                            TextButton(onClick = { change { it.withExclusive(node.id, false) } }) {
-                                Text("Retirer")
-                            }
+                        TextButton(onClick = { change { it.withExclusive(node.id, false) } }) {
+                            Text("Retirer")
+                        }
                     }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
@@ -1877,10 +1887,9 @@ private fun NodesSection(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Node supprimée ou révoquée", Modifier.weight(1f))
                     ToneChip(PluginBadge("Introuvable", PluginTone.ATTENTION))
-                    if (!locked)
-                        TextButton(onClick = { change { it.withExclusive(id, false) } }) {
-                            Text("Retirer")
-                        }
+                    TextButton(onClick = { change { it.withExclusive(id, false) } }) {
+                        Text("Retirer")
+                    }
                 }
             }
     Text(
@@ -1939,6 +1948,14 @@ private fun PowersSection(
             power = true,
         ) { on ->
             change { it.copy(installation = on) }
+        }
+        SwitchRow(
+            "Déléguer des tâches",
+            "Confier des tâches d’une conversation à de nouvelles conversations qui lui rendent compte, sur tout agent de code et modèle. Chacune s’exécute en tant que cet agent, ou qu’un agent dont il couvre les accès, dans son propre espace de travail. Une conversation déléguée ne délègue pas à son tour, et 5 au plus travaillent en même temps.",
+            access.delegation == true,
+            power = true,
+        ) { on ->
+            change { it.copy(delegation = on) }
         }
     }
     val exclusive = agent.effectiveExclusive(nodes)
@@ -2008,9 +2025,11 @@ private fun EngineSection(
         refresh = { vm.refreshModels(agent.provider) },
         provider = agent.provider,
         changeProvider = { provider ->
-            update { it.copy(provider = provider, model = "", reasoning = "") }
+            update { it.copy(provider = provider, model = "", reasoning = "", speed = "") }
         },
         field = true,
+        speed = agent.speed,
+        changeSpeed = { speed -> update { it.copy(speed = speed) } },
     ) { model, reasoning ->
         update { it.copy(model = model, reasoning = reasoning) }
     }

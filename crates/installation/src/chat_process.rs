@@ -143,6 +143,9 @@ struct TurnParams<'a> {
     client_user_message_id: Option<&'a Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<&'a Value>,
+    /// Kept by the thread for later turns, as `effort` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<&'a str>,
 }
 
 /// The plan's model, unless it leaves the choice to Codex.
@@ -183,16 +186,23 @@ struct Question {
     message_id: Option<String>,
 }
 
+// Codex persists client IDs in history. A reserved wire namespace preserves
+// operational identity across turns without changing provider message UUIDs.
+const OPERATIONAL_ID: &str = "cairn-runtime-disk:";
+
 struct Chat<'a> {
     session: &'a mut Session,
     events: mpsc::Sender<Value>,
     cancel: CancellationToken,
     thread: String,
+    /// The model Codex reports for the thread, which a plan without one runs.
+    thread_model: String,
     turn: String,
     completed: Option<Value>,
     last_message: String,
     seen: HashSet<String>,
     attempted: HashSet<String>,
+    turn_submitted: bool,
     texts: HashMap<String, String>,
     questions: HashMap<String, Question>,
     /// Subagents this conversation started, by the ID of the item that started them.
@@ -238,7 +248,7 @@ impl Chat<'_> {
     }
 
     async fn acknowledge(&mut self, id: &str) -> Result<()> {
-        if self.seen.insert(id.to_owned()) {
+        if self.seen.insert(id.to_owned()) && !id.starts_with(OPERATIONAL_ID) {
             self.emit(json!({ "type": "chat.delivered", "messageId": id }))
                 .await?;
         }
@@ -790,6 +800,7 @@ impl Chat<'_> {
         };
         let result = self.request(method, serde_json::to_value(params)?).await?;
         self.thread = text(&result["thread"], "id").to_owned();
+        self.thread_model = text(&result, "model").to_owned();
         if self.thread.is_empty() {
             return Err(Error::bad_gateway(
                 "Codex returned an invalid conversation.",
@@ -982,18 +993,88 @@ impl Chat<'_> {
         };
         let input =
             crate::attachments::input(&message, &plan["execution"]["attachments"], inbox(plan));
+        let (service_tier, speed_notice) = self.service_tier(plan).await?;
         let params = TurnParams {
             thread_id: &self.thread,
             input,
             effort: (!effort.is_empty()).then_some(effort),
             client_user_message_id: (!continuing).then(|| &plan["execution"]["messageId"]),
             model: model(plan),
+            service_tier: Some(service_tier.as_str()).filter(|tier| !tier.is_empty()),
         };
         let params = serde_json::to_value(params)?;
+        self.turn_submitted = true;
         let started = self.request("turn/start", params).await?;
         self.turn = text(&started["turn"], "id").to_owned();
         self.acknowledge(text(&plan["execution"], "messageId"))
-            .await
+            .await?;
+        // Only an attempt Codex accepted says how it asks for the speed, after its message.
+        if let Some(notice) = speed_notice {
+            self.emit(notice).await?;
+        }
+        Ok(())
+    }
+
+    /// The tier sent with the turn, and the speed notice to record once Codex accepts it. Codex
+    /// silently runs Standard for a tier its own catalog lacks, so a faster tier is checked against
+    /// this process's model list first, and against the account's recent cached catalog. Codex
+    /// silently answers both with its built-in list, which offers Fast, when it cannot fetch the
+    /// account's: a list naming the model without the tier is the account's, and decides Standard;
+    /// a list naming the tier is only a request, which the account's plan may still not run.
+    async fn service_tier(&mut self, plan: &Value) -> Result<(String, Option<Value>)> {
+        let tier = text(plan, "serviceTier").to_owned();
+        if tier.is_empty() || tier == crate::models::CODEX_STANDARD_TIER {
+            return Ok((tier, None));
+        }
+
+        // Without a chosen model, Codex runs the thread's, which its configuration may set
+        // rather than the catalog's default.
+        let model = match text(plan, "model") {
+            "" => self.thread_model.clone(),
+            model => model.to_owned(),
+        };
+        let check = if model.is_empty() {
+            // No model is known for the turn, so its catalog row cannot be found.
+            crate::models::TierCheck::Unconfirmed
+        } else {
+            tokio::select! {
+                () = self.cancel.cancelled() => return Err(Error::conflict(STOPPED)),
+                check = crate::models::check_tier(self.session, &model, &tier) => check,
+            }
+        };
+        let account = plan["accountTiers"][&model]
+            .as_array()
+            .map(|tiers| tiers.iter().any(|listed| listed == tier.as_str()));
+        let check = match (check, account) {
+            (_, Some(false)) => crate::models::TierCheck::Lacking,
+            (crate::models::TierCheck::Offered, None) => crate::models::TierCheck::Unconfirmed,
+            (check, _) => check,
+        };
+        let speed = match check {
+            crate::models::TierCheck::Offered => json!({
+                "requested": tier,
+                "confirmed": true,
+            }),
+            crate::models::TierCheck::Lacking => json!({
+                "requested": tier,
+                "applied": crate::models::STANDARD_SPEED,
+            }),
+            crate::models::TierCheck::Unconfirmed => json!({
+                "requested": tier,
+                "unconfirmed": true,
+            }),
+        };
+        let notice = json!({
+            "type": "turn.speed",
+            "messageId": plan["execution"]["messageId"],
+            "speed": speed,
+        });
+        let sent = if check == crate::models::TierCheck::Lacking {
+            crate::models::CODEX_STANDARD_TIER.to_owned()
+        } else {
+            tier
+        };
+        Ok((sent, Some(notice)))
     }
 
     /// Compacts the resumed thread. Codex replaces any running turn with its compaction
@@ -1065,8 +1146,13 @@ impl Chat<'_> {
         };
         for message in messages {
             let id = text(&message, "id");
+            let client_id = if message["operationalNotice"] == true {
+                format!("{OPERATIONAL_ID}{id}")
+            } else {
+                id.to_owned()
+            };
             if self.completed.is_some()
-                || self.seen.contains(id)
+                || self.seen.contains(&client_id)
                 || !self.attempted.insert(id.to_owned())
             {
                 continue;
@@ -1108,13 +1194,13 @@ impl Chat<'_> {
             let params = json!({
                 "threadId": self.thread,
                 "expectedTurnId": self.turn,
-                "clientUserMessageId": id,
+                "clientUserMessageId": client_id,
                 "input": input,
             });
             if self.request("turn/steer", params).await.is_err() {
                 break;
             }
-            self.acknowledge(id).await?;
+            self.acknowledge(&client_id).await?;
         }
         Ok(())
     }
@@ -1164,7 +1250,15 @@ pub async fn run(
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let mut session =
-        Session::codex(config, home, &args, Some(Path::new(text(&plan, "cwd")))).await?;
+        match Session::codex(config, home, &args, Some(Path::new(text(&plan, "cwd")))).await {
+            Ok(session) => session,
+            Err(error) => {
+                if let Some(failure) = crate::run_retry::startup_failure(&error) {
+                    let _ = events.send(failure).await;
+                }
+                return Err(error);
+            }
+        };
     let result = run_session(&mut session, home, plan, events, cancel, false).await;
     crate::performance::wait("codex_shutdown", session.close()).await;
     result
@@ -1189,6 +1283,9 @@ async fn run_session(
     if let Some(auth) = &mut auth
         && let Err(error) = auth.login(session).await
     {
+        if let Some(failure) = crate::run_retry::startup_failure(&error) {
+            let _ = events.send(failure).await;
+        }
         return Err(error);
     }
     session.auth = auth;
@@ -1197,11 +1294,13 @@ async fn run_session(
         events,
         cancel,
         thread: String::new(),
+        thread_model: String::new(),
         turn: String::new(),
         completed: None,
         last_message: String::new(),
         seen: HashSet::new(),
         attempted: HashSet::new(),
+        turn_submitted: false,
         texts: HashMap::new(),
         subagents: HashMap::new(),
         children: HashMap::new(),
@@ -1210,6 +1309,12 @@ async fn run_session(
         compacted: false,
     };
     let mut result = chat.execute(&plan).await;
+    if let Err(error) = &result
+        && !chat.turn_submitted
+        && let Some(failure) = crate::run_retry::startup_failure(error)
+    {
+        chat.emit(failure).await?;
+    }
     if result.is_ok() && reusable {
         result = chat.release().await;
     }

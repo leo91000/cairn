@@ -73,3 +73,12 @@ fn a_busy_member_upload_is_rejected_and_drained_before_its_next_small_frame() {
         matches!(member.push(&small.packets().next().unwrap()), Ok(Some(Frame::Cancel { id })) if id == "small")
     );
 }
+
+#[test]
+fn a_different_data_channel_version_requires_an_update() {
+    use cairn_protocol::data_channel::{FrameDecoder, HEADER};
+    let mut packet = vec![0; HEADER];
+    packet[0] = 2;
+    let error = FrameDecoder::default().push(&packet).err().unwrap();
+    assert!(error.to_string().contains("Update required"));
+}

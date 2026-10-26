@@ -1,11 +1,7 @@
 package build.cairn.app.data
 
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
 
@@ -14,32 +10,11 @@ import kotlinx.serialization.json.jsonObject
  * checking and what saving it changes. Pure functions so they can be tested without Compose.
  */
 
-/** What saving an edited agent would interrupt (`POST /agents/{id}/preview`). */
-@Serializable data class AgentPreviewRuns(val queued: Int = 0, val running: Int = 0)
+typealias AgentPreviewRuns = build.cairn.contracts.AgentPreviewRuns
 
-/** A plugin delegation that answers as the agent, and how the new access affects it. */
-@Serializable
-data class AgentDelegationEffect(
-    val id: String = "",
-    val pluginId: String = "",
-    val name: String = "",
-    val enabled: Boolean = true,
-    /** Saving without reapproval stops the delegation until it is reapproved. */
-    val suspended: Boolean = false,
-    /** Why the new access cannot be reapproved, or null. */
-    val blocked: String? = null,
-    /**
-     * Already suspended by an earlier change: reapproving now would also approve that change, so it
-     * is never preselected.
-     */
-    val alreadySuspended: Boolean = false,
-)
+typealias AgentDelegationEffect = build.cairn.contracts.AgentDelegationEffect
 
-@Serializable
-data class AgentPreview(
-    val runs: AgentPreviewRuns = AgentPreviewRuns(),
-    val delegations: List<AgentDelegationEffect> = emptyList(),
-)
+typealias AgentPreview = build.cairn.contracts.AgentPreview
 
 /** The sections of the agent page, in the order of its overview. */
 enum class AgentSection(val title: String) {
@@ -75,44 +50,23 @@ fun AgentDraft.withAllProjects(all: Boolean): AgentDraft =
  */
 fun newAgent() =
     Agent(
+        id = "00000000-0000-4000-8000-000000000000",
+        name = "",
+        revision = "",
+        createdAt = 0,
         access =
             AccessPolicy(
                 nodes = listOf(LOCAL_NODE_ID),
                 projects = emptyList(),
                 skills = emptyList(),
                 mcps = emptyList(),
-                mcpTools = emptyMap(),
+                mcpTools = build.cairn.contracts.McpTools(emptyMap()),
                 installation = false,
                 sandbox = "yolo",
                 backend = VM_BACKEND,
             ),
         exclusiveNodes = emptyList(),
         plugins = emptyList(),
-    )
-
-/**
- * An installation that does not mark its agents with `grantsOnAgent` (an earlier release, or one
- * rolled back to it, whose agents may still carry a revision) ignores top-level `exclusiveNodes`
- * and `plugins` and keeps them on the resources (instance `agentIds`, node `exclusiveAgents`).
- */
-fun olderInstallation(agents: List<Agent>) = agents.isNotEmpty() && agents.none { it.grantsOnAgent }
-
-/**
- * What the review compares against: on an older installation live grants are read-only and never
- * saved from the agent, so their differences are not reviewed.
- */
-fun reviewBaseline(baseline: Agent, edited: Agent, legacy: Boolean): Agent =
-    if (legacy) baseline.copy(exclusiveNodes = edited.exclusiveNodes, plugins = edited.plugins)
-    else baseline
-
-/** On an older installation, the agent's live grants as its resources record them. */
-fun Agent.withResourceGrants(catalog: PluginCatalog?, nodes: List<ExecutionNode>): Agent =
-    copy(
-        plugins = catalog?.connections?.filter { id in it.agentIds }?.map { it.id }.orEmpty(),
-        exclusiveNodes =
-            nodes
-                .filter { id in it.exclusiveAgents }
-                .map { if (it.local) LOCAL_NODE_ID else it.id },
     )
 
 /** Everything the page shows the agent's access against. */
@@ -138,9 +92,11 @@ const val NOT_LOADED = "Non chargé"
 fun AccessPolicy.withGrantedTools(existing: Set<String>? = null): AccessPolicy =
     copy(
         mcpTools =
-            mcpTools.filterKeys {
-                (mcps == null || it in mcps) && (existing == null || it in existing)
-            }
+            build.cairn.contracts.McpTools(
+                mcpTools.filterKeys {
+                    (mcps == null || it in mcps) && (existing == null || it in existing)
+                }
+            )
     )
 
 /** The agent as it will be sent: the parsed time limit applied. */
@@ -152,11 +108,16 @@ fun AgentDraft.resolved(): Agent =
  * revision and portrait come from the server.
  */
 fun profileChanged(base: Agent, edited: Agent): Boolean =
-    edited.copy(id = base.id, revision = base.revision, avatar = base.avatar) != base
+    edited.copy(
+        id = base.id,
+        revision = base.revision,
+        createdAt = base.createdAt,
+        avatar = base.avatar,
+    ) != base
 
 /** The section of every unsaved change, once per changed setting. */
 fun agentChanges(original: Agent, draft: AgentDraft): List<AgentSection> {
-    val edited = draft.resolved()
+    val edited = draft.agent
     val before = original.access
     val after = edited.access
     return buildList {
@@ -166,7 +127,8 @@ fun agentChanges(original: Agent, draft: AgentDraft): List<AgentSection> {
         if (
             edited.provider != original.provider ||
                 edited.model != original.model ||
-                edited.reasoning != original.reasoning
+                edited.reasoning != original.reasoning ||
+                edited.speed != original.speed
         )
             add(AgentSection.Engine)
         if (draft.timeout.trim() != original.timeoutMinutes.toString()) add(AgentSection.Advanced)
@@ -185,6 +147,7 @@ fun agentChanges(original: Agent, draft: AgentDraft): List<AgentSection> {
             add(AgentSection.Nodes)
         if (after.sandbox != before.sandbox) add(AgentSection.Sandbox)
         if (after.installation != before.installation) add(AgentSection.Powers)
+        if ((after.delegation == true) != (before.delegation == true)) add(AgentSection.Powers)
     }
 }
 
@@ -207,7 +170,9 @@ fun agentErrors(draft: AgentDraft): Map<AgentSection, String> = buildMap {
     if (
         agent.model.length > 100 ||
             agent.reasoning.length > 40 ||
-            !Regex("(?:[a-z][a-z0-9_-]*)?").matches(agent.reasoning)
+            !Regex("(?:[a-z][a-z0-9_-]*)?").matches(agent.reasoning) ||
+            agent.speed.length > 40 ||
+            !Regex("(?:[a-z][a-z0-9_-]*)?").matches(agent.speed)
     )
         put(AgentSection.Engine, "Choisissez un modèle et un niveau de réflexion valides.")
     if (draft.timeout.trim().toIntOrNull() !in 0..720)
@@ -225,7 +190,8 @@ fun sectionOfError(message: String): AgentSection? {
         "project" in text -> AgentSection.Projects
         "sandbox" in text -> AgentSection.Sandbox
         "installation" in text -> AgentSection.Powers
-        "model" in text || "reasoning" in text || "provider" in text -> AgentSection.Engine
+        "model" in text || "reasoning" in text || "provider" in text || "speed" in text ->
+            AgentSection.Engine
         "timeout" in text -> AgentSection.Advanced
         "name" in text || "instructions" in text || "description" in text -> AgentSection.Identity
         else -> null
@@ -295,12 +261,12 @@ fun Agent.nodeChoices(nodes: List<ExecutionNode>) = agentNodeChoices(nodes, acce
  * Switches between a VM and native execution on the host. Nodes of the other backend no longer
  * apply, so node execution and exclusive reservations start again from none.
  */
-fun Agent.withBackend(native: Boolean, readOnlyGrants: Boolean = false): Agent {
+fun Agent.withBackend(native: Boolean): Agent {
     val backend = if (native) NATIVE_BACKEND else VM_BACKEND
     if (backend == access.backend) return this
     return copy(
         access = access.copy(backend = backend, nodes = emptyList()),
-        exclusiveNodes = if (readOnlyGrants) exclusiveNodes else emptyList(),
+        exclusiveNodes = emptyList(),
     )
 }
 
@@ -316,11 +282,11 @@ fun Agent.effectiveExclusive(nodes: List<ExecutionNode>): List<ExecutionNode> =
     }
 
 /** Allows or stops running on one node. Stopping also drops the exclusive grant there. */
-fun Agent.withNodeRun(node: String, run: Boolean, readOnlyGrants: Boolean = false): Agent {
+fun Agent.withNodeRun(node: String, run: Boolean): Agent {
     val current = access.nodes ?: return this
     return copy(
         access = access.copy(nodes = if (run) (current + node).distinct() else current - node),
-        exclusiveNodes = if (run || readOnlyGrants) exclusiveNodes else exclusiveNodes - node,
+        exclusiveNodes = if (run) exclusiveNodes else exclusiveNodes - node,
     )
 }
 
@@ -464,23 +430,17 @@ fun agentAccessSummary(
     catalog: PluginCatalog? = null,
     /** Known machines, to show exclusivity only where it takes effect; null (unknown) omits it. */
     nodes: List<ExecutionNode>? = null,
-    /**
-     * An older installation keeps live grants on its resources: they come from [catalog] and
-     * [nodes], and are omitted without them.
-     */
-    older: Boolean = false,
 ): String {
     val access = agent.access
-    val shown = if (older) agent.withResourceGrants(catalog, nodes.orEmpty()) else agent
     return buildList {
             add(access.projects?.let { plural(it.size, "projet") } ?: "Tous les projets")
             add(access.nodes?.let { plural(it.size, "node") } ?: "Toutes les nodes")
             if (access.backend == NATIVE_BACKEND) add(backendLabel(access.backend))
-            if (shown.plugins.isNotEmpty())
-                if (catalog == null) add(plural(shown.plugins.size, "plugin"))
+            if (agent.plugins.isNotEmpty())
+                if (catalog == null) add(plural(agent.plugins.size, "plugin"))
                 else
                     addAll(
-                        shown.plugins
+                        agent.plugins
                             .map { id ->
                                 val connection = catalog.connections.find { it.id == id }
                                 catalog.packages.find { it.id == connection?.pluginId }?.name
@@ -490,10 +450,11 @@ fun agentAccessSummary(
                     )
             if (
                 // Only where it takes effect, so never while the machines are unknown.
-                nodes != null && shown.effectiveExclusive(nodes).isNotEmpty()
+                nodes != null && agent.effectiveExclusive(nodes).isNotEmpty()
             )
                 add("Exclusivité")
             if (access.installation) add("Gestion de l’installation")
+            if (access.delegation == true) add("Délégation de tâches")
         }
         .joinToString(" · ")
 }
@@ -714,6 +675,7 @@ fun agentReductions(
         .filter { it !in edited.plugins }
         .forEach { id -> add(pluginGrantLabel(id, resources.catalog)) }
     if (before.installation && !after.installation) add("gestion de l’installation")
+    if (before.delegation == true && after.delegation != true) add("délégation de tâches")
     if (before.backend == NATIVE_BACKEND && after.backend != NATIVE_BACKEND) add("exécution native")
     if ((sandboxStrictness[after.sandbox] ?: 0) > (sandboxStrictness[before.sandbox] ?: 0))
         add("mode d’exécution « ${sandboxLabel(after.sandbox)} »")
@@ -731,13 +693,14 @@ private fun pluginGrantLabel(id: String, catalog: PluginCatalog?): String {
 
 private fun runsSentence(runs: AgentPreviewRuns): String {
     val parts = buildList {
-        if (runs.queued > 0) add(plural(runs.queued, "exécution en file", "exécutions en file"))
+        if (runs.queued > 0)
+            add(plural(runs.queued.toInt(), "exécution en file", "exécutions en file"))
         if (runs.running > 0)
-            add(plural(runs.running, "conversation en cours", "conversations en cours"))
+            add(plural(runs.running.toInt(), "conversation en cours", "conversations en cours"))
     }
     val subject = parts.joinToString(" et ")
     val total = runs.queued + runs.running
-    return "$subject ne ${if (total == 1) "pourra" else "pourront"} pas continuer avec les anciens accès."
+    return "$subject ne ${if (total == 1L) "pourra" else "pourront"} pas continuer avec les anciens accès."
 }
 
 /** The review shown before saving: powers and secrets added, and work a reduction stops. */
@@ -795,6 +758,13 @@ fun agentReview(
                 "Ajout : gestion de l’installation. Cet agent pourra créer et modifier les agents (y compris leurs permissions), projets, skills, connexions MCP, missions et exécutions de toute l’installation.",
             )
         )
+    if (after.delegation == true && before.delegation != true)
+        add(
+            ReviewLine(
+                ReviewKind.Power,
+                "Ajout : délégation de tâches. Cet agent pourra lancer des conversations qui lui rendent compte, sur tout agent de code et modèle, en tant que lui-même ou qu’un agent dont il couvre les accès.",
+            )
+        )
     edited.plugins
         .filter { it !in original.plugins }
         .forEach { id ->
@@ -806,7 +776,7 @@ fun agentReview(
             )
         }
     val reductions = agentReductions(original, edited, resources)
-    val runs = preview?.runs ?: AgentPreviewRuns()
+    val runs = preview?.runs ?: AgentPreviewRuns(queued = 0, running = 0)
     val affected = runs.queued + runs.running > 0
     if (reductions.isNotEmpty()) {
         val text = "Retrait : ${reductions.joinToString(", ")}."
@@ -815,17 +785,6 @@ fun agentReview(
         // The server reports work the change stops even when nothing listed here is removed.
         add(ReviewLine(ReviewKind.Reduction, "Accès modifié. ${runsSentence(runs)}"))
 }
-
-/**
- * The preview of a save, or null when the installation predates it (404/405): the page then reviews
- * what it computes locally.
- */
-suspend fun <T> optionalPreview(load: suspend () -> T): T? =
-    try {
-        load()
-    } catch (e: ApiException) {
-        if (e.status == 404 || e.status == 405) null else throw e
-    }
 
 /** Delegations the save would suspend: these get a reapproval checkbox. */
 fun AgentPreview.suspendedDelegations() = delegations.filter { it.suspended }
@@ -886,6 +845,7 @@ fun rebaseAgent(
         description = pick(base.description, mine.description, theirs.description),
         model = pick(base.model, mine.model, theirs.model),
         reasoning = pick(base.reasoning, mine.reasoning, theirs.reasoning),
+        speed = pick(base.speed, mine.speed, theirs.speed),
         provider = pick(base.provider, mine.provider, theirs.provider),
         instructions = pick(base.instructions, mine.instructions, theirs.instructions),
         timeoutMinutes = pick(base.timeoutMinutes, mine.timeoutMinutes, theirs.timeoutMinutes),
@@ -897,8 +857,9 @@ fun rebaseAgent(
                 projects = mergeList(a.projects, m.projects, t.projects),
                 skills = mergeList(a.skills, m.skills, t.skills),
                 mcps = mergeList(a.mcps, m.mcps, t.mcps),
-                mcpTools = tools,
+                mcpTools = build.cairn.contracts.McpTools(tools),
                 installation = pick(a.installation, m.installation, t.installation),
+                delegation = pick(a.delegation, m.delegation, t.delegation),
                 sandbox = pick(a.sandbox, m.sandbox, t.sandbox),
                 backend = pick(a.backend, m.backend, t.backend),
             ),
@@ -943,44 +904,44 @@ fun AgentDraft.rebased(base: Agent, theirs: Agent, mcpIds: Set<String>? = null):
 
 /**
  * The body of `POST /agents`, `PUT /agents/{id}` and its preview. "All" selections are sent as
- * explicit nulls: an omitted key keeps the saved value on the server. The loaded revision is sent
- * back so a concurrent save is refused instead of overwritten.
+ * explicit nulls in the complete settings. The loaded revision is sent back so a concurrent save is
+ * refused instead of overwritten.
  */
 fun agentSaveBody(
     agent: Agent,
     reapprove: List<String> = emptyList(),
     /** MCP connections that exist; tool choices of deleted ones are not sent. Null keeps all. */
     mcpIds: Set<String>? = null,
-    /**
-     * False on an older or not yet known installation: live grants and the revision are left out,
-     * so an installation upgraded between load and save never reads them as "none".
-     */
-    liveGrants: Boolean = true,
     nativeNodeReviews: List<String> = emptyList(),
 ): JsonObject {
-    val fields =
-        wireJson
-            .encodeToJsonElement(agent.copy(access = agent.access.withGrantedTools(mcpIds)))
-            .jsonObject
-            .toMutableMap()
-    fields.remove("avatar")
-    fields.remove("grantsOnAgent")
-    fields.remove("revision")
-    if (agent.revision.isNotBlank()) fields["revision"] = JsonPrimitive(agent.revision)
-    if (!liveGrants) {
-        fields.remove("exclusiveNodes")
-        fields.remove("plugins")
-        fields.remove("revision")
-    }
-    fun list(value: List<String>?): JsonElement =
-        value?.let { JsonArray(it.map(::JsonPrimitive)) } ?: JsonNull
-    val access = fields["access"]!!.jsonObject.toMutableMap()
-    access["nodes"] = list(agent.access.nodes)
-    access["projects"] = list(agent.access.projects)
-    access["skills"] = list(agent.access.skills)
-    access["mcps"] = list(agent.access.mcps)
-    fields["access"] = JsonObject(access)
-    if (reapprove.isNotEmpty()) fields["reapproveDelegations"] = list(reapprove)
-    if (nativeNodeReviews.isNotEmpty()) fields["nativeNodeReviews"] = list(nativeNodeReviews)
-    return JsonObject(fields)
+    val settings = agentSettings(agent, mcpIds)
+    return build.cairn.contracts.contractJson
+        .encodeToJsonElement(
+            build.cairn.contracts.ReplaceAgentInput(
+                agentId = agent.id,
+                revision = agent.revision,
+                settings = settings,
+                review =
+                    build.cairn.contracts.AgentReview(
+                        nativeNodeReviews = nativeNodeReviews,
+                        reapproveDelegations = reapprove,
+                    ),
+            )
+        )
+        .jsonObject
 }
+
+fun agentSettings(agent: Agent, mcpIds: Set<String>? = null): build.cairn.contracts.AgentSettings =
+    build.cairn.contracts.AgentSettings(
+        name = agent.name,
+        provider = agent.provider,
+        description = agent.description,
+        model = agent.model,
+        reasoning = agent.reasoning,
+        speed = agent.speed,
+        instructions = agent.instructions,
+        timeoutMinutes = agent.timeoutMinutes,
+        access = agent.access.withGrantedTools(mcpIds),
+        exclusiveNodes = agent.exclusiveNodes,
+        plugins = agent.plugins,
+    )

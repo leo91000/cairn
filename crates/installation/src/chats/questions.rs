@@ -35,20 +35,15 @@ pub struct QuestionField {
     pub extra: Map<String, Value>,
 }
 
-/// Absent fields are tolerated and kept absent: records predate this type.
+/// A persisted question and its delivery state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Question {
-    #[serde(default)]
     pub id: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub chat_id: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub run_id: String,
-    #[serde(default)]
     pub blocking: bool,
     pub status: QuestionStatus,
-    #[serde(default)]
     pub fields: Vec<QuestionField>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<i64>,

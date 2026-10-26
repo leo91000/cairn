@@ -474,6 +474,226 @@ async fn model_and_reasoning_reach_codex_and_model_changes_resolve_the_new_defau
 }
 
 #[tokio::test]
+async fn a_faster_tier_is_checked_against_codex_own_model_list_before_the_turn() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    // Codex's own catalog lists Fast (`priority`) for fixture-fast only; Ultrafast for none here.
+    let cases = [
+        (
+            "fixture-fast",
+            "priority",
+            false,
+            "priority",
+            Some("offered"),
+        ),
+        ("", "priority", false, "priority", Some("offered")),
+        (
+            "fixture-deep",
+            "priority",
+            false,
+            "default",
+            Some("applied"),
+        ),
+        (
+            "fixture-fast",
+            "ultrafast",
+            false,
+            "default",
+            Some("applied"),
+        ),
+        (
+            "custom-alias",
+            "priority",
+            false,
+            "priority",
+            Some("unconfirmed"),
+        ),
+        (
+            "fixture-fast",
+            "priority",
+            true,
+            "priority",
+            Some("unconfirmed"),
+        ),
+        ("fixture-deep", "default", false, "default", None),
+        // A dated version of a listed model: Codex may apply the listed model's tiers to it.
+        (
+            "fixture-fast-2026-10-01",
+            "priority",
+            false,
+            "priority",
+            Some("unconfirmed"),
+        ),
+        // Without a chosen model, Codex runs the one its configuration sets, not the catalog's
+        // default: fixture-deep lists no Fast.
+        ("", "priority", false, "default", Some("applied")),
+        // The process lists Fast, but the account's own catalog names the model without it: the
+        // process fell back to Codex's built-in list, and the account runs Standard.
+        (
+            "fixture-fast",
+            "priority",
+            false,
+            "default",
+            Some("applied"),
+        ),
+        // Without the account's recent catalog, the process list alone confirms nothing.
+        (
+            "fixture-fast",
+            "priority",
+            false,
+            "priority",
+            Some("unconfirmed"),
+        ),
+    ];
+    for (index, (model, tier, list_fails, sent, notice)) in cases.into_iter().enumerate() {
+        let configured = home.join("fixture-config-model");
+        if index == 8 {
+            std::fs::write(&configured, "fixture-deep").unwrap();
+        }
+        let failure = home.join("fixture-model-list-error");
+        if list_fails {
+            std::fs::write(&failure, "").unwrap();
+        } else {
+            let _ = std::fs::remove_file(&failure);
+        }
+        let mut plan = plan(&root, "Check the speed");
+        plan["model"] = model.into();
+        plan["serviceTier"] = tier.into();
+        // The account's recent catalog, as planning passes it: Fast for fixture-fast only.
+        plan["accountTiers"] = match index {
+            9 => json!({ "fixture-fast": [] }),
+            10 => Value::Null,
+            _ => json!({ "fixture-fast": ["priority"], "fixture-deep": [] }),
+        };
+        plan["execution"]["messageId"] = format!("speed-{index}").into();
+        if index > 0 {
+            plan["sessionId"] = "fixture-chat".into();
+        }
+        let (tx, mut rx) = mpsc::channel::<Value>(64);
+        let events = tokio::spawn(async move {
+            let mut speed = Vec::new();
+            while let Some(event) = rx.recv().await {
+                if event["type"] == "turn.speed" {
+                    speed.push(event);
+                }
+            }
+            speed
+        });
+        chat_process::run(&config, &home, plan, tx, CancellationToken::new())
+            .await
+            .unwrap();
+        let speed = events.await.unwrap();
+        let thread = conversation(&home);
+        assert_eq!(thread["turns"][index]["serviceTier"], sent, "case {index}");
+        match notice {
+            None => assert!(speed.is_empty(), "case {index}: {speed:?}"),
+            Some(kind) => {
+                assert_eq!(speed.len(), 1, "case {index}: {speed:?}");
+                assert_eq!(speed[0]["speed"]["requested"], tier);
+                assert_eq!(speed[0]["messageId"], format!("speed-{index}"));
+                match kind {
+                    "offered" => {
+                        assert_eq!(speed[0]["speed"]["confirmed"], true);
+                        assert!(speed[0]["speed"].get("applied").is_none());
+                    }
+                    "applied" => assert_eq!(speed[0]["speed"]["applied"], "standard"),
+                    _ => assert_eq!(speed[0]["speed"]["unconfirmed"], true),
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn resolved_speed_reaches_codex_and_a_plan_without_a_tier_sends_none() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    for (index, tier) in [Some("priority"), None, Some("default")]
+        .into_iter()
+        .enumerate()
+    {
+        let mut plan = plan(&root, "Check the speed setting");
+        if let Some(tier) = tier {
+            plan["serviceTier"] = tier.into();
+        }
+        plan["execution"]["messageId"] = format!("message-{index}").into();
+        if index > 0 {
+            plan["sessionId"] = "fixture-chat".into();
+        }
+        run_quietly(&config, &home, plan).await;
+        let thread = conversation(&home);
+        assert_eq!(
+            thread["turns"][index]["serviceTier"],
+            tier.map_or(Value::Null, Value::from)
+        );
+    }
+}
+
+#[tokio::test]
+async fn disk_notice_reaches_codex_without_a_user_delivery_receipt() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let next_config = config.clone();
+    let next_home = home.clone();
+    let input = plan(&root, "fixture:question");
+    std::fs::write(
+        root.path().join("inbox/disk-notice.json"),
+        json!({ "id": "disk-notice", "operationalNotice": true,
+            "text": "Runtime disk pressure" })
+        .to_string(),
+    )
+    .unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, input, tx, CancellationToken::new()).await
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = rx.recv().await {
+            assert!(!(event["type"] == "chat.delivered" && event["messageId"] == "disk-notice"));
+            if event["type"] == "chat.question" {
+                deliver(
+                    &root,
+                    &json!([{ "id": "answer", "questionId": event["question"]["id"],
+                    "answers": { "direction": ["Gradual rollout"] }, "text": "Continue" }]),
+                )
+                .await;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+    let mut next = plan(&root, "Continue after the disk notice");
+    next["execution"]["messageId"] = "next-user-message".into();
+    next["sessionId"] = "fixture-chat".into();
+    // A newer operational notice replaces the file before the next turn.
+    std::fs::write(root.path().join("inbox/disk-notice.json"),
+        json!({ "id": "newer-disk-notice", "operationalNotice": true, "text": "Updated runtime notice" }).to_string()).unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    let next_task = tokio::spawn(async move {
+        chat_process::run(&next_config, &next_home, next, tx, CancellationToken::new()).await
+    });
+    let mut completed = false;
+    while let Some(event) = rx.recv().await {
+        if event["type"] == "chat.delivered" {
+            let id = event["messageId"].as_str().unwrap();
+            assert!(!id.contains("disk-notice"), "{event}");
+        }
+        completed |= event["type"] == "turn.completed";
+    }
+    next_task.await.unwrap().unwrap();
+    assert!(completed);
+    assert!(
+        std::fs::read_to_string(root.path().join("codex/fixture-conversation.json"))
+            .unwrap()
+            .contains("Runtime disk pressure")
+    );
+}
+
+#[tokio::test]
 async fn native_in_flight_question_accepts_answer_and_preserves_receipt() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);
@@ -1154,5 +1374,21 @@ async fn failed_or_sessionless_compactions_fail_without_completing() {
         !events
             .iter()
             .any(|event| event["item"]["status"] == "completed")
+    );
+}
+
+#[test]
+fn structured_tool_payloads_redact_credentials_and_nested_output() {
+    let event = json!({
+        "arguments": { "access_token": "private-value", "query": "public query" },
+        "result": [{ "text": "Bearer private-token" }, { "nested": ["a configured-secret value"] }],
+    });
+    let redacted = cairn_installation::run_output::payload(&event, &["configured-secret".into()]);
+    assert_eq!(
+        redacted,
+        json!({
+            "arguments": { "access_token": "[redacted]", "query": "public query" },
+            "result": [{ "text": "Bearer [redacted]" }, { "nested": ["a [redacted] value"] }],
+        })
     );
 }

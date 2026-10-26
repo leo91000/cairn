@@ -1,6 +1,4 @@
 //! One booted Firecracker VM and the attempt it executes.
-pub(super) mod snapshots;
-
 use super::{
     host::{self, call, connect, import, valid_runtime_name},
     mcp,
@@ -37,13 +35,6 @@ use tokio_util::sync::CancellationToken;
 /// Exit code of an attempt stopped by the controller.
 const STOPPED: i32 = 143;
 const MAX_OUTPUT_BYTES: usize = 100_000_000;
-
-#[derive(Clone, Copy)]
-enum Startup<'a> {
-    Cold,
-    Template,
-    Restore(&'a Path),
-}
 
 /// Balloon inflation touches guest pages even when their virtual address space
 /// has never occupied host RAM. Bound idle work by the physical working set,
@@ -139,9 +130,7 @@ async fn reclaim_idle_memory(
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AttemptRecord {
-    #[serde(default)]
     pub vm_id: String,
-    #[serde(default)]
     pub run_id: String,
 }
 
@@ -149,8 +138,7 @@ pub(crate) struct AttemptRecord {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeRecord {
-    #[serde(default)]
-    runtime_id: Option<String>,
+    runtime_id: String,
 }
 
 /// Owns every resource of a booted VM. A prepared disk can be adopted once only.
@@ -223,35 +211,24 @@ fn lock_disk(disk_dir: &Path) -> Result<std::fs::File> {
     Ok(lock)
 }
 
-/// A disk keeps booting the image it was created with; a new disk adopts `image`.
-async fn retained_image(state: &Path, image: &Path, disk_dir: &Path) -> Result<PathBuf> {
-    let runtime_file = disk_dir.join("runtime.json");
-    let retained = if runtime_file.exists() {
-        let runtime: RuntimeRecord =
-            serde_json::from_slice(&tokio::fs::read(&runtime_file).await?)?;
-        let name = runtime.runtime_id.unwrap_or_default();
-        if name.is_empty() || !valid_runtime_name(&name) {
-            return Err(Error::bad("Invalid retained runtime."));
-        }
-        state.join("images").join(name)
-    } else {
-        image.to_owned()
-    };
-    if !retained.join("root.ext4").exists() || !retained.join("vmlinux").exists() {
-        return Err(Error::conflict(
-            "The conversation requires an unavailable retained VM runtime.",
-        ));
+/// Resume persistent workspace data with the controller's current guest build.
+async fn current_image(image: &Path, disk_dir: &Path) -> Result<PathBuf> {
+    if !image.join("root.ext4").exists() || !image.join("vmlinux").exists() {
+        return Err(Error::conflict("Current VM runtime is not installed."));
     }
-    if !runtime_file.exists() {
-        let record = RuntimeRecord {
-            runtime_id: retained
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_owned),
-        };
-        atomic_write(&runtime_file, &serde_json::to_vec(&record)?).await?;
-    }
-    Ok(retained)
+    let runtime_id = image
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && valid_runtime_name(name))
+        .ok_or_else(|| Error::bad("Invalid VM runtime identity."))?
+        .to_owned();
+    let record = RuntimeRecord { runtime_id };
+    atomic_write(
+        &disk_dir.join("runtime.json"),
+        &serde_json::to_vec(&record)?,
+    )
+    .await?;
+    Ok(image.to_owned())
 }
 
 fn firecracker_config(
@@ -262,11 +239,6 @@ fn firecracker_config(
 ) -> Value {
     // Virtio guests have no PS/2 devices. Keep warnings and errors on the
     // serial console without paying for informational output during boot.
-    let control_device = if drives.len() == 2 {
-        "/dev/vdd"
-    } else {
-        "/dev/vdc"
-    };
     let boot_args = format!(
         concat!(
             "console=ttyS0 loglevel=5 i8042.nokbd i8042.noaux ",
@@ -275,7 +247,7 @@ fn firecracker_config(
             "-- -c \"set -e; mount -t devtmpfs devtmpfs /dev || true; ",
             "mount -t squashfs -o ro,nodev,nosuid {} /mnt; exec /mnt/cairn-init\""
         ),
-        network.guest, network.gateway, control_device
+        network.guest, network.gateway, "/dev/vdc"
     );
     let mut configured_drives = vec![json!({
         "drive_id": "root",
@@ -311,10 +283,8 @@ fn firecracker_config(
     })
 }
 
-fn jailer(id: &str, uid: u32, state: &Path, disk_bytes: u64, configured: bool) -> Command {
+fn jailer(id: &str, uid: u32, state: &Path, disk_bytes: u64) -> Command {
     let uid = uid.to_string();
-    // Firecracker writes a regular FUSE file at guest block offsets. A fixed
-    // limit below the retained disk size terminates the VMM with SIGXFSZ.
     let file_limit = format!("fsize={disk_bytes}");
     let mut command = Command::new("/usr/local/bin/jailer");
     command
@@ -343,9 +313,7 @@ fn jailer(id: &str, uid: u32, state: &Path, disk_bytes: u64, configured: bool) -
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    if configured {
-        command.args(["--config-file", "config.json"]);
-    }
+    command.args(["--config-file", "config.json"]);
     command
 }
 
@@ -401,18 +369,6 @@ impl Vm {
         stop: &CancellationToken,
         resources: Option<&Value>,
     ) -> Result<Self> {
-        Self::boot_start(state, image, disk_dir, slot, stop, resources, Startup::Cold).await
-    }
-
-    async fn boot_start(
-        state: &Path,
-        image: &Path,
-        disk_dir: PathBuf,
-        slot: usize,
-        stop: &CancellationToken,
-        resources: Option<&Value>,
-        startup: Startup<'_>,
-    ) -> Result<Self> {
         // GC cannot unlink a runtime between selecting it, publishing the disk
         // pin and linking the immutable files into the new jail.
         let _images = super::images::IMAGE_LIFECYCLE.read().await;
@@ -425,7 +381,7 @@ impl Vm {
         let id = crate::config::id();
         let current_kernel = image.join("vmlinux");
         let current_control = image.join("control.squashfs");
-        let image = retained_image(state, image, &disk_dir).await?;
+        let image = current_image(image, &disk_dir).await?;
         if disk_dir.join("restore.pending").exists() {
             return Err(Error::conflict("VM restore is incomplete."));
         }
@@ -453,7 +409,7 @@ impl Vm {
             memory_mib: resources.memory_mi_b,
         };
         let result = tokio::select! {
-            result = vm.launch(state, (&image, &current_kernel, &current_control, startup), &id, &resources, slot, &mut timing) => result,
+            result = vm.launch(state, (&image, &current_kernel, &current_control), &id, &resources, slot, &mut timing) => result,
             () = stop.cancelled() => Err(Error::unavailable("VM preparation stopped.")),
         };
         if let Err(error) = result {
@@ -470,7 +426,7 @@ impl Vm {
     async fn launch(
         &mut self,
         state: &Path,
-        (image, kernel, control, startup): (&Path, &Path, &Path, Startup<'_>),
+        (image, kernel, control): (&Path, &Path, &Path),
         id: &str,
         resources: &Resources,
         slot: usize,
@@ -495,43 +451,16 @@ impl Vm {
 
         timing.next("spawn_and_guest_ready");
         let mounted = self.mounted.as_ref().unwrap();
-        let paired = mounted.paired();
-        if !matches!(startup, Startup::Cold) && !paired {
-            return Err(Error::bad("Snapshots require paired native disks."));
-        }
-        let mut config = firecracker_config(&self.network, resources, slot, &mounted.drives());
-        if matches!(startup, Startup::Template) {
-            // The first diff is a standalone image of a freshly booted VM.
-            // Avoid faulting/writing the entire sparse RAM ceiling on a node.
-            config["machine-config"]["track_dirty_pages"] = true.into();
-            // Never capture enabled L2 virtualization hardware: its VMX/SVM
-            // state is not part of a Firecracker snapshot. The guest enables
-            // it on the first nested VM creation after restore instead.
-            let boot_args = config["boot-source"]["boot_args"].as_str().unwrap();
-            config["boot-source"]["boot_args"] =
-                format!("kvm.enable_virt_at_load=0 {boot_args}").into();
-        }
-        if let Startup::Restore(template) = startup {
-            snapshots::link(template, jail).await?;
-        }
+        let config = firecracker_config(&self.network, resources, slot, &mounted.drives());
         atomic_write(&jail.join("config.json"), &serde_json::to_vec(&config)?).await?;
         std::os::unix::fs::chown(jail.join("config.json"), Some(self.uid), Some(self.uid))?;
         let disk_bytes = self.volume.as_ref().unwrap().disk.size();
-        // Snapshot memory files may exceed the conversation's disk size.
-        let file_bytes = disk_bytes.max(resources.memory_mi_b * 1024 * 1024);
         tracing::info!(target: "cairn_performance", operation = "vm_configuration", id,
             cpu = resources.cpu, memory_mib = resources.memory_mi_b, disk_bytes,
-            file_limit_bytes = file_bytes, transport = "ublk");
-        let child = self.child.insert(
-            jailer(
-                id,
-                self.uid,
-                state,
-                file_bytes,
-                !matches!(startup, Startup::Restore(_)),
-            )
-            .spawn()?,
-        );
+            file_limit_bytes = disk_bytes, transport = "ublk");
+        let child = self
+            .child
+            .insert(jailer(id, self.uid, state, disk_bytes).spawn()?);
         self.consoles.push(console(
             child.stdout.take().unwrap(),
             state.join(format!("{id}.boot.log")),
@@ -540,42 +469,7 @@ impl Vm {
             child.stderr.take().unwrap(),
             state.join(format!("{id}.vmm.log")),
         ));
-        if matches!(startup, Startup::Restore(_)) {
-            // The restored anonymous guest inherits a frozen OS. A cancelled
-            // renewal must kill it rather than wait for guest-side shutdown.
-            self.idle = true;
-            timing.next("snapshot_load_and_drive_patch");
-            self.load_snapshot().await?;
-        }
-        let status = self.wait_for_guest().await?;
-        if status.version != 1 {
-            // An incompatible image never succeeds on retry.
-            return Err(Error::bad_gateway("Unsupported guest protocol."));
-        }
-        if matches!(startup, Startup::Restore(_)) {
-            if !status.snapshot_clones || status.initialized || !status.codex_ready {
-                return Err(Error::unavailable(
-                    "Snapshot is not an anonymous ready guest.",
-                ));
-            }
-            timing.next("clone_identity_and_native_restart");
-            self.renew_clone().await?;
-            self.warmed = true;
-            self.idle = false;
-        }
-        if paired && !matches!(startup, Startup::Template) {
-            timing.next("mount_workspace");
-            if !status.workspace_disks {
-                return Err(Error::bad_gateway(
-                    "Guest image does not support paired disks.",
-                ));
-            }
-            let reply =
-                host::guest_request(&self.socket, &json!({ "op": "mount-workspace" })).await?;
-            if reply["ok"] != true {
-                return Err(Error::unavailable("Guest workspace mount failed."));
-            }
-        }
+        self.wait_for_guest().await?;
         Ok(())
     }
 
@@ -595,8 +489,12 @@ impl Vm {
                 ));
             }
             let probe = host::status(&self.socket);
-            if let Ok(Ok(status)) = tokio::time::timeout(Duration::from_secs(1), probe).await {
-                return Ok(status);
+            if let Ok(result) = tokio::time::timeout(Duration::from_secs(1), probe).await {
+                match result {
+                    Ok(status) => return Ok(status),
+                    Err(error) if error.status == 502 => return Err(error),
+                    Err(_) => {}
+                }
             }
             // A remote disk read is still waiting; guest boot has not stalled.
             if self.volume.as_ref().is_some_and(|v| v.source.waiting()) {
@@ -643,7 +541,7 @@ impl Vm {
                 acknowledged = reply.succeeded();
             }
         }
-        // A VMM blocked in FUSE may not exit even after SIGKILL until its read
+        // A VMM blocked on disk I/O may not exit even after SIGKILL until its read
         // returns. Release remote reads and reserve waits before awaiting it.
         // All previously acknowledged disk writes remain in the durable journal.
         let volume = self.volume.take();
@@ -801,10 +699,12 @@ impl Vm {
         let mcp_listener = UnixListener::bind(&mcp_path)?;
         std::os::unix::fs::chown(&mcp_path, Some(self.uid), Some(self.uid))?;
 
-        let adapter = plan.chat_provider()?.adapter();
-        let auth_socket = format!("{}/cairn-auth.sock", adapter.state_directory());
+        let provider = plan.chat_provider()?;
         let home = plan.import_to(HOME);
-        let manager = home.map(|home| home.source.join(&auth_socket));
+        let manager = provider.and_then(|provider| {
+            let auth_socket = format!("{}/cairn-auth.sock", provider.adapter().state_directory());
+            home.map(|home| home.source.join(auth_socket))
+        });
         let channel = home.map(|home| home.source.join(mcp::SOCKET));
         let relay_stop = CancellationToken::new();
         let relay = auth_relay(listener, manager, relay_stop.clone());
@@ -827,7 +727,7 @@ impl Vm {
             }
             if plan.command().is_none() && !status.codex_ready {
                 timing.next("current_entrypoint");
-                host::prepare_entrypoint(socket, state, &status).await?;
+                host::prepare_entrypoint(socket).await?;
             }
             run(socket, plan, state, timing).await
         };
@@ -847,8 +747,7 @@ impl Vm {
 
     /// Warm only an anonymous local disk. A live native process must never be
     /// initialized over a previous conversation or a borrowed storage grant.
-    /// Older guest images return false and remain eligible for the cold path.
-    pub async fn warm_codex(&mut self, state: &Path, stop: &CancellationToken) -> Result<bool> {
+    pub async fn warm_codex(&mut self, stop: &CancellationToken) -> Result<bool> {
         if self
             .volume
             .as_ref()
@@ -860,16 +759,13 @@ impl Vm {
             return Err(Error::conflict("Only an anonymous VM can prewarm Codex."));
         }
         let status = host::status(&self.socket).await?;
-        if !status.codex_service {
-            return Ok(false);
-        }
         if status.initialized {
             return Err(Error::conflict("VM already contains a conversation."));
         }
         let mut timing = Operation::new("vm_codex_warm", self.id(), "clock");
         self.synchronize_clock().await?;
         timing.next("current_entrypoint");
-        host::prepare_entrypoint(&self.socket, state, &status).await?;
+        host::prepare_entrypoint(&self.socket).await?;
         // Any uncertain outcome retires this VM; execute cannot silently start
         // a second native process over databases opened by the first one.
         self.warmed = true;
@@ -936,8 +832,10 @@ async fn refresh_imports(socket: &Path, plan: &Plan) -> Result<()> {
         if import.target != HOME {
             continue;
         }
-        let adapter = plan.chat_provider()?.adapter();
-        if adapter.refresh_state_on_resume() {
+        if let Some(provider) = plan.chat_provider()?
+            && provider.adapter().refresh_state_on_resume()
+        {
+            let adapter = provider.adapter();
             let source = import.source.join(adapter.state_directory());
             let target = format!("{HOME}/{}", adapter.state_directory());
             if source.exists() {
@@ -1091,6 +989,35 @@ mod tests {
     use std::os::unix::process::CommandExt;
 
     #[tokio::test]
+    async fn resumed_disks_use_the_current_guest_image_without_changing_workspace_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let image = root.path().join("images/current");
+        let disk = root.path().join("disk");
+        tokio::fs::create_dir_all(&image).await.unwrap();
+        tokio::fs::create_dir_all(&disk).await.unwrap();
+        for file in ["root.ext4", "vmlinux"] {
+            tokio::fs::write(image.join(file), b"current")
+                .await
+                .unwrap();
+        }
+        tokio::fs::write(disk.join("runtime.json"), br#"{"runtimeId":"previous"}"#)
+            .await
+            .unwrap();
+        tokio::fs::write(disk.join("workspace"), b"retained")
+            .await
+            .unwrap();
+        assert_eq!(current_image(&image, &disk).await.unwrap(), image);
+        let saved: RuntimeRecord =
+            serde_json::from_slice(&tokio::fs::read(disk.join("runtime.json")).await.unwrap())
+                .unwrap();
+        assert_eq!(saved.runtime_id, "current");
+        assert_eq!(
+            tokio::fs::read(disk.join("workspace")).await.unwrap(),
+            b"retained"
+        );
+    }
+
+    #[tokio::test]
     async fn reduced_resume_seed_cannot_initialize_an_empty_guest() {
         let plan = Plan::new(json!({"workspaceSeeded":false,"imports":[]}));
         let error = import_workspace(Path::new("/no-guest.sock"), &plan)
@@ -1129,30 +1056,21 @@ mod tests {
     }
 
     #[test]
-    fn control_disk_bootstrap_keeps_flat_and_paired_guest_device_names() {
+    fn control_disk_bootstrap_uses_the_third_guest_device() {
         let network = Network::new(1).unwrap();
         let resources = crate::nodes::placement::defaults();
-        for (drives, device) in [
-            (vec![json!({"drive_id": "data"})], "/dev/vdc"),
-            (
-                vec![
-                    json!({"drive_id": "data"}),
-                    json!({"drive_id": "conversation"}),
-                ],
-                "/dev/vdd",
-            ),
-        ] {
-            let config = firecracker_config(&network, &resources, 1, &drives);
-            let boot = config["boot-source"]["boot_args"].as_str().unwrap();
-            assert!(boot.contains(&format!("ro,nodev,nosuid {device} /mnt")));
-            assert!(boot.contains("-- -c \"set -e;"));
-            assert!(boot.ends_with("exec /mnt/cairn-init\""));
-            let configured = config["drives"].as_array().unwrap();
-            assert_eq!(configured[1..1 + drives.len()], drives);
-            let control = configured.last().unwrap();
-            assert_eq!(control["path_on_host"], "control.squashfs");
-            assert_eq!(control["is_read_only"], true);
-        }
+        let drives = vec![json!({"drive_id": "data"})];
+        let device = "/dev/vdc";
+        let config = firecracker_config(&network, &resources, 1, &drives);
+        let boot = config["boot-source"]["boot_args"].as_str().unwrap();
+        assert!(boot.contains(&format!("ro,nodev,nosuid {device} /mnt")));
+        assert!(boot.contains("-- -c \"set -e;"));
+        assert!(boot.ends_with("exec /mnt/cairn-init\""));
+        let configured = config["drives"].as_array().unwrap();
+        assert_eq!(configured[1..1 + drives.len()], drives);
+        let control = configured.last().unwrap();
+        assert_eq!(control["path_on_host"], "control.squashfs");
+        assert_eq!(control["is_read_only"], true);
     }
 
     #[tokio::test]
@@ -1168,6 +1086,9 @@ mod tests {
             .join(&vm_id)
             .join("root");
         tokio::fs::create_dir_all(&directory).await.unwrap();
+        suspension::prepare_attempt(root.path(), "attempt", &vm_id)
+            .await
+            .unwrap();
         atomic_write(
             &root.path().join("attempt.vm.json"),
             &serde_json::to_vec(&AttemptRecord {
@@ -1212,7 +1133,7 @@ mod tests {
         let (reader, mut writer) = UnixStream::pair().unwrap();
         let output = tokio::spawn(async move {
             writer
-                .write_all(b"{\"type\":\"output\",\"data\":")
+                .write_all(b"{\"type\":\"output\",\"stderr\":false,\"data\":")
                 .await
                 .unwrap();
             tokio::time::sleep(Duration::from_millis(40)).await;
@@ -1337,7 +1258,7 @@ mod tests {
             .unwrap()
             .set_len(disk_bytes)
             .unwrap();
-        let command = jailer("test", 1000, directory.path(), disk_bytes, true);
+        let command = jailer("test", 1000, directory.path(), disk_bytes);
         let limit = command
             .as_std()
             .get_args()

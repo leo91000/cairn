@@ -16,7 +16,6 @@ import {
   watch,
 } from 'vue'
 import { useRoute } from 'vue-router'
-import { currentAgentIds } from '../agent-access'
 import {
   api,
   notify,
@@ -447,7 +446,6 @@ async function save() {
     return
   await action(async () => {
     const agent = state.agents.find(item => item.id === form.value.agentId)
-    const agentIds = await currentAgentIds(state.agents, entry.value, editing.value, async () => (await api<Catalog>('/plugins')).connections)
     const body = {
       name: form.value.name,
       // The save consumes a completed sign-in.
@@ -468,9 +466,8 @@ async function save() {
       }),
       enabled: form.value.enabled,
       ...sharing.value,
-      // An older (or unknown) installation needs the granted agents back, as they are now. A
-      // new instance is granted to the agents chosen on the assistant's last step.
-      ...(agentIds ? { agentIds } : !editing.value && grants.value.length ? { agentIds: grants.value } : {}),
+      // New instances grant the chosen agents; editing keeps current grants.
+      ...(!editing.value && grants.value.length ? { agentIds: grants.value } : {}),
     }
     const path = `/plugins/${id.value}/connections${editing.value ? `/${editing.value.id}` : ''}`
     await pluginOperation(path, body, editing.value ? 'PUT' : 'POST')

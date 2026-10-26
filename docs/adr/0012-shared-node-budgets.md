@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0070](0070-automatic-native-disk-growth.md) pour l’admission disque des nodes natives compatibles : leur capacité inutilisée accordée est protégée ; CPU et RAM restent partagés.
+
 # Slots et budgets partagés par node
 
 Chaque node possède un nombre de slots d’exécution et un budget CPU, RAM et disque
@@ -87,3 +89,5 @@ conteneur, indépendamment du budget du cgroup partagé. Un budget conservé qui
 dépasse une nouvelle enveloppe plus petite est réduit au plafond réel ; les
 budgets demandés par le manager restent visibles avec le motif de refus tant
 qu’ils ne peuvent pas être appliqués. Les heartbeats continuent pendant ce refus.
+
+L’[agrandissement natif automatique](0070-automatic-native-disk-growth.md) complète cette politique : les nodes natives compatibles réservent aussi la part non utilisée des capacités disque accordées aux exécutions actives. CPU et RAM restent partagés.

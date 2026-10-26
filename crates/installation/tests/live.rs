@@ -1,3 +1,5 @@
+use common::MissionFixture;
+
 mod common;
 
 use common::relay_fixture::router;
@@ -37,7 +39,7 @@ impl Fixture {
         let service = Service::new(config).await.unwrap();
         let token = text(&common::relay_fixture::context(&service).await, "value").to_owned();
         let task = service
-            .task(
+            .task_fixture(
                 json!({ "name": "Live test", "prompt": "Test", "agentId": MAIN_AGENT_ID }),
                 None,
             )
@@ -718,7 +720,7 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
         .store
         .set(
             &format!("chat-question:{chat_id}:question"),
-            json!({ "id": "question", "status": "pending" }),
+            json!({ "id": "question", "chatId": chat_id, "runId": f.run, "blocking": false, "fields": [], "status": "pending" }),
             None,
         )
         .await

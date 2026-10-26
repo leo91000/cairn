@@ -98,8 +98,8 @@ test('keeps projects compact and agent summaries readable with several resources
     projects.push(await workspace.service.project({ name, path: projectPath, baseBranch: directory === 'documentation' ? 'docs/developer-guides' : 'main' }))
   }
 
-  workspace.service.agent({ name: 'UI builder', description: 'Builds interfaces, checks accessibility and reviews the mobile experience.', access: { projects: [projects[0]!.id], github: false } })
-  workspace.service.agent({ name: 'Code reviewer', description: 'Reviews changes across repositories and keeps regressions out.', access: { projects: projects.map(project => project.id), github: false } })
+  workspace.service.agent({ name: 'UI builder', description: 'Builds interfaces, checks accessibility and reviews the mobile experience.', access: { projects: [projects[0]!.id] } })
+  workspace.service.agent({ name: 'Code reviewer', description: 'Reviews changes across repositories and keeps regressions out.', access: { projects: projects.map(project => project.id) } })
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await page.goto(workspacePath('/projects'))
   await authenticateWorkspace(page)

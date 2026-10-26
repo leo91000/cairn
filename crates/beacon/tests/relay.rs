@@ -41,7 +41,7 @@ async fn additional_nodes_enroll_directly_and_keep_their_channel_outside_the_rel
             "code": invitation["code"],
             "name": "Direct execution node",
             "protocol": 1,
-            "runtimeId": "fixture",
+            "runtimeId": "development",
             "capabilities": {
                 "os": "linux",
                 "arch": "x86_64",
@@ -85,7 +85,7 @@ async fn additional_nodes_enroll_directly_and_keep_their_channel_outside_the_rel
         .post(format!("{direct_url}/internal/nodes/heartbeat"))
         .header("host", "manager.vpn.example")
         .bearer_auth(identity["token"].as_str().unwrap())
-        .json(&json!({}))
+        .json(&json!({ "runtimeId": "development", "nodeProtocol": 2 }))
         .send()
         .await
         .unwrap();
@@ -188,7 +188,7 @@ async fn owner_claims_an_installation_with_a_single_use_code() {
     let claim_body = json!({
         "code": claim["code"],
         "name": "My installation",
-        "protocol": 1,
+        "protocol": cairn_protocol::PROTOCOL_VERSION,
     });
     let response = app
         .client
