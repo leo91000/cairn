@@ -1,6 +1,6 @@
-# Suivre les blocs écrits avec dm-era dans l'invité
+> Statut : Remplacée par [ADR-0009](0009-s3-backed-disks-required-on-every-node.md) : journal local du stockage S3 à la place de dm-era.
 
-> Décision historique remplacée par [ADR-0009](0009-s3-backed-disks-required-on-every-node.md). Les nouveaux disques utilisent le journal local du stockage S3.
+# Suivre les blocs écrits avec dm-era dans l'invité
 
 Relire tout le disque d'une conversation à chaque point de reprise est irréaliste avec
 des captures fréquentes. Firecracker ne suit que la mémoire, pas les écritures disque.
@@ -16,4 +16,4 @@ métadonnées deviennent indispensables pour lire le disque. Les options dans l'
 VM, ou sont encore en preview.
 
 Toute écriture de l'hôte sur `data.ext4` invalide le suivi. Une copie complète est faite
-au moins toutes les 24 h. Voir [la recherche et les mesures](../INCREMENTAL-VM-BACKUP-WRITE-TRACKING.md).
+au moins toutes les 24 h.

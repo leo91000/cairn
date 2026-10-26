@@ -258,8 +258,15 @@ pub fn disk_space(path: &Path, total: u64, free: u64) -> io::Result<(u64, u64)> 
         if !file.exists() {
             continue;
         }
-        let budget: Budget =
-            serde_json::from_slice(&std::fs::read(file)?).map_err(io::Error::other)?;
+        let bytes = std::fs::read(file)?;
+        let budget: Budget = if state.join("native-accounting.json").exists() {
+            // Native records require their protocol marker. The shared quota
+            // reader validates that format; VM records use the Budget shape.
+            let value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+            crate::native::native_budget(&value).map_err(io::Error::other)?
+        } else {
+            serde_json::from_slice(&bytes).map_err(io::Error::other)?
+        };
         let limit = budget.limits.disk_mi_b * 1_048_576;
         let remaining = limit.saturating_sub(disk_bytes(state)?);
         let policy: crate::storage::policy::Policy =
@@ -592,6 +599,54 @@ mod tests {
         assert_eq!(pressure(0, 32768, free, reserve), Some("disk"));
         let (_, free) = disk_space(root.path(), total, reserve - 1).unwrap();
         assert_eq!(free, reserve - 1);
+    }
+
+    #[test]
+    fn shared_disk_quota_accepts_only_the_verified_native_budget_protocol() {
+        let root = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let mut record = serde_json::json!({
+            "slots": 2,
+            "limits": { "cpu": 2, "memoryMiB": 1024, "diskMiB": 512 },
+            "nativeModeProtocol": 1,
+        });
+        let path = root.path().join(FILE);
+        let bytes = serde_json::to_vec(&record).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(
+            serde_json::from_slice::<Budget>(&bytes).is_err(),
+            "VM controllers must not decode native budget records"
+        );
+        let total = 128 * 1024 * 1_048_576;
+        assert!(
+            disk_space(root.path(), total, total).is_err(),
+            "A VM budget cannot accept a native marker"
+        );
+        std::fs::write(
+            root.path().join("native-accounting.json"),
+            serde_json::to_vec(&serde_json::json!({ "data": data.path() })).unwrap(),
+        )
+        .unwrap();
+        let (_, free) = disk_space(root.path(), total, total).unwrap();
+        let reserve = crate::storage::policy::Policy::default().reserve(total);
+        assert!(free > reserve + 511 * 1_048_576 && free <= reserve + 512 * 1_048_576);
+        charge_disk(root.path(), 512 * 1_048_576).unwrap();
+        assert_eq!(disk_space(root.path(), total, total).unwrap().1, reserve);
+        for protocol in [
+            serde_json::json!(2),
+            serde_json::json!(null),
+            serde_json::json!("1"),
+        ] {
+            record["nativeModeProtocol"] = protocol;
+            std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+            assert!(disk_space(root.path(), total, total).is_err());
+        }
+        record.as_object_mut().unwrap().remove("nativeModeProtocol");
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(
+            disk_space(root.path(), total, total).is_err(),
+            "Native budgets require their persisted protocol marker"
+        );
     }
 
     #[test]

@@ -30,7 +30,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sign_in::SignIn;
 use std::{
-    collections::HashMap,
+    borrow::Cow,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -73,7 +74,7 @@ pub trait Driver: Send + Sync {
         Err(Error::bad("This coding agent does not accept API keys."))
     }
 
-    /// Cleans up interrupted work and migrates state from earlier versions, once per start.
+    /// Cleans up interrupted work once per start.
     async fn initialize(&self, s: &Service) -> Result<()>;
 
     /// Codex runs on the host's own login until a managed account is added.
@@ -103,7 +104,14 @@ pub trait Driver: Send + Sync {
     /// Codex never schedules on unknown usage; Claude Code's usage may be unavailable.
     fn requires_usage(&self) -> bool;
 
-    async fn supports(&self, s: &Service, id: &str, model: &str) -> Result<bool>;
+    /// The name `usage` windows know a saved `model` by.
+    fn usage_model<'a>(&self, _usage: &Usage, model: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(model)
+    }
+
+    /// Whether the account can run `model` at `speed`, a Codex service tier or empty. A model
+    /// is required; a speed is only preferred, since a run without it falls back to Standard.
+    async fn supports(&self, s: &Service, id: &str, model: &str, speed: &str) -> Result<bool>;
 
     /// Loads what [`Driver::supports`] needs for `model` before selection takes its locks.
     async fn warm(&self, _s: &Service, _model: &str) -> Result<()> {
@@ -195,24 +203,6 @@ struct Overview {
     required: Vec<Provider>,
 }
 
-/// Codex accounts and runs saved before accounts were shared across coding agents. Runs once.
-pub fn migrate(db: &mut Db<'_>) -> Result<()> {
-    let key = "migration:agent-accounts";
-    if db.kv(key)?.is_some() {
-        return Ok(());
-    }
-    db.0.execute(
-        "UPDATE records SET kind=?1, data=json_set(data,'$.provider','codex') WHERE kind='codexAccounts'",
-        [KIND],
-    )?;
-    db.0.execute(
-        "UPDATE runs SET data=json_remove(json_set(data,'$.accountId',json_extract(data,'$.codexAccountId'),'$.accountName',json_extract(data,'$.codexAccountName')),'$.codexAccountId','$.codexAccountName','$.codexAuthMode')
-         WHERE json_type(data,'$.codexAccountId') IS NOT NULL OR json_type(data,'$.codexAccountName') IS NOT NULL OR json_type(data,'$.codexAuthMode') IS NOT NULL",
-        [],
-    )?;
-    db.set(key, &Value::Bool(true), None)
-}
-
 fn stored(db: &Db<'_>) -> Result<Vec<Account>> {
     db.list(KIND)?
         .into_iter()
@@ -259,13 +249,14 @@ pub(crate) fn replenish(account: &mut Account, driver: &dyn Driver) {
     let Some(exhausted) = &account.exhausted else {
         return;
     };
-    let (at, model) = (exhausted.at, exhausted.model.as_str());
+    let at = exhausted.at;
     let read_since = account
         .usage
         .as_ref()
         .and_then(|u| u.checked_at)
         .is_some_and(|checked| checked > at);
     let current = account.usage();
+    let model = &*driver.usage_model(&current, &exhausted.model);
     let retry_unknown_capacity = !driver.requires_usage()
         && (!read_since || current.uses_balance())
         && now() - at >= driver.fresh_for();
@@ -303,13 +294,14 @@ fn capacity(account: &Account, driver: &dyn Driver, model: &str) -> Option<f64> 
     if usage.uses_balance() {
         return None;
     }
-    usage.remaining(model)
+    usage.remaining(&driver.usage_model(usage, model))
 }
 
 /// Whether usage and state let the account take a new `model` run, ignoring its slots.
 fn schedulable(account: &Account, driver: &dyn Driver, model: &str) -> bool {
     let current = fresh(account, driver);
-    let blocked = current && account.usage().blocked(model);
+    let usage = account.usage();
+    let blocked = current && usage.blocked(&driver.usage_model(&usage, model));
     let has_capacity =
         capacity(account, driver, model).map_or(!driver.requires_usage(), |n| n > 0.);
     account.is_active()
@@ -464,13 +456,14 @@ impl Accounts {
         Ok(self.connecting.lock().await.as_deref() == Some(id) || self.recovering(s, id).await?)
     }
 
-    /// Accounts able to take a new `model` run now, best first: the most remaining capacity,
-    /// then the least recently used.
+    /// Accounts able to take a new `model` run now, best first: those offering `speed`, then the
+    /// most remaining capacity, then the least recently used.
     async fn eligible(
         &self,
         s: &Service,
         provider: Provider,
         model: &str,
+        speed: &str,
         leases: &HashMap<String, Lease>,
     ) -> Result<Vec<Account>> {
         let driver = provider.driver();
@@ -482,17 +475,31 @@ impl Accounts {
                 && running(leases, id) < account.parallel_runs()
                 && connecting.as_deref() != Some(id)
                 && !self.recovering(s, id).await?
-                && driver.supports(s, id, model).await?
+                && driver.supports(s, id, model, "").await?
             {
                 candidates.push(account);
             }
         }
+
+        // A speed only some accounts offer puts them first, but never holds a run back: when
+        // none of them can take it, the run goes to another one, whose turn says how it runs.
+        let mut lacking = HashSet::new();
+        if !speed.is_empty() {
+            for account in &candidates {
+                if !driver.supports(s, &account.id, model, speed).await? {
+                    lacking.insert(account.id.clone());
+                }
+            }
+        }
+
         let rank = |a: &Account| capacity(a, driver, model).unwrap_or(-1.);
         let ordered = driver.ordered();
         candidates.sort_by(|a, b| {
             let position = |a: &Account| ordered.then(|| a.priority());
-            position(a)
-                .cmp(&position(b))
+            lacking
+                .contains(&a.id)
+                .cmp(&lacking.contains(&b.id))
+                .then(position(a).cmp(&position(b)))
                 .then(rank(b).total_cmp(&rank(a)))
                 .then(
                     a.last_used_at
@@ -511,6 +518,19 @@ impl Accounts {
         provider: Provider,
         model: &str,
     ) -> Result<Option<Lease>> {
+        self.acquire_for(s, run_id, provider, model, "").await
+    }
+
+    /// Leases an account able to run `model`, preferring one offering `speed`, the run's chosen
+    /// Codex speed.
+    pub async fn acquire_for(
+        &self,
+        s: &Service,
+        run_id: &str,
+        provider: Provider,
+        model: &str,
+        speed: &str,
+    ) -> Result<Option<Lease>> {
         let mut timing =
             crate::performance::Operation::new("account_admission", run_id, "initialize");
         self.initialize(s).await?;
@@ -526,7 +546,10 @@ impl Accounts {
             if leases.contains_key(run_id) {
                 return Err(Error::conflict("This run already holds an account."));
             }
-            !self.eligible(s, provider, model, &leases).await?.is_empty()
+            !self
+                .eligible(s, provider, model, speed, &leases)
+                .await?
+                .is_empty()
         };
         // Background polling continues normally. Refresh synchronously only
         // when no account satisfies the existing usage validity and slot rules.
@@ -541,7 +564,7 @@ impl Accounts {
         if leases.contains_key(run_id) {
             return Err(Error::conflict("This run already holds an account."));
         }
-        let candidates = self.eligible(s, provider, model, &leases).await?;
+        let candidates = self.eligible(s, provider, model, speed, &leases).await?;
         drop(leases);
         for candidate in candidates {
             let _guard = self.lock(&candidate.id).await;
@@ -556,7 +579,7 @@ impl Accounts {
             drop(leases);
             if !available
                 || self.busy(s, &account.id).await?
-                || !driver.supports(s, &account.id, model).await?
+                || !driver.supports(s, &account.id, model, "").await?
             {
                 continue;
             }
@@ -773,7 +796,7 @@ impl Accounts {
         let leases = self.leases.lock().await.clone();
         let mut next = Vec::new();
         for provider in Provider::ALL {
-            if let Some(first) = self.eligible(s, provider, "", &leases).await?.first() {
+            if let Some(first) = self.eligible(s, provider, "", "", &leases).await?.first() {
                 next.push(first.id.clone());
             }
         }

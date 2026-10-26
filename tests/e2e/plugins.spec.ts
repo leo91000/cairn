@@ -1,4 +1,5 @@
 import type { Route } from '@playwright/test'
+import type { PluginConnection } from '../../apps/web/src/plugins'
 import { Buffer } from 'node:buffer'
 import {
   expect,
@@ -8,6 +9,7 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+import { mockPluginCommand } from './mock-plugin-command'
 
 const token = `synthetic_browser_discord_token_${'x'.repeat(48)}`
 
@@ -85,9 +87,9 @@ test('Discord bots are set up through the package’s own form and keep the toke
   })
   await workspace.api('/api/agents', 'POST', { name: 'Release helper' })
   await useRelayForHttpMocks(page)
-  await page.route('**/plugins/discord/form', discordForm)
+  await mockPluginCommand(page, '**/plugins/discord/form', discordForm)
   // Keep the journey offline: the saved bot starts paused instead of opening a Gateway session.
-  await page.route('**/plugins/discord/connections', async (route) => {
+  await mockPluginCommand(page, '**/plugins/discord/connections', async (route) => {
     if (route.request().method() !== 'POST')
       return route.continue()
     await route.continue({ postData: JSON.stringify({ ...route.request().postDataJSON(), enabled: false }) })
@@ -126,15 +128,18 @@ test('Discord bots are set up through the package’s own form and keep the toke
 
   await expect(dialog.getByRole('heading', { name: 'Who can talk to it' })).toBeVisible()
   await expect(dialog.getByRole('radio', { name: /Approve people as they ask/ })).toBeChecked()
-  // Anyone may only reach a read-only agent; this one isn't.
+  // Any agent can answer anyone; the owner is warned of what a writing agent allows.
   await dialog.getByRole('radio', { name: /^Anyone/ }).check()
-  await expect(dialog.getByRole('radio', { name: /Discord helper/ })).toBeDisabled()
-  await expect(dialog.getByText('Not read-only').first()).toBeVisible()
+  await dialog.getByRole('radio', { name: /Discord helper/ }).check()
+  await expect(dialog.getByText('Anyone in the channel can use everything Discord helper can do')).toBeVisible()
+  await expect(dialog.getByText(/they can change files and run commands/)).toBeVisible()
   await dialog.getByRole('radio', { name: /Approve people as they ask/ }).check()
+  await expect(dialog.getByText(/can use everything Discord helper can do/)).toBeHidden()
   await dialog.getByLabel('Person’s ID').fill('300')
   await dialog.getByRole('button', { name: 'Add', exact: true }).click()
   await expect(dialog.getByText('300', { exact: true })).toBeVisible()
-  await expect(dialog.getByRole('radio', { name: /Release helper/ })).toBeDisabled()
+  await dialog.getByRole('radio', { name: /Release helper/ }).check()
+  await expect(dialog.getByText('The people you allow can use everything Release helper can do')).toBeVisible()
   await dialog.getByRole('radio', { name: /Discord helper/ }).check()
   await dialog.getByLabel('Name', { exact: true }).fill('#support on Acme')
   await dialog.getByRole('button', { name: 'Save bot' }).click()
@@ -197,7 +202,7 @@ test('Discord bots are set up through the package’s own form and keep the toke
   await expect(review.getByRole('checkbox', { name: /Reapprove the new access for #support on Acme/ })).toBeChecked()
   const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await review.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await saving).postDataJSON().reapproveDelegations).toEqual([botId])
+  expect((await saving).postDataJSON().review.reapproveDelegations).toEqual([botId])
   await expect(review).toHaveCount(0)
 
   // An earlier change elsewhere already suspended the bot: a later edit never reapproves it by default.
@@ -212,7 +217,7 @@ test('Discord bots are set up through the package’s own form and keep the toke
   // Alone, a delegation already suspended does not open the review, and is not reapproved.
   const direct = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await describe('Answers support questions')
-  expect((await direct).postDataJSON()).not.toHaveProperty('reapproveDelegations')
+  expect((await direct).postDataJSON().review.reapproveDelegations).toEqual([])
   await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
   await expect(review).toHaveCount(0)
 
@@ -228,14 +233,14 @@ test('Discord bots are set up through the package’s own form and keep the toke
   await expect(review).toContainText('Already suspended by an earlier change. Reapprove only after checking its current access.')
   const unchecked = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await review.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await unchecked).postDataJSON()).not.toHaveProperty('reapproveDelegations')
+  expect((await unchecked).postDataJSON().review.reapproveDelegations).toEqual([])
   await expect(review).toHaveCount(0)
   // Checked deliberately, it is reapproved.
   await describe('Answers support questions in Acme')
   await earlier.check()
   const checked = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await review.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await checked).postDataJSON().reapproveDelegations).toEqual([botId])
+  expect((await checked).postDataJSON().review.reapproveDelegations).toEqual([botId])
   await expect(review).toHaveCount(0)
   await page.goto(workspacePath('/plugins/discord'))
 
@@ -338,8 +343,8 @@ values = { more = true, extra = true }
   await expect(form.getByText('Enter a team', { exact: true })).toHaveCount(0)
   const refreshed: string[] = []
   page.on('request', (request) => {
-    if (request.method() === 'POST' && request.url().endsWith('/plugins/notes/form')) {
-      const changed = request.postDataJSON().changed
+    if (request.method() === 'POST' && request.url().endsWith('/plugins/manage') && request.postDataJSON().kind === 'form') {
+      const changed = request.postDataJSON().data.changed
       if (changed)
         refreshed.push(changed)
     }
@@ -484,6 +489,15 @@ test('required choices and Unicode text keep the shared form whitespace contract
     json: {
       packages: [{
         id: 'forms',
+        setup: {
+          effort: 'token',
+          steps: [{
+            id: 'settings',
+            kind: 'settings',
+            title: 'Settings',
+            settings: ['region', 'team', 'password'],
+          }],
+        },
         builtin: false,
         status: 'active',
         active: '1.0.0',
@@ -523,7 +537,7 @@ test('required choices and Unicode text keep the shared form whitespace contract
     },
   }))
   const saves: Record<string, any>[] = []
-  await page.route('**/api/plugins/forms/connections', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/forms/connections', async (route) => {
     saves.push(route.request().postDataJSON())
     await route.fulfill({ json: {} })
   })
@@ -623,6 +637,14 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
     json: {
       packages: [{
         id: 'forms',
+        setup: {
+          steps: [{
+            id: 'settings',
+            kind: 'settings',
+            title: 'Settings',
+            settings: fields.filter(field => !field.hidden).map(field => field.key),
+          }],
+        },
         builtin: false,
         status: 'active',
         active: '1.0.0',
@@ -634,11 +656,11 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
     },
   }))
   const initialPanelValues = { password: 'synthetic_never_prefill', unknown: 'drop' }
-  await page.route('**/api/plugins/forms/connections/example/view', route => route.fulfill({
+  await mockPluginCommand(page, '**/api/plugins/forms/connections/example/view', route => route.fulfill({
     json: { view: [panelNode(initialPanelValues)] },
   }))
   const actions: Record<string, any>[] = []
-  await page.route('**/api/plugins/forms/connections/example/actions', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/forms/connections/example/actions', async (route) => {
     actions.push(route.request().postDataJSON().values)
     const result = actions.length === 2
       ? { view: [panelNode(initialPanelValues)] }
@@ -648,7 +670,7 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
     await route.fulfill({ json: result })
   })
   const completions: Record<string, any>[] = []
-  await page.route('**/api/plugins/forms/form', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/forms/form', async (route) => {
     completions.push(route.request().postDataJSON())
     await route.fulfill({
       json: {
@@ -660,7 +682,7 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
     })
   })
   const saves: Record<string, any>[] = []
-  await page.route('**/api/plugins/forms/connections/example', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/forms/connections/example', async (route) => {
     saves.push(route.request().postDataJSON())
     await route.fulfill({ json: {} })
   })
@@ -741,6 +763,86 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
   expect(saves[0].secrets).toEqual({})
 })
 
+test('bot warnings include the current instance and new draft plugin grants', async ({ page, workspace }) => {
+  const helper = await workspace.api('/api/agents', 'POST', {
+    name: 'Plugin helper',
+    access: {
+      projects: [],
+      mcps: [],
+      installation: false,
+      sandbox: 'read-only',
+    },
+  })
+  await useRelayForHttpMocks(page)
+  const manifest = {
+    id: 'hybrid',
+    name: 'Hybrid',
+    version: '1.0.0',
+    apiVersion: 2,
+    description: 'A plugin that both answers people and offers tools to agents.',
+    capabilities: ['conversations.submit'],
+    instances: { singular: 'Bot', plural: 'Bots' },
+    agentAccess: { description: 'Agents can use this bot’s tools.' },
+    settings: [],
+  }
+  const connection: PluginConnection = {
+    id: 'hybrid-bot',
+    pluginId: 'hybrid',
+    name: 'Hybrid bot',
+    settings: {},
+    agentIds: [helper.id],
+    agentId: helper.id,
+    projectId: null,
+    accessMode: 'everyone',
+    userIds: [],
+    people: [],
+    requests: [],
+    enabled: false,
+    status: { state: 'disconnected', message: null },
+    revision: 'fixture',
+    secretKeys: [],
+    usage: { hour: 0 },
+    activity: [],
+    maxMessagesPerHour: 20,
+    maxPerPersonPerHour: 5,
+  }
+  await page.route('**/api/plugins', route => route.fulfill({
+    json: {
+      packages: [{
+        id: 'hybrid',
+        setup: { steps: [{ id: 'people', kind: 'people', title: 'Who can talk to it' }, { id: 'agents', kind: 'agents', title: 'Agents' }] },
+        builtin: false,
+        status: 'active',
+        active: '1.0.0',
+        manifest,
+        versions: [],
+      }],
+      capabilities: [],
+      connections: [connection],
+    },
+  }))
+  await page.goto(workspacePath('/plugins/hybrid'))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Edit Hybrid bot', exact: true }).click()
+  const edited = page.getByRole('dialog', { name: 'Edit Hybrid bot' })
+  await expect(edited.getByRole('status').filter({ hasText: 'they can use its plugins' })).toBeVisible()
+  await edited.getByRole('button', { name: 'Cancel', exact: true }).click()
+
+  // Another instance has no grant: only the new draft can provide plugin access.
+  connection.agentIds = []
+  await page.reload()
+  await page.getByRole('button', { name: 'Add bot', exact: true }).click()
+  const draft = page.getByRole('dialog', { name: 'New bot' })
+  await draft.getByRole('radio', { name: /^Anyone/ }).check()
+  await draft.getByRole('radio', { name: /Plugin helper/ }).check()
+  await expect(draft.getByText(/can use everything Plugin helper can do/)).toBeHidden()
+  await draft.getByRole('button', { name: 'Continue', exact: true }).click()
+  await draft.getByRole('checkbox', { name: /Plugin helper/ }).check()
+  await expect(draft.getByRole('status').filter({ hasText: 'they can use its plugins' })).toBeVisible()
+  await draft.getByRole('checkbox', { name: /Plugin helper/ }).uncheck()
+  await expect(draft.getByText(/can use everything Plugin helper can do/)).toBeHidden()
+})
+
 test('a package with device sign-in saves an account without the token reaching the browser', async ({ page }) => {
   test.setTimeout(60000)
   await useRelayForHttpMocks(page)
@@ -770,6 +872,7 @@ test('a package with device sign-in saves an account without the token reaching 
     json: {
       packages: [{
         id: 'codehost',
+        setup: { effort: 'signin', steps: [{ id: 'credential', kind: 'credential', title: 'Sign in with Code host' }] },
         builtin: true,
         status: 'active',
         active: '1.0.0',
@@ -808,7 +911,7 @@ test('a package with device sign-in saves an account without the token reaching 
     await route.fulfill({ json: flow(id, id === 'second' && polls > 1 ? 'completed' : 'pending') })
   })
   const completions: Record<string, any>[] = []
-  await page.route('**/api/plugins/codehost/form', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/codehost/form', async (route) => {
     const body = route.request().postDataJSON()
     completions.push(body)
     const signedIn = body.credentialFlow === 'second'
@@ -822,7 +925,7 @@ test('a package with device sign-in saves an account without the token reaching 
     })
   })
   const saves: Record<string, any>[] = []
-  await page.route('**/api/plugins/codehost/connections', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/codehost/connections', async (route) => {
     saves.push(route.request().postDataJSON())
     await route.fulfill({ json: {} })
   })

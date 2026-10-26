@@ -25,7 +25,16 @@ import org.robolectric.annotation.GraphicsMode
 class PluginProjectPickerTest {
     @get:Rule val compose = createComposeRule()
 
-    private val account = PluginConnection("acct-1", "forge", "Work")
+    private val account =
+        PluginConnection(
+            id = "acct-1",
+            pluginId = "forge",
+            name = "Work",
+            settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+            status = PluginStatus(),
+            usage = PluginUsage(),
+            enabled = true,
+        )
     private val catalog =
         PluginCatalog(
             packages =
@@ -63,8 +72,24 @@ class PluginProjectPickerTest {
             connections =
                 listOf(
                     account,
-                    PluginConnection("acct-2", "forge", "Paused", enabled = false),
-                    PluginConnection("p1", "pending", "Pending"),
+                    PluginConnection(
+                        id = "acct-2",
+                        pluginId = "forge",
+                        name = "Paused",
+                        enabled = false,
+                        settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                        status = PluginStatus(),
+                        usage = PluginUsage(),
+                    ),
+                    PluginConnection(
+                        id = "p1",
+                        pluginId = "pending",
+                        name = "Pending",
+                        settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                        status = PluginStatus(),
+                        usage = PluginUsage(),
+                        enabled = true,
+                    ),
                 ),
         )
 

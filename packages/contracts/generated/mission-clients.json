@@ -1,0 +1,51 @@
+[
+  {
+    "input": "ListMissionsInput",
+    "method": "GET",
+    "name": "listMissions",
+    "output": "ListMissionsOutput",
+    "path": "/tasks"
+  },
+  {
+    "input": "MissionInput",
+    "method": "GET",
+    "name": "getMission",
+    "output": "Mission",
+    "path": "/tasks/{taskId}"
+  },
+  {
+    "input": "CreateMissionInput",
+    "method": "POST",
+    "name": "createMission",
+    "output": "Mission",
+    "path": "/tasks"
+  },
+  {
+    "input": "ReplaceMissionInput",
+    "method": "PUT",
+    "name": "replaceMission",
+    "output": "Mission",
+    "path": "/tasks/{taskId}"
+  },
+  {
+    "input": "MissionStateInput",
+    "method": "POST",
+    "name": "setMissionState",
+    "output": "Mission",
+    "path": "/tasks/{taskId}/state"
+  },
+  {
+    "input": "MissionInput",
+    "method": "DELETE",
+    "name": "deleteMission",
+    "output": "DeleteMissionOutput",
+    "path": "/tasks/{taskId}"
+  },
+  {
+    "input": "SchedulePreviewInput",
+    "method": "POST",
+    "name": "previewSchedule",
+    "output": "SchedulePreviewOutput",
+    "path": "/schedule/preview"
+  }
+]

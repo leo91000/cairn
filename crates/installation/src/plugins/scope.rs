@@ -3,7 +3,7 @@
 //! script may use; every call rereads the instance first.
 use super::{
     capabilities::{self, Context},
-    connections::{self, Connection},
+    connections::Connection,
     registry::Package,
 };
 use crate::{
@@ -62,7 +62,9 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
         scope
     };
     let requested = args["instance"].as_str();
-    if let Scope::Draft(connection, _) = scope {
+    if let Scope::Draft(connection, draft) = scope {
+        let draft = draft.clone();
+        s.store.read(move |db| draft.authorize(db)).await?;
         if requested.is_some_and(|id| id != connection.id) {
             return Err(Error::forbidden("Another instance is not available here."));
         }
@@ -88,10 +90,10 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
     };
     let value = s
         .store
-        .get(connections::KIND, &expected.id)
+        .plugin_instance(&expected.id)
         .await?
         .ok_or_else(|| Error::forbidden("The instance was removed."))?;
-    let connection: Connection = serde_json::from_value(value)?;
+    let connection = value;
     let unchanged = connection.revision == expected.revision;
     let granted = match scope {
         Scope::Managed(..) => unreachable!(),
@@ -192,6 +194,14 @@ pub async fn invoke(
             },
         )
         .await;
+    if let Scope::Draft(_, draft) = scope {
+        let draft = draft.clone();
+        s.store.read(move |db| draft.authorize(db)).await?;
+    } else {
+        for instance in scope.instances() {
+            current(s, scope, &json!({ "instance": instance["id"] })).await?;
+        }
+    }
     match (result, refused.into_inner().unwrap()) {
         (Ok(value), _) => Ok(value),
         (Err(InvocationError::Rejected(message)), _) => Err(Error::bad_gateway(message)),

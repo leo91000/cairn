@@ -1,6 +1,11 @@
 //! The Discord package runs entirely in Luau: its Gateway session over the generic
 //! `socket` capability, its setup form, its test and its panel. Discord is simulated
 //! by local HTTP and WebSocket servers.
+#[allow(unused_imports)]
+use common::{PluginServiceFixture as _, PluginStoreFixture as _};
+
+use common::AgentFixture;
+
 mod common;
 
 use axum::{
@@ -11,10 +16,7 @@ use axum::{
     routing::get,
 };
 use cairn_installation::{
-    plugins::{
-        connections::{self, Connection},
-        forms, panels, registry, socket, work,
-    },
+    plugins::{connections::Connection, panels, registry, socket, work},
     service::Service,
     validation::text,
 };
@@ -38,10 +40,10 @@ async fn service() -> (TempDir, Arc<Service>, Value) {
     s.plugins
         .use_worker(PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Discord agent",
-                "access": { "projects": [], "skills": [], "mcps": [], "github": false, "installation": false },
+                "access": { "projects": [], "skills": [], "mcps": [], "installation": false },
             }),
             None,
         )
@@ -186,7 +188,7 @@ async fn save(
     agent: &Value,
     settings: Value,
 ) -> cairn_installation::error::Result<Value> {
-    connections::save(
+    common::save_plugin(
         s,
         "discord",
         &json!({
@@ -211,13 +213,13 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     assert!(registry::builtin("discord").unwrap().manifest.instance_form);
 
     // Before a token: guidance only.
-    let empty = forms::form(&s, "discord", &json!({ "settings": {} }))
+    let empty = common::plugin_form(&s, "discord", &json!({ "settings": {} }))
         .await
         .unwrap();
     assert_eq!(empty["view"][0]["title"], "Create the bot");
     assert_eq!(empty["options"], json!({}));
 
-    let result = forms::form(
+    let result = common::plugin_form(
         &s,
         "discord",
         &json!({ "token": "synthetic_discord_token", "settings": { "guildId": "100", "channelId": "200" } }),
@@ -227,7 +229,7 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     assert_eq!(result["errors"], json!({}), "{result}");
     assert_eq!(
         result["options"]["guildId"],
-        json!([{ "value": "100", "label": "Acme" }])
+        json!([{ "value": "100", "label": "Acme", "description": "", "disabled": false }])
     );
     let channels = result["options"]["channelId"].as_array().unwrap();
     let names = channels
@@ -272,7 +274,7 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     );
 
     // A new server resets the channel; unknown servers and bad tokens explain themselves.
-    let changed = forms::form(
+    let changed = common::plugin_form(
         &s,
         "discord",
         &json!({ "token": "synthetic_discord_token", "settings": { "guildId": "100", "channelId": "200" }, "changed": "guildId" }),
@@ -280,7 +282,7 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     .await
     .unwrap();
     assert_eq!(changed["values"]["channelId"], "");
-    let unknown = forms::form(
+    let unknown = common::plugin_form(
         &s,
         "discord",
         &json!({ "token": "synthetic_discord_token", "settings": { "guildId": "999" } }),
@@ -291,7 +293,7 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
         unknown["errors"]["guildId"],
         "The bot isn’t in this server yet. Invite it, then refresh."
     );
-    let rejected = forms::form(
+    let rejected = common::plugin_form(
         &s,
         "discord",
         &json!({ "token": "wrong_token", "settings": {} }),
@@ -322,7 +324,7 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     let connection: Connection = serde_json::from_value(saved).unwrap();
 
     // Editing reuses the saved token; the test and the panel run in Luau too.
-    let editing = forms::form(
+    let editing = common::plugin_form(
         &s,
         "discord",
         &json!({ "instance": connection.id, "settings": connection.settings }),
@@ -330,7 +332,9 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     .await
     .unwrap();
     assert_eq!(editing["values"]["botName"], "cairn");
-    let tested = panels::test(&s, "discord", &connection.id).await.unwrap();
+    let tested = common::plugin_test(&s, "discord", &connection.id)
+        .await
+        .unwrap();
     assert_eq!(tested["message"], "Token works · signed in as cairn");
     let panel = panels::view(&s, "discord", &connection.id).await.unwrap();
     assert_eq!(panel["view"][0]["items"][2]["value"], "#support");
@@ -473,7 +477,7 @@ async fn gateway_identifies_heartbeats_admits_mentions_and_resumes_in_luau() {
     assert_eq!(events[0]["payload"]["botId"], "400");
     let status = s
         .store
-        .kv(&format!("plugin-status:{}", connection.id))
+        .status_fixture(&connection.id)
         .await
         .unwrap()
         .unwrap();
@@ -643,6 +647,80 @@ fn closes(commands: &[socket::Command]) -> Vec<u16> {
 }
 
 #[tokio::test]
+async fn unused_session_budget_connects_and_identifies() {
+    let (_root, s, agent) = service().await;
+    let saved = save(&s, &agent, json!({ "guildId": "100", "channelId": "200" }))
+        .await
+        .unwrap();
+    let connection: Connection = serde_json::from_value(saved).unwrap();
+    let (origin, server, gateway) = rest_with_gateway().await;
+
+    // A bot that has never identified has its full budget and no reset countdown.
+    gateway.remaining(1000, 0);
+    s.plugins.route_http_to(Some(origin));
+    let package = registry::active(&s, "discord").await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    let (link, mut commands) = socket::Link::channel();
+    let mut on = async |event: Value| {
+        handle(&s, &connection, &mut session, &link, &mut commands, event).await
+    };
+    on(json!({ "type": "start", "settings": connection.settings })).await;
+    let issued = on(json!({ "type": "tick", "name": "connect" })).await;
+    assert_eq!(
+        connected_to(&issued).0,
+        "wss://gateway-test.discord.gg/?v=10&encoding=json"
+    );
+    on(json!({ "type": "open" })).await;
+    let issued = on(frame(
+        &json!({ "op": 10, "d": { "heartbeat_interval": 41250 } }),
+    ))
+    .await;
+    assert_eq!(sent(&issued)[0]["op"], 2);
+    on(frame(&json!({
+        "op": 0,
+        "s": 1,
+        "t": "READY",
+        "d": {
+            "session_id": "synthetic_session",
+            "user": { "id": "400", "username": "Cairn", "bot": true },
+            "resume_gateway_url": "wss://gateway-test.discord.gg",
+        },
+    })))
+    .await;
+    let status = s
+        .store
+        .status_fixture(&connection.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status["state"], "connected");
+
+    // Zero reset time never grants a session when the balance is exhausted.
+    gateway.remaining(0, 0);
+    let issued = on(json!({ "type": "close", "code": 1000, "reason": "" })).await;
+    assert_eq!(
+        timer(&issued, "connect"),
+        Some((Duration::from_secs(1), None))
+    );
+    assert!(
+        !issued
+            .iter()
+            .any(|command| matches!(command, socket::Command::Connect { .. }))
+    );
+    session.stop().await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn gateway_lifecycle_matches_discord_and_discord_js() {
     let (_root, s, agent) = service().await;
     let saved = save(&s, &agent, json!({ "guildId": "100", "channelId": "200" }))
@@ -793,7 +871,7 @@ async fn gateway_lifecycle_matches_discord_and_discord_js() {
     connected_to(&issued);
     let status = s
         .store
-        .kv(&format!("plugin-status:{}", connection.id))
+        .status_fixture(&connection.id)
         .await
         .unwrap()
         .unwrap();
@@ -847,6 +925,8 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
             } }),
         )
         .await;
+        // Queue an earlier heartbeat, as the random first heartbeat can do.
+        send(&mut socket, json!({ "op": 1 })).await;
         // A large server's GUILD_CREATE, well over what a script receives whole.
         let channels = (0..12_000)
             .map(|index| json!({ "id": format!("{}", 10_000 + index), "type": 0, "name": "x".repeat(80) }))
@@ -869,9 +949,22 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
         )
         .await;
         send(&mut socket, json!({ "op": 1 })).await;
-        let heartbeat = tokio::time::timeout(Duration::from_secs(1), receive(&mut socket))
-            .await
-            .expect("oversized thread routing must not block heartbeats on REST");
+        let heartbeat = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let heartbeat = receive(&mut socket).await;
+                let caught_up = heartbeat["d"]
+                    .as_u64()
+                    .is_some_and(|sequence| sequence >= 3);
+                if heartbeat["op"] != 1 || caught_up {
+                    break heartbeat;
+                }
+                // A periodic heartbeat can precede the requested one. Acknowledge
+                // it while waiting for the response after the large dispatch.
+                send(&mut socket, json!({ "op": 11 })).await;
+            }
+        })
+        .await
+        .expect("oversized thread routing must not block heartbeats on REST");
         assert_eq!(
             heartbeat,
             json!({ "op": 1, "d": 3 }),
@@ -1239,51 +1332,56 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     // Instructions are not part of the approved access.
     let mut described = agent.clone();
     described["instructions"] = "Be brief.".into();
-    let preview = s.agent_preview(described, &id).await.unwrap();
+    let preview = s.agent_preview_fixture(described, &id).await.unwrap();
     assert_eq!(effect(&preview)["id"], connection);
     assert_eq!(effect(&preview)["suspended"], false);
 
     // A stricter sandbox changes the access the owner approved for Discord people.
     let mut stricter = agent.clone();
     stricter["access"]["sandbox"] = "read-only".into();
-    let preview = s.agent_preview(stricter.clone(), &id).await.unwrap();
+    let preview = s
+        .agent_preview_fixture(stricter.clone(), &id)
+        .await
+        .unwrap();
     assert_eq!(effect(&preview)["suspended"], true);
     assert_eq!(effect(&preview)["blocked"], Value::Null);
     assert_eq!(effect(&preview)["alreadySuspended"], false);
 
     stricter["reapproveDelegations"] = json!([connection]);
-    let updated = s.agent(stricter, Some(&id)).await.unwrap();
+    let updated = s.agent_fixture(stricter, Some(&id)).await.unwrap();
     let stored: Connection = serde_json::from_value(
         s.store
-            .get(connections::KIND, &connection)
+            .instance_fixture(&connection)
             .await
             .unwrap()
             .unwrap(),
     )
     .unwrap();
     assert_eq!(
-        stored.granted_access,
+        serde_json::to_value(stored.granted_access).unwrap(),
         cairn_installation::service::policy(&updated)
     );
     assert_ne!(stored.revision, text(&saved, "revision"));
 
-    // Installation access can never be approved for external people.
-    let mut wider = updated.clone();
-    wider["access"]["installation"] = true.into();
-    let preview = s.agent_preview(wider.clone(), &id).await.unwrap();
-    assert!(effect(&preview)["blocked"].is_string());
-    wider["reapproveDelegations"] = json!([connection]);
-    assert!(s.agent(wider.clone(), Some(&id)).await.is_err());
+    // The owner may approve installation access for Discord people too.
+    let mut installation = updated.clone();
+    installation["access"]["installation"] = true.into();
+    let preview = s
+        .agent_preview_fixture(installation.clone(), &id)
+        .await
+        .unwrap();
+    assert_eq!(effect(&preview)["suspended"], true);
+    assert_eq!(effect(&preview)["blocked"], Value::Null);
+    installation["reapproveDelegations"] = json!([connection]);
+    let updated = s.agent_fixture(installation, Some(&id)).await.unwrap();
 
     // Without reapproval the save succeeds and the bot waits for the owner.
-    wider
-        .as_object_mut()
-        .unwrap()
-        .remove("reapproveDelegations");
-    let widened = s.agent(wider, Some(&id)).await.unwrap();
+    let mut wider = updated.clone();
+    wider["access"]["sandbox"] = "yolo".into();
+    let widened = s.agent_fixture(wider, Some(&id)).await.unwrap();
     let stored = s
         .store
-        .get(connections::KIND, &connection)
+        .instance_fixture(&connection)
         .await
         .unwrap()
         .unwrap();
@@ -1294,36 +1392,33 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     // A later unrelated edit reports that the bot was already suspended.
     let mut renamed = widened.clone();
     renamed["description"] = "Renamed".into();
-    let preview = s.agent_preview(renamed.clone(), &id).await.unwrap();
+    let preview = s.agent_preview_fixture(renamed.clone(), &id).await.unwrap();
     assert_eq!(effect(&preview)["suspended"], true);
     assert_eq!(effect(&preview)["alreadySuspended"], true);
 
     // A bot bound to a previous installation owner cannot be reapproved from the agent.
     let mut previous = stored.clone();
     previous["ownerAccessId"] = "previous-owner".into();
-    s.store.put(connections::KIND, previous).await.unwrap();
+    s.store.put_instance_fixture(previous).await.unwrap();
     let mut restored = renamed.clone();
     restored["access"] = updated["access"].clone();
-    let preview = s.agent_preview(restored, &id).await.unwrap();
+    let preview = s.agent_preview_fixture(restored, &id).await.unwrap();
     assert_eq!(effect(&preview)["suspended"], false);
     assert!(effect(&preview)["blocked"].is_string());
     assert_eq!(effect(&preview)["alreadySuspended"], true);
 }
 
 #[tokio::test]
-async fn preview_reports_a_plugin_grant_that_would_stop_a_bot_anyone_can_reach() {
+async fn plugin_grants_keep_a_bot_anyone_can_reach_answering() {
     let (_root, s, agent) = service().await;
-    let mut public = agent.clone();
-    public["access"]["sandbox"] = "read-only".into();
-    let public = s.agent(public, Some(text(&agent, "id"))).await.unwrap();
-    let saved = connections::save(
+    let saved = common::save_plugin(
         &s,
         "discord",
         &json!({
             "name": "#support on Acme",
             "settings": { "guildId": "100", "channelId": "200" },
             "accessMode": "everyone",
-            "agentId": public["id"],
+            "agentId": agent["id"],
             "projectId": null,
             "enabled": true,
             "token": "synthetic_discord_token",
@@ -1332,7 +1427,7 @@ async fn preview_reports_a_plugin_grant_that_would_stop_a_bot_anyone_can_reach()
     )
     .await
     .unwrap();
-    let account = connections::save(
+    let account = common::save_plugin(
         &s,
         "onepassword",
         &json!({ "name": "Production", "enabled": true, "secrets": { "token": "ops_fixture" } }),
@@ -1340,20 +1435,24 @@ async fn preview_reports_a_plugin_grant_that_would_stop_a_bot_anyone_can_reach()
     )
     .await
     .unwrap();
-    let id = text(&public, "id").to_owned();
+    let id = text(&agent, "id").to_owned();
 
-    // The approved policy is unchanged, but anyone could then reach a secret.
-    let mut secret = public.clone();
+    // The approved policy is unchanged: the owner chose who may reach this agent.
+    let mut secret = agent.clone();
     secret["plugins"] = json!([account["id"]]);
-    let preview = s.agent_preview(secret.clone(), &id).await.unwrap();
+    let preview = s.agent_preview_fixture(secret.clone(), &id).await.unwrap();
     let effect = &preview["delegations"][0];
     assert_eq!(effect["id"], saved["id"]);
-    assert_eq!(effect["suspended"], true);
-    assert!(effect["blocked"].is_string());
-    secret["reapproveDelegations"] = json!([saved["id"]]);
-    assert!(s.agent(secret, Some(&id)).await.is_err());
-
-    // Without plugin grants the same preview is clean.
-    let preview = s.agent_preview(public.clone(), &id).await.unwrap();
-    assert_eq!(preview["delegations"][0]["suspended"], false);
+    assert_eq!(effect["suspended"], false);
+    assert_eq!(effect["blocked"], Value::Null);
+    s.agent_fixture(secret, Some(&id)).await.unwrap();
+    let stored: Connection = serde_json::from_value(
+        s.store
+            .instance_fixture(text(&saved, "id"))
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored.revision, text(&saved, "revision"));
 }

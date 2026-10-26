@@ -149,7 +149,15 @@ run's revocable grant. This delegates management across the entire installation,
 including other agents and their work, even when the caller's direct resource
 access is restricted. It requires no external OAuth connection or personal token.
 Disabling the option, ending or cancelling the execution, or changing its chat
-turn invalidates the access. See [the installation-access decision](adr/0036-opt-in-installation-tools-for-agents.md).
+turn invalidates the access. See [the installation-access decision](adr/0064-opt-in-installation-tools-for-agents.md).
+
+An agent with **Task delegation** also finds `delegate_task`, `task_status` and
+`task_cancel` on `cairn_workspace` in conversations it did not receive as a
+delegated task. `delegate_task` takes the task text and optionally a title, an
+agent the caller covers, a project, a coding agent (`codex`, `claude`,
+`opencode`), a model, a reasoning effort and a retry `requestId`. It returns the
+delegated conversation; `task_status` with its `chatId` returns its state, outcome,
+pending questions and final report. See [delegated tasks](adr/0059-delegated-tasks.md).
 
 ## Managing conversations
 
@@ -167,7 +175,7 @@ A message starts work with the target agent's permissions.
 | --- | --- |
 | `read` | `list_chats`, `get_chat`, `read_chat_content`, `list_chat_questions`, `list_chat_artifacts`, `read_chat_artifact`, `list_chat_attachments`, `read_chat_attachment` |
 | `manage` | `create_chat`, `rename_chat`, `delete_chat`, `restore_chat`, `upload_chat_attachment`, `set_chat_artifact_visibility` |
-| `run` | `send_chat_message`, `edit_chat_message`, `delete_chat_message`, `set_chat_paused`, `stop_chat`, `resume_chat`, `restart_chat_session`, `answer_chat_question` |
+| `run` | `send_chat_message`, `edit_chat_message`, `delete_chat_message`, `set_chat_paused`, `stop_chat`, `resume_chat`, `restart_chat_session`, `compact_chat`, `answer_chat_question` |
 
 `list_chats` supports agent/project filters and active/trash views. Lists and
 `get_chat` take `offset` and `limit` (default 50, maximum 100); follow `nextOffset`
@@ -188,7 +196,12 @@ that turn, cancels a scheduled wakeup and pauses follow-ups, retaining queued
 messages. `resume_chat` resumes a stopped/failed execution under the existing
 recovery rules; `set_chat_paused(false)` resumes queued follow-ups. A failed
 restored session can use `restart_chat_session` with `confirm: true` to keep its
-history and files but start a fresh native session. `rename_chat` sets a title;
+history and files but start a fresh native session. Chat summaries report
+`contextUsage` (latest request tokens, window, cache share, estimate flag; `null` when
+unknown) and `compaction` (`supported`, `running`, `available`, `reason`).
+`compact_chat` compacts the Codex or Claude Code context of an idle conversation as
+its own execution, without a user message or rewritten history; see
+[context compaction](CONTEXT-COMPACTION.md). `rename_chat` sets a title;
 the first message or later automatic title evaluation can update it.
 `list_chat_questions` exposes fields and status; `answer_chat_question` accepts
 an idempotent UUID in `answer.id` and one answer per field in `answer.answers`.
@@ -237,22 +250,18 @@ hour, and refresh tokens after 30 days. Browser sessions are separate credential
 
 | Scope | Operations |
 | --- | --- |
-| `read` | `list_agents`, `list_projects`, `list_tasks`, `list_runs`, `get_run`, `read_run_content`, `list_skills`, `read_skill`, `list_mcps` |
-| `manage` | `save_agent`, `update_agent`, `save_project`, `create_task`, `update_task`, `save_skill`, `edit_skill_files`, `create_mcp`, `update_mcp`, `test_mcp`, `disconnect_mcp`, `delete_mcp` |
+| `read` | `list_agents`, `list_models`, `list_projects`, `list_tasks`, `list_runs`, `get_run`, `read_run_content`, `list_skills`, `read_skill`, `list_mcps` |
+| `manage` | `save_agent`, `update_agent`, `save_project`, `create_task`, `replace_task`, `set_task_state`, `delete_task`, `save_skill`, `edit_skill_files`, `create_mcp`, `update_mcp`, `test_mcp`, `disconnect_mcp`, `delete_mcp` |
 | `run` | `run_task`, `cancel_run` |
 
-`save_agent` and `save_project` create new records. `update_task` replaces the
-existing task configuration; `save_skill` creates or replaces its SKILL.md;
-`edit_skill_files` applies a batch of file changes (see [skills](SKILLS.md)).
-`update_agent` preserves omitted top-level fields; an explicit access policy
-replaces the complete policy. MCP connection tools share the UI's validation,
-encrypted credential storage and run-grant enforcement. See
-[connection management](MCP-CONNECTIONS.md#managing-connections-through-mcp)
-for configuration, OAuth sign-in and agent assignments.
-`list_runs` is paginated and omits full instructions/results. `get_run` returns
-the run record and an incremental event page, bounded by serialized bytes as well
-as the 100-event maximum. Start with `after: 0`, then pass `nextAfter` while
-`hasMore` is true. A short page does **not** mean the history is exhausted.
+`list_models` returns a coding agent's catalog as the app's picker shows it, including each Codex model's `serviceTiers` (speed id, Codex's name and usage description, `limited` when some signed-in account able to run the model lacks it or cannot confirm it) and Codex's catalog `defaultServiceTier`, which Cairn does not apply. Agents (`save_agent`, `replace_agent`) and messages (`send_chat_message`, `edit_chat_message`) accept `speed`: a tier id, `standard`, or empty to inherit the agent's or conversation's speed, otherwise Standard. A message naming the coding agent of the conversation's latest turn keeps that turn's speed, as the apps show it, while an omitted model and reasoning come from the agent; an edit that omits `speed` keeps the queued one. Before each Codex turn with a faster speed, the run checks it against the model list of the Codex process running the turn; `get_run` events then include a `status` event when its outcome changes for the message: `payload.speed.applied` is `standard` when the turn runs at Standard, `payload.speed.confirmed` is `true` when both the Codex process and the account's recent catalog list the tier for the model and the turn asks for it (a request: the account's plan decides), and `payload.speed.unconfirmed` is `true` when the speed cannot be confirmed for the account and model (a model list could not be read or does not name the model exactly, or the account's catalog is unknown or older than 30 minutes), as the apps show it. Use a `serviceTiers` id from `list_models` or `standard`; Cairn sends Standard for another id, such as Codex's own `fast` alias, since Codex's list does not name it for the model, and the notice says so. A speed is rejected when the turn runs with Claude Code or OpenCode, named by the message or inherited from the queue or conversation. `replace_agent` replaces every setting: send the agent's `speed` to keep it, since an omitted or empty one runs at Standard, and a speed is rejected for a Claude Code or OpenCode agent.
+
+`create_task` accepts `{creationId?, settings}`. `replace_task` accepts
+`{taskId, revision, settings}` and replaces all mission settings. `set_task_state`
+changes only `enabled` and `archived` at that revision. Authorship and membership
+come from verified authority, never command JSON. `get_task`, `list_tasks`,
+`preview_schedule` and `list_task_activity` use the read scope; `list_tasks` returns
+`{tasks: [...]}`. These definitions are shared with HTTP and `cairn_installation`.
 
 A run or event too large for a page is returned as a preview with `truncated: true`
 and `totalBytes`. The stored content is unchanged. Use `read_run_content` with

@@ -60,26 +60,6 @@ est couverte par celle qui interdit tout droit de plugin à cet agent.
 La connexion « Se connecter avec GitHub » de Beacon reste : c'est un moyen de se
 connecter à un compte Cairn, sans rapport avec l'installation.
 
-## Compatibilité
-
-C'est une rupture de format : l'epoch de compatibilité passe de 7 à 8. Au premier
-démarrage, `plugins/legacy_github.rs` déplace l'existant, puis ne fait plus rien :
-
-- le login `gh` de l'installation devient l'instance « GitHub », accordée à chaque
-  agent qui avait `access.github` (vrai par défaut, Main compris) ;
-- chaque jeton dédié devient une instance « GitHub (<agent>) », chiffrée dans le
-  coffre, accordée à son agent ; le jeton d'un agent qui utilisait la connexion
-  partagée est gardé sans droit ;
-- `access.github` quitte les agents (leur politique est matérialisée avant, pour
-  qu'une restriction GitHub seule garde son effet sur les connexions MCP) et l'accès
-  approuvé des délégations ;
-- les sources de skills GitHub, les projets dont le remote est sur github.com et
-  les attentes GitHub en cours nomment le package.
-
-Les comptes migrés reçoivent leur login et leur identité de commit par le
-formulaire du package quand l'installation démarre ses plugins. Une version
-antérieure ne lit pas ces données : pas de retour arrière après la migration.
-
 ## Conséquences
 
 - Retirer un droit GitHub n'interrompt plus le travail en file (les droits de

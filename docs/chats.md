@@ -33,7 +33,7 @@ Android through the existing live stream and do not change the chat's recency.
 
 When an agent reports completion, **Task completed** appears beneath the reply in the conversation. **View evidence** expands the report and supporting details, including clickable commit and workflow links; **Hide evidence** collapses it. Reports without evidence use **View details**. **Blocked** and **Your input needed** show their reason immediately. These are agent-reported outcomes, and a new reply clears the previous report. The composer remains available while reading the evidence.
 
-The conversation reads like the Android app. Your messages sit in a tonal bubble; the agent's replies are plain text under its name. Short conversations sit just above the composer. The agent's actions between two messages collapse into one sentence (for example *Read 2 files, searched once, edited 2 files, ran 2 commands*) with the step count and any failures; expanding it shows a timeline where consecutive reads fold into one step, and each step opens a sheet with its command, output and technical details. While the agent works, the step in progress is left to the working indicator. Deliverables appear as a compact horizontal rail beside the reply. Connection status (**Reconnecting…**, **Updating…**) floats over the conversation instead of moving it. Mission runs use the same reader; see [missions](tasks.md).
+The conversation reads like the Android app. Your messages sit in a tonal bubble; the agent's replies are plain text under its name. Short conversations sit just above the composer. The agent's actions between two messages collapse into one sentence (for example *Read 2 files, searched once, edited 2 files, ran 2 commands*) with the step count and any failures; expanding it shows a timeline where consecutive reads fold into one step, and each step opens a sheet with its command, output and technical details. While the agent works, the step in progress is left to the working indicator. Deliverables appear as a compact horizontal rail beside the reply. Connection status (**Reconnecting…**, **Updating…**) floats over the conversation instead of moving it. Mission runs use the same reader; see [missions](#missions).
 
 Routine session updates (connecting, starting, finishing and success) are hidden from chat, including inside tool groups. The working indicator and completion footer provide that status. Failures and unresolved interruptions appear as inline notices; recovered connection retries disappear. Raw lifecycle events remain in run activity for troubleshooting.
 
@@ -45,7 +45,15 @@ Send starts a reply. An initial message appears directly in the conversation wit
 
 The composer options contain searchable model and reasoning selectors for the next message. They use Codex's live `model/list` catalog, including descriptions and each model's supported reasoning levels. Agent settings use the same selectors. Changing model resets reasoning to that model's default; **Agent default** follows the agent configuration. Saved models absent from the current catalog remain visible. Model and reasoning changes need a new turn; they cannot change an already running turn. Queued edits preserve both choices. Drafts stay in the current browser tab across reloads. Submitted messages, queue state, transcripts and working files persist on the server.
 
-Model discovery is authenticated and cached for five minutes per enabled Codex account. Usage polling refreshes it using the existing account session. The picker combines available models, hides catalog-hidden entries except a saved selection, and offers the reasoning levels shared by accounts exposing that model. Account selection uses fresh catalogs to avoid routing a known model to an account that does not expose it. Discovery failures keep the last catalog with a visible retry status. Custom provider aliases remain supported by the API. [Codex model discovery protocol](https://learn.chatgpt.com/docs/app-server#models).
+Model discovery is authenticated and cached for five minutes per enabled Codex account. Usage polling refreshes it using the existing account session. The picker combines available models, hides catalog-hidden entries except a saved selection, and offers the reasoning levels shared by accounts exposing that model. It offers every speed any enabled account lists for that model and marks a speed as `limited` when some signed-in account able to run the model lacks it or cannot confirm it. Account selection uses fresh catalogs to avoid routing a known model to an account that does not expose it. Discovery failures keep the last catalog with a visible retry status. Custom provider aliases remain supported by the API. [Codex model discovery protocol](https://learn.chatgpt.com/docs/app-server#models).
+
+## Speed
+
+Codex models can offer faster **service tiers** in exchange for higher usage. The picker shows a **Speed** row inside the chosen Codex model's card, with **Standard** and every tier that model lists in the live catalog (`model/list` `serviceTiers`, for example `priority`, which Codex names **Fast**). The description under the choices is Codex's own wording for that model and account, such as "1.5x speed, increased usage", followed by a link to [OpenAI's speed page](https://learn.chatgpt.com/docs/agent-configuration/speed). Cairn does not display usage multipliers itself: on 24 October 2026 that page listed Fast at 2.5× and Ultrafast at 8× the Standard rate for included subscription limits, 2× and 6× for purchased credits and Enterprise pay-as-you-go, and API-key billing by tokens; the rates differ per plan and change over time. Ultrafast appears only when the account's catalog offers it (OpenAI limits it to Pro $500, eligible Enterprise and Edu plans).
+
+The speed is independent of the model and the reasoning level: changing either keeps it. **Agent default** / **Conversation default** inherits the agent's or conversation's speed; without one, **Default** is Standard. Codex's app server does not apply a model's catalog `defaultServiceTier` (only Codex's own terminal client does), so Cairn never shows it as the speed in use. Agent settings save a default speed. Each message, including queued ones, keeps the speed chosen when it was written; editing a queued message restores it (an editor that sends no speed keeps it), and steering cannot change the speed of the running turn. Switching to Claude Code or OpenCode drops the speed: they expose no speed setting, and the API rejects a speed for a message whose turn runs with them, whether it names the coding agent or inherits it from the queue or conversation. Messages and agents saved before speeds existed carry none and run at Standard, as they did before.
+
+Codex accepts the tier in `turn/start` and keeps it for the thread, even across `thread/resume`. Cairn therefore sends a tier with every turn: the chosen one, or `default` for Standard and for turns without a speed, so a turn never silently keeps an earlier turn's faster tier. Codex 0.164.0 silently omits a Fast or Ultrafast tier its catalog does not advertise for the model (it passes `flex` through). Routing prefers accounts whose cached catalog confirms the tier: usage polls refresh each account's catalog before it expires, and for speeds a catalog stays authoritative for 30 minutes, since polls skip a busy account. The decision belongs to the turn: just before `turn/start`, each attempt asks the Codex process that will run it for its `model/list`, the catalog Codex itself applies. When that list names the model without the tier, the turn asks for Standard and the conversation shows **This turn runs at Standard speed**. When the list cannot be read, or does not name the model exactly (a custom alias, or a dated version Codex may match to a listed model), the turn still asks for the tier and the conversation shows **Speed not confirmed for this turn**: it may run at Standard. A turn without a chosen model is checked against the model Codex reports for the thread, which its configuration may set; routing only uses the catalog default to order accounts. Codex answers `model/list` with its built-in list, which offers Fast for its main models, when it cannot fetch the account's, and says nothing about it; Cairn's cached account catalogs come from the same call. So a list that names the model without the tier is the account's own and decides: when the process's list or the account's recent cached catalog does so, the turn asks for Standard with the notice above. When both name the tier, the conversation shows **Selected speed requested for this turn**: a request, since the account's plan decides whether it applies, and Cairn does not measure speed. When the account's catalog is unknown or older than 30 minutes, the turn shows **Speed not confirmed for this turn** instead. Notices are recorded only for an attempt Codex accepted. A retried or resumed attempt, possibly on another account, checks again, and the conversation only shows a change of outcome, such as the selected speed after an earlier attempt ran at Standard. A speed must be a `serviceTiers` id from the catalog or `standard`; Codex's list does not name another id, such as its own `fast` alias, so Cairn asks for Standard for it and the notice says so. The picker marks a speed *limited* when some account able to run the model lacks or does not confirm it; the picker label then says the speed is *requested*, as it does when the model's speeds are unknown. Queued messages and the Android agent overview always call a faster speed *requested*, adding *not listed for this model* when the model's catalog lacks it, since each turn reports how it runs. A run without a connected account uses the local Codex catalog the same way, and the speed Cairn sends replaces a `service_tier` set in the host's `~/.codex/config.toml`, which such runs otherwise copy: choose the speed in Cairn instead.
 
 ## Plan turns
 
@@ -59,12 +67,13 @@ Cairn enforces the boundary rather than asking the model to respect it. During a
 turn the engine's sandbox is read-only with no shell network access, whatever the
 agent's access; MCP connections only offer tools they declare read-only
 (`readOnlyHint`); `cairn_installation` only offers `read` operations; and
-`cairn_workspace` only offers `open_project`, `list_nodes`, `exclusive_status` and
-`pending_questions`. Plugin tools and commands are unavailable. Builds and tests that
+`cairn_workspace` only offers `open_project`, `list_nodes`, `exclusive_status`,
+`pending_questions` and, for an agent that delegates, `task_status`. Delegating or
+cancelling a task, plugin tools and plugin commands are unavailable. Builds and tests that
 write files fail. Claude Code runs in its plan permission mode; Codex receives the
 `plan` collaboration preset it lists, without subagents. OpenCode cannot run plan
 turns. A plan request cannot steer a running turn that may change files: queue it.
-See [the plan-turn decision](adr/0059-plan-turns.md).
+See [the plan-turn decision](adr/0071-plan-turns.md).
 
 ## Invoking skills with `$`
 
@@ -74,7 +83,7 @@ The message is stored and displayed exactly as typed. When a reply starts, or a 
 
 ## Execution and recovery
 
-Tasks continue to use `codex exec`. Chats use Codex app-server `thread/start`, `thread/resume`, `turn/start` and `turn/steer`, tested against Codex 0.154.0. Steering includes the active `expectedTurnId`. If that turn has already finished, the message remains pending for the next turn.
+All executions, including missions, use the chat protocol. Codex uses app-server `thread/start`, `thread/resume`, `turn/start` and `turn/steer`, tested against Codex 0.154.0. Steering includes the active `expectedTurnId`. If that turn has already finished, the message remains pending for the next turn.
 
 `Chats` owns durable user messages and dispatch. `Worker` owns account selection, project locks, timeout budgets, restart fencing and execution. `chat-process.ts` adapts app-server notifications to the shared Activity artifact format. Each active reply has a supervised process; idle chats hold no account or worker slot. Restricted agents run the same adapter inside the isolated container, with a read-only inbox containing only that run's steering messages.
 
@@ -99,3 +108,30 @@ On iPhone and iPad, install Cairn using Safari's **Share → Add to Home Screen*
 The public app must use HTTPS. No notification SaaS account is required: VAPID keys are generated automatically and encrypted with the existing persistent application key, along with browser subscription credentials. Keep the data volume and its encryption key when moving the deployment. Supported push providers are Chrome/Chromium (FCM), Firefox, Safari, and Edge's Windows notification service. The server validates provider endpoints, removes expired subscriptions, and retries temporary failures for up to an hour. It skips notifications for questions already answered. The service worker does not cache pages or authenticated API responses.
 
 Tests cover the native Codex request/response shape, blocking and nonblocking questions, late answers, replay, restart, API authorization, notification retry and expiry, private push content, device enrollment/revocation, notification routing, and desktop/mobile question screens in Chromium and WebKit. Browser automation replaces the OS permission prompt and push provider; actual delivery to a phone requires opting in on that phone.
+
+## Missions
+
+Missions follow the Android app. The list shows one card per mission: its agent and
+project, its name, the schedule in words (for example *Every Monday · 09:00*, or *Paused ·*
+before it) with the next date, and a strip of its last twelve runs in order (green
+succeeded, coral failed, accent running). A mission needing review says why: **Failed**,
+**Interrupted**, **Blocked** or **Your input needed**. The round button runs the mission;
+while it runs, the button shows the elapsed time instead. Running missions come first, then
+those needing review, then the next scheduled ones, then the rest by name.
+
+The title summarises how many missions are active and when the next one runs. **Search
+missions** filters by name and tags; the chips filter **All**, **Scheduled**, **One-off**,
+**Paused** and **Archived**, each with its count. **New mission** opens the editor.
+
+Selecting a card opens the mission: beside the list on wide screens, in a bottom sheet on
+screens up to 900 px. It shows the agent and project, the name and tags, the schedule with
+its time, cron expression, timezone and next two dates, the brief (three lines, expandable),
+and the last ten runs with their success rate. Each run opens its own page. The detail ends with
+**Edit mission**, **Pause schedule** / **Resume schedule** and **Run now**; the actions menu
+duplicates or archives the mission (both paused), opens the latest run, or deletes it. The
+selected mission stays in the URL across reloads.
+
+**Run now** opens the new run, as on Android. A run page opens on its **Conversation**, then
+offers **Result**, **Files** and **Mission brief**. The conversation reads like a chat: the
+agent's actions between messages collapse into one sentence, expand into a timeline and
+open each step's command, output and details in a sheet.

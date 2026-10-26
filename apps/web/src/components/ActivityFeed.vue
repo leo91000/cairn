@@ -44,6 +44,7 @@ import ChatNotice from './ChatNotice.vue'
 import ChatOutcome from './ChatOutcome.vue'
 import ChatQuotaCard from './ChatQuotaCard.vue'
 import ChatWaitCard from './ChatWaitCard.vue'
+import ContextCompaction from './ContextCompaction.vue'
 import Icon from './Icon.vue'
 import MessageAttachments from './MessageAttachments.vue'
 import PlanCard from './PlanCard.vue'
@@ -480,6 +481,7 @@ defineExpose({
                 <SubagentTeam v-else-if="entry.kind === 'team'" :agents="entry.agents" :active="active" />
                 <PlanCard v-else-if="entry.kind === 'plan'" :plan="entry.plan" :live="entry.id === livePlan && !!plan" />
                 <PlanUpdate v-else-if="entry.kind === 'plan-update'" :change="entry.change" :progress="entry.progress" />
+                <ContextCompaction v-else-if="entry.kind === 'compaction'" :entry="entry" />
                 <ChatWaitCard
                   v-else-if="entry.kind === 'wait'"
                   :wait="entry.wait"

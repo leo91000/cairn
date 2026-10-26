@@ -13,6 +13,7 @@ use crate::{
     service::Service,
     validation::text,
 };
+use cairn_contracts::PluginState;
 use cairn_plugin_host::{InvocationError, Session};
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -51,15 +52,11 @@ pub async fn maintain(s: Arc<Service>) {
         if changed || !patterns_loaded {
             patterns_loaded = load_secret_patterns(&s).await;
         }
-        let Ok(values) = s.store.list(connections::KIND).await else {
+        let Ok(values) = s.store.plugin_instances().await else {
             continue;
         };
         let mut wanted = HashMap::new();
-        for connection in values
-            .into_iter()
-            .filter_map(|value| serde_json::from_value::<Connection>(value).ok())
-            .filter(|connection| connection.enabled)
-        {
+        for connection in values.into_iter().filter(|connection| connection.enabled) {
             // A new revision or a different approved package restarts the worker.
             let package = registry::active(&s, &connection.plugin_id).await;
             let key = format!(
@@ -104,22 +101,28 @@ async fn run(
     stop: CancellationToken,
 ) {
     let Ok(package) = package else {
-        status(&s, &connection, "needs_review").await;
+        status(&s, &connection, PluginState::NeedsReview).await;
         return;
     };
     let mut retry = Duration::from_secs(5);
     loop {
-        status(&s, &connection, "connecting").await;
+        status(&s, &connection, PluginState::Connecting).await;
         let result = tokio::select! {
             () = stop.cancelled() => return,
             result = serve(&s, &connection, &package, &stop) => result,
         };
         if let Err(error) = result {
             if matches!(error.status, 401 | 403) {
-                status_with(&s, &connection, "needs_review", Some(&error.message)).await;
+                status_with(
+                    &s,
+                    &connection,
+                    PluginState::NeedsReview,
+                    Some(&error.message),
+                )
+                .await;
                 return;
             }
-            status(&s, &connection, "disconnected").await;
+            status(&s, &connection, PluginState::Disconnected).await;
         }
         tokio::select! {
             () = stop.cancelled() => return,
@@ -157,7 +160,7 @@ async fn serve(
             stop.cancelled().await;
             Ok(())
         } else {
-            status(s, connection, "connected").await;
+            status(s, connection, PluginState::Connected).await;
             stop.cancelled().await;
             Ok(())
         }

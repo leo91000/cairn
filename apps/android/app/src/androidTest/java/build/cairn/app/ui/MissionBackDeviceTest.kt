@@ -22,10 +22,25 @@ class MissionBackDeviceTest {
     @get:Rule val compose = createComposeRule()
 
     private val now = System.currentTimeMillis()
-    private val main = Agent(MAIN_AGENT_ID, "Agent principal")
+    private val main =
+        Agent(
+            exclusiveNodes = emptyList(),
+            plugins = emptyList(),
+            revision = "",
+            createdAt = 0,
+            access =
+                AccessPolicy(
+                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                    projects = null,
+                    skills = null,
+                    mcps = null,
+                ),
+            id = MAIN_AGENT_ID,
+            name = "Agent principal",
+        )
     private val daily =
         Task(
-            "daily",
+            "a05f5991-ec1e-57a2-a8e5-ec314581a110",
             "Revue quotidienne",
             "Relire les changements du jour.",
             MAIN_AGENT_ID,
@@ -35,12 +50,12 @@ class MissionBackDeviceTest {
     private val done =
         Run(
             "done-run",
-            taskId = "daily",
+            taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
             status = "succeeded",
             trigger = "schedule",
             startedAt = now - 7_200_000,
             finishedAt = now - 7_000_000,
-            snapshot = Snapshot(task = daily, agent = main),
+            snapshot = Snapshot(task = daily.runTaskSnapshot(), agent = main),
         )
 
     private fun shell(command: String): String =
@@ -89,9 +104,17 @@ class MissionBackDeviceTest {
                             path == "/api/installations" -> json(beaconInstallationsFixture())
                             path == "/api/account/session" -> json(beaconAccountFixture("fixture"))
                             path == "/api/installations/fixture/api/agents" ->
-                                json(wireJson.encodeToString(listOf(main)))
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(listOf(main))
+                                    )
+                                )
                             path == "/api/installations/fixture/api/tasks" ->
-                                json(wireJson.encodeToString(listOf(daily)))
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListMissionsOutput(listOf(daily))
+                                    )
+                                )
                             path == "/api/installations/fixture/api/tasks/activity" ->
                                 json(wireJson.encodeToString(listOf(done)))
                             path == "/api/installations/fixture/api/runs" ->
@@ -105,7 +128,31 @@ class MissionBackDeviceTest {
                             path == "/api/installations/fixture/api/overview" ||
                                 path.endsWith("/models") ||
                                 path == "/api/installations/fixture/api/accounts" -> json("{}")
-                            else -> json("[]")
+                            else ->
+                                json(
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
+                                )
                         }
                     }
                 }

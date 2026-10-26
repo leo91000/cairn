@@ -8,6 +8,7 @@ pub mod artifacts;
 pub mod attachments;
 pub mod auth;
 pub(crate) mod backend_migration;
+pub(crate) mod capabilities;
 mod chat_inbox;
 pub mod chat_process;
 pub mod chat_titles;
@@ -18,8 +19,10 @@ mod codex_background;
 mod codex_login;
 pub mod coding_agent;
 pub mod config;
+pub mod context_usage;
 pub mod conversation_deletion;
 pub mod conversation_lifecycle;
+pub mod delegation;
 pub mod direct;
 pub mod error;
 pub mod execution;
@@ -33,6 +36,7 @@ pub mod mcp_oauth;
 pub mod mcp_server;
 pub mod mcps;
 pub mod microvm;
+pub mod missions;
 pub mod models;
 pub mod native;
 pub mod network;
@@ -47,6 +51,7 @@ pub mod process;
 pub(crate) mod project_archives;
 pub mod project_git;
 pub mod project_workspaces;
+pub mod projects;
 pub mod provider;
 mod reads;
 pub mod recovery;
@@ -62,10 +67,22 @@ pub mod skills;
 pub mod storage;
 pub mod store;
 pub mod supervisor;
-mod task_authors;
 pub mod tls;
 pub mod toolkit;
 pub mod validation;
 pub mod vault;
 pub mod waits;
 pub mod worker;
+
+pub mod agents;
+
+#[cfg(test)]
+extern crate self as cairn_installation;
+
+#[cfg(test)]
+#[path = "../tests/common/agent_fixture.rs"]
+pub(crate) mod agent_fixture;
+
+#[cfg(test)]
+#[path = "../tests/common/mission_fixture.rs"]
+pub(crate) mod mission_fixture;

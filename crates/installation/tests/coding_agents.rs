@@ -5,7 +5,7 @@ use cairn_installation::{
     provider::Provider,
     run_output,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::BTreeMap;
 use tempfile::TempDir;
 
@@ -51,18 +51,6 @@ fn adapters_preserve_native_mcp_permissions_and_thread_credentials() {
                     json!(["read"])
                 );
                 assert_eq!(chat["args"], json!([]));
-                let args = native["args"].as_array().unwrap();
-                assert!(
-                    args.iter()
-                        .filter_map(Value::as_str)
-                        .any(|arg| arg.contains("bearer_token_env_var"))
-                );
-                assert!(
-                    !args
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .any(|arg| arg.contains("synthetic-run-token"))
-                );
             }
             Provider::Claude => {
                 assert!(native.get("codexConfig").is_none());
@@ -180,9 +168,6 @@ fn engine_configuration_and_validation_do_not_depend_on_the_other_engine() {
                 assert_eq!(environment["CODEX_HOME"], home.to_string_lossy());
                 assert!(!environment.contains_key("BROWSER"));
                 assert!(!environment.contains_key("DISABLE_AUTOUPDATER"));
-                assert!(!adapter.uses_chat(false, false));
-                assert!(adapter.uses_chat(false, true));
-                assert!(adapter.uses_chat(true, false));
             }
             Provider::Claude => {
                 assert!(!environment.contains_key("ANTHROPIC_API_KEY"));
@@ -190,7 +175,6 @@ fn engine_configuration_and_validation_do_not_depend_on_the_other_engine() {
                 assert_eq!(environment["BROWSER"], "true");
                 assert_eq!(environment["DISABLE_AUTOUPDATER"], "1");
                 assert_eq!(environment["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1");
-                assert!(adapter.uses_chat(false, false));
                 assert!(
                     adapter
                         .validate_agent(&json!({ "provider": "claude", "reasoning": "ultra" }))
@@ -205,7 +189,6 @@ fn engine_configuration_and_validation_do_not_depend_on_the_other_engine() {
                 assert_eq!(environment["CAIRN_OPENCODE_HOME"], home.to_string_lossy());
                 assert!(!environment.contains_key("XDG_DATA_HOME"));
                 assert_eq!(environment["OPENCODE_AUTH_CONTENT"], "{}");
-                assert!(adapter.uses_chat(false, false));
                 assert!(adapter.validate_agent(&json!({ "provider": "opencode", "model": "openrouter/anthropic/claude-sonnet", "access": { "sandbox": "read-only" } })).is_err());
                 assert!(adapter.validate_agent(&json!({ "provider": "opencode", "model": "openrouter/anthropic/claude-sonnet" })).is_ok());
             }

@@ -569,10 +569,10 @@ pub async fn uninstall(s: &Service, id: &str) -> Result<Value> {
     }
     let used = s
         .store
-        .list(super::connections::KIND)
+        .plugin_instances()
         .await?
         .iter()
-        .any(|connection| connection["pluginId"] == id);
+        .any(|connection| connection.plugin_id == id);
     if used {
         return Err(Error::conflict("Remove this plugin's connections first."));
     }

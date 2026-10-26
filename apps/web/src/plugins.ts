@@ -1,4 +1,6 @@
 import type { Agent } from '../../../packages/contracts/contracts'
+import type { PluginConnection } from '../../../packages/contracts/generated/typescript/PluginConnection'
+import type { PluginOption as GeneratedPluginOption } from '../../../packages/contracts/generated/typescript/PluginOption'
 import type { IconName } from './icons'
 import type { PluginSetup, SetupRisk } from './plugin-setup'
 import {
@@ -19,13 +21,7 @@ import {
   Wrench,
 } from './icons'
 
-export interface FieldOption {
-  value: string
-  label: string
-  /** Shown under the choice, e.g. why it can't be picked. */
-  description?: string
-  disabled?: boolean
-}
+export type FieldOption = Pick<GeneratedPluginOption, 'value' | 'label'> & Partial<GeneratedPluginOption>
 
 /** One field of a declarative plugin form (instance settings or a view's form). */
 export interface SettingField {
@@ -51,13 +47,7 @@ export interface SettingField {
   default?: unknown
 }
 
-/** What a package's `form` handler returns while the owner edits an instance. */
-export interface FormResult {
-  options: Record<string, FieldOption[]>
-  values: Record<string, unknown>
-  errors: Record<string, string>
-  view: any[]
-}
+export type { PluginActivity as Activity } from '../../../packages/contracts/generated/typescript/PluginActivity'
 
 export interface PluginArgument {
   name: string
@@ -182,7 +172,7 @@ export interface PluginEntry {
   status: 'active' | 'update' | 'needs_approval' | 'invalid'
   active: string | null
   manifest: Manifest | null
-  /** The steps the owner follows; older installations send only the manifest. */
+  /** The steps resolved by the installation; null for invalid packages. */
   setup?: PluginSetup | null
   versions: PackageVersion[]
 }
@@ -193,52 +183,10 @@ export interface Catalog {
   connections: PluginConnection[]
 }
 
-export interface Label {
-  id: string
-  name: string
-}
-
-export interface AccessRequest {
-  id: string
-  userId: string
-  name: string
-  mentions: number
-  updatedAt: number
-}
-
-export interface Activity {
-  id: string
-  chatId: string
-  userId: string
-  name: string
-  preview: string
-  status: 'working' | 'replied' | 'failed' | 'stopped'
-  createdAt: number
-}
-
-export interface PluginConnection {
-  id: string
-  pluginId: string
-  name: string
-  enabled: boolean
-  settings: Record<string, any>
-  /** Agents granted the package's commands and tools on this instance. */
-  agentIds?: string[]
-  /** Secret fields saved in the vault; values never reach the browser. */
-  secretKeys?: string[]
-  userIds: string[]
-  people: Label[]
-  accessMode: 'allowlist' | 'requests' | 'everyone'
-  maxPerPersonPerHour?: number
-  agentId: string
-  projectId: string | null
-  maxMessagesPerHour: number
-  /** Live state, with the package's own message (e.g. who it is signed in as). */
-  status: { state: string, message?: string | null }
-  usage: { hour: number }
-  requests: AccessRequest[]
-  activity: Activity[]
-}
+export type { PluginConnection } from '../../../packages/contracts/generated/typescript/PluginConnection'
+export type { PluginFormResult as FormResult } from '../../../packages/contracts/generated/typescript/PluginFormResult'
+export type { PluginLabel as Label } from '../../../packages/contracts/generated/typescript/PluginLabel'
+export type { PluginRequest as AccessRequest } from '../../../packages/contracts/generated/typescript/PluginRequest'
 
 /** How each host capability reads in the catalogue. */
 export const capabilityLabels: Record<string, [IconName, string]> = {
@@ -320,23 +268,31 @@ export function personName(connection: PluginConnection, id: string) {
   return connection.people.find(person => person.id === id)?.name || `User ${id.slice(-4)}`
 }
 
-/** External people may only reach a dedicated agent: one project at most, no installation access. */
-export function eligibleAgent(agent: Agent) {
-  return agent.access.installation !== true && Array.isArray(agent.access.projects) && agent.access.projects.length <= 1
+/**
+ * What the people reaching an agent through a bot could do with its access, for the
+ * owner's warning. Nothing is refused: the owner chooses who may reach which agent.
+ * For anyone in a channel, writing, MCP and plugin access matter as well.
+ */
+export function delegationRisks(agent: Agent, connections: Pick<PluginConnection, 'agentIds'>[], everyone: boolean, draftGrants: string[] = []) {
+  const risks: string[] = []
+  if (agent.access.installation === true)
+    risks.push('manage your whole installation')
+  if (!Array.isArray(agent.access.projects))
+    risks.push('open every project')
+  else if (agent.access.projects.length > 1)
+    risks.push(`open ${agent.access.projects.length} projects`)
+  if (!everyone)
+    return risks
+  if (agent.access.sandbox !== 'read-only')
+    risks.push('change files and run commands')
+  if (!Array.isArray(agent.access.mcps) || agent.access.mcps.length)
+    risks.push('use its MCP connections')
+  if (draftGrants.includes(agent.id) || connections.some(connection => connection.agentIds?.includes(agent.id)))
+    risks.push('use its plugins, such as GitHub or 1Password')
+  return risks
 }
 
-/**
- * Why an agent can't serve anyone in a channel, or '' when it can. Mirrors the server:
- * read-only sandbox, one project at most, no installation, MCP or plugin grants.
- */
-export function publicProblem(agent: Agent, connections: Pick<PluginConnection, 'agentIds'>[]) {
-  if (!eligibleAgent(agent))
-    return 'Too broad'
-  if (agent.access.sandbox !== 'read-only')
-    return 'Not read-only'
-  if (!Array.isArray(agent.access.mcps) || agent.access.mcps.length)
-    return 'Has MCPs'
-  if (connections.some(connection => connection.agentIds?.includes(agent.id)))
-    return 'Has plugin access'
-  return ''
+/** `a, b and c`. */
+export function listed(items: string[]) {
+  return items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : items[0] ?? ''
 }

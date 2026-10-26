@@ -1,5 +1,4 @@
 import type { Locator, Page } from '@playwright/test'
-import type { Service } from '../fixtures/legacy/server/service'
 import { execFileSync, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import {
@@ -14,13 +13,12 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { test as base, expect } from '@playwright/test'
-import { config as loadConfig } from '../fixtures/legacy/server/config'
-import { Service as SeedService } from '../fixtures/legacy/server/service'
-import { Store } from '../fixtures/legacy/server/store'
+import agentWire from '../../packages/contracts/generated/agent-wire.json' with { type: 'json' }
 import { beaconRelayFixture, executeBeaconSql } from './beacon-relay-fixture'
+import { NativeFixture } from './native-fixture'
 
 export interface Workspace {
-  service: Service
+  service: NativeFixture
   restart: () => Promise<void>
   url: string
   installationUrl: string
@@ -77,21 +75,18 @@ export const test = base.extend<object, { workspace: Workspace }>({
     isolatedDatabase.searchParams.set('options', `-c search_path=${schema}`)
     const accountEmail = `${schema}@example.test`
     await Promise.all([mkdir(home), mkdir(projectPath)])
-    const config = loadConfig({
+    const config = {
       dataDir: path.join(directory, 'data'),
       home,
       workspaceRoots: [projectPath],
       codexBin: path.resolve('tests/fixtures/codex.mjs'),
-      ghBin: '/nonexistent/fixture-gh',
       publicUrl: managerUrl,
       logger: false,
       host: '127.0.0.1',
       port,
       workerEnabled: true,
-    })
-    // The old service only seeds/inspects the shared database. Every HTTP request,
-    // scheduled run, account refresh and chat is handled by the native process.
-    const service = new SeedService(new Store(config.dataDir), config)
+    }
+    const service = new NativeFixture(config)
     const configuration = path.join(directory, 'config.json')
     const usageFile = path.join(directory, 'usage.json')
     const usage: Record<string, unknown> = {}
@@ -203,10 +198,39 @@ export const test = base.extend<object, { workspace: Workspace }>({
       : route
     const api = async (route: string, method = 'GET', body?: unknown) => {
       await ensureSession()
+      // Journey setup uses concise settings; every actual request still uses the current
+      // complete command. Browser-generated calls are exercised independently of this helper.
+      const profile = route.match(/^\/api\/agents(?:\/([0-9a-f-]+))?(\/preview)?$/)
+      if (profile && body && typeof body === 'object' && !('settings' in body) && ['POST', 'PUT'].includes(method)) {
+        const patch = body as Record<string, any>
+        const current = profile[1] ? await api(`/api/agents/${profile[1]}`) : null
+        const defaults = current ?? agentWire.creates[0].settings
+        const {
+          id: _id,
+          revision: _revision,
+          createdAt: _createdAt,
+          avatar: _avatar,
+          ...settings
+        } = { ...defaults, ...patch }
+        settings.access = { ...defaults.access, ...patch.access }
+        delete settings.creationId
+        delete settings.nativeNodeReviews
+        delete settings.reapproveDelegations
+        const review = { nativeNodeReviews: patch.nativeNodeReviews ?? [], reapproveDelegations: patch.reapproveDelegations ?? [] }
+        body = profile[1]
+          ? {
+              agentId: profile[1],
+              revision: patch.revision ?? current.revision,
+              settings,
+              review,
+            }
+          : { ...(Object.hasOwn(patch, 'creationId') ? { creationId: patch.creationId } : {}), settings, review }
+      }
+
       const response = await fetch(`${url}${apiPath(route)}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
       const result = await response.json()
       expect(response.ok, JSON.stringify(result)).toBe(true)
-      return result
+      return route === '/api/agents' && method === 'GET' ? result.agents : route === '/api/mcps' && method === 'GET' ? result.mcps : result
     }
 
     const signIn = async (page: Page) => {
@@ -318,11 +342,10 @@ export const test = base.extend<object, { workspace: Workspace }>({
         setOpenCodeGoUsage: (id, apiKey, value) => {
           goUsage.set(apiKey, value)
           // Let the next explicit refresh poll the fixture without waiting a minute.
-          const row = service.store.db.prepare('SELECT data FROM records WHERE id=? AND kind=?').get(id, 'agentAccounts') as { data: string }
-          const account = JSON.parse(row.data)
+          const account = service.store.get('agentAccounts', id)
           if (account.usage)
             account.usage.attemptedAt = Date.now() - 60001
-          service.store.db.prepare('UPDATE records SET data=? WHERE id=? AND kind=?').run(JSON.stringify(account), id, 'agentAccounts')
+          service.store.put('agentAccounts', account)
         },
       })
     }
@@ -332,8 +355,6 @@ export const test = base.extend<object, { workspace: Workspace }>({
       await beacon.close()
       executeBeaconSql(database, `DROP SCHEMA ${schema} CASCADE`)
       currentWorkspace = undefined
-      await service.accounts.close()
-      service.store.close()
       await rm(directory, { recursive: true, force: true })
     }
   }, { scope: 'worker', timeout: 120000 }],

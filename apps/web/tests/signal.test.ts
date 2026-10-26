@@ -35,6 +35,18 @@ function chat(id: string, values: Partial<ChatView> = {}): ChatView {
 
 function task(id: string, values: Partial<Task> = {}): Task {
   return {
+    revision: 'fixture',
+    authorId: null,
+    authorAccessId: null,
+    authorRemoved: false,
+    scheduleWaitReason: null,
+    scheduleFailure: null,
+    nativePrincipals: [],
+    nativeAuthorityNodes: [],
+    nativeParentRunId: null,
+    nativeParentAccess: null,
+    nativeProvenanceUnknown: true,
+    nativePluginGrants: null,
     id,
     name: id,
     prompt: 'Do it',
@@ -426,5 +438,15 @@ describe('the working indicator', () => {
     expect(identityColor('h')).toBe('#14365A') // Java hash 104 maps to palette entry 0.
     expect(identityColor('cairn')).toBe('#5E6B2E')
     expect(identityColor('main')).toBe(identityColor('main'))
+  })
+})
+
+describe('delegated conversations', () => {
+  it('name the conversation that delegated them while it remains', () => {
+    const requester = chat('requester', { title: 'Refactor the send queue', slug: 'refactor' })
+    const delegated = chat('delegated', { status: 'running', requester: { chatId: 'requester', title: 'Refactor the send queue' } })
+    const fil = filOf([requester, delegated], [], [])
+    expect(fil.live.find(item => item.chatId === 'delegated')?.requester).toEqual({ title: 'Refactor the send queue', to: '/chats/requester' })
+    expect(fil.recent.find(item => item.chatId === 'requester')?.requester).toBeUndefined()
   })
 })

@@ -19,6 +19,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.error
@@ -31,6 +32,233 @@ INSTALL = Path('/opt/cairn-native')
 SERVICE = 'cairn-native-node.service'
 CGROUP_ROOT = Path('/sys/fs/cgroup')
 STOP = False
+
+# Only fixed, credential-free prerequisite messages reach the CLI. Other
+# exceptions can carry manager URLs, credentials or response bodies and remain
+# masked by the entrypoint's generic handler.
+PREREQUISITES = {
+    'systemd': 'Native rootless enclaves require systemd 255 or newer; older versions force NoNewPrivileges on mapping helpers.',
+    'userns': 'Native Docker requires enabled unprivileged user namespaces; global restrictions are not changed automatically.',
+    'uidmap': 'Native Docker requires the distribution uidmap package (newuidmap/newgidmap).',
+    'mapping': 'Native Docker requires root-owned non-writable mapping helpers with setuid or the exact effective CAP_SETUID/CAP_SETGID file capability.',
+    'accounts': 'Native Docker requires iptables, iproute2 and account tools (useradd/groupadd/usermod/getent); install distribution packages before enrollment.',
+    'subids': 'Native Docker requires root-managed /etc/subuid and /etc/subgid databases.',
+    'tun': 'Native Docker requires the existing /dev/net/tun character device.',
+    'kernel': 'Native Docker bind isolation requires Linux 5.12 or newer.',
+    'apparmor': 'Restricted user namespaces require AppArmor tooling and a writable root-managed profile for the managed RootlessKit binary.',
+    'e2fsprogs': 'Native ublk storage requires e2fsprogs (mkfs.ext4/e2fsck/resize2fs).',
+    'ublk': 'Native storage requires the ublk_drv kernel module and /dev/ublk-control character device; install the matching kernel modules before enrolling.',
+    'cgroup': 'Native execution requires cgroup v2 with CPU, memory and PID controllers.',
+}
+
+
+class PrerequisiteError(ValueError):
+    def __init__(self, requirement):
+        self.diagnostic = PREREQUISITES[requirement]
+        super().__init__(self.diagnostic)
+
+
+# Managed tools are independent of the conversation's pinned coding engines.
+# No host Docker service is installed, joined, stopped or reconfigured.
+DOCKER_TOOLS = (
+    ('https://download.docker.com/linux/static/stable/x86_64/docker-29.9.0.tgz',
+     '33e1ab8b63d14bca449f7a3d30d7f6aa669daa544e60a86b17fec87f61afe2b4',
+     {'docker/' + name: 'bin/' + name for name in ('docker', 'dockerd', 'containerd', 'containerd-shim-runc-v2', 'runc', 'docker-init', 'docker-proxy')}),
+    ('https://github.com/rootless-containers/rootlesskit/releases/download/v3.3.0/rootlesskit-x86_64.tar.gz',
+     '0e757c8f80510d764df8c9a5f169805580b48d02329f0a200900e261ecec27ed', {'rootlesskit': 'bin/rootlesskit'}),
+    ('https://github.com/rootless-containers/slirp4netns/releases/download/v1.3.6/slirp4netns-x86_64',
+     '411167abceff1fc8a7c562f53ed9f26d3ec8a17df4e2fe6eaa3bd53f1c1e1d48', {'': 'bin/slirp4netns'}),
+    ('https://github.com/docker/buildx/releases/download/v0.38.1/buildx-v0.38.1.linux-amd64',
+     'e25d5cd675092bb5d1d03632fdc46cdf3fede7b514dc5f023a105e00d3ce5ad4', {'': 'plugins/docker-buildx'}),
+    ('https://github.com/docker/compose/releases/download/v5.6.1/docker-compose-linux-x86_64',
+     '47737f4236e6d3ccea7291995203f8f018058783b4c3a9469119811a0b5db8c0', {'': 'plugins/docker-compose'}),
+)
+
+DOCKER_WRAPPER = '''#!/bin/sh
+set -eu
+if test "${1:-}" = cairn-reset; then
+  if test "$#" -ne 2 || test "$2" != --confirm-delete-state; then
+    echo 'To delete ALL conversation Docker images, containers, build cache and volumes, use docker cairn-reset --confirm-delete-state.' >&2
+    exit 2
+  fi
+  exec /run/cairn-entrypoint/cairn native-docker-reset
+fi
+client_config=${DOCKER_CONFIG:-/home/node/.docker}
+mkdir -p "$client_config/cli-plugins"
+for plugin in buildx compose; do
+  if ! test -e "$client_config/cli-plugins/docker-$plugin"; then
+    ln -s "/opt/cairn-docker/plugins/docker-$plugin" "$client_config/cli-plugins/docker-$plugin"
+  fi
+done
+case "${1:-}" in
+  compose|buildx)
+    plugin=$1
+    case "${2:-}" in
+      version|--help|help)
+        shift
+        exec "/opt/cairn-docker/plugins/docker-$plugin" "$@"
+        ;;
+    esac
+    ;;
+esac
+export DOCKER_HOST=unix:///run/cairn-docker/docker.sock
+exec /opt/cairn-docker/bin/docker "$@"
+'''
+
+
+def trusted_mapping_helper(path, required_bit):
+    metadata = Path(path).stat()
+    if metadata.st_uid != 0 or metadata.st_mode & 0o022 or not metadata.st_mode & stat.S_IXOTH or not stat.S_ISREG(metadata.st_mode):
+        return False
+    if metadata.st_mode & stat.S_ISUID:
+        return True
+    try:
+        capability = os.getxattr(path, 'security.capability')
+    except OSError:
+        return False
+    if len(capability) not in (20, 24):
+        return False
+    words = [int.from_bytes(capability[offset:offset + 4], 'little') for offset in range(0, len(capability), 4)]
+    expected_revision = 0x02000001 if len(words) == 5 else 0x03000001
+    return words[0] == expected_revision and words[1:5] == [required_bit, 0, 0, 0] and (len(words) == 5 or words[5] == 0)
+
+
+def require_systemd():
+    try:
+        version = subprocess.run(['systemctl', '--version'], check=True, capture_output=True, text=True, timeout=10).stdout.split()[1]
+        version = int(version)
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError) as error:
+        raise PrerequisiteError('systemd') from error
+    if version < 255:
+        raise PrerequisiteError('systemd')
+
+
+def require_docker_host():
+    require_systemd()
+    for name in ('/proc/sys/user/max_user_namespaces', '/proc/sys/kernel/unprivileged_userns_clone'):
+        path = Path(name)
+        try:
+            disabled = path.exists() and int(path.read_text().strip()) == 0
+        except (OSError, ValueError) as error:
+            raise PrerequisiteError('userns') from error
+        if disabled:
+            raise PrerequisiteError('userns')
+    for name, required_bit in (('newuidmap', 1 << 7), ('newgidmap', 1 << 6)):
+        path = shutil.which(name)
+        if not path:
+            raise PrerequisiteError('uidmap')
+        try:
+            trusted = trusted_mapping_helper(path, required_bit)
+        except OSError as error:
+            raise PrerequisiteError('mapping') from error
+        if not trusted:
+            raise PrerequisiteError('mapping')
+    for name in ('iptables', 'ip6tables', 'ip', 'usermod', 'useradd', 'groupadd', 'getent'):
+        if not shutil.which(name):
+            raise PrerequisiteError('accounts')
+    for name in ('/etc/subuid', '/etc/subgid'):
+        try:
+            metadata = Path(name).stat()
+        except OSError as error:
+            raise PrerequisiteError('subids') from error
+        if metadata.st_uid != 0 or metadata.st_mode & 0o022:
+            raise PrerequisiteError('subids')
+    try:
+        tun = Path('/dev/net/tun').stat()
+    except OSError as error:
+        raise PrerequisiteError('tun') from error
+    if not stat.S_ISCHR(tun.st_mode):
+        raise PrerequisiteError('tun')
+    try:
+        kernel = tuple(int(part) for part in os.uname().release.split('.')[:2])
+    except ValueError as error:
+        raise PrerequisiteError('kernel') from error
+    if kernel < (5, 12):
+        raise PrerequisiteError('kernel')
+
+
+def prepare_docker_tools():
+    # Bump this package generation when wrapper or generated metadata changes.
+    target = INSTALL / 'docker-tools/v2'
+    if target.exists():
+        manifest = json.loads((target / 'manifest.json').read_text())
+        for name, digest in manifest.items():
+            path = target / name
+            if path.is_symlink() or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                raise ValueError('Managed native Docker tool integrity check failed.')
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    with tempfile.TemporaryDirectory(prefix='.docker-tools-', dir=target.parent) as temporary:
+        stage = Path(temporary)
+        stage.chmod(0o755)
+        (stage / 'bin').mkdir(mode=0o755)
+        (stage / 'plugins').mkdir(mode=0o755)
+        for url, digest, names in DOCKER_TOOLS:
+            archive = stage / 'download'
+            # These public downloads carry no enrollment/node credential.
+            with urllib.request.urlopen(url, timeout=60) as response, archive.open('wb') as output:
+                total = 0
+                while chunk := response.read(65536):
+                    total += len(chunk)
+                    if total > 256 * 1024 * 1024:
+                        raise ValueError('Native Docker tool download exceeds its size bound.')
+                    output.write(chunk)
+            if hashlib.sha256(archive.read_bytes()).hexdigest() != digest:
+                raise ValueError('Native Docker tool download digest mismatch.')
+            if url.endswith('.tar.gz') or url.endswith('.tgz'):
+                with tarfile.open(archive) as bundle:
+                    for source, name in names.items():
+                        record = bundle.getmember(source)
+                        if not record.isfile() or record.size > 256 * 1024 * 1024:
+                            raise ValueError('Invalid managed Docker executable.')
+                        with bundle.extractfile(record) as source_file, (stage / name).open('xb') as output:
+                            shutil.copyfileobj(source_file, output)
+            else:
+                shutil.copyfile(archive, stage / names[''])
+            archive.unlink()
+        (stage / 'docker').write_text(DOCKER_WRAPPER)
+        # Extract the paired client's API version without ever contacting a daemon.
+        # Client version output is emitted even when the explicit missing socket
+        # makes the server half of `docker version` fail.
+        client = stage / 'bin/docker'
+        client.chmod(0o555)
+        probe = subprocess.run([str(client), 'version', '--format', '{{json .Client}}'],
+            env=dict(PATH=os.defpath, HOME=str(stage), DOCKER_CONFIG=str(stage / 'client-probe'),
+                     DOCKER_HOST='unix://' + str(stage / 'unavailable.sock')),
+            capture_output=True, text=True, timeout=20)
+        version = json.loads(probe.stdout)['ApiVersion']
+        if not re.fullmatch(r'[0-9]+\.[0-9]+', version):
+            raise ValueError('Managed Docker API version probe failed.')
+        (stage / 'engine-api.json').write_text(json.dumps(dict(apiVersion=version)))
+        inventory = {}
+        for path in [stage / 'docker', stage / 'engine-api.json', *(stage / 'bin').iterdir(), *(stage / 'plugins').iterdir()]:
+            path.chmod(0o444 if path.name == 'engine-api.json' else 0o555)
+            inventory[str(path.relative_to(stage))] = hashlib.sha256(path.read_bytes()).hexdigest()
+        atomic_json(stage / 'manifest.json', inventory)
+        (stage / 'manifest.json').chmod(0o444)
+        os.rename(stage, target)
+    return target
+
+
+def configure_docker_apparmor(target):
+    restriction = Path('/proc/sys/kernel/apparmor_restrict_unprivileged_userns')
+    if not restriction.exists() or restriction.read_text().strip() != '1':
+        return
+    parser = shutil.which('apparmor_parser')
+    if not parser:
+        raise PrerequisiteError('apparmor')
+    executable = str(target / 'bin/rootlesskit')
+    if any(character in executable for character in ('"', '\n', '\r')):
+        raise ValueError('Invalid managed RootlessKit path.')
+    profile = Path('/etc/apparmor.d/cairn-native-rootlesskit')
+    try:
+        profile.write_text('abi <abi/4.0>,\ninclude <tunables/global>\n'
+                           'profile cairn-native-rootlesskit "' + executable + '" flags=(unconfined) {\n  userns,\n}\n'
+                           'profile cairn-native-rootlesskit-enclave "/opt/cairn-docker/bin/rootlesskit" flags=(unconfined) {\n  userns,\n}\n')
+        profile.chmod(0o644)
+        subprocess.run([parser, '--replace', str(profile)], check=True, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise PrerequisiteError('apparmor') from error
 
 
 class UnixControllerConnection(http.client.HTTPConnection):
@@ -102,10 +330,8 @@ def validate_release(value):
     for field in ('sha256', 'toolsSha256'):
         if not re.fullmatch('[0-9a-f]{64}', value.get(field, '')):
             raise ValueError('Invalid native release digest.')
-    if value.get('os') != 'linux' or value.get('arch') != 'x86_64' or not value.get('protocolMin', 99) <= 2 <= value.get('protocolMax', 0):
+    if value.get('os') != 'linux' or value.get('arch') != 'x86_64' or value.get('nodeProtocol') != 2:
         raise ValueError('Native release platform/protocol is incompatible.')
-    if not isinstance(value.get('dataEpoch'), int) or value['dataEpoch'] < 1:
-        raise ValueError('Missing installation data compatibility epoch.')
     if value.get('binaryPath') != '/internal/nodes/native-binary' or value.get('toolsPath') != '/internal/nodes/native-tools':
         raise ValueError('Unexpected native artifact endpoint.')
     for field, maximum in (('size', 256 * 1024 * 1024), ('toolsSize', 512 * 1024 * 1024)):
@@ -144,11 +370,10 @@ def download(manager, release, directory, tools=False, code=None, token=None):
 def tool_inventory(manifest):
     if manifest.get('version') != 1 or manifest.get('os') != 'linux' or manifest.get('arch') != 'x86_64':
         raise ValueError('Unknown native tool manifest.')
-    expected = {'bin/codex', 'bin/claude', 'bin/opencode', 'bin/node', 'bin/gh'}
+    expected = {'bin/codex', 'bin/codex-code-mode-host', 'bin/claude', 'bin/opencode', 'bin/node', 'bin/gh'}
     entries = manifest.get('files', [])
     paths = {entry.get('path') for entry in entries}
-    # Older pinned runtimes remain recoverable with their original inventory.
-    if paths not in (expected, expected | {'bin/codex-code-mode-host'}) or len(entries) != len(paths):
+    if paths != expected or len(entries) != len(paths):
         raise ValueError('Incomplete native tool inventory.')
     return entries
 
@@ -287,40 +512,41 @@ def environment(directory):
     return {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', 'DATA_DIR': str(ROOT / 'data'),
             'RUNNER_STATE_DIR': str(ROOT / 'state'), 'RUNNER_URL': 'http://127.0.0.1:4311', 'RUNNER_BIND': '127.0.0.1:4311',
             'CAIRN_NODE_BACKEND': 'native', 'CAIRN_NATIVE_TOOLS': str(directory / 'tools'),
-            'CAIRN_NATIVE_SUPERVISOR_UNIT': SERVICE, 'APP_RUNTIME_ID': release['runtimeId']}
+            'CAIRN_NATIVE_SUPERVISOR_UNIT': SERVICE, 'APP_RUNTIME_ID': release['runtimeId'],
+            'CAIRN_NATIVE_DOCKER_TOOLS': str(INSTALL / 'docker-tools/v2')}
 
 
 def require_storage():
     for binary in ('mkfs.ext4', 'e2fsck', 'resize2fs'):
         if shutil.which(binary) is None:
-            raise ValueError('Native ublk storage requires e2fsprogs (' + binary + ').')
+            raise PrerequisiteError('e2fsprogs')
     if not Path('/sys/module/ublk_drv').is_dir():
         try:
             subprocess.run(['modprobe', 'ublk_drv'], check=True, capture_output=True, timeout=10)
         except (OSError, subprocess.SubprocessError) as error:
-            raise ValueError('Native storage requires a kernel with the ublk_drv module. Install the matching kernel modules before enrolling.') from error
+            raise PrerequisiteError('ublk') from error
     try:
         control = Path('/dev/ublk-control').stat()
     except OSError as error:
-        raise ValueError('Native storage requires /dev/ublk-control.') from error
+        raise PrerequisiteError('ublk') from error
     if not stat.S_ISCHR(control.st_mode):
-        raise ValueError('Native storage control must be a character device.')
+        raise PrerequisiteError('ublk')
 
 
 def install(manager):
     manager = origin(manager)
     if (ROOT / 'data/node/identity.json').exists():
         raise ValueError('Native node is already enrolled.')
-    version = subprocess.run(['systemctl', '--version'], check=True, capture_output=True, text=True).stdout.split()[1]
-    if int(version) < 252:
-        raise ValueError('Native execution requires systemd 252 or newer.')
+    require_systemd()
     try:
         controllers = set((CGROUP_ROOT / 'cgroup.controllers').read_text().split())
     except OSError as error:
-        raise ValueError('Native execution requires cgroup v2 with CPU, memory and PID controllers.') from error
+        raise PrerequisiteError('cgroup') from error
     if not {'cpu', 'memory', 'pids'} <= controllers:
-        raise ValueError('Native execution requires cgroup v2 with CPU, memory and PID controllers.')
+        raise PrerequisiteError('cgroup')
     require_storage()
+    require_docker_host()
+    configure_docker_apparmor(prepare_docker_tools())
     ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(ROOT, 0o700)
     (ROOT / 'data').mkdir(mode=0o700, exist_ok=True)
@@ -350,8 +576,8 @@ def install(manager):
     select(directory)
     Path('/etc/systemd/system/' + SERVICE).write_text('''[Unit]
 Description=Cairn native execution node
-After=network-online.target
-Wants=network-online.target
+After=network-online.target cairn-node-gateway.service
+Wants=network-online.target cairn-node-gateway.service
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /opt/cairn-native/host.py run
@@ -366,7 +592,7 @@ WantedBy=multi-user.target
 ''')
     subprocess.run(['systemctl', 'daemon-reload'], check=True)
     subprocess.run(['systemctl', 'enable', '--now', SERVICE], check=True)
-    print('Native node enrolled. Enable it in Cairn and explicitly select trusted callers and native agents.')
+    print('Native node enrolled in protected mode. Enable it in Cairn and select trusted people and native agents. Administrator mode additionally requires sudo with the standard /etc/sudoers.d include; it is confirmed from the node details and gives control of the real host.')
 
 
 def health(directory, timeout=30):
@@ -404,28 +630,36 @@ def start_node(directory):
     return subprocess.Popen([str(directory / 'cairn'), 'node-daemon', str(ROOT / 'data/node')], env=environment(directory))
 
 
-def activate(candidate, previous, child):
+def activate(candidate, child):
     terminate(child)
+    select(candidate)
     trial = start_node(candidate)
     if trial.poll() is None and health(candidate):
-        select(candidate)
-        return trial, candidate, None
+        return trial
     terminate(trial)
-    restored = start_node(previous)
-    if not health(previous):
-        terminate(restored)
-        raise RuntimeError('Native update and rollback both failed health checks.')
-    return restored, previous, 'Native candidate failed health checks; previous compatible version restored.'
+    raise RuntimeError('Native candidate failed health checks; candidate retained for retry.')
+
+
+def complete_update(manager, token, current):
+    pending = ROOT / 'update-pending.json'
+    if not pending.exists() or json.loads(pending.read_text())['candidate'] != current.name:
+        return
+    if not health(current):
+        raise RuntimeError('Pending native candidate is not healthy.')
+    json_request(manager, '/internal/nodes/maintenance', {'action': 'complete', 'image': '', 'error': None}, token)
+    pending.unlink()
 
 
 def run():
     require_storage()
+    require_docker_host()
+    configure_docker_apparmor(prepare_docker_tools())
     manager = origin(json.loads((ROOT / 'settings.json').read_text())['manager'])
     identity = json.loads((ROOT / 'data/node/identity.json').read_text())
     token = identity['token']
     current = (INSTALL / 'current').resolve(strict=True)
     child = None
-    failed = None
+    pending_update = ROOT / 'update-pending.json'
     try:
         child = start_node(current)
         if not health(current):
@@ -435,14 +669,14 @@ def run():
                 raise RuntimeError('Native node process exited unexpectedly.')
             draining = False
             try:
+                complete_update(manager, token, current)
                 release = validate_release(json_request(manager, '/internal/nodes/native-release', token=token))
                 installed = json.loads((current / 'release.json').read_text())
                 same = release['sha256'] == installed['sha256'] and release['toolsSha256'] == installed['toolsSha256']
-                candidate_id = release['sha256'] + '-' + release['toolsSha256']
-                if not same and candidate_id != failed:
-                    if release['dataEpoch'] != installed['dataEpoch']:
-                        raise ValueError('Native update needs a reviewed installation data epoch transition.')
+                if not same:
                     candidate = prepare(manager, release, token=token)
+                    require_docker_host()
+                    configure_docker_apparmor(prepare_docker_tools())
                     verify_workload_tools(candidate)
                     if STOP:
                         break
@@ -456,25 +690,24 @@ def run():
                         time.sleep(1)
                     else:
                         raise RuntimeError('Native update drain did not finish; preserving current version.')
+                    atomic_json(pending_update, {'candidate': candidate.name})
                     previous = current
-                    child, selected, error = activate(candidate, current, child)
-                    current = selected
-                    if not error:
-                        try:
-                            collect_versions(current, previous)
-                        except (OSError, ValueError, KeyError):
-                            print('Native version collection postponed; local versions retained.', file=sys.stderr)
-                    if error:
-                        failed = candidate_id
-                    json_request(manager, '/internal/nodes/maintenance', {'action': 'complete', 'image': '', 'error': error}, token)
+                    child = activate(candidate, child)
+                    current = candidate
+                    try:
+                        collect_versions(current, previous)
+                    except (OSError, ValueError, KeyError):
+                        print('Native version collection postponed; local versions retained.', file=sys.stderr)
+                    complete_update(manager, token, current)
             except (OSError, ValueError, RuntimeError, zipfile.BadZipFile, KeyError, TypeError, urllib.error.URLError, subprocess.SubprocessError) as error:
                 # Do not print request bodies, response bodies, identities or credentials.
-                print('Native update postponed: ' + type(error).__name__, file=sys.stderr)
+                diagnostic = error.diagnostic if isinstance(error, PrerequisiteError) else type(error).__name__
+                print('Native update postponed: ' + diagnostic, file=sys.stderr)
                 if child.poll() is not None:
                     raise RuntimeError('Native node is no longer running.') from None
-                if draining:
+                if draining and not pending_update.exists():
                     try:
-                        json_request(manager, '/internal/nodes/maintenance', {'action': 'complete', 'image': '', 'error': 'Native update failed; compatible prior version retained.'}, token)
+                        json_request(manager, '/internal/nodes/maintenance', {'action': 'complete', 'image': '', 'error': 'Native update failed; inspect the retained candidate.'}, token)
                     except (OSError, ValueError):
                         pass
             for _ in range(300):
@@ -503,6 +736,9 @@ if __name__ == '__main__':
             run()
         else:
             raise ValueError('Use install <manager HTTPS origin> or run.')
+    except PrerequisiteError as error:
+        print('Native node prerequisites unavailable: ' + error.diagnostic, file=sys.stderr)
+        sys.exit(1)
     except Exception as error:
         print('Native node failed: ' + type(error).__name__, file=sys.stderr)
         sys.exit(1)

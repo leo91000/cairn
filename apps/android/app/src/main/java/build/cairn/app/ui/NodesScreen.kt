@@ -13,11 +13,12 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
 
+// Both runtimes share the gateway to Cairn; the last one on the machine removes it.
 private const val UNINSTALL_COMMAND =
-    "sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node"
+    "sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node; sudo sh -c 'if [ ! -e /var/lib/cairn-native ]; then systemctl disable --now cairn-node-gateway 2>/dev/null; rm -rf /etc/systemd/system/cairn-node-gateway.service /opt/cairn-gateway /var/lib/cairn-gateway; systemctl daemon-reload; fi'"
 
 private const val NATIVE_UNINSTALL_COMMAND =
-    "sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=\$(findmnt -rno TARGET) || { echo \"findmnt could not list mounts.\" >&2; exit 1; }; printf \"%s\\n\" \"\$mounts\" | grep ^/var/lib/cairn-native/; match=\$?; if [ \"\$match\" -ne 1 ]; then echo \"Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry.\" >&2; exit 1; fi; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload'"
+    "sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=\$(findmnt -rno TARGET) || { echo \"findmnt could not list mounts.\" >&2; exit 1; }; printf \"%s\\n\" \"\$mounts\" | grep ^/var/lib/cairn-native/; match=\$?; if [ \"\$match\" -ne 1 ]; then echo \"Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry.\" >&2; exit 1; fi; cairn_policy() { grep -Fqx \"# Cairn native administrator; protected units retain NoNewPrivileges.\" \"\$1\" || return \$?; grep -Fqx \"cairn-workload ALL=(ALL:ALL) NOPASSWD: ALL\" \"\$1\"; }; for policy in /etc/sudoers.d/cairn-native-*; do [ -e \"\$policy\" ] || [ -L \"\$policy\" ] || continue; case \"\$policy\" in */cairn-native-*[!0-9]*|*/cairn-native-) continue ;; esac; if [ -L \"\$policy\" ] || [ ! -f \"\$policy\" ]; then echo \"Unrecognized native sudo policy: host-owner review required.\" >&2; exit 1; fi; if cairn_policy \"\$policy\"; then rm -f -- \"\$policy\" || exit; else policy_status=\$?; [ \"\$policy_status\" -eq 1 ] || exit \"\$policy_status\"; fi; done; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload && { if [ ! -e /var/lib/cairn-node ]; then systemctl disable --now cairn-node-gateway 2>/dev/null; rm -rf /etc/systemd/system/cairn-node-gateway.service /opt/cairn-gateway /var/lib/cairn-gateway; systemctl daemon-reload; fi; }'"
 
 private fun uninstallCommand(node: ExecutionNode) =
     if (node.capabilities.backend == NATIVE_BACKEND) NATIVE_UNINSTALL_COMMAND else UNINSTALL_COMMAND
@@ -34,11 +35,12 @@ fun NodesScreen(
     var storage by remember { mutableStateOf<ExecutionNode?>(null) }
     var name by remember { mutableStateOf("") }
     var backend by remember { mutableStateOf("firecracker") }
+    // Optional: without it, Beacon introduces the machine to the manager.
+    var directAddress by remember { mutableStateOf<String?>(null) }
     var nativeCallers by remember { mutableStateOf<List<NativeCaller>>(emptyList()) }
     // Never persist enrollment secrets in saved instance state.
     var enrollment by remember { mutableStateOf<NodeEnrollment?>(null) }
     // Machines known when the code was created, to recognise the newly connected one.
-    var knownBeforeEnrollment by remember { mutableStateOf(emptySet<String>()) }
     var recovery by remember { mutableStateOf<NodeSyncSettings?>(null) }
     var editing by remember { mutableStateOf<ExecutionNode?>(null) }
     var revoking by remember { mutableStateOf<ExecutionNode?>(null) }
@@ -68,15 +70,12 @@ fun NodesScreen(
         if (nodes.any { it.capabilities.backend == "native" })
             nativeCallers = vm.api.get("/nodes/native-callers")
         val invitation = enrollment ?: return
-        // A guided switch needs the identity assigned to this exact invitation.
-        if (replacing != null && invitation.nodeId == null) return
         nodes
             .firstOrNull {
                 !it.local &&
                     !it.revoked &&
                     it.capabilities.backend == invitation.backend &&
-                    (invitation.nodeId?.let { expected -> it.id == expected }
-                        ?: (it.id !in knownBeforeEnrollment))
+                    it.id == invitation.nodeId
             }
             ?.let {
                 enrollment = null
@@ -276,9 +275,15 @@ fun NodesScreen(
                             Text("Version : $it", style = MaterialTheme.typography.bodySmall)
                         }
                     }
+                    if (node.capabilities.backend == NATIVE_BACKEND)
+                        NativeNodeMode(vm, node) { load() }
                     HorizontalDivider()
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = { editing = node }) { Text("Configurer") }
+                        if (node.nativeModeRequest?.mode == "administrator")
+                            TextButton(onClick = { granting = node }) {
+                                Text("Examiner l’accès administrateur des agents")
+                            }
                         TextButton(onClick = { storage = node }) { Text("Stockage") }
                         if (!node.local)
                             TextButton(
@@ -342,6 +347,10 @@ fun NodesScreen(
                 } ?: "Connectez une machine Linux, puis choisissez qui peut l’utiliser.",
                 style = MaterialTheme.typography.bodyMedium,
             )
+            Text(
+                "Cairn met la machine en relation avec le manager : aucune adresse du manager, aucun certificat ni port ouvert n’est nécessaire. Ils se connectent directement quand les réseaux le permettent. Sinon, leurs échanges, disques des conversations compris, transitent par les serveurs de Cairn chiffrés de bout en bout : Cairn ne peut pas les lire.",
+                style = MaterialTheme.typography.bodySmall,
+            )
             Field("Nom de la machine", name, { name = it })
             if (replacing == null)
                 Toggle("Exécution native sur l’hôte", backend == "native") {
@@ -351,10 +360,26 @@ fun NodesScreen(
                 Text(
                     "Linux x86-64 avec systemd et le pilote noyau ublk. Le GPU reste utilisable par le bureau, mais les travaux intensifs peuvent le ralentir. L’isolation est plus faible qu’une VM."
                 )
+            val address = directAddress
+            if (address == null)
+                TextButton(onClick = { directAddress = "" }) {
+                    Text("Se connecter directement plutôt")
+                }
+            else {
+                Field(
+                    "Adresse directe du manager",
+                    address,
+                    { directAddress = it },
+                    keyboardOptions = InputKeyboards.Uri,
+                )
+                Text(
+                    "Facultatif. Une adresse sur le réseau local ou un VPN évite que le trafic de la node passe par Cairn, même quand les réseaux empêchent une connexion directe. Utilisez HTTPS avec un certificat reconnu par la node ; HTTP n’est accepté qu’en boucle locale pour les tests. C’est l’adresse du manager, pas celle de l’application.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             Button(
                 enabled = !state.busy && name.isNotBlank(),
                 onClick = {
-                    knownBeforeEnrollment = nodes.map { it.id }.toSet()
                     vm.perform {
                         enrollment =
                             api.send(
@@ -363,6 +388,10 @@ fun NodesScreen(
                                 buildJsonObject {
                                     put("name", name)
                                     put("backend", backend)
+                                    directAddress
+                                        ?.trim()
+                                        ?.takeIf { it.isNotEmpty() }
+                                        ?.let { put("managerUrl", it) }
                                 },
                             )
                     }
@@ -371,10 +400,6 @@ fun NodesScreen(
                 Text("Créer un code d’inscription")
             }
             enrollment?.let {
-                if (replacing != null && it.nodeId == null)
-                    Text(
-                        "Mettez à jour cette installation pour suivre le remplacement et terminer la bascule guidée. L’ancienne node est conservée."
-                    )
                 val command = it.installCommand
                 if (command != null) {
                     Text(
@@ -474,7 +499,11 @@ fun NodesScreen(
             vm.perform {
                 // Only grants the chosen agents: finishing never revokes one, including an agent
                 // allowed meanwhile from another window.
-                grantNodeAgents(chosen, node.grantedAgents(state.agents)) { body ->
+                grantNodeAgents(
+                    chosen,
+                    node.grantedAgents(state.agents),
+                    confirmNativeAdministration = node.nativeModeRequest?.mode == "administrator",
+                ) { body ->
                     api.request("PUT", "/nodes/${node.id}/agents", body)
                 }
                 granting = null
@@ -676,11 +705,16 @@ private fun FirstAgents(
             "Les agents choisis pourront exécuter leurs conversations sur cette machine. Un tag ou une capacité ne donne jamais d’accès à lui seul.",
             style = MaterialTheme.typography.bodyMedium,
         )
+        if (node.nativeModeRequest?.mode == "administrator") Text(NATIVE_ADMIN_WARNING)
         val granted = node.grantedAgents(state.agents)
         state.agents.forEach { agent ->
             // The server refuses an agent on a node of another execution backend.
             val mismatch = !node.accepts(agent)
-            val everywhere = !mismatch && agent.access.nodes == null
+            val everywhere =
+                !mismatch &&
+                    agent.access.nodes == null &&
+                    (node.nativeModeRequest?.mode != "administrator" ||
+                        agent.id in node.nativeReviewedAgents)
             val already = !mismatch && !everywhere && agent.id in granted
             val locked = everywhere || already
             val checked = locked || (!mismatch && agent.id in selected)
@@ -782,6 +816,7 @@ internal fun NodeEditor(
                     tags.split(',').map(String::trim).filter(String::isNotEmpty),
                     NodeResources(cpu.toInt(), memoryMiB!!, diskMiB!!),
                     slots.toInt(),
+                    confirmNativeAdministration = node.nativeModeRequest?.mode == "administrator",
                     nativeEnabled =
                         if (node.capabilities.backend == NATIVE_BACKEND) nativeEnabled else null,
                     nativeAccounts =
@@ -823,6 +858,10 @@ internal fun NodeEditor(
                 Text(
                     "Seuls les agents natifs et les personnes sélectionnées peuvent travailler ici. Retirer une autorisation arrête les travaux concernés à l’expiration de leur bail."
                 )
+                if (node.nativeModeRequest?.mode == "administrator")
+                    Text(
+                        "Chaque personne sélectionnée pourra diriger l’administration complète de cet hôte via les agents admis. Enregistrer confirme cet accès."
+                    )
                 Toggle("Activer l’exécution native", nativeEnabled) { nativeEnabled = it }
                 if (nativeCallers.isNotEmpty())
                     Text("Personnes de confiance", style = MaterialTheme.typography.labelLarge)

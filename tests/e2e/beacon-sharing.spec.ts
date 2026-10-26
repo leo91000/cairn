@@ -14,10 +14,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
-import { config as loadConfig } from '../fixtures/legacy/server/config'
-import { Service as SeedService } from '../fixtures/legacy/server/service'
-import { Store } from '../fixtures/legacy/server/store'
 import { executeBeaconSql, expireAccountProof } from './beacon-relay-fixture'
+import { NativeFixture } from './native-fixture'
 
 test('owner shares an installation and member works without management controls', async ({ page, browser }) => {
   test.setTimeout(120000)
@@ -43,7 +41,7 @@ test('owner shares an installation and member works without management controls'
   const isolatedDatabase = new URL(database)
   isolatedDatabase.searchParams.set('options', `-c search_path=${schema}`)
   const url = 'http://localhost:4397'
-  let seed: SeedService | undefined
+  let seed: NativeFixture | undefined
   const ownerEmail = `owner-${Date.now()}@example.test`
   const memberEmail = `member-${Date.now()}@example.test`
   const memberContext = await browser.newContext()
@@ -91,13 +89,13 @@ test('owner shares an installation and member works without management controls'
     await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
     const code = await page.getByLabel('Installation claim code').inputValue()
     await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
-    seed = new SeedService(new Store(join(root, 'data')), loadConfig({
+    seed = new NativeFixture({
       dataDir: join(root, 'data'),
       home: join(root, 'home'),
       workspaceRoots: [root],
       workerEnabled: false,
       logger: false,
-    }))
+    })
     const installation = start('target/debug/cairn', {
       DATA_DIR: join(root, 'data'),
       AGENT_HOME: join(root, 'home'),
@@ -147,16 +145,18 @@ test('owner shares an installation and member works without management controls'
     const installationUrl = `${url}/installations/${memberSession.installations[0].slug}/`
     await expect(member).toHaveURL(installationUrl)
     const apiRoot = `${url}/api/installations/${memberSession.installations[0].id}/api`
-    const agents = await (await member.request.get(`${apiRoot}/agents`)).json()
+    const { agents } = await (await member.request.get(`${apiRoot}/agents`)).json()
     const taskResponse = await member.request.post(`${apiRoot}/tasks`, {
       headers: { 'origin': url, 'x-csrf-token': memberSession.csrf },
       data: {
-        name: 'Member commitment',
-        prompt: 'Shared scheduled work',
-        agentId: agents[0].id,
-        cron: '0 9 * * *',
-        timezone: 'UTC',
-        enabled: true,
+        settings: {
+          name: 'Member commitment',
+          prompt: 'Shared scheduled work',
+          agentId: agents[0].id,
+          cron: '0 9 * * *',
+          timezone: 'UTC',
+          enabled: true,
+        },
       },
     })
     expect(taskResponse.status()).toBe(200)
@@ -169,7 +169,16 @@ test('owner shares an installation and member works without management controls'
     const ownerSession = await (await page.request.get(`${url}/api/account/session`)).json()
     const ownerTaskResponse = await page.request.post(`${apiRoot}/tasks`, {
       headers: { 'origin': url, 'x-csrf-token': ownerSession.csrf },
-      data: { ...task, name: 'Owner commitment', enabled: false },
+      data: {
+        settings: {
+          name: 'Owner commitment',
+          prompt: task.prompt,
+          agentId: task.agentId,
+          cron: task.cron,
+          timezone: task.timezone,
+          enabled: false,
+        },
+      },
     })
     expect(ownerTaskResponse.status()).toBe(200)
     const ownerTask = await ownerTaskResponse.json()
@@ -309,8 +318,6 @@ test('owner shares an installation and member works without management controls'
       child.kill('SIGTERM')
       await exited
     }))
-    await seed?.accounts.close()
-    seed?.store.close()
     await new Promise<void>(resolve => mail.close(() => resolve()))
     await rm(root, { recursive: true, force: true })
     executeBeaconSql(database, `DROP SCHEMA ${schema} CASCADE`)

@@ -89,10 +89,9 @@ async fn origin(s: &Service, plugin: &str, source: &str, instance: Option<&str>)
         None => {
             let mut instances = s
                 .store
-                .list(connections::KIND)
+                .plugin_instances()
                 .await?
                 .into_iter()
-                .filter_map(|value| serde_json::from_value::<Connection>(value).ok())
                 .filter(|connection| connection.plugin_id == plugin && connection.enabled)
                 .collect::<Vec<_>>();
             instances.sort_by(|a, b| a.name.cmp(&b.name));

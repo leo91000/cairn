@@ -1,3 +1,10 @@
+#[allow(unused_imports)]
+use common::{PluginServiceFixture as _, PluginStoreFixture as _};
+
+use common::AgentFixture;
+use common::MissionFixture;
+use common::ProjectFixture;
+
 mod common;
 
 use axum::{
@@ -61,7 +68,7 @@ async fn shared_setup_keeps_an_absent_optional_secret_absent() {
     registry::approve(&s, "shared-app", "1", text(&installed, "digest"))
         .await
         .unwrap();
-    let original = connections::save(
+    let original = common::save_plugin(
         &s,
         "shared-app",
         &json!({
@@ -71,7 +78,7 @@ async fn shared_setup_keeps_an_absent_optional_secret_absent() {
     )
     .await
     .unwrap();
-    let copy = connections::save(
+    let copy = common::save_plugin(
         &s,
         "shared-app",
         &json!({
@@ -103,10 +110,10 @@ async fn service() -> (TempDir, Arc<Service>, Value) {
     common::relay_fixture::claimed(&s).await.unwrap();
     s.plugins.use_worker(worker());
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Discord agent",
-                "access": { "projects": [], "skills": [], "mcps": [], "github": false, "installation": false },
+                "access": { "projects": [], "skills": [], "mcps": [], "installation": false },
             }),
             None,
         )
@@ -117,7 +124,7 @@ async fn service() -> (TempDir, Arc<Service>, Value) {
 
 async fn fixture() -> (TempDir, Arc<Service>, Connection) {
     let (root, s, agent) = service().await;
-    let connection = connections::save(
+    let connection = common::save_plugin(
         &s,
         "discord",
         &json!({
@@ -944,14 +951,14 @@ async fn finish_turn(s: &Service, delivery: &Value, answer: &str) {
 }
 
 #[tokio::test]
-async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothing_is_needed() {
+async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is_needed() {
     let (_root, s, connection) = fixture().await;
     let (mock, server) = mock(&s).await;
     let support = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Support",
-                "access": { "projects": [], "skills": [], "mcps": [], "github": false, "installation": false, "sandbox": "read-only" },
+                "access": { "projects": [], "skills": [], "mcps": [], "installation": false, "sandbox": "read-only" },
             }),
             None,
         )
@@ -971,21 +978,19 @@ async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothin
         })
     };
     let channel = json!({ "guildId": "100", "channelId": "200", "messageContent": true, "everyMessage": true });
-    // The fixture's agent can run commands: not acceptable for anyone in a channel.
-    let broad = s.get("agents", &connection.agent_id).await.unwrap();
-    assert!(
-        connections::save(
-            &s,
-            "discord",
-            &input(&broad, channel.clone()),
-            Some(&connection.id)
-        )
-        .await
-        .is_err()
-    );
+    // The owner chooses the agent, even one that can run commands for anyone in a channel.
+    let broad = s.agent_snapshot(&connection.agent_id).await.unwrap();
+    common::save_plugin(
+        &s,
+        "discord",
+        &input(&broad, channel.clone()),
+        Some(&connection.id),
+    )
+    .await
+    .unwrap();
     // Answering every message needs Message Content: the package turns it on.
     let missing = json!({ "guildId": "100", "channelId": "200", "everyMessage": true });
-    let saved = connections::save(
+    let saved = common::save_plugin(
         &s,
         "discord",
         &input(&support, missing),
@@ -994,7 +999,7 @@ async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothin
     .await
     .unwrap();
     assert_eq!(saved["settings"]["messageContent"], true);
-    let saved = connections::save(
+    let saved = common::save_plugin(
         &s,
         "discord",
         &input(&support, channel),
@@ -1093,7 +1098,7 @@ async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothin
         value["channel_id"] = json!("601");
         value
     };
-    let binding = s.store.list(connections::KIND).await.unwrap();
+    let binding = s.store.instances_fixture().await.unwrap();
     assert_eq!(binding[0]["accessMode"], "everyone");
     for (id, author) in [("603", "302"), ("604", "301")] {
         accept_in(&s, &connection, &threads, stop(id, author))
@@ -1118,8 +1123,8 @@ async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothin
         1
     );
 
-    // Granting the agent a plugin such as 1Password later suspends the public connection.
-    connections::save(
+    // Granting the agent a plugin such as 1Password later keeps the public connection.
+    common::save_plugin(
         &s,
         "onepassword",
         &json!({
@@ -1130,13 +1135,9 @@ async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothin
     )
     .await
     .unwrap();
-    assert_eq!(
-        accept(&s, &connection, chatter("605", "303", "hello?"))
-            .await
-            .unwrap_err()
-            .status,
-        403
-    );
+    accept(&s, &connection, chatter("605", "303", "hello?"))
+        .await
+        .unwrap();
     session.stop().await;
     server.abort();
 }
@@ -1145,7 +1146,7 @@ async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothin
 async fn access_requests_wait_for_approval_without_storing_content() {
     let (_root, s, connection) = fixture().await;
     let (mock, server) = mock(&s).await;
-    let saved = connections::save(
+    let saved = common::save_plugin(
         &s,
         "discord",
         &json!({
@@ -1203,7 +1204,7 @@ async fn access_requests_wait_for_approval_without_storing_content() {
     }
 
     // Approval applies to the running worker without a new revision.
-    connections::people(&s, "discord", &connection.id, "301", "approve")
+    common::plugin_people(&s, "discord", &connection.id, "301", "approve")
         .await
         .unwrap();
     assert!(
@@ -1219,7 +1220,7 @@ async fn access_requests_wait_for_approval_without_storing_content() {
             .await
             .unwrap()
     );
-    connections::people(&s, "discord", &connection.id, "302", "deny")
+    common::plugin_people(&s, "discord", &connection.id, "302", "deny")
         .await
         .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
@@ -1236,7 +1237,7 @@ async fn access_requests_wait_for_approval_without_storing_content() {
         "denied people stay silent"
     );
 
-    let overview = connections::overview(&s).await.unwrap();
+    let overview = serde_json::to_value(connections::overview(&s).await.unwrap()).unwrap();
     assert_eq!(overview[0]["userIds"], json!(["301"]));
     assert_eq!(
         overview[0]["people"],
@@ -1246,10 +1247,10 @@ async fn access_requests_wait_for_approval_without_storing_content() {
     assert_eq!(overview[0]["usage"]["hour"], 1);
     assert_eq!(overview[0]["activity"][0]["name"], "Sarah");
 
-    connections::people(&s, "discord", &connection.id, "301", "remove")
+    common::plugin_people(&s, "discord", &connection.id, "301", "remove")
         .await
         .unwrap();
-    connections::set_enabled(&s, "discord", &connection.id, &json!({ "enabled": false }))
+    common::enable_plugin(&s, "discord", &connection.id, &json!({ "enabled": false }))
         .await
         .unwrap();
     assert_eq!(
@@ -1271,7 +1272,7 @@ async fn access_requests_wait_for_approval_without_storing_content() {
 
 #[tokio::test]
 async fn rate_limits_and_changed_agent_access_stop_admission() {
-    let (_root, s, connection) = fixture().await;
+    let (root, s, connection) = fixture().await;
     let event = |id: &str| {
         json!({
             "name": "message",
@@ -1324,9 +1325,11 @@ async fn rate_limits_and_changed_agent_access_stop_admission() {
         403
     );
 
-    let mut agent = s.get("agents", &connection.agent_id).await.unwrap();
+    let mut agent = s.agent_snapshot(&connection.agent_id).await.unwrap();
     agent["access"]["projects"] = Value::Null;
-    s.agent(agent, Some(&connection.agent_id)).await.unwrap();
+    s.agent_fixture(agent, Some(&connection.agent_id))
+        .await
+        .unwrap();
     assert_eq!(
         accept(&s, &connection, message("505", "300", "<@400> hi"))
             .await
@@ -1334,7 +1337,8 @@ async fn rate_limits_and_changed_agent_access_stop_admission() {
             .status,
         403
     );
-    let broad = connections::save(
+    // Listed people may reach the main agent, with every project and installation access.
+    common::save_plugin(
         &s,
         "discord",
         &json!({
@@ -1347,14 +1351,46 @@ async fn rate_limits_and_changed_agent_access_stop_admission() {
         }),
         None,
     )
-    .await;
-    assert!(broad.is_err());
+    .await
+    .unwrap();
+    // The agent still has to reach the delegation's project.
+    let project = s
+        .project_fixture(json!({ "name": "Elsewhere", "path": root.path() }), None)
+        .await
+        .unwrap();
+    let elsewhere = s
+        .agent_fixture(
+            json!({ "name": "Elsewhere", "access": { "projects": [], "installation": false } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let unreachable = common::save_plugin(
+        &s,
+        "discord",
+        &json!({
+            "name": "Elsewhere",
+            "settings": { "guildId": "100", "channelId": "200" },
+            "userIds": ["300"],
+            "agentId": elsewhere["id"],
+            "projectId": project["id"],
+            "enabled": true,
+            "token": "synthetic_discord_token",
+        }),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        unreachable.message,
+        "This agent can’t open the selected project."
+    );
     for settings in [
         json!({ "guildId": "100" }),
         json!({ "guildId": "100", "channelId": "x" }),
         json!({ "guildId": "100", "channelId": "200", "extra": 1 }),
     ] {
-        let result = connections::save(
+        let result = common::save_plugin(
             &s,
             "discord",
             &json!({ "name": "Bad", "settings": settings, "userIds": ["300"], "agentId": connection.agent_id, "enabled": false, "token": "t" }),
@@ -1898,11 +1934,12 @@ async fn replies_to_a_stopped_turn_do_not_carry_the_next_answer() {
 async fn revoked_and_deleted_deliveries_do_not_stop_other_people() {
     let (_root, s, connection) = fixture().await;
     let (mock, server) = mock(&s).await;
-    let mut saved = serde_json::to_value(&connection).unwrap();
+    let mut saved = common::instance_configuration(&connection);
+    saved.as_object_mut().unwrap().remove("agentIds");
     saved["userIds"] = json!(["300", "301"]);
     saved["maxMessagesPerHour"] = json!(10);
     let connection: Connection = serde_json::from_value(
-        connections::save(&s, "discord", &saved, Some(&connection.id))
+        common::save_plugin(&s, "discord", &saved, Some(&connection.id))
             .await
             .unwrap(),
     )
@@ -1921,7 +1958,7 @@ async fn revoked_and_deleted_deliveries_do_not_stop_other_people() {
         .transaction(move |db| db.remove("chats", &chat_id))
         .await
         .unwrap();
-    connections::people(&s, "discord", &connection.id, "300", "remove")
+    common::plugin_people(&s, "discord", &connection.id, "300", "remove")
         .await
         .unwrap();
     let remaining = deliveries.iter().find(|d| d["thread"] == "512").unwrap();
@@ -1949,15 +1986,16 @@ async fn revoked_and_deleted_deliveries_do_not_stop_other_people() {
 #[tokio::test]
 async fn public_question_partial_answers_require_the_starters_authority() {
     let (_root, s, connection) = fixture().await;
-    let agent = s.agent(json!({
+    let agent = s.agent_fixture(json!({
         "name": "Support",
-        "access": { "projects": [], "skills": [], "mcps": [], "github": false, "installation": false, "sandbox": "read-only" },
+        "access": { "projects": [], "skills": [], "mcps": [], "installation": false, "sandbox": "read-only" },
     }), None).await.unwrap();
-    let mut saved = serde_json::to_value(&connection).unwrap();
+    let mut saved = common::instance_configuration(&connection);
+    saved.as_object_mut().unwrap().remove("agentIds");
     saved["agentId"] = agent["id"].clone();
     saved["accessMode"] = json!("everyone");
     let connection: Connection = serde_json::from_value(
-        connections::save(&s, "discord", &saved, Some(&connection.id))
+        common::save_plugin(&s, "discord", &saved, Some(&connection.id))
             .await
             .unwrap(),
     )
@@ -2205,10 +2243,7 @@ async fn every_host_capability_rejects_a_changed_owner() {
     // The persisted connection keeps valid agent grants but belongs to another owner.
     connection.owner_access_id = Some("previous-owner".into());
     s.store
-        .put(
-            connections::KIND,
-            serde_json::to_value(&connection).unwrap(),
-        )
+        .put_instance_fixture(serde_json::to_value(&connection).unwrap())
         .await
         .unwrap();
     let ctx = context(
@@ -2317,17 +2352,16 @@ async fn reviewed_reduced_agent_grants_start_a_fresh_conversation() {
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let mut agent = s.get("agents", &connection.agent_id).await.unwrap();
+    let mut agent = s.agent_snapshot(&connection.agent_id).await.unwrap();
     agent["access"]["sandbox"] = json!("read-only");
-    s.agent(agent, Some(&connection.agent_id)).await.unwrap();
-    let saved = connections::save(
-        &s,
-        "discord",
-        &serde_json::to_value(&connection).unwrap(),
-        Some(&connection.id),
-    )
-    .await
-    .unwrap();
+    s.agent_fixture(agent, Some(&connection.agent_id))
+        .await
+        .unwrap();
+    let mut settings = common::instance_configuration(&connection);
+    settings.as_object_mut().unwrap().remove("agentIds");
+    let saved = common::save_plugin(&s, "discord", &settings, Some(&connection.id))
+        .await
+        .unwrap();
     let new_connection: Connection = serde_json::from_value(saved).unwrap();
     let mut next = event("561");
     next["revision"] = json!(new_connection.revision);
@@ -2422,7 +2456,7 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     assert_eq!(entry["status"], "needs_approval");
     let input = json!({ "name": "Core status", "settings": { "team": "configured-team" }, "token": "secret-key", "enabled": true });
     assert_eq!(
-        connections::save(&s, "pinger", &input, None)
+        common::save_plugin(&s, "pinger", &input, None)
             .await
             .unwrap_err()
             .status,
@@ -2451,11 +2485,18 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     for bad in [json!({ "team": "core", "other": 1 }), json!({})] {
         let mut input = input.clone();
         input["settings"] = bad;
-        assert!(connections::save(&s, "pinger", &input, None).await.is_err());
+        assert!(
+            common::save_plugin(&s, "pinger", &input, None)
+                .await
+                .is_err()
+        );
     }
-    let connection: Connection =
-        serde_json::from_value(connections::save(&s, "pinger", &input, None).await.unwrap())
-            .unwrap();
+    let connection: Connection = serde_json::from_value(
+        common::save_plugin(&s, "pinger", &input, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert!(
         connection.agent_id.is_empty(),
         "plugins without conversations get no agent"
@@ -2582,7 +2623,7 @@ async fn plugin_management_is_owner_only_and_mcp_never_returns_secret_reads() {
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let task = s
-        .task(
+        .task_fixture(
             json!({ "name": "Inspect", "agentId": MAIN_AGENT_ID, "prompt": "Inspect" }),
             None,
         )
@@ -2633,7 +2674,7 @@ async fn plugin_management_is_owner_only_and_mcp_never_returns_secret_reads() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    let catalog = s.store.list(connections::KIND).await.unwrap();
+    let catalog = s.store.instances_fixture().await.unwrap();
     assert!(
         !serde_json::to_string(&catalog)
             .unwrap()
@@ -2703,7 +2744,7 @@ async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_
         .unwrap();
     assert_eq!(result, "HELLO Ada");
 
-    let connection = connections::save(
+    let connection = common::save_plugin(
         &s,
         "splitter",
         &json!({
@@ -2725,7 +2766,7 @@ async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_
         registry::active(&s, "splitter").await.err().unwrap().status,
         403
     );
-    let paused = connections::set_enabled(
+    let paused = common::enable_plugin(
         &s,
         "splitter",
         text(&connection, "id"),
@@ -2752,4 +2793,79 @@ async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_
     assert!(registry::active(&s, "splitter").await.is_err());
     std::fs::remove_file(directory.join("link.luau")).unwrap();
     registry::active(&s, "splitter").await.unwrap();
+}
+
+#[tokio::test]
+async fn deleting_a_shared_source_during_setup_does_not_commit_its_draft_or_secrets() {
+    use axum::routing::get;
+    use tokio::sync::Notify;
+
+    let (_root, s, _agent) = service().await;
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let app = Router::new().route(
+        "/check",
+        get({
+            let started = started.clone();
+            let release = release.clone();
+            move || {
+                let started = started.clone();
+                let release = release.clone();
+                async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Json(json!({}))
+                }
+            }
+        }),
+    );
+    let (origin, server) = common::serve_locally(app).await;
+    s.plugins.route_http_to(Some(origin));
+    let installed = registry::install(&s,&json!({
+        "manifest": {
+            "id": "shared-fenced", "name": "Shared fenced", "version": "1", "apiVersion": 2,
+            "capabilities": ["http"], "hosts": ["api.example.test"], "instanceForm": true,
+            "settings": [
+                { "key": "clientId", "title": "Client ID", "type": "string", "required": true },
+                { "key": "clientSecret", "title": "Client secret", "type": "secret", "required": true },
+                { "key": "check", "title": "Check", "type": "boolean", "default": false }
+            ],
+            "setup": { "steps": [
+                { "id": "app", "kind": "settings", "title": "App", "shared": true, "settings": ["clientId","clientSecret"] },
+                { "id": "instance", "kind": "settings", "title": "Instance", "settings": ["check"] }
+            ] }
+        },
+        "source": "return { form = function(input) if input.values.check then cairn.http.request({ url = 'https://api.example.test/check' }) end return {} end }"
+    })).await.unwrap();
+    registry::approve(&s, "shared-fenced", "1", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let source = common::save_plugin(&s,"shared-fenced",&json!({ "name": "Source", "enabled": false, "settings": { "clientId": "app" }, "secrets": { "clientSecret": "synthetic-secret" } }),None).await.unwrap();
+    let source_id = text(&source, "id");
+    let input = json!({ "name": "Stale draft", "enabled": false, "settings": { "check": true }, "sharedFrom": source_id });
+    let remove = async {
+        started.notified().await;
+        connections::remove(&s, "shared-fenced", source_id)
+            .await
+            .unwrap();
+        release.notify_one();
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(
+            common::save_plugin(&s, "shared-fenced", &input, None),
+            remove
+        )
+    })
+    .await
+    .unwrap();
+    assert!(result.is_err());
+    assert!(s.store.plugin_instances().await.unwrap().is_empty());
+    assert!(
+        s.vault
+            .get(&connections::secrets_key(source_id))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    server.abort();
 }

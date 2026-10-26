@@ -16,7 +16,6 @@ import {
   watch,
 } from 'vue'
 import { useRoute } from 'vue-router'
-import { currentAgentIds } from '../agent-access'
 import {
   api,
   notify,
@@ -66,7 +65,7 @@ import {
   pluginSecrets,
   pluginSettings,
 } from '../plugin-form-values'
-import { pluginOperation } from '../plugin-operations'
+import { pluginCommand } from '../plugin-management'
 import {
   effortLabels,
   matchingPreset,
@@ -81,10 +80,10 @@ import {
   connectionState,
   contributions,
   delegates as delegating,
-  eligibleAgent,
+  delegationRisks,
   instanceNoun,
+  listed,
   personName,
-  publicProblem,
 } from '../plugins'
 import { buttonBase, buttonSizes, buttonVariants } from '../ui'
 
@@ -157,14 +156,14 @@ const activityTones = {
   stopped: ['bg-hover text-muted', 'Stopped'],
 } as const
 
-/** Why an agent can't answer this instance's people, or '' when it can. */
-function problem(agent: Agent) {
-  if (form.value.accessMode === 'everyone')
-    return publicProblem(agent, catalog.value.connections.filter(item => item.id !== editing.value?.id))
-  return eligibleAgent(agent) ? '' : 'Too broad'
+/** What this instance's people could do through an agent, for the owner's warning. */
+function risks(agent: Agent) {
+  return delegationRisks(agent, catalog.value.connections, form.value.accessMode === 'everyone', editing.value ? [] : grants.value)
 }
 
-const agents = computed(() => [...state.agents].sort((a, b) => Number(Boolean(problem(a))) - Number(Boolean(problem(b)))))
+const agents = computed(() => [...state.agents].sort((a, b) => Number(risks(a).length > 0) - Number(risks(b).length > 0)))
+const chosenAgent = computed(() => state.agents.find(agent => agent.id === form.value.agentId))
+const chosenRisks = computed(() => chosenAgent.value ? risks(chosenAgent.value) : [])
 const singular = computed(() => instanceNoun(manifest.value, 1))
 const plural = computed(() => instanceNoun(manifest.value, 2))
 // A completed device sign-in gives the draft its credential; the package's form handler then
@@ -278,14 +277,19 @@ async function complete(changed?: string) {
   const inputs = Object.fromEntries(fields.value.map(field => [field.key, fieldInput(field)]))
   completing.value = true
   try {
-    const result = await pluginOperation<FormResult>(`/plugins/${id.value}/form`, {
-      instance: editing.value?.id,
-      settings: pluginSettings(storedFields.value, values.value),
-      secrets: pluginSecrets(secrets.value),
-      ...sharing.value,
-      ...credentialInput(form.value.token, signIn.flow.value),
-      ...(changed ? { changed } : {}),
-    })
+    const { form: result } = await pluginCommand({
+      kind: 'form',
+      pluginId: id.value,
+      instanceId: editing.value?.id ?? null,
+      data: {
+        revision: editing.value?.revision,
+        settings: pluginSettings(storedFields.value, values.value),
+        secrets: pluginSecrets(secrets.value),
+        ...sharing.value,
+        ...credentialInput(form.value.token, signIn.flow.value),
+        ...(changed ? { changed } : {}),
+      },
+    }, 'form')
     if (ask !== asked)
       return
     for (const field of storedFields.value) {
@@ -388,8 +392,7 @@ function stepProblem(item: SetupStep | undefined): string {
   }
 
   if (item.kind === 'people') {
-    const agent = state.agents.find(item => item.id === form.value.agentId)
-    if (!agent || problem(agent))
+    if (!chosenAgent.value)
       return 'Choose the agent that answers.'
     if (form.value.accessMode === 'allowlist' && !people.value.length)
       return 'Add at least one person.'
@@ -448,32 +451,32 @@ async function save() {
     return
   await action(async () => {
     const agent = state.agents.find(item => item.id === form.value.agentId)
-    const agentIds = await currentAgentIds(state.agents, entry.value, editing.value, async () => (await api<Catalog>('/plugins')).connections)
     const body = {
+      revision: editing.value?.revision,
       name: form.value.name,
       // The save consumes a completed sign-in.
       ...credentialInput(form.value.token, signIn.flow.value),
       settings: pluginSettings(storedFields.value, values.value),
       // Blank secret fields keep what is saved.
       secrets: pluginSecrets(secrets.value),
-      // Agents are granted on their own page; omitting the list keeps it.
-      ...(delegates.value && {
-        agentId: form.value.agentId,
-        projectId: agent?.access.projects?.[0] ?? null,
-        accessMode: form.value.accessMode,
-        userIds: people.value.map(item => item.id),
-        people: people.value,
-        maxMessagesPerHour: Number(form.value.maxMessagesPerHour),
-        maxPerPersonPerHour: Number(form.value.maxPerPersonPerHour),
-      }),
+      agentId: delegates.value ? form.value.agentId : '',
+      projectId: delegates.value && agent?.access.projects?.length === 1 ? agent.access.projects[0] : null,
+      accessMode: form.value.accessMode,
+      userIds: people.value.map(item => item.id),
+      people: people.value,
+      maxMessagesPerHour: Number(form.value.maxMessagesPerHour),
+      maxPerPersonPerHour: Number(form.value.maxPerPersonPerHour),
       enabled: form.value.enabled,
       ...sharing.value,
-      // An older (or unknown) installation needs the granted agents back, as they are now. A
-      // new instance is granted to the agents chosen on the assistant's last step.
-      ...(agentIds ? { agentIds } : !editing.value && grants.value.length ? { agentIds: grants.value } : {}),
+      // New instances grant the chosen agents; editing keeps current grants.
+      ...(!editing.value && grants.value.length ? { agentIds: grants.value } : {}),
     }
-    const path = `/plugins/${id.value}/connections${editing.value ? `/${editing.value.id}` : ''}`
-    await pluginOperation(path, body, editing.value ? 'PUT' : 'POST')
+    await pluginCommand({
+      kind: 'save',
+      pluginId: id.value,
+      instanceId: editing.value?.id ?? null,
+      data: body,
+    }, 'saved')
     signIn.consumed()
     form.value.token = ''
     secrets.value = pluginFormSecrets()
@@ -483,23 +486,41 @@ async function save() {
   })
 }
 
-async function post(connection: PluginConnection, path: string, body?: unknown) {
+async function setEnabled(connection: PluginConnection, enabled: boolean) {
   await action(async () => {
-    await api(`/plugins/${id.value}/connections/${connection.id}/${path}`, { method: 'POST', body: body ? JSON.stringify(body) : undefined })
+    await pluginCommand({
+      kind: 'enabled',
+      pluginId: id.value,
+      instanceId: connection.id,
+      data: { enabled },
+    }, 'enabled')
+    await load()
+  })
+}
+
+async function personAction(connection: PluginConnection, userId: string, operation: 'approve' | 'deny' | 'remove') {
+  await action(async () => {
+    await pluginCommand({
+      kind: 'people',
+      pluginId: id.value,
+      instanceId: connection.id,
+      userId,
+      operation,
+    }, 'people')
     await load()
   })
 }
 
 async function test(connection: PluginConnection) {
   await action(async () => {
-    const result = await pluginOperation<{ message?: string }>(`/plugins/${id.value}/connections/${connection.id}/test`)
+    const result = await pluginCommand({ kind: 'test', pluginId: id.value, instanceId: connection.id }, 'tested')
     notify(`${connection.name}: ${result.message || 'it works'}`)
   })
 }
 
 async function disconnect(connection: PluginConnection) {
   await action(async () => {
-    const result = await api<{ message: string }>(`/plugins/${id.value}/connections/${connection.id}/disconnect`, { method: 'POST' })
+    const result = await pluginCommand({ kind: 'disconnect', pluginId: id.value, instanceId: connection.id }, 'disconnected')
     await load()
     notify(`${connection.name}: ${result.message}`)
   })
@@ -507,7 +528,7 @@ async function disconnect(connection: PluginConnection) {
 
 async function remove() {
   await action(async () => {
-    await api(`/plugins/${id.value}/connections/${removing.value!.id}`, { method: 'DELETE' })
+    await pluginCommand({ kind: 'delete', pluginId: id.value, instanceId: removing.value!.id }, 'deleted')
     removing.value = undefined
     await load()
   })
@@ -729,14 +750,14 @@ onBeforeUnmount(() => {
                 <li v-for="request in connection.requests" :key="request.id" class="flex items-center gap-3 rounded-xl bg-coral-soft px-3 py-2">
                   <PersonAvatar :name="request.name || request.userId" :identity="request.userId" :size="26" />
                   <span class="flex-1 truncate text-xs"><b>{{ request.name || request.userId }}</b> asked to use it</span>
-                  <UiButton size="small" :disabled="busy" @click="post(connection, `people/${request.userId}/deny`)">
+                  <UiButton size="small" :disabled="busy" @click="personAction(connection, request.userId, 'deny')">
                     Deny
                   </UiButton>
                   <UiButton
                     size="small"
                     variant="primary"
                     :disabled="busy"
-                    @click="post(connection, `people/${request.userId}/approve`)"
+                    @click="personAction(connection, request.userId, 'approve')"
                   >
                     Approve
                   </UiButton>
@@ -748,7 +769,7 @@ onBeforeUnmount(() => {
                     size="small"
                     :disabled="busy"
                     :aria-label="`Remove ${personName(connection, user)}`"
-                    @click="post(connection, `people/${user}/remove`)"
+                    @click="personAction(connection, user, 'remove')"
                   >
                     Remove
                   </UiButton>
@@ -788,7 +809,7 @@ onBeforeUnmount(() => {
                   role="switch"
                   :checked="connection.enabled"
                   :disabled="busy"
-                  @change="post(connection, 'enabled', { enabled: !connection.enabled })"
+                  @change="setEnabled(connection, !connection.enabled)"
                 >
                 Active
               </label>
@@ -1114,7 +1135,7 @@ onBeforeUnmount(() => {
                 type="radio"
                 value="everyone"
                 class="mt-0.5 w-auto!"
-              >Anyone<small class="col-start-2 font-normal">Needs a read-only agent with at most one project and no MCP or plugin access.</small></label>
+              >Anyone<small class="col-start-2 font-normal">Everyone who can post in the channel, within an hourly limit per person.</small></label>
             </fieldset>
             <fieldset class="grid gap-2" :disabled="busy">
               <legend class="mb-1 text-xs font-semibold">
@@ -1150,18 +1171,17 @@ onBeforeUnmount(() => {
                 v-for="agent in agents"
                 :key="agent.id"
                 class="grid! grid-cols-[auto_1fr_auto] items-center gap-x-2.5! rounded-xl border border-line px-3.5 py-2 font-normal!"
-                :class="problem(agent) ? 'opacity-60' : form.agentId === agent.id ? 'border-accent bg-soft' : ''"
+                :class="form.agentId === agent.id ? 'border-accent bg-soft' : ''"
               >
                 <input
                   v-model="form.agentId"
                   type="radio"
                   class="w-auto!"
                   :value="agent.id"
-                  :disabled="Boolean(problem(agent))"
                 ><span class="truncate text-xs font-semibold">{{ agent.name }}</span>
-                <span v-if="problem(agent)" class="rounded-full bg-warning-surface px-2 py-px text-3xs font-semibold text-warning">{{ problem(agent) }}</span>
+                <span v-if="risks(agent).length" class="rounded-full bg-warning-surface px-2 py-px text-3xs font-semibold text-warning">Broad access</span>
               </label>
-              <small>People reach only this agent: one project at most and no installation access. <RouterLink to="/agents" class="text-accent">Create a dedicated agent</RouterLink></small>
+              <small>People reach this agent with all of its access. <RouterLink to="/agents" class="text-accent">Create a dedicated agent</RouterLink> to limit what they can do.</small>
             </fieldset>
             <label>Messages per hour<input
               v-model="form.maxMessagesPerHour"
@@ -1218,6 +1238,15 @@ onBeforeUnmount(() => {
               </p>
             </section>
           </template>
+
+          <div v-if="delegates && ['people', 'agents'].includes(current.kind) && chosenAgent && chosenRisks.length" class="flex gap-2.5 rounded-xl bg-warning-surface px-3.5 py-2.5 text-xs leading-relaxed text-warning" role="status">
+            <Icon :name="TriangleAlert" :size="15" class="mt-0.5 shrink-0" />
+            <p>
+              <b class="block">{{ form.accessMode === 'everyone' ? 'Anyone in the channel' : 'The people you allow' }} can use everything {{ chosenAgent.name }} can do</b>
+              Through the bot, they can {{ listed(chosenRisks) }}.
+              {{ form.accessMode === 'everyone' ? 'For a public channel, prefer a read-only agent with one project.' : 'Only allow people you trust, or choose a more limited agent.' }}
+            </p>
+          </div>
 
           <template v-if="last || editing">
             <hr class="border-line">

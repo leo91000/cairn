@@ -71,6 +71,10 @@ async fn serve(
     assert!(headers.get("authorization").is_none());
     publisher.requests.fetch_add(1, Ordering::SeqCst);
     let path = request.uri().path();
+    // The opt-in feed can advertise a prerelease even when a stable release exists.
+    if path == "/check/1/0/CLI2/en/2.0.0/Y" {
+        return Json(json!({ "available": "1", "version": "2.43.0-beta.02" })).into_response();
+    }
     if path == "/latest" || path.starts_with("/check/") {
         return Json(publisher.release.lock().await.clone()).into_response();
     }
@@ -515,7 +519,6 @@ async fn release_metadata_larger_than_half_a_frame_is_not_duplicated() {
 
 #[tokio::test]
 async fn first_use_can_finish_a_download_longer_than_the_normal_handler_deadline() {
-    use cairn_installation::plugins::connections;
     let f = Fixture::new().await;
     *f.publisher.release.lock().await = json!({ "version": "2.41.0" });
     let arch = if std::env::consts::ARCH == "aarch64" {
@@ -527,7 +530,7 @@ async fn first_use_can_finish_a_download_longer_than_the_normal_handler_deadline
         format!("/dist/1P/op2/pkg/v2.41.0/op_linux_{arch}_v2.41.0.zip"),
         archive("op", "[]"),
     );
-    let account = connections::save(
+    let account = common::save_plugin(
         &f.service,
         "onepassword",
         &json!({

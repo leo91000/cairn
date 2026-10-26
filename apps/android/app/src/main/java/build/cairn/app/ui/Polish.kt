@@ -302,19 +302,6 @@ internal object CairnIcons {
             lineTo(17f, 17.5f)
             lineTo(17f, 21.5f)
         }
-    val PullRequest =
-        line("PullRequest") {
-            moveTo(9f, 6f)
-            arcTo(3f, 3f, 0f, true, true, 8.99f, 5.9f)
-            moveTo(21f, 18f)
-            arcTo(3f, 3f, 0f, true, true, 20.99f, 17.9f)
-            moveTo(6f, 9f)
-            lineTo(6f, 21f)
-            moveTo(13f, 6f)
-            lineTo(16f, 6f)
-            quadTo(18f, 6f, 18f, 8f)
-            lineTo(18f, 15f)
-        }
     val Workflow =
         line("Workflow") {
             moveTo(5f, 3f)

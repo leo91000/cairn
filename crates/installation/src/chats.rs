@@ -44,6 +44,11 @@ const MAX_UNDELIVERED: usize = 20;
 const TITLE_CHARS: usize = 90;
 const PRIVATE_ANSWER_TEXT: &str = "Answered a private question.";
 
+const CONTINUED_MISSION: &str = concat!(
+    "This mission now continues as a chat; the unattended rule given earlier ",
+    "no longer applies."
+);
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatInput {
@@ -62,9 +67,11 @@ struct NewChat {
     paused: bool,
     created_at: i64,
     updated_at: i64,
+    last_activity_at: i64,
 }
 
-/// `chatExecution` on a run: the user message the next agent turn delivers.
+/// `chatExecution` on a run: the user message the next agent turn delivers,
+/// preceded by the interactive rule on a Codex mission thread.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatExecution {
@@ -81,6 +88,34 @@ struct ChatExecution {
     /// The previous turn of this run was a plan turn, whose engine mode may persist.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     after_plan: bool,
+    /// `compact`: the execution compacts the native context instead of delivering a message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation: Option<&'static str>,
+    /// What the conversation showed before a compaction, restored once it succeeds: a
+    /// compaction is not a reply and never marks the conversation as newly finished.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous: Option<Value>,
+}
+
+/// The `chatExecution.operation` of a context compaction.
+pub(crate) const COMPACT: &str = "compact";
+
+pub(crate) fn is_compaction(run: &Value) -> bool {
+    run["chatExecution"]["operation"] == COMPACT
+}
+
+/// A compaction is not a reply: once it succeeds, the conversation keeps its last reply and
+/// its outcome, and does not become newly finished. Resuming an interrupted compaction clears
+/// the run's outcome, so it comes from what the compaction saved. Failures and stops still show
+/// why it ended.
+pub(crate) fn keep_reply_after_compaction(run: &Value, patch: &mut Value) {
+    if !is_compaction(run) {
+        return;
+    }
+    let previous = &run["chatExecution"]["previous"];
+    patch["summary"] = previous["summary"].clone();
+    patch["finishedAt"] = previous["finishedAt"].clone();
+    patch["outcome"] = previous["outcome"].clone();
 }
 
 /// Payload of the `chat.user` event recorded when a message reaches the agent.
@@ -99,6 +134,12 @@ struct UserMessageEvent<'a> {
 /// so its tools keep this restriction until the next turn replaces the grant.
 pub(crate) fn planning(run: &Value) -> bool {
     run["chatExecution"]["plan"] == true
+}
+
+/// Whether the next turn of this run follows a plan turn, whose engine mode may persist.
+/// A compaction in between starts no turn, so it carries the mark forward.
+fn follows_plan(run: &Value) -> bool {
+    planning(run) || (is_compaction(run) && run["chatExecution"]["afterPlan"] == true)
 }
 
 fn chat(db: &Db<'_>, id: &str) -> Result<Value> {
@@ -135,6 +176,7 @@ fn same_content(a: &Value, b: &Value) -> bool {
         && a["model"] == b["model"]
         && text(a, "reasoning") == text(b, "reasoning")
         && (a["plan"] == true) == (b["plan"] == true)
+        && text(a, "speed") == text(b, "speed")
         && crate::attachments::same(a, b)
 }
 
@@ -144,14 +186,14 @@ fn record_name(db: &Db<'_>, chat: &Value, kind: &str, key: &str, deleted: &str) 
     } else {
         "projectId"
     };
-    Ok(match db.get(kind, text(chat, id_key))? {
+    Ok(match db.agent_snapshot(text(chat, id_key))? {
         Some(record) => record["name"].clone(),
         // Keep the name remembered on the chat after its agent or project is removed.
         None => chat.get(key).cloned().unwrap_or_else(|| deleted.into()),
     })
 }
 
-fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
+pub(crate) fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
     chat["lifecycle"] = crate::conversation_lifecycle::state(&chat).into();
     chat["pendingQuestions"] = questions(db, text(&chat, "id"))?
         .iter()
@@ -162,14 +204,27 @@ fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
     chat["projectName"] = if chat["projectId"].is_null() {
         Value::Null
     } else {
-        record_name(db, &chat, "projects", "projectName", "Deleted project")?
+        db.project(text(&chat, "projectId"))?.map_or_else(
+            || {
+                chat.get("projectName")
+                    .cloned()
+                    .unwrap_or_else(|| "Deleted project".into())
+            },
+            |project| Value::from(project.settings.name),
+        )
     };
     let run = db.run(text(&chat, "runId"))?;
     chat["canRequestNewSession"] =
         crate::conversation_lifecycle::can_request_new_session(&chat, run.as_ref()).into();
-    chat["status"] = run
-        .as_ref()
-        .map_or_else(|| "idle".into(), |run| run["status"].clone());
+    let queued_delegation = run.is_none()
+        && chat["requestedBy"].is_object()
+        && continuation::has_pending_input(db, &chat)?;
+    chat["status"] = if queued_delegation {
+        "queued".into()
+    } else {
+        run.as_ref()
+            .map_or_else(|| "idle".into(), |run| run["status"].clone())
+    };
     chat["suspendedByExclusive"] = run
         .as_ref()
         .map_or(Value::Null, |run| run["suspendedByExclusive"].clone());
@@ -178,9 +233,150 @@ fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
         .as_ref()
         .and_then(|run| Provider::of_run(run).ok())
         .map_or(Value::Null, |provider| provider.as_str().into());
+    // How full the native session's context was at its latest report; absent when unknown.
+    chat["contextUsage"] = run
+        .as_ref()
+        .map_or(Value::Null, |run| run["contextUsage"].clone());
+    chat["compaction"] = compaction_state(db, &chat, run.as_ref())?;
     // When the agent's latest turn ended, for what the Fil shows as unread.
     chat["finishedAt"] = run.map_or(Value::Null, |run| run["finishedAt"].clone());
+    // The delegating conversation, while it can still be opened.
+    chat["requester"] = match chat["requestedBy"]["chatId"].as_str() {
+        Some(id) => db.get("chats", id)?.filter(is_active).map_or(
+            Value::Null,
+            |requester| json!({ "chatId": requester["id"], "title": requester["title"] }),
+        ),
+        None => Value::Null,
+    };
     Ok(chat)
+}
+
+/// Whether the conversation's coding agent can compact its context, whether it is
+/// compacting now, and why a compaction cannot start when it cannot.
+fn compaction_state(db: &Db<'_>, chat: &Value, run: Option<&Value>) -> Result<Value> {
+    let provider = run.and_then(|run| Provider::of_run(run).ok());
+    let supported = provider.is_some_and(Provider::compacts_context);
+    let running = run.is_some_and(|run| run_is_active(run) && is_compaction(run));
+    let blocker = if running {
+        Some("The conversation is already compacting its context.".to_owned())
+    } else {
+        compaction_blocker(db, chat, run)?
+    };
+    Ok(json!({
+        "supported": supported,
+        "running": running,
+        "available": blocker.is_none(),
+        "reason": blocker,
+    }))
+}
+
+/// Why the conversation cannot compact its native context now, if it cannot.
+fn compaction_blocker(db: &Db<'_>, chat: &Value, run: Option<&Value>) -> Result<Option<String>> {
+    if !is_active(chat) {
+        return Ok(Some("This conversation has been deleted.".into()));
+    }
+    let Some(run) = run else {
+        return Ok(Some("Send a first message before compacting.".into()));
+    };
+    // The view of a run that names no coding agent still opens: it just cannot compact.
+    let Ok(provider) = Provider::of_run(run) else {
+        return Ok(Some(
+            "This conversation's coding agent does not support context compaction.".into(),
+        ));
+    };
+    if !provider.compacts_context() {
+        return Ok(Some(format!(
+            "{} does not support context compaction in Cairn.",
+            provider.label()
+        )));
+    }
+    // Codex replaces a running turn with its compaction, so compaction never overlaps a turn.
+    if run_is_active(run) || run["recoveryPending"] == true {
+        return Ok(Some(
+            "Wait for the current turn to finish before compacting.".into(),
+        ));
+    }
+    if run["status"] != RunStatus::Succeeded {
+        return Ok(Some(
+            "Resume or resolve the last turn before compacting.".into(),
+        ));
+    }
+    if !run["workspaceCleanedAt"].is_null() {
+        return Ok(Some(
+            "This workspace has been cleaned up. Start a new chat.".into(),
+        ));
+    }
+    let fresh_session = chat["sessionRestartRequested"] == true
+        || db
+            .kv(&format!("run-checkpoint:{}", text(run, "id")))?
+            .is_some_and(|checkpoint| checkpoint["freshSession"] == true);
+    if !run["sessionId"].is_string() || fresh_session {
+        return Ok(Some(
+            "This conversation has no saved native session to compact.".into(),
+        ));
+    }
+    if chat["wakeup"].is_object() {
+        return Ok(Some(
+            "Compact after the scheduled continuation resumes.".into(),
+        ));
+    }
+    let undelivered: bool = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE chat_id=?
+         AND json_extract(data,'$.status') IN ('queued','sending'))",
+        [text(chat, "id")],
+        |row| row.get(0),
+    )?;
+    if undelivered {
+        return Ok(Some(
+            "Wait for queued messages to be delivered before compacting.".into(),
+        ));
+    }
+    Ok(None)
+}
+
+/// Starts compacting the conversation's native context in its retained session. The
+/// compaction runs as its own execution of the conversation's run, never as a user message.
+fn compact(db: &Db<'_>, chat_id: &str, origin: &crate::native::policy::Origin) -> Result<Value> {
+    let mut chat = chat(db, chat_id)?;
+    crate::native::policy::authorize_chat(db, &mut chat, origin)?;
+    require_active(&chat)?;
+    let run = db.run(text(&chat, "runId"))?;
+    if run
+        .as_ref()
+        .is_some_and(|run| run_is_active(run) && is_compaction(run))
+    {
+        // A retried request after a lost response keeps the compaction already started.
+        return view(db, chat);
+    }
+    if let Some(reason) = compaction_blocker(db, &chat, run.as_ref())? {
+        return Err(Error::conflict(reason));
+    }
+    let run = run.unwrap();
+    let execution = ChatExecution {
+        message_id: format!("compact:{}", id()).into(),
+        text: String::new(),
+        attachments: json!([]),
+        recovery: false,
+        context: None,
+        plan: false,
+        // Compacting delivers no turn: the turn after it still follows the plan turn.
+        after_plan: follows_plan(&run),
+        operation: Some(COMPACT),
+        previous: Some(json!({
+            "summary": run["summary"],
+            "finishedAt": run["finishedAt"],
+            "outcome": run["outcome"],
+        })),
+    };
+    continue_run(db, &chat, &run, &run, execution)?;
+    db.event(
+        text(&run, "id"),
+        "status",
+        "Compacting the conversation context",
+        None,
+    )?;
+    db.put("chats", &chat)?;
+    view(db, chat)
 }
 
 /// Active conversations. Deleted ones are skipped before their view is built.
@@ -225,15 +421,78 @@ pub(crate) fn history_run(db: &Db<'_>, id: &str) -> Result<String> {
     })
 }
 
-/// Steering joins the running turn, whose provider, model and reasoning are fixed.
+/// Steering joins the running turn, whose provider, model, reasoning and speed are fixed.
 fn changes_running_agent(message: &Value, run: &Value) -> Result<bool> {
     let agent = &run["snapshot"]["agent"];
     let provider = Value::from(Provider::of_run(run)?.as_str());
-    let differs =
-        |key: &str, current: &Value| !text(message, key).is_empty() && message[key] != *current;
+    let differs = |key: &str, current: &Value| {
+        !text(message, key).is_empty() && text(message, key) != current.as_str().unwrap_or("")
+    };
+    // A turn without a speed runs at Standard, so asking for Standard changes nothing.
+    let speed = |value: &str| {
+        if value.is_empty() {
+            crate::models::STANDARD_SPEED.to_owned()
+        } else {
+            value.to_owned()
+        }
+    };
+    let changes_speed = !text(message, "speed").is_empty()
+        && speed(text(message, "speed")) != speed(text(agent, "speed"));
     Ok(differs("provider", &provider)
         || differs("model", &agent["model"])
-        || differs("reasoning", &agent["reasoning"]))
+        || differs("reasoning", &agent["reasoning"])
+        || changes_speed)
+}
+
+/// The coding agent a message's turn runs with: the one it names, else the running turn's
+/// for a steering message, else the one the queued messages ahead of it, the conversation's
+/// latest turn or its agent select.
+fn message_provider(db: &Db<'_>, chat: &Value, message: &Value) -> Result<String> {
+    if !text(message, "provider").is_empty() {
+        return Ok(text(message, "provider").to_owned());
+    }
+    let run = db.run(text(chat, "runId"))?;
+    if message["mode"] == MessageMode::Steer
+        && let Some(run) = run.as_ref().filter(|run| run_is_active(run))
+    {
+        return Ok(Provider::of_run(run)?.as_str().to_owned());
+    }
+
+    let ahead = db
+        .messages(text(chat, "id"))?
+        .into_iter()
+        .take_while(|queued| queued["id"] != message["id"])
+        .filter(|queued| {
+            queued["status"] == MessageStatus::Queued || queued["status"] == MessageStatus::Sending
+        })
+        .filter(|queued| !text(queued, "provider").is_empty())
+        .last();
+    if let Some(queued) = ahead {
+        return Ok(text(&queued, "provider").to_owned());
+    }
+
+    if let Some(run) = run {
+        return Ok(Provider::of_run(&run)?.as_str().to_owned());
+    }
+    let agent = required(
+        db.agent_snapshot(text(chat, "agentId"))?,
+        "This agent is no longer available.",
+    )?;
+    Ok(Provider::of_agent(&agent)?.as_str().to_owned())
+}
+
+/// Only Codex offers a speed choice; a turn with another coding agent cannot ask for one.
+fn validate_speed(db: &Db<'_>, chat: &Value, message: &Value) -> Result<()> {
+    if text(message, "speed").is_empty() {
+        return Ok(());
+    }
+    crate::models::validate_speed(text(message, "speed"))?;
+    if message_provider(db, chat, message)? != Provider::Codex.as_str() {
+        return Err(Error::bad(
+            "Speed applies only to Codex. Remove it or choose Codex for this message.",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_steer(db: &Db<'_>, chat: &Value, message: &Value) -> Result<()> {
@@ -245,7 +504,7 @@ fn validate_steer(db: &Db<'_>, chat: &Value, message: &Value) -> Result<()> {
     };
     if run_is_active(&run) && changes_running_agent(message, &run)? {
         return Err(Error::conflict(
-            "Queue this message to change provider, model or reasoning on the next turn.",
+            "Queue this message to change provider, model, reasoning or speed on the next turn.",
         ));
     }
     // Steering joins the running turn with its permissions: a plan request cannot
@@ -263,18 +522,7 @@ fn require_plan_support(db: &Db<'_>, chat: &Value, message: &Value) -> Result<()
     if message["plan"] != true {
         return Ok(());
     }
-    let provider = if !text(message, "provider").is_empty() {
-        Provider::parse(text(message, "provider"))?
-    } else if let Some(run) = db.run(text(chat, "runId"))? {
-        Provider::of_run(&run)?
-    } else {
-        let agent = required(
-            db.get("agents", text(chat, "agentId"))?,
-            "This agent is no longer available.",
-        )?;
-        Provider::of_agent(&agent)?
-    };
-    require_plan_turns(provider)
+    require_plan_turns(Provider::parse(&message_provider(db, chat, message)?)?)
 }
 
 fn require_plan_turns(provider: Provider) -> Result<()> {
@@ -327,11 +575,11 @@ fn require_sendable(db: &Db<'_>, chat: &Value, messages: &[Value], id: &str) -> 
         ));
     }
     let agent = required(
-        db.get("agents", text(chat, "agentId"))?,
+        db.agent_snapshot(text(chat, "agentId"))?,
         "This agent is no longer available.",
     )?;
     crate::nodes::require_node(&agent)?;
-    task_projects(&agent, chat, &db.list("projects")?)?;
+    task_projects(&agent, chat, &db.projects()?)?;
     let cleaned = db
         .run(text(chat, "runId"))?
         .is_some_and(|run| !run["workspaceCleanedAt"].is_null());
@@ -368,6 +616,7 @@ pub(crate) fn send(
         return Ok(existing.clone());
     }
     require_sendable(db, &chat, &messages, text(&values, "id"))?;
+    validate_speed(db, &chat, &values)?;
     validate_steer(db, &chat, &values)?;
     require_plan_support(db, &chat, &values)?;
     if messages.is_empty() {
@@ -412,6 +661,21 @@ fn withdraw(db: &Db<'_>, chat_id: &str, message: &Value) -> Result<Value> {
     Ok(json!({ "deleted": true }))
 }
 
+/// Parses an edited message. A speed or plan request the editor did not send stays as
+/// stored: an editor predating them never turns a plan request into an ordinary turn.
+pub(crate) fn parse_edit(input: Value) -> Result<Value> {
+    let kept = ["speed", "plan"].map(|field| input.get(field).is_none());
+    let mut values = parse("message", input)?;
+    if let Some(values) = values.as_object_mut() {
+        for (field, kept) in ["speed", "plan"].into_iter().zip(kept) {
+            if kept {
+                values.remove(field);
+            }
+        }
+    }
+    Ok(values)
+}
+
 pub(crate) fn edit(
     db: &Db<'_>,
     chat_id: &str,
@@ -451,9 +715,17 @@ pub(crate) fn edit_as(
         return Err(Error::conflict("A submitted answer cannot be edited."));
     }
     crate::attachments::message(db, chat_id, &mut values)?;
-    validate_steer(db, &chat, &values)?;
-    require_plan_support(db, &chat, &values)?;
+    // An edit without a speed, from an editor predating speeds, keeps the stored one while the
+    // message still goes to Codex.
+    let kept_speed = values.get("speed").is_none();
     crate::store::merge(&mut current, &values);
+    if kept_speed && message_provider(db, &chat, &current)? != Provider::Codex.as_str() {
+        set_speed(&mut current, "");
+    }
+    // Steering joins the running turn with the message as edited, including a kept speed.
+    validate_steer(db, &chat, &current)?;
+    validate_speed(db, &chat, &current)?;
+    require_plan_support(db, &chat, &current)?;
     db.put_message(&current)
 }
 
@@ -562,8 +834,13 @@ fn needs_attention(chat: &Value, run: Option<&Value>) -> bool {
         && chat["sessionRestartRequested"] != true
 }
 
-/// Applies the provider, model and reasoning chosen for this message.
-fn select_agent(snapshot: &mut Value, run: Option<&Value>, message: &Value) -> Result<()> {
+/// Applies the provider, model, reasoning and speed chosen for this message. The speed is
+/// independent of the model: it carries over model changes, not a change of coding agent.
+pub(crate) fn select_agent(
+    snapshot: &mut Value,
+    run: Option<&Value>,
+    message: &Value,
+) -> Result<()> {
     let previous = run.map_or(
         &snapshot["snapshot"]["agent"],
         |run| &run["snapshot"]["agent"],
@@ -577,6 +854,8 @@ fn select_agent(snapshot: &mut Value, run: Option<&Value>, message: &Value) -> R
     .to_owned();
     let inherited_model = text(previous, "model").to_owned();
     let inherited_reasoning = text(previous, "reasoning").to_owned();
+    let inherited_speed = text(previous, "speed").to_owned();
+    let continues = provider == Provider::of_agent(previous)?.as_str();
 
     let switched = provider != Provider::of_run(snapshot)?.as_str();
     let agent = &mut snapshot["snapshot"]["agent"];
@@ -595,8 +874,20 @@ fn select_agent(snapshot: &mut Value, run: Option<&Value>, message: &Value) -> R
             String::new()
         }
         .into();
+        set_speed(
+            agent,
+            if implicit_provider {
+                &inherited_speed
+            } else {
+                ""
+            },
+        );
     }
-    agent["provider"] = provider.into();
+    // Naming the coding agent of the latest turn keeps that turn's speed, as both clients
+    // show it, rather than a default the agent's profile gained since.
+    if !implicit_provider && continues {
+        set_speed(agent, &inherited_speed);
+    }
     if !text(message, "model").is_empty() {
         agent["model"] = message["model"].clone();
         agent["reasoning"] = text(message, "reasoning").into();
@@ -604,7 +895,24 @@ fn select_agent(snapshot: &mut Value, run: Option<&Value>, message: &Value) -> R
     if !text(message, "reasoning").is_empty() {
         agent["reasoning"] = message["reasoning"].clone();
     }
+    if !text(message, "speed").is_empty() {
+        set_speed(agent, text(message, "speed"));
+    }
+    // Another coding agent's run has no speed to keep, even one inherited from its profile.
+    if provider != Provider::Codex.as_str() {
+        set_speed(agent, "");
+    }
+    agent["provider"] = provider.into();
     Ok(())
+}
+
+/// Snapshots without a speed, including every earlier one, run at Standard.
+fn set_speed(agent: &mut Value, speed: &str) {
+    if !speed.is_empty() {
+        agent["speed"] = speed.into();
+    } else if let Some(agent) = agent.as_object_mut() {
+        agent.remove("speed");
+    }
 }
 
 /// Reuses the chat's run for the next turn, handing the transcript to a fresh
@@ -647,7 +955,9 @@ fn continue_run(
             run_id,
             &json!({
                 "sessionId": null,
-                "resumeAvailable": false
+                "resumeAvailable": false,
+                // The fresh session starts with an empty context.
+                "contextUsage": null,
             }),
         )?;
         let status = format!(
@@ -655,26 +965,42 @@ fn continue_run(
             provider.label()
         );
         db.event(run_id, "status", &status, None)?;
+    } else if provider == Provider::Codex && resumes_mission_thread(run) {
+        // Codex keeps the developer instructions a thread started with, so the
+        // mission's thread would stay unattended. Every turn repeats the rule
+        // because compaction can drop earlier user messages.
+        execution.text = format!(
+            "{CONTINUED_MISSION} {}\n\n{}",
+            crate::run_output::INTERACTIVE,
+            execution.text
+        );
     }
     checkpoint["completed"] = false.into();
     checkpoint["remainingMs"] = crate::run_limits::budget_ms(agent).into();
     remove_keys(&mut checkpoint, &["lastMessage", "settled"]);
     db.set(&key, &checkpoint, None)?;
-    db.patch_run(
-        run_id,
-        &json!({
-            "snapshot": snapshot["snapshot"],
-            "status": RunStatus::Queued,
-            "summary": "",
-            "error": null,
-            "outcome": null,
-            "finishedAt": null,
-            "cancelRequestedAt": null,
-            "recoveryPending": true,
-            "chatExecution": serde_json::to_value(execution)?,
-        }),
-    )?;
+    let compaction = execution.operation == Some(COMPACT);
+    let mut patch = json!({
+        "snapshot": snapshot["snapshot"],
+        "status": RunStatus::Queued,
+        "error": null,
+        "finishedAt": null,
+        "cancelRequestedAt": null,
+        "recoveryPending": true,
+        "chatExecution": serde_json::to_value(execution)?,
+    });
+    // A compaction answers no message: the last reply and its outcome stay current.
+    if !compaction {
+        patch["summary"] = "".into();
+        patch["outcome"] = Value::Null;
+    }
+    db.patch_run(run_id, &patch)?;
     Ok(())
+}
+
+/// A mission continued in chat that still resumes the thread its mission started.
+fn resumes_mission_thread(run: &Value) -> bool {
+    run["sessionId"].is_string() && run["sessionId"] == run["sourceSessionId"]
 }
 
 fn remove_keys(value: &mut Value, keys: &[&str]) {
@@ -725,7 +1051,9 @@ fn launch_turn(
         recovery: false,
         context: None,
         plan: message["plan"] == true,
-        after_plan: run.as_ref().is_some_and(planning),
+        after_plan: run.as_ref().is_some_and(follows_plan),
+        operation: None,
+        previous: None,
     };
     if let Some(run) = run {
         continue_run(db, &chat, &run, &snapshot, execution)?;
@@ -755,10 +1083,6 @@ fn launch_turn(
     message["status"] = MessageStatus::Sending.into();
     db.put_message(&message)?;
     Ok(())
-}
-
-pub(crate) fn create_in(db: &Db<'_>, input: Value) -> Result<Value> {
-    create_as(db, input, &crate::native::policy::Origin::default())
 }
 
 /// Transfers a completed mission's conversation to a chat without replaying it.
@@ -792,7 +1116,7 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
     crate::native::policy::authorize_run_in(db, run_id, origin)?;
     let run = required(db.run(run_id)?, "Run not found")?;
     let agent = required(
-        db.get("agents", text(&run["snapshot"]["agent"], "id"))?,
+        db.agent_snapshot(text(&run["snapshot"]["agent"], "id"))?,
         "Agent not found",
     )?;
     if !crate::service::covers(&agent, &run["snapshot"]["agent"]) {
@@ -801,6 +1125,7 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
         ));
     }
 
+    let created_at = now();
     let mut chat = json!({
         "id": id(),
         "title": run["snapshot"]["task"]["name"],
@@ -808,11 +1133,12 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
         "projectId": run["projectId"],
         "runId": run_id,
         "paused": false,
-        "createdAt": now(),
-        "updatedAt": now(),
+        "createdAt": created_at,
+        "updatedAt": created_at,
+        "lastActivityAt": created_at,
     });
     crate::native::policy::apply(&mut chat, &run);
-    task_projects(&agent, &chat, &db.list("projects")?)?;
+    task_projects(&agent, &chat, &db.projects()?)?;
 
     let chat = db.put("chats", &chat)?;
     db.patch_run(
@@ -820,6 +1146,7 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
         &json!({
             "sourceTaskId": run["taskId"],
             "sourceTaskPrompt": run["snapshot"]["task"]["prompt"],
+            "sourceSessionId": run["sessionId"],
             "taskId": chat["id"],
             "trigger": "chat",
         }),
@@ -849,7 +1176,7 @@ pub(crate) fn create_as(
     origin: &crate::native::policy::Origin,
 ) -> Result<Value> {
     let input = parse_as::<ChatInput>("chat", input)?;
-    let agent = required(db.get("agents", &input.agent_id)?, "Agent not found")?;
+    let agent = required(db.agent_snapshot(&input.agent_id)?, "Agent not found")?;
     crate::native::policy::authorize_origin(db, &agent, origin)?;
     let created_at = now();
     let mut chat = serde_json::to_value(NewChat {
@@ -861,20 +1188,20 @@ pub(crate) fn create_as(
         paused: false,
         created_at,
         updated_at: created_at,
+        last_activity_at: created_at,
     })?;
     crate::native::policy::authorize_chat(db, &mut chat, origin)?;
-    task_projects(&agent, &chat, &db.list("projects")?)?;
+    task_projects(&agent, &chat, &db.projects()?)?;
     db.put("chats", &chat)
 }
 
-pub(crate) fn send_in(db: &Db<'_>, chat: &str, input: Value) -> Result<Value> {
-    send(
-        db,
-        chat,
-        parse("message", input)?,
-        None,
-        &crate::native::policy::Origin::default(),
-    )
+pub(crate) fn send_as_in(
+    db: &Db<'_>,
+    chat: &str,
+    input: Value,
+    origin: &crate::native::policy::Origin,
+) -> Result<Value> {
+    send(db, chat, parse("message", input)?, None, origin)
 }
 
 pub(crate) fn pause_in(db: &Db<'_>, id: &str, paused: bool) -> Result<Value> {
@@ -989,7 +1316,7 @@ impl Service {
         let values = input
             .map(|mut input| {
                 input["id"] = message.clone().into();
-                parse("message", input)
+                parse_edit(input)
             })
             .transpose()?;
         let result = self
@@ -1003,6 +1330,44 @@ impl Service {
                 edit_as(db, &id, &message, values, &origin)
             })
             .await?;
+        self.worker.notify();
+        Ok(result)
+    }
+
+    /// Compacts the conversation's native context while it is idle.
+    pub(crate) async fn chat_compact_authorized<F>(&self, id: &str, authorize: F) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
+        let origin = crate::native::policy::origin();
+        if origin.known() {
+            crate::native::policy::refresh_chat(self, id).await?;
+        }
+        let id = id.to_owned();
+
+        // A succeeded run's worker may still be saving its checkpoint: the compaction resets
+        // it, so it waits for that worker to release the run, like resuming does.
+        let active = self.worker.active.lock().await;
+        let run_id = self
+            .store
+            .read({
+                let id = id.clone();
+                move |db| Ok(text(&chat(db, &id)?, "runId").to_owned())
+            })
+            .await?;
+        if active.contains_key(&run_id) {
+            return Err(Error::conflict(
+                "Wait for the current turn to finish before compacting.",
+            ));
+        }
+        let result = self
+            .store
+            .transaction(move |db| {
+                authorize(db)?;
+                compact(db, &id, &origin)
+            })
+            .await?;
+        drop(active);
         self.worker.notify();
         Ok(result)
     }
@@ -1034,7 +1399,10 @@ impl Service {
                 None => None,
             };
             if let Some(run) = run.as_ref().filter(|run| run_is_active(run)) {
-                self.publish_steering(&chat, run).await?;
+                // Messages sent while compacting wait for the next turn instead of steering.
+                if !is_compaction(run) {
+                    self.publish_steering(&chat, run).await?;
+                }
                 continue;
             }
             let busy = run.as_ref().is_some_and(|run| {
@@ -1133,20 +1501,21 @@ impl Service {
         } else {
             text(&message, "text")
         };
-        let mut task = parse(
-            "task",
-            json!({
-                "name": chat["title"],
-                "prompt": prompt,
-                "agentId": chat["agentId"],
-                "projectId": chat["projectId"],
-                "worktree": true,
-            }),
-        )?;
+        let mut settings: cairn_contracts::MissionSettings = serde_json::from_value(json!({
+            "name": chat["title"],
+            "prompt": prompt,
+            "agentId": chat["agentId"],
+            "projectId": chat["projectId"],
+            "worktree": true,
+        }))?;
+        settings.validate().map_err(Error::bad)?;
+        let mut task = serde_json::to_value(settings)?;
         task["id"] = chat["id"].clone();
         task["createdAt"] = chat["createdAt"].clone();
         task["nextRun"] = Value::Null;
         let mut snapshot = self.snapshot(task, "chat").await?;
+        snapshot["snapshot"]["delegation"] =
+            crate::delegation::role(&chat, &snapshot["snapshot"]["agent"]);
         select_agent(&mut snapshot, run.as_ref(), &message)?;
         let provider = Provider::of_run(&snapshot)?;
         provider
@@ -1197,7 +1566,7 @@ mod tests {
             .transaction(|db| {
                 for (id, agent) in [
                     ("switched", json!({ "provider": "claude" })),
-                    ("legacy", json!({})),
+                    ("codex", json!({ "provider": "codex" })),
                 ] {
                     let run = json!({
                         "id": id,
@@ -1222,14 +1591,14 @@ mod tests {
                     chats.iter().find(|chat| chat["id"] == id).unwrap()["provider"].clone()
                 };
                 assert_eq!(provider("switched"), "claude");
-                assert_eq!(provider("legacy"), "codex");
+                assert_eq!(provider("codex"), "codex");
                 assert!(provider("new").is_null());
 
                 let runs = db.runs(None, None, 10, 0, false)?;
                 let provider =
                     |id: &str| runs.iter().find(|run| run["id"] == id).unwrap()["provider"].clone();
                 assert_eq!(provider("switched"), "claude");
-                assert_eq!(provider("legacy"), "codex");
+                assert_eq!(provider("codex"), "codex");
                 Ok(())
             })
             .await
@@ -1237,10 +1606,171 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn continuation_consumes_durable_and_legacy_fresh_session_requests_once() {
+    async fn compaction_runs_only_between_turns_and_keeps_the_last_reply() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let origin = crate::native::policy::Origin::default();
+                let outcome = json!({ "status": "completed", "reason": "Done", "messageId": "first" });
+                let run = json!({
+                    "id": "run",
+                    "taskId": "chat",
+                    "createdAt": 0,
+                    "status": "succeeded",
+                    "sessionId": "native-session",
+                    "summary": "Last reply",
+                    "finishedAt": 500,
+                    "outcome": outcome,
+                    "contextUsage": { "contextTokens": 150_000, "contextWindow": 200_000, "cachedTokens": 120_000, "estimated": false },
+                    "chatExecution": { "messageId": "first", "text": "First", "attachments": [], "recovery": false },
+                    "snapshot": { "agent": { "provider": "codex" } },
+                });
+                db.add_run(&run, None)?;
+                db.set("run-checkpoint:run", &json!({ "completed": true, "launched": true }), None)?;
+                db.put(
+                    "chats",
+                    &json!({
+                        "id": "chat",
+                        "runId": "run",
+                        "agentId": "agent",
+                        "nativeProvenanceUnknown": false,
+                    }),
+                )?;
+
+                let idle = view(db, chat(db, "chat")?)?;
+                assert_eq!(idle["contextUsage"]["contextTokens"], 150_000);
+                assert_eq!(idle["compaction"], json!({ "supported": true, "running": false, "available": true, "reason": null }));
+
+                // A queued follow-up is delivered first: compaction never reorders the queue.
+                let queued = json!({ "id": "queued", "chatId": "chat", "text": "Next", "status": "queued", "createdAt": 1 });
+                db.put_message(&queued)?;
+                let error = compact(db, "chat", &origin).unwrap_err();
+                assert!(error.message.contains("queued messages"), "{}", error.message);
+                withdraw(db, "chat", &queued)?;
+
+                let started = compact(db, "chat", &origin)?;
+                assert_eq!(started["compaction"]["running"], true);
+                assert_eq!(started["compaction"]["available"], false);
+                let compacting = db.run("run")?.unwrap();
+                assert_eq!(compacting["status"], "queued");
+                assert_eq!(compacting["recoveryPending"], true);
+                assert_eq!(compacting["chatExecution"]["operation"], COMPACT);
+                assert_eq!(
+                    compacting["chatExecution"]["previous"],
+                    json!({ "summary": "Last reply", "finishedAt": 500, "outcome": outcome })
+                );
+                // The previous reply and its outcome are not replaced by a compaction.
+                assert_eq!(compacting["summary"], "Last reply");
+                assert_eq!(compacting["outcome"], outcome);
+                assert!(db.messages("chat")?.is_empty());
+
+                // A retried request keeps the compaction already started.
+                let retried = compact(db, "chat", &origin)?;
+                assert_eq!(db.run("run")?.unwrap()["chatExecution"], compacting["chatExecution"]);
+                assert_eq!(retried["compaction"]["running"], true);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn compaction_explains_why_it_is_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let cases = [
+                    (
+                        "opencode",
+                        "succeeded",
+                        Some("session"),
+                        "OpenCode does not support",
+                    ),
+                    (
+                        "claude",
+                        "failed",
+                        Some("session"),
+                        "Resume or resolve the last turn",
+                    ),
+                    (
+                        "claude",
+                        "running",
+                        Some("session"),
+                        "Wait for the current turn",
+                    ),
+                    ("codex", "succeeded", None, "no saved native session"),
+                ];
+                for (index, (provider, status, session, reason)) in cases.into_iter().enumerate() {
+                    let id = format!("case-{index}");
+                    db.add_run(
+                        &json!({
+                            "id": id,
+                            "taskId": id,
+                            "createdAt": 0,
+                            "status": status,
+                            "sessionId": session,
+                            "snapshot": { "agent": { "provider": provider } },
+                        }),
+                        None,
+                    )?;
+                    db.put(
+                        "chats",
+                        &json!({
+                            "id": id,
+                            "runId": id,
+                            "agentId": "agent",
+                            "nativeProvenanceUnknown": false,
+                        }),
+                    )?;
+                    let state = view(db, chat(db, &id)?)?["compaction"].clone();
+                    assert_eq!(state["available"], false, "{provider} {status}");
+                    assert_eq!(state["supported"], provider != "opencode");
+                    assert!(text(&state, "reason").contains(reason), "{state}");
+                    assert!(view(db, chat(db, &id)?)?["contextUsage"].is_null());
+                    let error =
+                        compact(db, &id, &crate::native::policy::Origin::default()).unwrap_err();
+                    assert!(error.message.contains(reason), "{}", error.message);
+                }
+
+                db.put(
+                    "chats",
+                    &json!({ "id": "empty", "runId": null, "agentId": "agent" }),
+                )?;
+                let state = view(db, chat(db, "empty")?)?["compaction"].clone();
+                assert_eq!(state["supported"], false);
+                assert!(text(&state, "reason").contains("first message"));
+
+                // A run that names no coding agent still shows its conversation.
+                db.add_run(
+                    &json!({ "id": "unnamed", "taskId": "unnamed", "createdAt": 0, "status": "succeeded" }),
+                    None,
+                )?;
+                db.put(
+                    "chats",
+                    &json!({
+                        "id": "unnamed",
+                        "runId": "unnamed",
+                        "agentId": "agent",
+                        "nativeProvenanceUnknown": false,
+                    }),
+                )?;
+                let state = view(db, chat(db, "unnamed")?)?["compaction"].clone();
+                assert_eq!(state["supported"], false);
+                assert_eq!(state["available"], false);
+                assert!(text(&state, "reason").contains("does not support"));
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn continuation_consumes_chat_and_checkpoint_fresh_session_requests_once() {
         use crate::store::Store;
 
-        for legacy in [false, true] {
+        for checkpoint_restart in [false, true] {
             for (isolated, native) in [(false, false), (true, false), (true, true)] {
                 let root = tempfile::tempdir().unwrap();
                 let store = Store::open(root.path()).unwrap();
@@ -1259,7 +1789,7 @@ mod tests {
                         let chat = json!({
                             "id": "chat",
                             "runId": "run",
-                            "sessionRestartRequested": !legacy,
+                            "sessionRestartRequested": !checkpoint_restart,
                         });
                         db.put("chats", &chat)?;
                         db.set(
@@ -1282,7 +1812,7 @@ mod tests {
                         db.set(
                             "run-checkpoint:run",
                             &json!({
-                                "freshSession": legacy,
+                                "freshSession": checkpoint_restart,
                                 "completed": true,
                                 "launched": true,
                                 "prepared": prepared,
@@ -1334,6 +1864,8 @@ mod tests {
                                 context: None,
                                 plan: false,
                                 after_plan: false,
+                                operation: None,
+                                previous: None,
                             },
                         )?;
                         let next = db.run("run")?.unwrap();
@@ -1344,6 +1876,68 @@ mod tests {
                     .await
                     .unwrap();
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_threads_of_missions_continued_in_chat_receive_the_interactive_rule() {
+        // Provider, thread the mission started, and whether each turn carries the rule.
+        for (provider, source, expected) in [
+            ("codex", Some("thread"), true),
+            ("codex", Some("earlier-thread"), false),
+            ("codex", None, false),
+            ("claude", Some("thread"), false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let store = crate::store::Store::open(root.path()).unwrap();
+            store
+                .transaction(move |db| {
+                    let mut run = json!({
+                        "id": "run",
+                        "taskId": "chat",
+                        "createdAt": 0,
+                        "status": "succeeded",
+                        "trigger": "chat",
+                        "sessionId": "thread",
+                        "snapshot": { "agent": { "provider": provider } },
+                    });
+                    if let Some(source) = source {
+                        run["sourceTaskPrompt"] = "Check the deployment.".into();
+                        run["sourceSessionId"] = source.into();
+                    }
+                    db.add_run(&run, None)?;
+                    db.set("run-checkpoint:run", &json!({ "completed": true }), None)?;
+                    let chat = json!({ "id": "chat", "runId": "run" });
+                    db.put("chats", &chat)?;
+                    // Compaction can drop earlier messages, so every turn repeats it.
+                    for message in ["Now fix it", "Thanks"] {
+                        let execution = ChatExecution {
+                            message_id: message.into(),
+                            text: message.into(),
+                            attachments: json!([]),
+                            recovery: false,
+                            context: None,
+                            plan: false,
+                            after_plan: false,
+                            operation: None,
+                            previous: None,
+                        };
+                        continue_run(db, &chat, &run, &run, execution)?;
+                        let continued = db.run("run")?.unwrap();
+                        let turn = text(&continued["chatExecution"], "text");
+                        assert_eq!(
+                            turn.contains(crate::run_output::INTERACTIVE),
+                            expected,
+                            "{provider} {source:?}"
+                        );
+                        assert_eq!(turn.starts_with(CONTINUED_MISSION), expected);
+                        assert!(turn.ends_with(message));
+                        assert_eq!(continued["sessionId"], "thread");
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
         }
     }
 
@@ -1417,6 +2011,20 @@ mod tests {
         message["provider"] = "codex".into();
         message["model"] = "gpt-6-sol".into();
         validate_steer(&db, &chat, &message).unwrap();
+
+        // The running turn keeps its speed; the run has none, so only an explicit one differs.
+        message["speed"] = "priority".into();
+        assert_eq!(
+            validate_steer(&db, &chat, &message).unwrap_err().status,
+            409
+        );
+        message["speed"] = "".into();
+        validate_steer(&db, &chat, &message).unwrap();
+        // Asking for Standard does not change a turn without a speed: it runs at Standard.
+        message["speed"] = "standard".into();
+        validate_steer(&db, &chat, &message).unwrap();
+        message["speed"] = "".into();
+
         let unknown = json!({
             "id": id(),
             "text": "Continue",
@@ -1425,76 +2033,112 @@ mod tests {
         assert!(parse("message", unknown).is_err());
     }
 
-    #[test]
-    fn plan_requests_cannot_steer_a_working_turn_or_run_on_opencode() {
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch("CREATE TABLE runs(id TEXT,data TEXT); CREATE TABLE records(kind TEXT,id TEXT,data TEXT);")
+    #[tokio::test]
+    async fn plan_requests_cannot_steer_a_working_turn_or_run_on_opencode() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let claude = cairn_contracts::AgentId(uuid::Uuid::new_v4());
+                let settings = serde_json::from_value(json!({
+                    "name": "claude",
+                    "provider": "claude",
+                    "access": cairn_contracts::AccessPolicy::default(),
+                    "exclusiveNodes": [],
+                    "plugins": [],
+                }))?;
+                db.save_agent(&crate::agents::new_agent(settings, Some(claude)))?;
+                for (id, provider, status, chat_execution) in [
+                    (
+                        "working",
+                        "claude",
+                        "running",
+                        json!({ "messageId": "first" }),
+                    ),
+                    (
+                        "planning",
+                        "claude",
+                        "running",
+                        json!({ "messageId": "first", "plan": true }),
+                    ),
+                    ("legacy", "opencode", "succeeded", Value::Null),
+                ] {
+                    db.add_run(
+                        &json!({
+                            "id": id,
+                            "taskId": id,
+                            "createdAt": 0,
+                            "status": status,
+                            "snapshot": { "agent": { "provider": provider } },
+                            "chatExecution": chat_execution,
+                        }),
+                        None,
+                    )?;
+                }
+                let chat = |id: &str| json!({ "id": id, "runId": id, "agentId": claude });
+                let (working, planning_chat, opencode) =
+                    (chat("working"), chat("planning"), chat("legacy"));
+                let mut message = parse(
+                    "message",
+                    json!({ "id": id(), "text": "Plan instead", "mode": "steer", "plan": true }),
+                )?;
+
+                // A plan request never joins a turn that can already change files.
+                assert_eq!(
+                    validate_steer(db, &working, &message).unwrap_err().status,
+                    409
+                );
+                validate_steer(db, &planning_chat, &message)?;
+                // Ordinary steering of a plan turn stays restricted by that turn.
+                message["plan"] = false.into();
+                validate_steer(db, &planning_chat, &message)?;
+
+                message["plan"] = true.into();
+                message["mode"] = "queue".into();
+                validate_steer(db, &working, &message)?;
+                require_plan_support(db, &working, &message)?;
+                // The inherited engine and an explicit choice are both checked.
+                assert_eq!(
+                    require_plan_support(db, &opencode, &message)
+                        .unwrap_err()
+                        .status,
+                    400
+                );
+                message["provider"] = "codex".into();
+                require_plan_support(db, &opencode, &message)?;
+                message["provider"] = "opencode".into();
+                assert!(require_plan_support(db, &working, &message).is_err());
+
+                // A queued message switching to OpenCode decides for the plan request after it.
+                db.put_message(&json!({
+                    "id": "ahead",
+                    "chatId": "working",
+                    "createdAt": 1,
+                    "status": "queued",
+                    "provider": "opencode",
+                }))?;
+                message["provider"] = "".into();
+                assert!(require_plan_support(db, &working, &message).is_err());
+
+                // Older clients omit the field: their messages are never plan turns.
+                let older = parse("message", json!({ "id": id(), "text": "Go" }))?;
+                assert_eq!(older["plan"], false);
+                require_plan_support(db, &opencode, &older)?;
+                Ok(())
+            })
+            .await
             .unwrap();
-        let working = json!({
-            "status": "running",
-            "snapshot": { "agent": { "provider": "claude" } },
-            "chatExecution": { "messageId": "first" },
-        });
-        let planning_run = json!({
-            "status": "running",
-            "snapshot": { "agent": { "provider": "claude" } },
-            "chatExecution": { "messageId": "first", "plan": true },
-        });
-        let legacy = json!({
-            "status": "succeeded",
-            "snapshot": { "agent": { "provider": "opencode" } },
-        });
-        for (id, run) in [
-            ("working", &working),
-            ("planning", &planning_run),
-            ("legacy", &legacy),
-        ] {
-            connection
-                .execute("INSERT INTO runs VALUES(?,?)", [id, &run.to_string()])
-                .unwrap();
-        }
-        let db = Db(&connection);
-        let mut message = parse(
-            "message",
-            json!({ "id": id(), "text": "Plan instead", "mode": "steer", "plan": true }),
-        )
-        .unwrap();
+    }
 
-        // A plan request never joins a turn that can already change files.
-        let working_chat = json!({ "runId": "working" });
-        assert_eq!(
-            validate_steer(&db, &working_chat, &message)
-                .unwrap_err()
-                .status,
-            409
-        );
-        validate_steer(&db, &json!({ "runId": "planning" }), &message).unwrap();
-        // Ordinary steering of a plan turn stays restricted by that turn.
-        message["plan"] = false.into();
-        validate_steer(&db, &json!({ "runId": "planning" }), &message).unwrap();
-
-        message["plan"] = true.into();
-        message["mode"] = "queue".into();
-        validate_steer(&db, &working_chat, &message).unwrap();
-        require_plan_support(&db, &working_chat, &message).unwrap();
-        // The inherited engine and an explicit choice are both checked.
-        let opencode_chat = json!({ "runId": "legacy" });
-        assert_eq!(
-            require_plan_support(&db, &opencode_chat, &message)
-                .unwrap_err()
-                .status,
-            400
-        );
-        message["provider"] = "codex".into();
-        require_plan_support(&db, &opencode_chat, &message).unwrap();
-        message["provider"] = "opencode".into();
-        assert!(require_plan_support(&db, &working_chat, &message).is_err());
-
-        // Older clients omit the field: their messages are never plan turns.
-        let older = parse("message", json!({ "id": id(), "text": "Go" })).unwrap();
-        assert_eq!(older["plan"], false);
-        require_plan_support(&db, &opencode_chat, &older).unwrap();
+    #[test]
+    fn an_edit_without_a_plan_request_keeps_the_stored_one() {
+        let kept = parse_edit(json!({ "id": id(), "text": "Revised" })).unwrap();
+        assert!(kept.get("plan").is_none());
+        let mut stored = json!({ "text": "Plan it", "plan": true });
+        crate::store::merge(&mut stored, &kept);
+        assert_eq!(stored["plan"], true);
+        let ordinary = parse_edit(json!({ "id": id(), "text": "Do it", "plan": false })).unwrap();
+        assert_eq!(ordinary["plan"], false);
     }
 
     #[test]
@@ -1512,10 +2156,22 @@ mod tests {
             context: None,
             plan: false,
             after_plan: true,
+            operation: None,
+            previous: None,
         };
         let value = serde_json::to_value(execution).unwrap();
         assert!(value.get("plan").is_none());
         assert_eq!(value["afterPlan"], true);
+
+        // A compaction starts no turn: the turn after it still follows the plan turn.
+        assert!(follows_plan(&run(true)));
+        assert!(!follows_plan(&run(false)));
+        let compaction = |after_plan: bool| json!({ "chatExecution": { "operation": COMPACT, "afterPlan": after_plan } });
+        assert!(follows_plan(&compaction(true)));
+        assert!(!follows_plan(&compaction(false)));
+        assert!(!follows_plan(
+            &json!({ "chatExecution": { "afterPlan": true } })
+        ));
 
         let event = serde_json::to_value(UserMessageEvent {
             message_id: "message",
@@ -1535,5 +2191,148 @@ mod tests {
         })
         .unwrap();
         assert!(ordinary.get("plan").is_none());
+    }
+
+    #[test]
+    fn speed_is_independent_of_the_model_but_belongs_to_codex() {
+        let codex = |speed: Option<&str>| {
+            let mut agent =
+                json!({ "provider": "codex", "model": "gpt-6-sol", "reasoning": "high" });
+            if let Some(speed) = speed {
+                agent["speed"] = speed.into();
+            }
+            json!({ "snapshot": { "agent": agent } })
+        };
+        let select = |previous: &Value, message: Value| {
+            let mut snapshot = codex(None);
+            select_agent(&mut snapshot, Some(previous), &message).unwrap();
+            snapshot["snapshot"]["agent"].clone()
+        };
+
+        // A model change resets the reasoning level, not the speed.
+        let previous = codex(Some("priority"));
+        let agent = select(&previous, json!({ "model": "gpt-6-astra" }));
+        assert_eq!(agent["model"], "gpt-6-astra");
+        assert_eq!(agent["reasoning"], "");
+        assert_eq!(agent["speed"], "priority");
+
+        // Reasoning changes keep it too, and an explicit speed replaces it.
+        let agent = select(&previous, json!({ "reasoning": "low" }));
+        assert_eq!(agent["speed"], "priority");
+        let agent = select(&previous, json!({ "speed": "standard" }));
+        assert_eq!(agent["speed"], "standard");
+        assert_eq!(agent["reasoning"], "high");
+
+        // Earlier runs and messages without a speed keep none.
+        let agent = select(&codex(None), json!({ "text": "Continue" }));
+        assert!(agent.get("speed").is_none());
+
+        // Naming the conversation's coding agent keeps its latest turn's speed, even after the
+        // agent's profile gained another default.
+        let mut faster_profile = codex(Some("priority"));
+        let continued = json!({ "provider": "codex", "model": "gpt-6-sol", "reasoning": "high" });
+        select_agent(&mut faster_profile, Some(&codex(None)), &continued).unwrap();
+        assert!(faster_profile["snapshot"]["agent"].get("speed").is_none());
+        let mut standard_profile = codex(None);
+        select_agent(&mut standard_profile, Some(&previous), &continued).unwrap();
+        assert_eq!(standard_profile["snapshot"]["agent"]["speed"], "priority");
+
+        // Another coding agent has no speed, and returning to Codex starts from its default.
+        let agent = select(&previous, json!({ "provider": "claude" }));
+        assert!(agent.get("speed").is_none());
+        let claude = json!({ "snapshot": { "agent": { "provider": "claude", "model": "opus", "speed": "priority" } } });
+        let agent = select(&claude, json!({ "text": "Continue" }));
+        assert!(agent.get("speed").is_none());
+        let agent = select(&claude, json!({ "provider": "codex" }));
+        assert!(agent.get("speed").is_none());
+        let agent = select(&claude, json!({ "provider": "codex", "speed": "priority" }));
+        assert_eq!(agent["speed"], "priority");
+    }
+
+    #[tokio::test]
+    async fn a_speed_is_refused_for_turns_another_coding_agent_runs() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let codex = cairn_contracts::AgentId(uuid::Uuid::new_v4());
+                let claude = cairn_contracts::AgentId(uuid::Uuid::new_v4());
+                for (agent_id, provider) in [(codex, "codex"), (claude, "claude")] {
+                    let settings = serde_json::from_value(json!({
+                        "name": provider,
+                        "provider": provider,
+                        "access": cairn_contracts::AccessPolicy::default(),
+                        "exclusiveNodes": [],
+                        "plugins": [],
+                    }))?;
+                    db.save_agent(&crate::agents::new_agent(settings, Some(agent_id)))?;
+                }
+                let run = json!({
+                    "id": "claude-run",
+                    "taskId": "switched",
+                    "createdAt": 0,
+                    "status": "succeeded",
+                    "snapshot": { "agent": { "provider": "claude" } },
+                });
+                db.add_run(&run, None)?;
+                let new_codex = json!({ "id": "new-codex", "runId": null, "agentId": codex });
+                let new_claude = json!({ "id": "new-claude", "runId": null, "agentId": claude });
+                let switched = json!({ "id": "switched", "runId": "claude-run", "agentId": codex });
+                let fast = |provider: &str| json!({ "id": id(), "provider": provider, "speed": "priority" });
+                let refused = |chat: &Value, message: &Value| {
+                    validate_speed(db, chat, message).unwrap_err().status == 400
+                };
+
+                // Without a provider, the message runs with the conversation's coding agent.
+                validate_speed(db, &new_codex, &fast(""))?;
+                assert!(refused(&new_claude, &fast("")));
+                assert!(refused(&switched, &fast("")));
+                validate_speed(db, &switched, &fast("codex"))?;
+                assert!(refused(&new_codex, &fast("opencode")));
+                validate_speed(db, &new_claude, &json!({ "id": id(), "speed": "" }))?;
+                // Codex's name for Standard is not a speed choice.
+                assert!(refused(&new_codex, &json!({ "id": id(), "speed": "default" })));
+
+                // A queued message switching coding agent decides for the ones after it.
+                let mut ahead = json!({
+                    "id": "ahead",
+                    "chatId": "switched",
+                    "createdAt": 1,
+                    "status": "queued",
+                    "provider": "codex",
+                });
+                db.put_message(&ahead)?;
+                validate_speed(db, &switched, &fast(""))?;
+                ahead["status"] = "delivered".into();
+                db.put_message(&ahead)?;
+                assert!(refused(&switched, &fast("")));
+
+                // A steering message joins the running turn, whatever the queue switches to next.
+                let running = json!({
+                    "id": "codex-run",
+                    "taskId": "steering",
+                    "createdAt": 0,
+                    "status": "running",
+                    "snapshot": { "agent": { "provider": "codex", "speed": "priority" } },
+                });
+                db.add_run(&running, None)?;
+                let steering = json!({ "id": "steering", "runId": "codex-run", "agentId": codex });
+                let switching = json!({
+                    "id": "switching",
+                    "chatId": "steering",
+                    "createdAt": 1,
+                    "status": "queued",
+                    "provider": "claude",
+                });
+                db.put_message(&switching)?;
+                let mut steer = fast("");
+                steer["mode"] = "steer".into();
+                validate_speed(db, &steering, &steer)?;
+                steer["mode"] = "queue".into();
+                assert!(refused(&steering, &steer));
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 }

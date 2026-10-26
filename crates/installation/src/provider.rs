@@ -14,10 +14,10 @@ pub enum Provider {
 impl Provider {
     pub const ALL: [Provider; 3] = [Provider::Codex, Provider::Claude, Provider::Opencode];
 
-    /// Agents saved before Claude Code support have no provider and run on Codex.
+    /// Current agent and run records explicitly select their coding engine.
     pub fn of_agent(agent: &Value) -> Result<Self> {
         match agent.get("provider") {
-            None => Ok(Self::Codex),
+            None => Err(Error::bad("Missing coding agent in saved state.")),
             Some(Value::String(value)) => Self::parse(value),
             Some(_) => Err(Error::bad("Invalid coding agent.")),
         }
@@ -48,6 +48,12 @@ impl Provider {
         }
     }
 
+    /// Whether the coding agent can compact its native context on request. OpenCode runs
+    /// with automatic compaction disabled and exposes no compaction control to Cairn.
+    pub fn compacts_context(self) -> bool {
+        matches!(self, Self::Codex | Self::Claude)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Codex => "Codex",
@@ -63,8 +69,8 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn agents_without_a_provider_run_on_codex() {
-        assert_eq!(Provider::of_agent(&json!({})).unwrap(), Provider::Codex);
+    fn records_require_an_explicit_provider() {
+        assert!(Provider::of_agent(&json!({})).is_err());
         assert_eq!(
             Provider::of_agent(&json!({ "provider": "claude" })).unwrap(),
             Provider::Claude

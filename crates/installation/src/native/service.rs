@@ -1,5 +1,5 @@
 //! Native implementation of the existing authenticated node controller protocol.
-use super::{atomic_write, block, disk, systemd, workspace};
+use super::{atomic_write, block, disk, mode, systemd, workspace};
 use crate::{
     error::{Error, Result},
     microvm::{plan::Plan, protocol::Event, wire},
@@ -33,9 +33,62 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_PLAN: u64 = 8_000_000;
 const MAX_LOG: u64 = 64 * 1024 * 1024;
+const DISK_RELEASE_WAIT: Duration = Duration::from_secs(120);
 
-fn native_budget(value: &Value) -> Result<crate::microvm::budget::Budget> {
-    let budget: crate::microvm::budget::Budget = serde_json::from_value(value.clone())?;
+const DISK_WAIT_TIMEOUT: &str =
+    "Native disk ownership was not released before the preparation deadline.";
+
+fn disk_admission_deadline(plan: &Value, wait: Duration) -> (tokio::time::Instant, bool) {
+    let execution_wait = plan["expires"].as_i64().map(|until| {
+        let remaining = until.saturating_sub(crate::config::now()).max(0) as u64;
+        Duration::from_millis(remaining)
+    });
+    let time_limited = execution_wait.is_some_and(|remaining| remaining <= wait);
+    let remaining = execution_wait.map_or(wait, |remaining| remaining.min(wait));
+    let deadline = tokio::time::Instant::now() + remaining;
+    (deadline, time_limited)
+}
+
+fn supervision_stop_reason(
+    leased: bool,
+    expired: bool,
+    conversation_bytes: u64,
+    conversation_limit: u64,
+    node_bytes: u64,
+    node_limit: u64,
+) -> Option<&'static str> {
+    if !leased {
+        return Some("lease_expired");
+    }
+    if expired {
+        return Some("time_limit");
+    }
+    if conversation_bytes > conversation_limit {
+        return Some("conversation_disk_limit");
+    }
+    if node_bytes > node_limit {
+        return Some("node_disk_limit");
+    }
+    None
+}
+
+pub(crate) fn native_budget(value: &Value) -> Result<crate::microvm::budget::Budget> {
+    if value["nativeModeProtocol"] != 1 {
+        return Err(Error::bad("Unknown native mode storage protocol."));
+    }
+    budget_request(value)
+}
+
+fn budget_request(value: &Value) -> Result<crate::microvm::budget::Budget> {
+    let mut value = value.clone();
+    if let Some(protocol) = value
+        .as_object_mut()
+        .and_then(|value| value.remove("nativeModeProtocol"))
+        && protocol != 1
+    {
+        return Err(Error::bad("Unknown native mode storage protocol."));
+    }
+    let budget: crate::microvm::budget::Budget = serde_json::from_value(value)?;
     budget.limits.validate()?;
     if !(1..=4096).contains(&budget.slots) {
         return Err(Error::bad("Use between 1 and 4096 execution slots."));
@@ -43,8 +96,28 @@ fn native_budget(value: &Value) -> Result<crate::microvm::budget::Budget> {
     Ok(budget)
 }
 
+fn budget_record(budget: &Value) -> Value {
+    let mut record = budget.clone();
+    record["nativeModeProtocol"] = 1.into();
+    record
+}
+
+async fn load_budget(path: &Path) -> Result<crate::microvm::budget::Budget> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => {
+            let value: Value = serde_json::from_slice(&bytes)?;
+            native_budget(&value)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            budget_request(&json!({ "slots": 1, "limits": crate::nodes::placement::defaults() }))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 struct Attempt {
     run: String,
+    expires: Option<i64>,
     stop: CancellationToken,
     started: bool,
     protection: Option<tokio::task::JoinHandle<()>>,
@@ -55,11 +128,13 @@ struct Controller {
     data: PathBuf,
     state: PathBuf,
     active: Arc<Mutex<HashMap<String, Attempt>>>,
+    capacity: Arc<Mutex<super::capacity::Capacity>>,
     mounted: Arc<Mutex<HashMap<String, Arc<block::Handle>>>>,
     leases: Arc<Mutex<HashMap<String, u64>>>,
     admission: Arc<Mutex<()>>,
     base_warmer: Arc<super::bases_warmer::Warmer>,
     budget: Arc<Mutex<Value>>,
+    mode: Arc<Mutex<Value>>,
     changed: Arc<Notify>,
     log_lock: Arc<Mutex<()>>,
     stop: CancellationToken,
@@ -135,6 +210,136 @@ impl Controller {
             .is_some_and(|until| *until > crate::nodes::boot_ms())
     }
 
+    async fn persist_mode(&self, state: &Value) -> Result<()> {
+        let bytes = serde_json::to_vec(state)?;
+        if let Err(error) = atomic_write(&self.state.join(mode::FILE), &bytes).await {
+            // Keep the last confirmed mode and target, but report the actual
+            // failure through health even when the disk cannot record it.
+            let mut observed = self.mode.lock().await;
+            observed["status"] = "failed".into();
+            observed["error"] = error.message.clone().into();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn change_mode(&self, value: Value) -> Result<Value> {
+        let request = mode::request(value)?;
+        let expected = serde_json::to_value(&request)?;
+        let _admission = self.admission.lock().await;
+        let previous = self.mode.lock().await.clone();
+        if mode::matches(&previous, &expected) {
+            return Ok(previous);
+        }
+        let mut pending = previous.clone();
+        pending["status"] = "pending".into();
+        pending["target"] = expected.clone();
+        pending["error"] = Value::Null;
+        // Refuse old leased plans even if persisting intent fails. No sudo
+        // mutation or applied acknowledgement may precede durable intent.
+        *self.mode.lock().await = pending.clone();
+        self.persist_mode(&pending).await?;
+        let result = tokio::time::timeout(Duration::from_secs(270), async {
+            // Signal every preparation/workload first; all process descendants
+            // belong to the managed cgroup. Root can escape it: this is cooperative.
+            let active: Vec<_> = self
+                .active
+                .lock()
+                .await
+                .iter()
+                .map(|(id, attempt)| {
+                    attempt.stop.cancel();
+                    id.clone()
+                })
+                .collect();
+            for id in active {
+                self.stop_admitted(&id).await?;
+            }
+            if !self.active.lock().await.is_empty() {
+                return Err(Error::conflict(
+                    "Native executions have not finished stopping.",
+                ));
+            }
+            mode::sudo(
+                &self.identity,
+                request.mode == crate::nodes::native_mode::Mode::Administrator,
+            )
+            .await
+        })
+        .await;
+        let state = match result {
+            Ok(Ok(())) => {
+                json!({ "mode": request.mode, "generation": request.generation, "status": "applied" })
+            }
+            result => {
+                pending["status"] = "failed".into();
+                pending["error"] = match result {
+                    Ok(Err(error)) => error.message,
+                    _ => "Native privilege transition stop confirmation timed out.".into(),
+                }
+                .into();
+                pending
+            }
+        };
+        self.persist_mode(&state).await?;
+        *self.mode.lock().await = state.clone();
+        Ok(state)
+    }
+
+    /// Admission precedes the attempt's lease watcher. Keep its initial storage
+    /// wait bounded too, and observe stop markers without blocking DELETE.
+    async fn start_storage(&self, id: &str, plan: &Value) -> Result<disk::StorageGuard> {
+        let (deadline, time_limited) = disk_admission_deadline(plan, DISK_RELEASE_WAIT);
+        let waiting = disk::lock(&self.state);
+        tokio::pin!(waiting);
+        let mut acquired = None;
+        loop {
+            let rejected = if self.stop.is_cancelled() {
+                Some((
+                    "controller_shutdown",
+                    Error::unavailable("Native controller is stopping."),
+                ))
+            } else if plan["expires"]
+                .as_i64()
+                .is_some_and(|until| crate::config::now() >= until)
+            {
+                Some((
+                    "time_limit",
+                    Error::timeout(
+                        "Native execution exceeded its time limit before disk admission.",
+                    ),
+                ))
+            } else if self.file(id, "stopped").exists() || self.file(id, "exit").exists() {
+                Some(("cancelled", Error::conflict("Attempt has already stopped.")))
+            } else if !self.leased(id).await {
+                Some((
+                    "lease_expired",
+                    Error::conflict("Native execution lease is missing or expired."),
+                ))
+            } else {
+                None
+            };
+            if let Some((reason, error)) = rejected {
+                drop(acquired);
+                self.record_stop(id, reason, Value::Null).await;
+                return Err(error);
+            }
+            // Recheck the deadline/lease/stop state even after acquiring the lock.
+            if let Some(owner) = acquired {
+                return Ok(owner);
+            }
+            tokio::select! {
+                biased;
+                () = self.stop.cancelled() => {},
+                () = tokio::time::sleep_until(deadline) => {
+                    return Err(self.disk_admission_timeout(id, time_limited).await);
+                }
+                result = &mut waiting => acquired = Some(result?),
+                () = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+        }
+    }
+
     async fn start(&self, id: &str) -> Result<()> {
         let _admission = self.admission.lock().await;
         if self.active.lock().await.contains_key(id) {
@@ -154,6 +359,7 @@ impl Controller {
             return Err(Error::unavailable("The native execution slot is occupied."));
         }
         let plan = self.plan(id).await?;
+        mode::check_plan(&*self.mode.lock().await, &plan)?;
         let resources: crate::nodes::Resources = serde_json::from_value(plan["resources"].clone())?;
         resources.validate()?;
         let budget: crate::nodes::Resources =
@@ -166,7 +372,7 @@ impl Controller {
                 "Native plan exceeds the node owner's configured resource budget.",
             ));
         }
-        let _disk = disk::lock(&self.state).await?;
+        let _disk = self.start_storage(id, &plan).await?;
         self.check_preparation_space(&plan).await?;
         let root = workspace::directory(&self.state, text(&plan, "runId"))?;
         let owner = workspace::execution_ownership(&self.state, text(&plan, "runId")).await?;
@@ -178,34 +384,22 @@ impl Controller {
             id.into(),
             Attempt {
                 run: text(&plan, "runId").into(),
+                expires: plan["expires"].as_i64(),
                 stop: stop.clone(),
                 started: false,
                 protection: None,
             },
         );
+        self.capacity.lock().await.register(
+            id,
+            text(&plan, "runId"),
+            resources.disk_mi_b.saturating_mul(disk::MIB),
+        );
         let (controller, id) = (self.clone(), id.to_owned());
         let (lease_controller, lease_id, lease_stop) =
             (controller.clone(), id.clone(), stop.clone());
         tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    () = lease_stop.cancelled() => {},
-                    () = tokio::time::sleep(Duration::from_millis(100)) => {
-                        if lease_controller.leased(&lease_id).await { continue; }
-                        lease_stop.cancel();
-                    }
-                }
-                let preparation = lease_controller
-                    .active
-                    .lock()
-                    .await
-                    .get(&lease_id)
-                    .is_some_and(|attempt| !attempt.started);
-                if preparation {
-                    let _ = lease_controller.abort_disk(&lease_id).await;
-                }
-                break;
-            }
+            lease_controller.watch_lease(&lease_id, lease_stop).await;
         });
         tokio::spawn(async move {
             let result = controller.execute(&id, &plan, stop.clone()).await;
@@ -237,7 +431,7 @@ impl Controller {
                     crate::runner::CONTROLLER_FAILED
                 }
             };
-            // Deliver the legacy result path expected by the node connector.
+            // Deliver the result path consumed by the node connector.
             let result = root.join("data/output/result.md");
             if let Ok(file) = crate::artifacts::file::open_export(&result, &root.join("data")) {
                 let file = tokio::fs::File::from_std(file);
@@ -253,9 +447,7 @@ impl Controller {
                     let _ = atomic_write(&target, &bytes).await;
                 }
             }
-            let native_block =
-                block::exists(&controller.state, text(&plan, "runId")).unwrap_or(true);
-            if native_block {
+            {
                 let mounted = {
                     controller
                         .mounted
@@ -289,31 +481,42 @@ impl Controller {
                     tracing::error!(attempt = id, %error, "Native completed generation must be recovered before ownership release");
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
-            } else {
-                let budget = plan["resources"]["diskMiB"]
-                    .as_u64()
-                    .unwrap_or(32768)
-                    .saturating_mul(1_048_576);
-                let captured = controller
-                    .capture_checkpoint(text(&plan, "runId"), &id, budget)
-                    .await;
-                if let Err(error) = captured {
-                    tracing::error!(attempt = id, message = %error.message, "Native checkpoint failed; local work retained");
-                    let _ = atomic_write(&root.join("checkpoint-error"), error.message.as_bytes())
-                        .await;
-                } else {
-                    let _ = tokio::fs::remove_file(root.join("checkpoint-error")).await;
-                }
             }
             // Release physical ownership before reporting completion to a replacement.
             drop(owner);
             let _ = atomic_write(&controller.file(&id, "exit"), code.to_string().as_bytes()).await;
             let _ = tokio::fs::remove_file(controller.file(&id, "active")).await;
             controller.active.lock().await.remove(&id);
+            controller.capacity.lock().await.attempts.remove(&id);
             controller.leases.lock().await.remove(&id);
             controller.changed.notify_waiters();
         });
         Ok(())
+    }
+
+    async fn watch_lease(&self, id: &str, stop: CancellationToken) {
+        loop {
+            tokio::select! {
+                () = stop.cancelled() => {},
+                () = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if self.leased(id).await {
+                        continue;
+                    }
+                    self.record_stop(id, "lease_expired", Value::Null).await;
+                    stop.cancel();
+                }
+            }
+            let preparation = self
+                .active
+                .lock()
+                .await
+                .get(id)
+                .is_some_and(|attempt| !attempt.started);
+            if preparation {
+                let _ = self.abort_disk(id).await;
+            }
+            break;
+        }
     }
 
     async fn append(&self, id: &str, stderr: bool, bytes: &[u8]) -> Result<()> {
@@ -354,9 +557,157 @@ impl Controller {
         }
     }
 
+    /// Busy journal/physical leases can outlive the previous systemd workload
+    /// while a capture finishes. Wait within this attempt rather than consuming
+    /// controller recovery attempts. Never hold the node-wide storage lock while
+    /// sleeping: the previous owner may need it to complete shutdown.
+    async fn mount_after_release(
+        &self,
+        id: &str,
+        plan: &Value,
+        stop: &CancellationToken,
+        wait: Duration,
+    ) -> Result<(disk::StorageGuard, bool, block::Mounted)> {
+        let (deadline, time_limited) = disk_admission_deadline(plan, wait);
+        let mut reported = false;
+        loop {
+            if stop.is_cancelled() || !self.leased(id).await {
+                return Err(self.preparation_stopped(id, plan).await);
+            }
+            if plan["expires"]
+                .as_i64()
+                .is_some_and(|until| crate::config::now() >= until)
+            {
+                return Err(self.disk_admission_timeout(id, true).await);
+            }
+            // Cancel only lock acquisition, never an in-flight mount or clone.
+            let owner = tokio::select! {
+                biased;
+                () = stop.cancelled() => {
+                    return Err(self.preparation_stopped(id, plan).await);
+                }
+                result = tokio::time::timeout_at(deadline, disk::lock(&self.state)) => {
+                    match result {
+                        Ok(result) => result?,
+                        Err(_) => return Err(self.disk_admission_timeout(id, time_limited).await),
+                    }
+                }
+            };
+            if stop.is_cancelled() || !self.leased(id).await {
+                drop(owner);
+                return Err(self.preparation_stopped(id, plan).await);
+            }
+            // The global lock may have become available as the deadline elapsed.
+            if plan["expires"]
+                .as_i64()
+                .is_some_and(|until| crate::config::now() >= until)
+            {
+                drop(owner);
+                return Err(self.disk_admission_timeout(id, true).await);
+            }
+            let result: Result<(bool, block::Mounted)> = async {
+                self.check_preparation_space(plan).await?;
+                let from_base = self.bases().initialize(plan, stop).await?;
+                let mounted = block::mount(&self.state, text(plan, "runId"), plan, stop).await?;
+                Ok((from_base, mounted))
+            }
+            .await;
+            match result {
+                Ok((from_base, mounted)) => return Ok((owner, from_base, mounted)),
+                Err(error) if error.is_conflict() && error.message == block::DISK_BUSY => {
+                    drop(owner);
+                    if !reported {
+                        tracing::info!(
+                            attempt = id,
+                            run = text(plan, "runId"),
+                            "Waiting for previous native disk ownership to be released"
+                        );
+                        let _ = self
+                            .append(
+                                id,
+                                true,
+                                b"Waiting for previous native disk ownership to be released.\n",
+                            )
+                            .await;
+                        reported = true;
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+            tokio::select! {
+                biased;
+                () = stop.cancelled() => {
+                    return Err(self.preparation_stopped(id, plan).await);
+                }
+                () = tokio::time::sleep_until(deadline) => {
+                    return Err(self.disk_admission_timeout(id, time_limited).await);
+                }
+                () = tokio::time::sleep(Duration::from_millis(250)) => {}
+            }
+        }
+    }
+
+    async fn cancellation_reason(&self, id: &str, plan: &Value) -> &'static str {
+        if self.stop.is_cancelled() {
+            return "controller_shutdown";
+        }
+        if plan["expires"]
+            .as_i64()
+            .is_some_and(|until| crate::config::now() >= until)
+        {
+            return "time_limit";
+        }
+        if !self.leased(id).await {
+            return "lease_expired";
+        }
+        "cancelled"
+    }
+
+    async fn preparation_stopped(&self, id: &str, plan: &Value) -> Error {
+        let reason = self.cancellation_reason(id, plan).await;
+        self.record_stop(id, reason, Value::Null).await;
+        Error::unavailable("Native disk preparation stopped.")
+    }
+
+    async fn disk_admission_timeout(&self, id: &str, time_limit: bool) -> Error {
+        if time_limit {
+            self.record_stop(id, "time_limit", Value::Null).await;
+            return Error::timeout(
+                "Native execution exceeded its time limit before disk admission.",
+            );
+        }
+        self.record_stop(id, "disk_ownership_timeout", Value::Null)
+            .await;
+        Error::unavailable(DISK_WAIT_TIMEOUT)
+    }
+
+    /// Diagnostic persistence must never prevent workload fencing.
+    async fn record_stop(&self, id: &str, reason: &str, usage: Value) {
+        let details = json!({
+            "reason": reason,
+            "at": crate::config::now(),
+            "usage": usage,
+        });
+        tracing::warn!(attempt = id, diagnostics = %details, "Native controller stopping workload");
+        let recorded = tokio::time::timeout(Duration::from_secs(1), async {
+            if let Err(error) =
+                super::record_stop_once(&self.file(id, "stop-reason.json"), &details).await
+            {
+                tracing::warn!(attempt = id, %error, "Could not persist native stop reason");
+            }
+            let message = format!("Native controller stopping workload: {details}\n");
+            let _ = self.append(id, true, message.as_bytes()).await;
+        })
+        .await;
+        if recorded.is_err() {
+            tracing::warn!(
+                attempt = id,
+                "Native stop diagnostics timed out; proceeding with workload fencing"
+            );
+        }
+    }
+
     async fn execute(&self, id: &str, plan: &Value, stop: CancellationToken) -> Result<i32> {
-        let disk_owner = disk::lock(&self.state).await?;
-        self.check_preparation_space(plan).await?;
         let root = workspace::directory(&self.state, text(plan, "runId"))?;
         atomic_write(&root.join("attempt"), id.as_bytes()).await?;
         atomic_write(
@@ -369,14 +720,20 @@ impl Controller {
             .as_str()
             .ok_or_else(|| Error::bad("Missing pinned native runtime."))?;
         super::systemd::tools(runtime)?;
-        let from_base = self.bases().initialize(plan, &stop).await?;
-        let mounted = block::mount(&self.state, text(plan, "runId"), plan, &stop).await?;
+        let (disk_owner, from_base, mounted) = self
+            .mount_after_release(id, plan, &stop, DISK_RELEASE_WAIT)
+            .await?;
         self.mounted.lock().await.insert(
             text(plan, "runId").to_owned(),
             Arc::new(block::Handle::new(mounted)),
         );
         if stop.is_cancelled() {
             return Ok(143);
+        }
+        let administrator = plan["nativeMode"]["mode"] == "administrator";
+        let mut identity = super::identity::provision(&self.state, text(plan, "runId")).await?;
+        if administrator {
+            identity.host_engine = Some((self.identity.uid, self.identity.gid));
         }
         block::initialize(
             &self.state,
@@ -400,30 +757,35 @@ impl Controller {
             tokio::fs::remove_dir_all(&temporary).await?;
         }
         private_dir(&temporary).await?;
-        workspace::own_tree(&temporary, self.identity.uid, self.identity.gid).await?;
+        workspace::own_tree(&temporary, identity.uid(), identity.gid()).await?;
         let stage = self.data.join("runs").join(text(plan, "runId"));
-        let bindings = super::home::prepare(
-            &stage.join("home"),
-            &data.join("home"),
-            self.identity.uid,
-            self.identity.gid,
+        let bindings =
+            super::home::prepare_for_identity(&stage.join("home"), &data, &identity).await?;
+        // Keep the existing prepared-base admission marker. The authoritative
+        // ownership mapping now travels inside the published filesystem.
+        atomic_write(
+            &root.join("file-owner.json"),
+            &serde_json::to_vec(&identity)?,
         )
         .await?;
-        workspace::own_tree(&stage.join("home"), self.identity.uid, self.identity.gid).await?;
-        let ownership = json!({ "uid": self.identity.uid, "gid": self.identity.gid });
-        let saved_owner: Value = match tokio::fs::read(root.join("file-owner.json")).await {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Null,
-            Err(error) => return Err(error.into()),
-        };
-        if saved_owner != ownership {
-            workspace::own_tree(&data, self.identity.uid, self.identity.gid).await?;
-            block::sync(&data).await?;
-            atomic_write(
-                &root.join("file-owner.json"),
-                &serde_json::to_vec(&ownership)?,
-            )
-            .await?;
+        let docker_data = data.join("docker");
+        // Only namespace root may access raw daemon metadata. Engine access is
+        // exclusively through the mandatory authorization plugin.
+        tokio::fs::create_dir_all(&docker_data).await?;
+        std::os::unix::fs::lchown(
+            &docker_data,
+            Some(identity.root_uid),
+            Some(identity.root_gid),
+        )?;
+        tokio::fs::set_permissions(&docker_data, std::fs::Permissions::from_mode(0o700)).await?;
+        let runtime = root.join("docker-runtime");
+        if runtime.exists() {
+            tokio::fs::remove_dir_all(&runtime).await?;
+        }
+        for name in ["runtime", "rootlesskit", "plugins"] {
+            let path = runtime.join(name);
+            private_dir(&path).await?;
+            std::os::unix::fs::lchown(&path, Some(identity.root_uid), Some(identity.root_gid))?;
         }
         if disk::used(&self.data, &self.state).await? > self.disk_limit().await? {
             return Err(Error::conflict(
@@ -440,46 +802,83 @@ impl Controller {
             "sys",
             "run",
             "tmp",
+            "var",
             "var/tmp",
+            "home",
             "home/node",
         ] {
-            tokio::fs::create_dir_all(container.join(dir)).await?;
+            let path = container.join(dir);
+            tokio::fs::create_dir_all(&path).await?;
+            tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).await?;
         }
         let mut plan = plan.clone();
+        plan["guestDataRoot"] = guest_data(&plan, &self.data)
+            .to_string_lossy()
+            .into_owned()
+            .into();
+        if !administrator {
+            plan["nativeIdentity"] = serde_json::to_value(&identity)?;
+        }
         plan["nativeHomeBindings"] = serde_json::to_value(bindings)?;
         if plan["chat"]["provider"] == "claude" {
             plan["chat"]["claudeCredentialsDirectory"] = super::home::CLAUDE_AUTH_DIRECTORY.into();
         }
         let mcp_stop = stop.child_token();
         let _mcp_guard = mcp_stop.clone().drop_guard();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let origin = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
-        for field in ["codexConfig", "claudeMcps", "opencodeConfig", "args"] {
-            if let Some(value) = plan["chat"].get_mut(field) {
+        if administrator {
+            // Preserve administrator's host execution and existing local relay;
+            // it does not enter the protected Docker namespace or receive its socket.
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let origin = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
+            for field in ["codexConfig", "claudeMcps", "opencodeConfig", "args"] {
+                if let Some(value) = plan["chat"].get_mut(field) {
+                    replace_origin(value, &origin);
+                }
+            }
+            if let Some(value) = plan.get_mut("args") {
                 replace_origin(value, &origin);
             }
+            plan["mcpEnv"][crate::plugins::cli::ORIGIN_ENV] = origin.into();
+            tokio::spawn(relay(
+                listener,
+                stage.join("home").join(crate::microvm::mcp::SOCKET),
+                mcp_stop,
+            ));
+        } else {
+            plan["mcpEnv"][crate::plugins::cli::ORIGIN_ENV] = crate::microvm::mcp::ORIGIN.into();
         }
-        if let Some(value) = plan.get_mut("args") {
-            replace_origin(value, &origin);
-        }
-        // `cairn plugin` reaches the same channel as the agent's MCP servers.
-        plan["mcpEnv"][crate::plugins::cli::ORIGIN_ENV] = origin.clone().into();
-        let channel = stage.join("home").join(crate::microvm::mcp::SOCKET);
-        tokio::spawn(relay(listener, channel, mcp_stop));
         let auth = stage
             .join("home")
             .join(crate::nodes::workspace::provider_home(&plan))
             .join("cairn-auth.sock");
+        let channel = stage.join("home").join(crate::microvm::mcp::SOCKET);
         if plan["chat"].is_object() {
             let _ = tokio::time::timeout(Duration::from_secs(3), async {
-                while !auth.exists() {
+                while !auth.exists() || !channel.exists() {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })
             .await;
         }
+        if !administrator && channel.exists() {
+            use std::os::unix::fs::FileTypeExt;
+            if !tokio::fs::symlink_metadata(&channel)
+                .await?
+                .file_type()
+                .is_socket()
+            {
+                return Err(Error::unavailable(
+                    "Native conversation MCP channel is not a socket.",
+                ));
+            }
+            std::os::unix::fs::lchown(&channel, Some(identity.root_uid), Some(identity.root_gid))?;
+        } else if !administrator && plan["chat"].is_object() {
+            return Err(Error::unavailable(
+                "Native conversation MCP channel did not become available.",
+            ));
+        }
         let auth = if auth.exists() {
-            std::os::unix::fs::lchown(&auth, Some(self.identity.uid), Some(self.identity.gid))?;
+            std::os::unix::fs::lchown(&auth, Some(identity.uid()), Some(identity.gid()))?;
             Some(auth)
         } else {
             None
@@ -505,6 +904,9 @@ impl Controller {
             workspace: &data.join("workspaces"),
             output: &data.join("output"),
             identity: &self.identity,
+            conversation: (!administrator).then_some(&identity),
+            docker_data: (!administrator).then_some(docker_data.as_path()),
+            docker_runtime: (!administrator).then_some(runtime.as_path()),
             temporary: &temporary,
             auth: auth.as_deref(),
         };
@@ -527,12 +929,16 @@ impl Controller {
             .cloned()
             .ok_or_else(|| Error::internal("Native disk ownership missing."))?;
         let (protection_id, protection_stop) = (id.to_owned(), stop.clone());
+        let protection_controller = self.clone();
         let protection = tokio::spawn(async move {
             if let Err(error) =
                 super::protection::monitor(mounted.volume.clone(), &protection_id, storage_stop)
                     .await
             {
                 tracing::error!(attempt = protection_id, %error, "Native storage CPU protection failed; fencing workload");
+                protection_controller
+                    .record_stop(&protection_id, "storage_protection_failed", Value::Null)
+                    .await;
                 protection_stop.cancel();
                 if systemd::stop(&protection_id).await.is_err() {
                     let _ = mounted.abort_io().await;
@@ -560,15 +966,40 @@ impl Controller {
             tokio::select! {
                 result = child.wait() => break result?.code().unwrap_or(143),
                 () = stop.cancelled() => {
+                    let reason = self.cancellation_reason(id, &plan).await;
+                    self.record_stop(id, reason, Value::Null).await;
                     systemd::stop(id).await?;
                     break 143;
                 }
                 _ = timer.tick() => {
-                    let expired = plan["expires"].as_i64().is_some_and(|until| crate::config::now() >= until);
-                    let conversation_bytes = block::used_bytes(&data)?.saturating_add(disk::bytes_if_present(&temporary).await?);
-                    let oversized = conversation_bytes > self.disk_budget(&plan)
-                        || disk::used(&self.data, &self.state).await? > self.disk_limit().await?;
-                    if !self.leased(id).await || expired || oversized {
+                    let leased = self.leased(id).await;
+                    let expired = plan["expires"]
+                        .as_i64()
+                        .is_some_and(|until| crate::config::now() >= until);
+                    let workspace_bytes = block::used_bytes(&data)?;
+                    let temporary_bytes = disk::bytes_if_present(&temporary).await?;
+                    let conversation_bytes = workspace_bytes.saturating_add(temporary_bytes);
+                    let conversation_limit = self.monitor_capacity(id, &plan, workspace_bytes, temporary_bytes).await?;
+                    let node_bytes = disk::used(&self.data, &self.state).await?;
+                    let node_limit = self.disk_limit().await?;
+                    let reason = supervision_stop_reason(
+                        leased,
+                        expired,
+                        conversation_bytes,
+                        conversation_limit,
+                        node_bytes,
+                        node_limit,
+                    );
+                    if let Some(reason) = reason {
+                        let usage = json!({
+                            "workspaceBytes": workspace_bytes,
+                            "temporaryBytes": temporary_bytes,
+                            "conversationBytes": conversation_bytes,
+                            "conversationLimitBytes": conversation_limit,
+                            "nodeBytes": node_bytes,
+                            "nodeLimitBytes": node_limit,
+                        });
+                        self.record_stop(id, reason, usage).await;
                         systemd::stop(id).await?;
                         break 143;
                     }
@@ -594,6 +1025,63 @@ impl Controller {
         let _ = tokio::fs::remove_file(plan_file).await;
         let _ = tokio::fs::remove_dir_all(container).await;
         Ok(code)
+    }
+
+    async fn monitor_capacity(
+        &self,
+        id: &str,
+        plan: &Value,
+        workspace: u64,
+        temporary: u64,
+    ) -> Result<u64> {
+        let run = text(plan, "runId");
+        let mounted = self.mounted.lock().await.get(run).cloned();
+        let filesystem = mounted.as_ref().map_or(self.disk_budget(plan), |handle| {
+            handle.filesystem.load(std::sync::atomic::Ordering::Acquire)
+        });
+        let (allowance, notice, negotiated) = {
+            let mut capacity = self.capacity.lock().await;
+            let (allowance, notice) = capacity
+                .observe(id, workspace, temporary, filesystem)
+                .unwrap_or((self.disk_budget(plan), None));
+            (allowance, notice, capacity.negotiated)
+        };
+        if let Some(notice) = notice {
+            let directory = self.data.join("runs").join(run).join("chat-input");
+            crate::nodes::workspace::publish_native_notice(
+                &directory,
+                &serde_json::to_vec(&notice)?,
+            )
+            .await?;
+            let event = json!({
+                "type": "runtime.disk_notice", "text": notice["text"],
+                "capacity": { "capturedAt": crate::config::now(), "workspaceBytes": workspace, "temporaryBytes": temporary,
+                    "allowanceBytes": allowance, "filesystemBytes": filesystem },
+            });
+            self.append(id, false, format!("{event}\n").as_bytes())
+                .await?;
+        }
+        if negotiated
+            && allowance > filesystem
+            && let Some(mounted) = mounted
+        {
+            let attempt = id.to_owned();
+            // The lifecycle lock pins the mount through the metadata commit and
+            // resize, while supervision remains responsive to lease/cancellation.
+            tokio::spawn(async move {
+                let Ok(mut mount) = mounted.mount.try_lock() else {
+                    return;
+                };
+                if let Err(error) = mount.grow(allowance).await {
+                    tracing::warn!(
+                        attempt,
+                        status = error.status,
+                        "Native disk growth deferred; data retained"
+                    );
+                }
+            });
+        }
+        Ok(allowance)
     }
 
     fn disk_budget(&self, plan: &Value) -> u64 {
@@ -694,11 +1182,6 @@ impl Controller {
         Ok(())
     }
 
-    async fn capture_checkpoint(&self, run: &str, attempt: &str, budget: u64) -> Result<Value> {
-        let _disk = disk::lock(&self.state).await?;
-        workspace::capture(&self.state, run, attempt, budget, self.disk_growth().await?).await
-    }
-
     async fn stopped_snapshot(&self, run: &str, force: bool) -> Result<Value> {
         let _disk = disk::lock(&self.state).await?;
         if block::exists(&self.state, run)? {
@@ -727,39 +1210,7 @@ impl Controller {
             )
             .await;
         }
-        if self
-            .active
-            .lock()
-            .await
-            .values()
-            .any(|attempt| attempt.run == run)
-        {
-            return Err(Error::conflict(
-                "Waiting for the stopped native checkpoint to finish.",
-            ));
-        }
-        let root = workspace::directory(&self.state, run)?;
-        let _owner =
-            crate::file_lock::exclusive(&root.join("owner.lock"), "Native workspace is active.")?;
-        let attempt = tokio::fs::read_to_string(root.join("attempt")).await?;
-        if !force
-            && let Ok(snapshot) = workspace::completed(&self.state, run).await
-            && snapshot["manifest"]["attempt"] == attempt
-        {
-            return Ok(snapshot);
-        }
-        let limit = match tokio::fs::read(root.join("resources.json")).await {
-            Ok(bytes) => {
-                let resources: crate::nodes::Resources = serde_json::from_slice(&bytes)?;
-                resources
-                    .disk_mi_b
-                    .saturating_mul(disk::MIB)
-                    .min(self.disk_limit().await?)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => self.disk_limit().await?,
-            Err(error) => return Err(error.into()),
-        };
-        workspace::capture(&self.state, run, &attempt, limit, self.disk_growth().await?).await
+        Err(Error::conflict("Conversation has no native journal."))
     }
 
     async fn abort_disk(&self, id: &str) -> Result<()> {
@@ -780,10 +1231,33 @@ impl Controller {
 
     async fn stop_attempt(&self, id: &str) -> Result<()> {
         uuid(id)?;
-        let _admission = self.admission.lock().await;
+        // Publish cancellation before waiting for an admission that may itself
+        // be waiting for storage. Its waiter observes this durable marker.
         atomic_write(&self.file(id, "stopped"), b"1").await?;
-        if let Some(attempt) = self.active.lock().await.get(id) {
+        let _admission = self.admission.lock().await;
+        self.stop_admitted(id).await
+    }
+
+    async fn stop_admitted(&self, id: &str) -> Result<()> {
+        if self.stop.is_cancelled() {
+            self.record_stop(id, "controller_shutdown", Value::Null)
+                .await;
+        }
+        atomic_write(&self.file(id, "stopped"), b"1").await?;
+        let requested = self.active.lock().await.get(id).and_then(|attempt| {
+            if attempt.stop.is_cancelled() {
+                return None;
+            }
             attempt.stop.cancel();
+            Some(attempt.expires)
+        });
+        if let Some(expires) = requested {
+            let reason = if expires.is_some_and(|until| crate::config::now() >= until) {
+                "time_limit"
+            } else {
+                "cancelled"
+            };
+            self.record_stop(id, reason, Value::Null).await;
         }
         let preparing = self
             .active
@@ -858,6 +1332,36 @@ fn guest_data(plan: &Value, data: &Path) -> PathBuf {
         .map_or_else(|| data.to_owned(), PathBuf::from)
 }
 
+fn replace_origin(value: &mut Value, origin: &str) {
+    match value {
+        Value::String(text) => *text = text.replace(crate::microvm::mcp::ORIGIN, origin),
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| replace_origin(value, origin)),
+        Value::Object(values) => values
+            .values_mut()
+            .for_each(|value| replace_origin(value, origin)),
+        _ => {}
+    }
+}
+
+async fn relay(listener: tokio::net::TcpListener, channel: PathBuf, stop: CancellationToken) {
+    let _ = crate::microvm::listener::serve(
+        || listener.accept(),
+        |(mut client, _)| {
+            let channel = channel.clone();
+            async move {
+                if let Ok(mut server) = tokio::net::UnixStream::connect(channel).await {
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                }
+            }
+        },
+        32,
+        stop,
+    )
+    .await;
+}
+
 #[cfg(test)]
 async fn install_home(source: &Path, target: &Path) -> Result<()> {
     let agents = target.join(".agents");
@@ -915,36 +1419,6 @@ async fn install_home(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-fn replace_origin(value: &mut Value, origin: &str) {
-    match value {
-        Value::String(text) => *text = text.replace(crate::microvm::mcp::ORIGIN, origin),
-        Value::Array(values) => values
-            .iter_mut()
-            .for_each(|value| replace_origin(value, origin)),
-        Value::Object(values) => values
-            .values_mut()
-            .for_each(|value| replace_origin(value, origin)),
-        _ => {}
-    }
-}
-
-async fn relay(listener: tokio::net::TcpListener, channel: PathBuf, stop: CancellationToken) {
-    let _ = crate::microvm::listener::serve(
-        || listener.accept(),
-        |(mut client, _)| {
-            let channel = channel.clone();
-            async move {
-                if let Ok(mut server) = tokio::net::UnixStream::connect(channel).await {
-                    let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
-                }
-            }
-        },
-        32,
-        stop,
-    )
-    .await;
-}
-
 async fn input(request: Request, limit: usize) -> Result<Value> {
     let bytes = axum::body::to_bytes(request.into_body(), limit)
         .await
@@ -973,14 +1447,26 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         let capabilities = crate::nodes::connector::capabilities(&controller.state)?;
         let usage = controller.usage().await?;
         let budget = controller.budget.lock().await.clone();
+        let capacity = controller.capacity.lock().await.clone();
+        let disk_growth = if storage::ublk::supports_growth() {
+            serde_json::to_value(
+                capacity
+                    .report(&controller.state, usage["diskBytes"].as_u64().unwrap_or(0))
+                    .await?,
+            )?
+        } else {
+            Value::Null
+        };
+        let runtime_id = crate::nodes::component_runtime();
+        systemd::tools(&runtime_id)?;
         return Ok(Json(json!({
-            "status": "ok", "backend": "native", "nodeProtocol": 2, "projectArchives": 1, "nativeProjectBases": 1,
-            "runtimeId": std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into()),
+            "status": "ok", "backend": "native", "nodeProtocol": 2,
+            "runtimeId": runtime_id,
             "dataRoot": controller.data, "capabilities": capabilities,
-            "runtimes": systemd::runtimes()?,
+            "nativeMode": controller.mode.lock().await.clone(),
             "pool": { "capacity": budget["slots"] }, "activeRuns": controller.active.lock().await.len(),
             "sharedResources": true, "exclusiveReservations": false, "budget": budget,
-            "usage": usage, "pressure": null
+            "usage": usage, "pressure": null, "diskGrowth": disk_growth
         })).into_response());
     }
     let secret = tokio::fs::read_to_string(controller.data.join("runner-secret")).await?;
@@ -990,6 +1476,15 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
     }
     let parts = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
     let value = match (method.as_str(), parts.as_slice()) {
+        ("POST", ["disk-growth"]) => {
+            let value = input(request, 1_000_000).await?;
+            controller
+                .capacity
+                .lock()
+                .await
+                .apply(&value, controller.disk_limit().await?);
+            json!({ "ready": true })
+        }
         ("POST", ["native-bases", "lookup"]) => {
             let value = input(request, 8_000_000).await?;
             let archives: Vec<crate::project_archives::Archive> =
@@ -1012,9 +1507,10 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 .await?;
             json!({ "queued": true })
         }
+        ("POST", ["native-mode"]) => controller.change_mode(input(request, 16384).await?).await?,
         ("POST", ["node-budget"]) => {
             let value = input(request, 16384).await?;
-            let budget = native_budget(&value)?;
+            let budget = budget_request(&value)?;
             let _admission = controller.admission.lock().await;
             let previous = controller.budget.lock().await.clone();
             if value != previous {
@@ -1042,7 +1538,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 }
                 atomic_write(
                     &controller.state.join(crate::microvm::budget::FILE),
-                    &serde_json::to_vec(&value)?,
+                    &serde_json::to_vec(&budget_record(&value))?,
                 )
                 .await?;
                 *controller.budget.lock().await = value;
@@ -1149,57 +1645,12 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         }
         ("POST", ["disks", run, "storage-status"]) => {
             uuid(run)?;
-            if block::exists(&controller.state, run)? {
-                return Ok(Json(block::status(&controller.state, run).await?).into_response());
-            }
-            let root = workspace::directory(&controller.state, run)?;
-            let active_local = disk::bytes_if_present(&root.join("data")).await?;
-            let local = workspace::retained_bytes(&controller.state, run).await?;
-            let active = controller
-                .active
-                .lock()
-                .await
-                .values()
-                .any(|attempt| attempt.run == *run);
-            let completed = workspace::completed(&controller.state, run).await.ok();
-            let published: Value = match tokio::fs::read(root.join("published.json")).await {
-                Ok(bytes) => serde_json::from_slice(&bytes)?,
-                Err(_) => Value::Null,
-            };
-            let dirty = active
-                || completed
-                    .as_ref()
-                    .is_none_or(|point| point["id"] != published["snapshotId"]);
-            json!({ "mode": "native", "localBytes": local, "activeLocalBytes": active_local,
-                "dirtyBytes": if dirty { local.max(1) } else { 0 }, "waitingFor": null,
-                "checkpointConsistency": "stopped", "published": published })
+            block::status(&controller.state, run).await?
         }
         ("POST", ["disks", run, "published"]) => {
             uuid(run)?;
-            if block::exists(&controller.state, run)? {
-                let receipt = input(request, 16384).await?;
-                return Ok(
-                    Json(block::published(&controller.state, run, &receipt).await?).into_response(),
-                );
-            }
-            let _disk = disk::lock(&controller.state).await?;
-            uuid(run)?;
             let receipt = input(request, 16384).await?;
-            uuid(text(&receipt, "backupId"))?;
-            uuid(text(&receipt, "snapshotId"))?;
-            let root = workspace::directory(&controller.state, run)?;
-            let completed = workspace::completed(&controller.state, run).await?;
-            if completed["id"] != receipt["snapshotId"] {
-                return Err(Error::conflict(
-                    "Native checkpoint changed before publication acknowledgement.",
-                ));
-            }
-            atomic_write(&root.join("published.json"), &serde_json::to_vec(&receipt)?).await?;
-            // Acknowledging the latest durable backup makes older stopped archives
-            // redundant. Never collect another conversation's or the current archive.
-            workspace::collect_archives(&controller.state, run, Some(text(&completed, "id")))
-                .await?;
-            json!({ "committed": true })
+            block::published(&controller.state, run, &receipt).await?
         }
         ("POST", ["disks", run, "snapshot-completed"]) => {
             uuid(run)?;
@@ -1252,7 +1703,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 ));
             }
             let run = tokio::fs::read_to_string(controller.file(id, "run")).await?;
-            workspace::completed(&controller.state, &run).await?
+            controller.stopped_snapshot(&run, false).await?
         }
         (_, ["snapshots", snapshot, operation]) => {
             uuid(snapshot)?;
@@ -1299,23 +1750,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             let _disk = disk::lock(&controller.state).await?;
             uuid(run)?;
             let request = input(request, snapshots::MAX_MANIFEST_BYTES).await?;
-            if request["manifest"]["kind"] == block::KIND {
-                return Ok(
-                    Json(block::restore(&controller.state, run, request).await?).into_response()
-                );
-            }
-            let limit = controller.budget.lock().await["limits"]["diskMiB"]
-                .as_u64()
-                .unwrap_or(32768)
-                * 1_048_576;
-            block::restore_files(
-                &controller.state,
-                run,
-                &request,
-                limit,
-                controller.disk_growth().await?,
-            )
-            .await?
+            block::restore(&controller.state, run, request).await?
         }
         ("POST", ["disks", run, action @ ("delete" | "prune")]) => {
             let _disk = disk::lock(&controller.state).await?;
@@ -1326,11 +1761,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 &root.join("owner.lock"),
                 "Native workspace is active.",
             )?;
-            if (root.join("restore.pending.json").exists()
-                || root.join("block-restore.pending.json").exists()
-                || root.join("legacy-block-restore.pending.json").exists())
-                && *action == "prune"
-            {
+            if root.join("block-restore.pending.json").exists() && *action == "prune" {
                 return Err(Error::conflict(
                     "Finish native restore before pruning retained local work.",
                 ));
@@ -1338,8 +1769,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             let retired_grants = block::action(&controller.state, run, *action == "delete").await?;
             let mut entries = tokio::fs::read_dir(&root).await?;
             while let Some(entry) = entries.next_entry().await? {
-                if (entry.file_name().to_string_lossy().starts_with("stale-")
-                    || entry.file_name().to_string_lossy().starts_with("restore-"))
+                if entry.file_name().to_string_lossy().starts_with("stale-")
                     && entry.file_type().await?.is_dir()
                 {
                     tokio::fs::remove_dir_all(entry.path()).await?;
@@ -1348,21 +1778,15 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             if *action == "delete" {
                 for entry in [
                     "data",
-                    "completed.json",
+                    "docker-runtime",
                     "initialized",
                     "resources.json",
                     "attempt",
-                    "restored.json",
-                    "checkpoint-error",
-                    "published.json",
                     "runtime.json",
-                    "restore.pending.json",
                     "block-initialized",
                     "file-owner.json",
                     "block-seeding",
                     "block-restore.pending.json",
-                    "legacy-block-restore.pending.json",
-                    "legacy-data",
                     "tmp",
                 ] {
                     let path = root.join(entry);
@@ -1376,7 +1800,6 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 }
             }
             if *action == "delete" {
-                workspace::collect_archives(&controller.state, run, None).await?;
                 let stage = controller.data.join("runs").join(run);
                 if stage.exists() {
                     tokio::fs::remove_dir_all(stage).await?;
@@ -1531,8 +1954,12 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                     remaining.min(controller.disk_growth().await?),
                 )
                 .await?;
-                workspace::own_tree(&received, controller.identity.uid, controller.identity.gid)
-                    .await?;
+                let mut identity =
+                    super::identity::provision(&controller.state, &attempt.run).await?;
+                if plan["nativeMode"]["mode"] == "administrator" {
+                    identity.host_engine = Some((controller.identity.uid, controller.identity.gid));
+                }
+                workspace::own_tree(&received, identity.uid(), identity.gid()).await?;
                 tokio::fs::rename(received, &target).await?;
             }
             json!({ "ok": true })
@@ -1634,25 +2061,29 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     }
     recover_preparations(&data, &state).await?;
     let budget_path = state.join(crate::microvm::budget::FILE);
-    let budget: Value = match tokio::fs::read(&budget_path).await {
-        Ok(bytes) => serde_json::from_slice(&bytes)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            json!({ "slots": 1, "limits": crate::nodes::placement::defaults() })
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let checked = native_budget(&budget)?;
+    let checked = load_budget(&budget_path).await?;
+    let budget = serde_json::to_value(&checked)?;
     systemd::apply_budget(&checked).await?;
-    atomic_write(&budget_path, &serde_json::to_vec(&budget)?).await?;
+    atomic_write(&budget_path, &serde_json::to_vec(&budget_record(&budget))?).await?;
+    let mut mode = mode::load(&state).await?;
+    if mode["status"] == "applied"
+        && let Err(error) = mode::sudo(&identity, mode["mode"] == "administrator").await
+    {
+        mode["status"] = "failed".into();
+        mode["error"] = error.message.into();
+        atomic_write(&state.join(mode::FILE), &serde_json::to_vec(&mode)?).await?;
+    }
     let controller = Controller {
         data,
         state,
         active: Arc::default(),
+        capacity: Arc::default(),
         mounted: Arc::default(),
         leases: Arc::default(),
         admission: Arc::default(),
         base_warmer: Arc::default(),
         budget: Arc::new(Mutex::new(budget)),
+        mode: Arc::new(Mutex::new(mode)),
         changed: Arc::default(),
         log_lock: Arc::default(),
         stop: stop.clone(),
@@ -1692,6 +2123,36 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_budget_validates_persisted_protocol_and_keeps_fresh_bootstrap() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(crate::microvm::budget::FILE);
+        assert_eq!(load_budget(&path).await.unwrap().slots, 1);
+        let request = json!({
+            "slots": 6,
+            "limits": { "cpu": 1, "memoryMiB": 1024, "diskMiB": 1024 },
+        });
+        assert_eq!(budget_request(&request).unwrap().slots, 6);
+        for protocol in [None, Some(json!(null)), Some(json!(2)), Some(json!("1"))] {
+            let mut record = request.clone();
+            if let Some(protocol) = protocol {
+                record["nativeModeProtocol"] = protocol;
+            }
+            let bytes = serde_json::to_vec(&record).unwrap();
+            atomic_write(&path, &bytes).await.unwrap();
+            let error = load_budget(&path).await.unwrap_err();
+            assert!(error.message.contains("native mode storage protocol"));
+            assert_eq!(tokio::fs::read(&path).await.unwrap(), bytes);
+        }
+        atomic_write(
+            &path,
+            &serde_json::to_vec(&budget_record(&request)).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(load_budget(&path).await.unwrap().slots, 6);
+    }
 
     #[tokio::test]
     async fn native_startup_reclaims_interrupted_preparations_and_preserves_committed_disks() {
@@ -1821,10 +2282,14 @@ mod tests {
             data,
             state,
             active: Arc::default(),
+            capacity: Arc::default(),
             mounted: Arc::default(),
             leases: Arc::default(),
             admission: Arc::default(),
             base_warmer: Arc::default(),
+            mode: Arc::new(Mutex::new(
+                json!({ "mode": "protected", "generation": null, "status": "applied" }),
+            )),
             budget: Arc::new(Mutex::new(
                 json!({ "slots": 1, "limits": { "cpu": 1, "memoryMiB": 1024, "diskMiB": 1024 } }),
             )),
@@ -1838,6 +2303,557 @@ mod tests {
             }),
         };
         (root, controller)
+    }
+
+    async fn busy_disk_fixture(controller: &Controller) -> (String, String, Value) {
+        let run = crate::config::id();
+        let id = crate::config::id();
+        let root = workspace::directory(&controller.state, &run).unwrap();
+        private_dir(&root).await.unwrap();
+        // Stop before any privileged mount after ownership becomes available.
+        // This permanent missing-journal conflict must never be retried.
+        atomic_write(&root.join("initialized"), b"1").await.unwrap();
+        atomic_write(&root.join("block-initialized"), b"1")
+            .await
+            .unwrap();
+        atomic_write(&controller.file(&id, "log"), b"")
+            .await
+            .unwrap();
+        let plan = json!({
+            "runId": run,
+            "resources": { "diskMiB": 128 },
+        });
+        controller
+            .leases
+            .lock()
+            .await
+            .insert(id.clone(), crate::nodes::boot_ms() + 60_000);
+        (run, id, plan)
+    }
+
+    #[tokio::test]
+    async fn start_path_observes_deadline_and_cancellation_before_storage_admission() {
+        let (_fixture, controller) = fixture().await;
+        let (run, id, _) = busy_disk_fixture(&controller).await;
+        let stage = controller.data.join("runs").join(&run);
+        for directory in [
+            stage.join("workspace"),
+            stage.join("home"),
+            controller.data.join("runner-plans"),
+        ] {
+            private_dir(&directory).await.unwrap();
+        }
+        let mut plan = json!({
+            "id": id,
+            "runId": run,
+            "backend": "native",
+            "nodeLeaseRequired": true,
+            "cwd": stage.join("workspace"),
+            "projectRoot": stage.join("workspace"),
+            "sandbox": "workspace-write",
+            "args": [],
+            "prompt": "fixture",
+            "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+            "imports": [
+                { "source": stage.join("workspace"), "target": stage.join("workspace") },
+                { "source": stage.join("home"), "target": "/home/node" }
+            ],
+        });
+        controller
+            .leases
+            .lock()
+            .await
+            .insert(id.clone(), crate::nodes::boot_ms() + 10_000);
+        plan["expires"] = (crate::config::now() + 1000).into();
+        atomic_write(
+            &controller
+                .data
+                .join("runner-plans")
+                .join(format!("{id}.json")),
+            plan.to_string().as_bytes(),
+        )
+        .await
+        .unwrap();
+        let held = disk::lock(&controller.state).await.unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(5), controller.start(&id))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.status, 408);
+        let saved: Value = serde_json::from_slice(
+            &tokio::fs::read(controller.file(&id, "stop-reason.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["reason"], "time_limit");
+        assert!(controller.active.lock().await.is_empty());
+
+        let id = crate::config::id();
+        plan["id"] = id.clone().into();
+        plan["expires"] = Value::Null;
+        controller
+            .leases
+            .lock()
+            .await
+            .insert(id.clone(), crate::nodes::boot_ms() + 10_000);
+        atomic_write(
+            &controller
+                .data
+                .join("runner-plans")
+                .join(format!("{id}.json")),
+            plan.to_string().as_bytes(),
+        )
+        .await
+        .unwrap();
+        let starting = tokio::spawn({
+            let controller = controller.clone();
+            let id = id.clone();
+            async move { controller.start(&id).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while controller.admission.try_lock().is_ok() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // DELETE publishes this marker before it waits for admission/fencing.
+        atomic_write(&controller.file(&id, "stopped"), b"1")
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(2), starting)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.is_conflict());
+        assert!(controller.admission.try_lock().is_ok());
+        assert!(controller.active.lock().await.is_empty());
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn native_disk_admission_waits_without_holding_the_global_storage_lock() {
+        let (_fixture, controller) = fixture().await;
+        let (run, id, plan) = busy_disk_fixture(&controller).await;
+        let held = storage::environment::ownership(&controller.state, &run, "fixture owner")
+            .await
+            .unwrap();
+        let waiting = tokio::spawn({
+            let controller = controller.clone();
+            let id = id.clone();
+            async move {
+                controller
+                    .mount_after_release(
+                        &id,
+                        &plan,
+                        &CancellationToken::new(),
+                        Duration::from_secs(5),
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if tokio::fs::metadata(controller.file(&id, "log"))
+                    .await
+                    .unwrap()
+                    .len()
+                    > 0
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!waiting.is_finished());
+        // Shutdown of the previous writer must be able to take this lock.
+        let global = tokio::time::timeout(Duration::from_secs(1), disk::lock(&controller.state))
+            .await
+            .unwrap()
+            .unwrap();
+        drop(global);
+        drop(held);
+        let error = tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .err()
+            .unwrap();
+        assert_eq!(error.status, 409);
+        assert!(error.message.starts_with("Native journal is missing"));
+        assert!(!controller.file(&id, "exit").exists());
+        assert!(
+            storage::environment::ownership(&controller.state, &run, "probe")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_disk_admission_retries_physical_contention_during_bootstrap() {
+        let (_fixture, controller) = fixture().await;
+        let (run, id, plan) = busy_disk_fixture(&controller).await;
+        let root = workspace::directory(&controller.state, &run).unwrap();
+        tokio::fs::remove_file(root.join("block-initialized"))
+            .await
+            .unwrap();
+        let lease = storage::environment::ownership(&controller.state, &run, "fixture")
+            .await
+            .unwrap();
+        let held =
+            crate::file_lock::exclusive(&lease.directory.join("lock"), "physical owner").unwrap();
+        drop(lease);
+        let waiting = tokio::spawn({
+            let controller = controller.clone();
+            let id = id.clone();
+            async move {
+                controller
+                    .mount_after_release(
+                        &id,
+                        &plan,
+                        &CancellationToken::new(),
+                        Duration::from_secs(5),
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if tokio::fs::metadata(controller.file(&id, "log"))
+                    .await
+                    .unwrap()
+                    .len()
+                    > 0
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!waiting.is_finished());
+        let global = tokio::time::timeout(Duration::from_secs(1), disk::lock(&controller.state))
+            .await
+            .unwrap()
+            .unwrap();
+        drop(global);
+        drop(held);
+        // The intentionally absent storage credentials reject before privileged
+        // image preparation, proving that bootstrap retried after lock release.
+        let error = tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .err()
+            .unwrap();
+        assert!(
+            error.is_internal(),
+            "invalid storage fixture must reject before image preparation"
+        );
+        assert_ne!(error.message, block::DISK_BUSY);
+    }
+
+    #[tokio::test]
+    async fn lease_expiry_during_disk_admission_records_the_initiating_cause() {
+        let (_fixture, controller) = fixture().await;
+        let (run, id, plan) = busy_disk_fixture(&controller).await;
+        let held = storage::environment::ownership(&controller.state, &run, "fixture")
+            .await
+            .unwrap();
+        let stop = CancellationToken::new();
+        controller
+            .leases
+            .lock()
+            .await
+            .insert(id.clone(), crate::nodes::boot_ms() + 150);
+        let watching = tokio::spawn({
+            let controller = controller.clone();
+            let id = id.clone();
+            let stop = stop.clone();
+            async move { controller.watch_lease(&id, stop).await }
+        });
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            controller.mount_after_release(&id, &plan, &stop, Duration::from_secs(5)),
+        )
+        .await
+        .unwrap()
+        .err()
+        .unwrap();
+        assert_eq!(error.message, "Native disk preparation stopped.");
+        watching.await.unwrap();
+        let path = controller.file(&id, "stop-reason.json");
+        let saved: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(saved["reason"], "lease_expired");
+        controller.record_stop(&id, "cancelled", Value::Null).await;
+        assert_eq!(
+            serde_json::from_slice::<Value>(&tokio::fs::read(path).await.unwrap()).unwrap(),
+            saved
+        );
+        assert!(
+            storage::environment::ownership(&controller.state, &run, "probe")
+                .await
+                .is_err()
+        );
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn lease_expiry_on_global_lock_release_prevents_preparation_without_a_watcher() {
+        let (_fixture, controller) = fixture().await;
+        let (_, id, plan) = busy_disk_fixture(&controller).await;
+        let held = disk::lock(&controller.state).await.unwrap();
+        controller
+            .leases
+            .lock()
+            .await
+            .insert(id.clone(), crate::nodes::boot_ms() + 50);
+        let waiting = tokio::spawn({
+            let controller = controller.clone();
+            let id = id.clone();
+            async move {
+                controller
+                    .mount_after_release(
+                        &id,
+                        &plan,
+                        &CancellationToken::new(),
+                        Duration::from_secs(5),
+                    )
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(held);
+        let error = tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .err()
+            .unwrap();
+        assert_eq!(error.message, "Native disk preparation stopped.");
+        let saved: Value = serde_json::from_slice(
+            &tokio::fs::read(controller.file(&id, "stop-reason.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["reason"], "lease_expired");
+    }
+
+    #[tokio::test]
+    async fn controller_shutdown_during_preparation_retains_its_specific_reason() {
+        let (_fixture, controller) = fixture().await;
+        let (_, id, plan) = busy_disk_fixture(&controller).await;
+        let held = disk::lock(&controller.state).await.unwrap();
+        let waiting = tokio::spawn({
+            let controller = controller.clone();
+            let id = id.clone();
+            async move {
+                let stop = controller.stop.child_token();
+                controller
+                    .mount_after_release(&id, &plan, &stop, Duration::from_secs(5))
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        controller.stop.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .err()
+            .unwrap();
+        assert_eq!(error.message, "Native disk preparation stopped.");
+        let saved: Value = serde_json::from_slice(
+            &tokio::fs::read(controller.file(&id, "stop-reason.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["reason"], "controller_shutdown");
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn native_disk_admission_deadline_keeps_the_existing_owner_fenced() {
+        let (_fixture, controller) = fixture().await;
+        let (run, id, plan) = busy_disk_fixture(&controller).await;
+        let held = storage::environment::ownership(&controller.state, &run, "fixture owner")
+            .await
+            .unwrap();
+        let error = controller
+            .mount_after_release(
+                &id,
+                &plan,
+                &CancellationToken::new(),
+                Duration::from_millis(50),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(error.is_unavailable());
+        assert!(error.message.contains("deadline"));
+        assert!(
+            storage::environment::ownership(&controller.state, &run, "probe")
+                .await
+                .is_err()
+        );
+        drop(held);
+        assert!(
+            storage::environment::ownership(&controller.state, &run, "probe")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_disk_admission_cancels_while_waiting_for_global_storage() {
+        let (_fixture, controller) = fixture().await;
+        let (_, id, plan) = busy_disk_fixture(&controller).await;
+        let held = disk::lock(&controller.state).await.unwrap();
+        let stop = CancellationToken::new();
+        let waiting = tokio::spawn({
+            let controller = controller.clone();
+            let stop = stop.clone();
+            async move {
+                controller
+                    .mount_after_release(&id, &plan, &stop, Duration::from_secs(5))
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        stop.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .err()
+            .unwrap();
+        assert_eq!(error.message, "Native disk preparation stopped.");
+        drop(held);
+        assert!(disk::lock(&controller.state).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn execution_deadline_bounds_global_disk_wait_and_records_the_cause() {
+        let (_fixture, controller) = fixture().await;
+        let (_, id, mut plan) = busy_disk_fixture(&controller).await;
+        let held = disk::lock(&controller.state).await.unwrap();
+        plan["expires"] = (crate::config::now() + 50).into();
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            controller.mount_after_release(
+                &id,
+                &plan,
+                &CancellationToken::new(),
+                Duration::from_secs(5),
+            ),
+        )
+        .await
+        .unwrap()
+        .err()
+        .unwrap();
+        assert_eq!(error.status, 408);
+        let saved: Value = serde_json::from_slice(
+            &tokio::fs::read(controller.file(&id, "stop-reason.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["reason"], "time_limit");
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn native_disk_admission_does_not_retry_permanent_conflicts_or_expired_plans() {
+        let (_fixture, controller) = fixture().await;
+        let (_, id, mut plan) = busy_disk_fixture(&controller).await;
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            controller.mount_after_release(
+                &id,
+                &plan,
+                &CancellationToken::new(),
+                Duration::from_secs(5),
+            ),
+        )
+        .await
+        .unwrap()
+        .err()
+        .unwrap();
+        assert!(error.message.starts_with("Native journal is missing"));
+        assert_eq!(
+            tokio::fs::metadata(controller.file(&id, "log"))
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        plan["expires"] = 1.into();
+        let error = controller
+            .mount_after_release(
+                &id,
+                &plan,
+                &CancellationToken::new(),
+                Duration::from_secs(5),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.status, 408);
+    }
+
+    #[tokio::test]
+    async fn native_supervision_records_the_trigger_and_both_disk_budgets() {
+        let (_fixture, controller) = fixture().await;
+        let id = crate::config::id();
+        atomic_write(&controller.file(&id, "log"), b"")
+            .await
+            .unwrap();
+        let usage = json!({
+            "workspaceBytes": 24,
+            "temporaryBytes": 24,
+            "conversationBytes": 48,
+            "conversationLimitBytes": 32,
+            "nodeBytes": 100,
+            "nodeLimitBytes": 512,
+        });
+        let reason = supervision_stop_reason(true, false, 48, 32, 100, 512).unwrap();
+        controller.record_stop(&id, reason, usage.clone()).await;
+        let saved: Value = serde_json::from_slice(
+            &tokio::fs::read(controller.file(&id, "stop-reason.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["reason"], "conversation_disk_limit");
+        assert_eq!(saved["usage"], usage);
+        assert!(saved["at"].as_i64().unwrap() > 0);
+        assert!(
+            tokio::fs::metadata(controller.file(&id, "log"))
+                .await
+                .unwrap()
+                .len()
+                > 0
+        );
+        assert_eq!(
+            supervision_stop_reason(false, false, 0, 32, 0, 512),
+            Some("lease_expired")
+        );
+        assert_eq!(
+            supervision_stop_reason(true, true, 0, 32, 0, 512),
+            Some("time_limit")
+        );
+        assert_eq!(
+            supervision_stop_reason(true, false, 32, 32, 513, 512),
+            Some("node_disk_limit")
+        );
+        assert_eq!(supervision_stop_reason(true, false, 32, 32, 512, 512), None);
     }
 
     fn request(path: &str, body: &Value) -> Request {
@@ -1859,6 +2875,7 @@ mod tests {
             attempt.clone(),
             Attempt {
                 run: crate::config::id(),
+                expires: None,
                 stop: CancellationToken::new(),
                 started: true,
                 protection: None,
@@ -1912,6 +2929,7 @@ mod tests {
             attempt.clone(),
             Attempt {
                 run: crate::config::id(),
+                expires: None,
                 stop: CancellationToken::new(),
                 started: true,
                 protection: None,
@@ -1984,19 +3002,6 @@ mod tests {
             .unwrap();
     }
 
-    async fn stopped_data(controller: &Controller, run: &str, attempt: &str) -> PathBuf {
-        let root = workspace::directory(&controller.state, run).unwrap();
-        private_dir(&root.join("data/workspaces")).await.unwrap();
-        atomic_write(&root.join("attempt"), attempt.as_bytes())
-            .await
-            .unwrap();
-        atomic_write(&root.join("initialized"), b"1").await.unwrap();
-        atomic_write(&root.join("data/workspaces/source"), b"original")
-            .await
-            .unwrap();
-        root
-    }
-
     #[tokio::test]
     async fn tmp_artifact_uses_the_ephemeral_path_and_rejects_redirects() {
         let (_fixture, controller) = fixture().await;
@@ -2036,6 +3041,7 @@ mod tests {
             attempt.clone(),
             Attempt {
                 run: run.clone(),
+                expires: None,
                 stop: CancellationToken::new(),
                 started: true,
                 protection: None,
@@ -2120,128 +3126,6 @@ mod tests {
         assert!(!receiving.path().join("model").exists());
         assert_eq!(tokio::fs::metadata(retained).await.unwrap().len(), 20 * gib);
         assert_eq!(controller.usage().await.unwrap(), usage);
-    }
-
-    #[tokio::test]
-    async fn native_stop_waits_for_checkpoint_completion_and_physical_owner_release() {
-        let (_fixture, controller) = fixture().await;
-        let run = crate::config::id();
-        let attempt = crate::config::id();
-        let root = stopped_data(&controller, &run, &attempt).await;
-        let owner = workspace::execution_ownership(&controller.state, &run)
-            .await
-            .unwrap();
-        controller.active.lock().await.insert(
-            attempt.clone(),
-            Attempt {
-                run: run.clone(),
-                stop: CancellationToken::new(),
-                started: true,
-                protection: None,
-            },
-        );
-        let (waiting_controller, waiting_attempt) = (controller.clone(), attempt.clone());
-        let mut waiting =
-            tokio::spawn(async move { waiting_controller.wait_stopped(&waiting_attempt).await });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(30), &mut waiting)
-                .await
-                .is_err()
-        );
-        let error = controller.stopped_snapshot(&run, false).await.unwrap_err();
-        assert_eq!(error.status, 409);
-        let snapshot = controller
-            .capture_checkpoint(&run, &attempt, disk::MIB)
-            .await
-            .unwrap();
-        assert!(!waiting.is_finished());
-        drop(owner);
-        controller.active.lock().await.remove(&attempt);
-        tokio::time::timeout(Duration::from_secs(2), waiting)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let _replacement = crate::file_lock::exclusive(&root.join("owner.lock"), "busy").unwrap();
-        assert_eq!(
-            workspace::completed(&controller.state, &run).await.unwrap()["id"],
-            snapshot["id"]
-        );
-    }
-
-    #[tokio::test]
-    async fn native_completed_snapshot_recovers_after_space_is_freed_without_serving_old_data() {
-        let (_fixture, controller) = fixture().await;
-        let run = crate::config::id();
-        let attempt = crate::config::id();
-        let root = stopped_data(&controller, &run, &attempt).await;
-        let original = controller.stopped_snapshot(&run, false).await.unwrap();
-        atomic_write(&root.join("data/workspaces/source"), b"latest local work")
-            .await
-            .unwrap();
-        let other = controller
-            .state
-            .join("native")
-            .join(crate::config::id())
-            .join("data/stale");
-        sparse(&other, 2048 * disk::MIB).await;
-        assert!(controller.stopped_snapshot(&run, true).await.is_err());
-        assert!(workspace::completed(&controller.state, &run).await.is_err());
-        assert!(controller.stopped_snapshot(&run, false).await.is_err());
-        assert!(
-            controller
-                .state
-                .join("snapshots")
-                .join(text(&original, "id"))
-                .exists()
-        );
-
-        tokio::fs::remove_file(other).await.unwrap();
-        let response = route(
-            controller.clone(),
-            request(&format!("/disks/{run}/snapshot-completed"), &json!({})),
-        )
-        .await
-        .unwrap();
-        let recovered: Value = serde_json::from_slice(
-            &axum::body::to_bytes(response.into_body(), 1_000_000)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        assert_ne!(recovered["id"], original["id"]);
-        assert!(!root.join("checkpoint-error").exists());
-        let archive = tokio::fs::read(
-            controller
-                .state
-                .join("snapshots")
-                .join(text(&recovered, "id"))
-                .join("disk"),
-        )
-        .await
-        .unwrap();
-        assert!(
-            String::from_utf8(archive)
-                .unwrap()
-                .contains(&STANDARD.encode(b"latest local work"))
-        );
-        assert_eq!(
-            controller.stopped_snapshot(&run, false).await.unwrap()["id"],
-            recovered["id"]
-        );
-
-        atomic_write(
-            &root.join("checkpoint-error"),
-            b"transient explicit capture failure",
-        )
-        .await
-        .unwrap();
-        let replacement = controller.stopped_snapshot(&run, true).await.unwrap();
-        assert!(!root.join("checkpoint-error").exists());
-        assert_eq!(
-            workspace::completed(&controller.state, &run).await.unwrap()["id"],
-            replacement["id"]
-        );
     }
 
     #[tokio::test]
@@ -2361,6 +3245,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_mode_final_write_failure_reports_unconfirmed_privileges() {
+        let (_root, controller) = fixture().await;
+        let target = json!({ "mode": "administrator", "generation": crate::config::id() });
+        {
+            let mut pending = controller.mode.lock().await;
+            pending["status"] = "pending".into();
+            pending["target"] = target.clone();
+        }
+        private_dir(&controller.state.join(mode::FILE))
+            .await
+            .unwrap();
+        let applied = json!({ "mode": target["mode"], "generation": target["generation"], "status": "applied" });
+        // Exercise final acknowledgement persistence without invoking host sudo.
+        assert!(controller.persist_mode(&applied).await.is_err());
+        let observed = controller.mode.lock().await.clone();
+        assert_eq!(observed["status"], "failed");
+        assert_eq!(
+            observed["mode"], "protected",
+            "Never publish an undurable applied mode"
+        );
+        assert_eq!(observed["target"], target);
+        assert!(!text(&observed, "error").is_empty());
+        assert!(mode::check_plan(&observed, &json!({})).is_err());
+        assert!(mode::check_plan(&observed, &json!({ "nativeMode": target })).is_err());
+    }
+
+    #[tokio::test]
+    async fn native_mode_persistence_failure_blocks_previously_leased_plans() {
+        let (_root, controller) = fixture().await;
+        let run = crate::config::id();
+        let attempt = crate::config::id();
+        let stage = controller.data.join("runs").join(&run);
+        for directory in [
+            stage.join("workspace"),
+            stage.join("home"),
+            controller.data.join("runner-plans"),
+        ] {
+            private_dir(&directory).await.unwrap();
+        }
+        let plan = json!({
+            "id": attempt, "runId": run, "backend": "native", "nodeLeaseRequired": true, "expires": null,
+            "cwd": stage.join("workspace"), "projectRoot": stage.join("workspace"),
+            "sandbox": "workspace-write", "args": [], "prompt": "fixture",
+            "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+            "imports": [
+                { "source": stage.join("workspace"), "target": stage.join("workspace") },
+                { "source": stage.join("home"), "target": "/home/node" }
+            ]
+        });
+        atomic_write(
+            &controller
+                .data
+                .join("runner-plans")
+                .join(format!("{attempt}.json")),
+            &serde_json::to_vec(&plan).unwrap(),
+        )
+        .await
+        .unwrap();
+        controller
+            .leases
+            .lock()
+            .await
+            .insert(attempt.clone(), crate::nodes::boot_ms() + 60000);
+        controller.plan(&attempt).await.unwrap();
+        mode::check_plan(&*controller.mode.lock().await, &plan).unwrap();
+        // A directory at the state-file destination guarantees an atomic rename
+        // failure on this disposable fixture, before any host sudo operation.
+        private_dir(&controller.state.join(mode::FILE))
+            .await
+            .unwrap();
+        let request = json!({ "mode": "administrator", "generation": crate::config::id() });
+        assert!(controller.change_mode(request.clone()).await.is_err());
+        let state = controller.mode.lock().await.clone();
+        assert_eq!(state["status"], "failed");
+        assert!(!text(&state, "error").is_empty());
+        assert_eq!(state["target"], request);
+        let error = controller.start(&attempt).await.unwrap_err();
+        assert_eq!(error.status, 409);
+        assert!(error.message.contains("privilege generation"), "{error:?}");
+        assert!(controller.active.lock().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn expired_or_stopped_attempts_cannot_start_or_regain_a_lease() {
         let (_root, controller) = fixture().await;
         let attempt = crate::config::id();
@@ -2392,6 +3359,16 @@ mod tests {
         let directory = workspace::directory(&controller.state, &run).unwrap();
         private_dir(&directory).await.unwrap();
         std::os::unix::fs::symlink(outside.path(), directory.join("data")).unwrap();
+        let docker_runtime = directory.join("docker-runtime");
+        let mirror = docker_runtime.join("runtime/mounts/fixture/source");
+        tokio::fs::create_dir_all(&mirror).await.unwrap();
+        tokio::fs::create_dir_all(docker_runtime.join("rootlesskit"))
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(outside.path(), mirror.join("outside")).unwrap();
+        tokio::fs::write(docker_runtime.join("rootlesskit/child_pid"), b"123")
+            .await
+            .unwrap();
         tokio::fs::write(directory.join("unrelated"), b"preserved")
             .await
             .unwrap();
@@ -2406,6 +3383,7 @@ mod tests {
             b"owner files"
         );
         assert!(!directory.join("data").exists());
+        assert!(!docker_runtime.exists());
         assert!(directory.join("unrelated").exists());
     }
 
@@ -2445,6 +3423,7 @@ mod tests {
                 crate::config::id(),
                 Attempt {
                     run: crate::config::id(),
+                    expires: None,
                     stop: CancellationToken::new(),
                     started: true,
                     protection: None,
@@ -2458,6 +3437,7 @@ mod tests {
             existing.clone(),
             Attempt {
                 run: crate::config::id(),
+                expires: None,
                 stop: CancellationToken::new(),
                 started: true,
                 protection: None,

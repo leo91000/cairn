@@ -2,6 +2,7 @@ package build.cairn.app.data
 
 import build.cairn.app.diagnostics.PerfOperation
 import build.cairn.app.diagnostics.Performance
+import build.cairn.contracts.setAgentAvatar
 import java.io.FileNotFoundException
 import java.io.IOException
 import kotlin.coroutines.resume
@@ -40,7 +41,7 @@ val wireJson = Json {
 }
 
 /** [explained] is false when the response carried no Cairn error, as a proxy's error page. */
-class ApiException(val status: Int, message: String, val explained: Boolean = true) :
+open class ApiException(val status: Int, message: String, val explained: Boolean = true) :
     IOException(message)
 
 /** Marks I/O from the HTTP transport; local document and disk errors remain actionable. */
@@ -329,14 +330,12 @@ class CairnApi(
 
     suspend fun uploadAgentPortrait(id: String, bytes: ByteArray): Agent {
         require(bytes.size <= 5 * 1024 * 1024) { "Choisissez une image de moins de 5 Mo." }
-        return exchange(
-            builder("/agents/${segment(id)}/avatar")
-                .put(bytes.toRequestBody("application/octet-stream".toMediaType()))
-                .build()
-        ) { response ->
-            checkResponse(response)
-            wireJson.decodeFromString<Agent>(response.body.string())
-        }
+        return setAgentAvatar(
+            build.cairn.contracts.SetAgentAvatarInput(
+                id,
+                java.util.Base64.getEncoder().encodeToString(bytes),
+            )
+        )
     }
 
     suspend fun download(
@@ -384,7 +383,9 @@ class CairnApi(
             object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
                     // A staged upload can disappear before OkHttp opens its local file.
-                    val failure = if (e is FileNotFoundException) e else ConnectionException(e)
+                    val failure =
+                        if (e is FileNotFoundException || e is ProtocolMismatch) e
+                        else ConnectionException(e)
                     if (continuation.isActive) continuation.resumeWithException(failure)
                 }
 

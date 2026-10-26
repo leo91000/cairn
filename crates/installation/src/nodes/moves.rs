@@ -5,6 +5,7 @@ use crate::{
     error::{Error, Result},
     run_status::RunStatus,
     service::Service,
+    store::Db,
     validation::text,
 };
 use serde::Serialize;
@@ -92,7 +93,7 @@ struct MoveRequest<'a> {
 
 async fn run_agent(s: &Service, run: &Value) -> Result<Value> {
     s.store
-        .get("agents", super::run_agent(run))
+        .agent_snapshot(super::run_agent(run))
         .await?
         .ok_or_else(|| Error::forbidden("Agent removed."))
 }
@@ -203,8 +204,7 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
         return Err(Error::conflict("A movement is already pending."));
     }
     let checkpoint = super::checkpoint(s, run_id).await?;
-    let deadline =
-        (now() + wait as i64 * 1000).min(checkpoint["deadline"].as_i64().unwrap_or(i64::MAX));
+    let deadline = now() + wait as i64 * 1000;
     // A finished conversation with a VM session moves without being resumed.
     let idle = run["status"] == RunStatus::Succeeded
         && run["sessionId"].is_string()
@@ -315,6 +315,14 @@ async fn record_request(
             let current = db
                 .run(&owner)?
                 .ok_or_else(|| Error::not_found("Conversation removed."))?;
+            if source.is_none()
+                && expected == RunStatus::Queued
+                && source_mode_unconfirmed(db, &owner)?
+            {
+                return Err(Error::unavailable(
+                    "Waiting for the node's privilege mode to be confirmed.",
+                ));
+            }
             // Explicit movement would bypass a mission wait. Internal relocation
             // of an unfinished queued turn must still be able to restore capacity.
             if expected != RunStatus::Queued
@@ -427,6 +435,15 @@ enum Recovery {
 
 const WAITING_TITLE: &str = "Conversation waiting for its node";
 
+fn source_mode_unconfirmed(db: &Db<'_>, run: &str) -> Result<bool> {
+    let checkpoint = super::db_checkpoint(db, run)?;
+    let Some(source) = checkpoint["nodeId"].as_str() else {
+        return Ok(false);
+    };
+    let node = db.get("nodes", source)?.unwrap_or_default();
+    Ok(super::native_mode::unconfirmed(&node))
+}
+
 /// Plans a lossless move of queued work when its retained node has no room.
 pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
     if super::publication::requested(run) {
@@ -445,6 +462,13 @@ pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
     let Some(source) = checkpoint["nodeId"].as_str() else {
         return Ok(false);
     };
+    let owner = run_id.to_owned();
+    if s.store
+        .read(move |db| source_mode_unconfirmed(db, &owner))
+        .await?
+    {
+        return Ok(false);
+    }
     // A normal resume still prefers the intact local disk. Only a capacity
     // shortage starts a full, fenced transfer; unavailable nodes use recovery.
     match super::placement::check(s, run).await {
@@ -500,7 +524,10 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
         let _ = super::refresh_local(s).await;
     }
     let node = s.get("nodes", source).await?;
-    let agent = s.get("agents", super::run_agent(current)).await?;
+    if super::native_mode::unconfirmed(&node) {
+        return Ok(Recovery::Waiting);
+    }
+    let agent = s.agent_snapshot(super::run_agent(current)).await?;
     let available = super::seen_within(&node, super::HEARTBEAT_TIMEOUT_MS)
         && node["revoked"] != true
         && node["executionReady"] == true
@@ -525,8 +552,6 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
     };
     let mut selecting = current.clone();
     selecting["placementTransition"] = true.into();
-    selecting["requiredRuntime"] =
-        super::publication::manifest(s, &backup).await?["runtime"]["runtimeId"].clone();
     let reservation = id();
     let Ok(selected) = super::placement::reserve(s, &selecting, &reservation).await else {
         let body = "The node running this conversation is unavailable and no other authorized node can resume it yet.";
@@ -573,10 +598,30 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
             Recovery::NotNeeded => return Ok(true),
             Recovery::Waiting => return Ok(false),
             Recovery::Planned(movement) => {
-                current["moveRequest"] = movement;
-                s.store
-                    .patch_run(run_id, json!({ "moveRequest": current["moveRequest"] }))
-                    .await?;
+                let owner = run_id.to_owned();
+                let pending = movement.clone();
+                let accepted = s
+                    .store
+                    .transaction(move |db| {
+                        if source_mode_unconfirmed(db, &owner)?
+                            || db
+                                .run(&owner)?
+                                .is_none_or(|run| run["moveRequest"].is_object())
+                        {
+                            return Ok(false);
+                        }
+                        db.patch_run(&owner, &json!({ "moveRequest": pending }))?;
+                        Ok(true)
+                    })
+                    .await;
+                match accepted {
+                    Ok(true) => current["moveRequest"] = movement,
+                    rejected => {
+                        super::placement::release(s, text(&movement, "reservation")).await?;
+                        rejected?;
+                        return Ok(false);
+                    }
+                }
             }
         }
     }
@@ -694,12 +739,8 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
     } else {
         RunStatus::Queued
     };
-    // Publication validated this manifest before the move; an unreadable one keeps the default.
-    let manifest = super::publication::manifest(s, backup)
-        .await
-        .unwrap_or_default();
     let patch = json!({
-        "storage": { "mode": restored_storage_mode(&manifest) },
+        "storage": { "mode": super::ON_DEMAND },
         "movementError": null,
         "accountWaitReason": null,
         "nodeId": node,
@@ -772,17 +813,6 @@ pub async fn latest(s: &Service, run: &str) -> Result<Option<Value>> {
     }
 }
 
-/// The storage a restored point mounts until the next launch records its own: a
-/// legacy native file checkpoint restores a file workspace, every other point an
-/// on-demand journal disk.
-fn restored_storage_mode(manifest: &Value) -> &'static str {
-    if manifest["kind"] == "native-files-v1" {
-        "native"
-    } else {
-        super::ON_DEMAND
-    }
-}
-
 async fn release_destination(s: &Service, run: &Value) -> Result<()> {
     for reservation in [
         run["moveRequest"]["reservation"].as_str(),
@@ -794,25 +824,4 @@ async fn release_destination(s: &Service, run: &Value) -> Result<()> {
         super::placement::release(s, reservation).await?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::restored_storage_mode;
-    use serde_json::json;
-
-    #[test]
-    fn only_legacy_native_file_checkpoints_restore_without_a_journal() {
-        assert_eq!(
-            restored_storage_mode(&json!({ "kind": "native-files-v1" })),
-            "native"
-        );
-        for manifest in [
-            json!({ "kind": "native-ext4-v1" }),
-            json!({ "layout": { "kind": "paired-ext4-v2" } }),
-            json!(null),
-        ] {
-            assert_eq!(restored_storage_mode(&manifest), "on-demand");
-        }
-    }
 }

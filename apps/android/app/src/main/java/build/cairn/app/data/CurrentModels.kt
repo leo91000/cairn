@@ -1,7 +1,7 @@
 package build.cairn.app.data
 
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 
 @Serializable
@@ -29,6 +29,8 @@ data class ChatMessage(
     val provider: String = "",
     /** A plan turn, which explores and proposes without changing anything. */
     val plan: Boolean = false,
+    /** The Codex speed this message asked for; empty on earlier messages. */
+    val speed: String = "",
 )
 
 @Serializable data class QuestionOption(val label: String, val description: String = "")
@@ -61,6 +63,11 @@ data class ChatWakeup(
     val createdAt: Long,
     val wakeAt: Long,
     val condition: JsonObject? = null,
+    /**
+     * A group's progress, in the order of its conditions: `{ observation, display, nextCheckAt,
+     * lastError }` each. Kept as JSON, like [display].
+     */
+    val members: JsonArray? = null,
     val observation: JsonObject? = null,
     /** Plugin conditions: when Cairn checks again, and why its last check failed. */
     val nextCheckAt: Long? = null,
@@ -71,6 +78,34 @@ data class ChatWakeup(
      */
     val display: JsonObject? = null,
 )
+
+/**
+ * How full the coding agent's context was at its latest report. [contextTokens] is what the latest
+ * model request occupied, never the conversation's cumulative spend.
+ */
+@Serializable
+data class ContextUsage(
+    val contextTokens: Long = 0,
+    /** The model's context window; absent when the coding agent does not report it. */
+    val contextWindow: Long? = null,
+    /** Of [contextTokens], input read from the prompt cache, when reported. */
+    val cachedTokens: Long? = null,
+    /** A local estimate: before the session's first response, or right after a compaction. */
+    val estimated: Boolean = false,
+)
+
+/** Whether the coding agent can compact its context now, and why not when it cannot. */
+@Serializable
+data class ChatCompaction(
+    /** The coding agent offers a compaction control. OpenCode does not. */
+    val supported: Boolean = false,
+    val running: Boolean = false,
+    val available: Boolean = false,
+    val reason: String? = null,
+)
+
+/** The conversation whose agent delegated a conversation. */
+@Serializable data class ChatRequester(val chatId: String, val title: String = "")
 
 @Serializable
 data class Chat(
@@ -90,6 +125,9 @@ data class Chat(
     val provider: String? = null,
     /** When the agent's latest turn ended. */
     val finishedAt: Long? = null,
+    /** Absent for older servers and before the coding agent reports it. */
+    val contextUsage: ContextUsage? = null,
+    val compaction: ChatCompaction? = null,
     /** The agent finished a turn this account has not opened since. */
     val unread: Boolean = false,
     /** The opening of the agent's final message, while unread. */
@@ -106,6 +144,8 @@ data class Chat(
     val lifecycleError: String? = null,
     val wakeup: ChatWakeup? = null,
     val suspendedByExclusive: ExclusiveReservation? = null,
+    /** The conversation that delegated this one, while it still exists. */
+    val requester: ChatRequester? = null,
 ) {
     val exclusiveSuspended
         get() =
@@ -174,6 +214,19 @@ data class HistoryPage(
 
 @Serializable data class ReasoningOption(val reasoningEffort: String, val description: String = "")
 
+/** A speed Codex offers for a model. [description] is Codex's own wording of its usage. */
+@Serializable
+data class ServiceTier(
+    val id: String,
+    val name: String = "",
+    val description: String = "",
+    /**
+     * Not confirmed by every enabled account able to run the model: runs prefer accounts that
+     * confirm it, and each turn says when it runs at Standard or Codex cannot confirm it.
+     */
+    val limited: Boolean = false,
+)
+
 /** One connected provider offering a model, as `provider/model`. */
 @Serializable
 data class ModelRoute(
@@ -197,6 +250,13 @@ data class CodingAgentModel(
     val supportedReasoningEfforts: List<ReasoningOption> = emptyList(),
     /** Models offered by several providers. [model] then runs on the first available route. */
     val routes: List<ModelRoute> = emptyList(),
+    /** Codex speeds besides standard; null in catalogs cached before speeds were listed. */
+    val serviceTiers: List<ServiceTier>? = null,
+    /**
+     * Codex's catalog default tier, applied only by Codex's own terminal client: Cairn runs
+     * Standard when no speed is chosen.
+     */
+    val defaultServiceTier: String? = null,
 )
 
 fun CodingAgentModel.route(value: String): ModelRoute? = routes.find { it.model == value }
@@ -212,37 +272,33 @@ data class ModelCatalog(
     val error: String = "",
 )
 
-@Serializable
-data class McpTool(
-    val name: String,
-    val title: String? = null,
-    val description: String? = null,
-    val inputSchema: JsonElement? = null,
-)
+typealias Mcp = build.cairn.contracts.McpView
 
-@Serializable
-data class Mcp(
-    val id: String = "",
-    val name: String = "",
-    val transport: String = "http",
-    val url: String = "",
-    val command: String = "",
-    val args: List<String> = emptyList(),
-    val auth: String = "none",
-    val clientId: String = "",
-    val scopes: String = "",
-    val allowPrivateNetwork: Boolean = false,
-    val enabled: Boolean = true,
-    val enabledTools: List<String>? = null,
-    val state: String = "untested",
-    val error: String = "",
-    val tools: List<McpTool> = emptyList(),
-    val checkedAt: Long? = null,
-    val hasToken: Boolean = false,
-    val hasClientSecret: Boolean = false,
-    val envKeys: List<String> = emptyList(),
-    val callbackUrl: String = "",
-)
+typealias McpTool = build.cairn.contracts.McpTool
+
+fun Mcp.settings(
+    token: String? = null,
+    clientSecret: String? = null,
+    env: Map<String, String>? = null,
+    removeEnv: List<String> = emptyList(),
+) =
+    build.cairn.contracts.McpInput(
+        name = name,
+        transport = transport,
+        url = url,
+        command = command,
+        args = args,
+        auth = auth,
+        clientId = clientId,
+        scopes = scopes,
+        allowPrivateNetwork = allowPrivateNetwork,
+        enabled = enabled,
+        enabledTools = enabledTools,
+        token = token,
+        clientSecret = clientSecret,
+        env = env?.let { build.cairn.contracts.McpEnvironment(it) },
+        removeEnv = removeEnv,
+    )
 
 @Serializable data class UrlResult(val url: String)
 
@@ -294,3 +350,22 @@ fun artifactPathForLink(
         }
     return path.takeIf { Regex("/runs/[A-Za-z0-9_-]+/artifacts/[A-Za-z0-9_-]+").matches(it) }
 }
+
+fun build.cairn.contracts.McpInput.replacement() =
+    build.cairn.contracts.McpReplacementInput(
+        name = name,
+        transport = transport,
+        url = url,
+        command = command,
+        args = args,
+        auth = auth,
+        clientId = clientId,
+        scopes = scopes,
+        allowPrivateNetwork = allowPrivateNetwork,
+        enabled = enabled,
+        enabledTools = enabledTools,
+        token = token,
+        clientSecret = clientSecret,
+        env = env,
+        removeEnv = removeEnv,
+    )

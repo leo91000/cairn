@@ -2,12 +2,11 @@
 use crate::{
     error::{Error, Result},
     mcp_server::{ToolResult, empty_listing},
-    mcps::{grant_key, record::RunGrant},
+    mcps::grant_key,
     run_status::RunStatus,
     service::{Service, covers, run_projects},
     validation::{text, uuid},
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -31,10 +30,9 @@ pub fn catalog(run: &Value) -> Vec<Value> {
 
 pub fn authorize_in(db: &crate::store::Db<'_>, bearer: &str) -> Result<Value> {
     let denied = || Error::unauthorized("Workspace access expired or was revoked.");
-    let grant = db.kv(&grant_key(bearer))?.ok_or_else(denied)?;
-    let grant = RunGrant::deserialize(&grant)?;
+    let grant = db.mcp_run_grant(&grant_key(bearer))?.ok_or_else(denied)?;
     let run = db.run(&grant.run_id)?.ok_or_else(denied)?;
-    let revoked = grant.message_id != *crate::waits::execution_id(&run)
+    let revoked = grant.message_id.as_deref() != crate::waits::execution_id(&run).as_str()
         || !grant.workspace
         || run["status"] != RunStatus::Running
         || !run["cancelRequestedAt"].is_null();
@@ -42,7 +40,7 @@ pub fn authorize_in(db: &crate::store::Db<'_>, bearer: &str) -> Result<Value> {
         return Err(denied());
     }
     let agent = &run["snapshot"]["agent"];
-    let current = db.get("agents", text(agent, "id"))?.ok_or_else(denied)?;
+    let current = db.agent_snapshot(text(agent, "id"))?.ok_or_else(denied)?;
     if !covers(&current, agent) {
         return Err(Error::forbidden("Agent permissions were reduced."));
     }
@@ -55,10 +53,10 @@ pub async fn authorize(s: &Service, bearer: &str) -> Result<Value> {
 }
 
 /// Whether the registered project still matches the one this run was granted.
-fn unchanged(current: &Value, granted: &Value) -> bool {
-    current["path"] == granted["path"]
-        && current["baseBranch"] == granted["baseBranch"]
-        && (current["sourceMode"] == "local") == (granted["sourceMode"] == "local")
+fn unchanged(current: &cairn_contracts::Project, granted: &Value) -> bool {
+    current.settings.path == granted["path"].as_str().unwrap_or("")
+        && current.settings.base_branch == granted["baseBranch"].as_str().unwrap_or("")
+        && (current.settings.source_mode == "local") == (granted["sourceMode"] == "local")
 }
 
 impl Projects {
@@ -86,7 +84,7 @@ impl Projects {
             .ok_or_else(|| Error::forbidden("This project is not authorized for this run."))?;
         let current = s
             .store
-            .get("projects", project_id)
+            .project(project_id)
             .await?
             .ok_or_else(|| Error::not_found("Project no longer exists."))?;
         if !unchanged(&current, &project) {
@@ -113,7 +111,12 @@ impl Projects {
         let status = format!("Opening {}", text(&project, "name"));
         s.store.event(run_id, "status", &status, None).await?;
         let agent_id = text(&run["snapshot"]["agent"], "id");
-        let access = crate::plugins::run_credentials::fetch(s, Some(agent_id), &current).await?;
+        let access = crate::plugins::run_credentials::fetch(
+            s,
+            Some(agent_id),
+            &serde_json::to_value(&current)?,
+        )
+        .await?;
         let credentials = crate::plugins::run_credentials::RunCredentials {
             fetch: [(project_id.to_owned(), access)].into(),
             ..Default::default()
@@ -205,14 +208,15 @@ fn open_project_tool() -> Value {
     })
 }
 
-/// Workspace tools of a plan turn: reading Cairn's state and opening authorized projects
-/// in the private workspace. Every other tool, including plugin tools, has effects
-/// beyond the turn.
-const PLAN_TOOLS: [&str; 4] = [
+/// Workspace tools of a plan turn: reading Cairn's state, including delegated task
+/// reports, and opening authorized projects in the private workspace. Every other tool,
+/// including delegation and plugin tools, has effects beyond the turn.
+const PLAN_TOOLS: [&str; 5] = [
     "open_project",
     "list_nodes",
     "exclusive_status",
     "pending_questions",
+    "task_status",
 ];
 
 const PLAN_DENIED: &str = "This tool is unavailable during a plan turn because it has effects beyond exploring. Include the step in your plan; the user starts implementation explicitly.";
@@ -292,6 +296,23 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
                 format!("Published {}: {url}", text(result, "title"))
             })
         }
+        "delegate_task" => ToolResult::from_result(
+            crate::delegation::delegate(s, bearer, args).await,
+            |result| {
+                format!(
+                    "Delegated “{}” to {} as conversation {}. Wait with wait_for and the task_finished condition.",
+                    text(result, "title"),
+                    text(result, "agentName"),
+                    text(result, "chatId")
+                )
+            },
+        ),
+        "task_status" => {
+            ToolResult::from_result(crate::delegation::status(s, bearer, args).await, summary)
+        }
+        "task_cancel" => {
+            ToolResult::from_result(crate::delegation::cancel(s, bearer, args).await, summary)
+        }
         "open_project" => ToolResult::from_result(
             s.projects.open(s, bearer, text(args, "projectId")).await,
             |result| {
@@ -332,6 +353,12 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         }
         Err(_) => (Vec::new(), false),
     };
+    let token = bearer.to_owned();
+    let delegates = s
+        .store
+        .read(move |db| Ok(crate::delegation::offered(db, &token)))
+        .await
+        .unwrap_or(false);
     let mut tools = vec![
         open_project_tool(),
         crate::artifacts::tool(),
@@ -341,12 +368,15 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         crate::outcome::tool(),
         crate::chats::questions::list_tool(),
         crate::chats::questions::cancel_tool(),
-        crate::waits::tool(&conditions),
+        crate::waits::tool(&conditions, delegates),
         crate::nodes::exclusive::acquire_tool(),
         crate::nodes::exclusive::release_tool(),
         crate::nodes::exclusive::status_tool(),
         crate::nodes::exclusive::renew_tool(),
     ];
+    if delegates {
+        tools.extend(crate::delegation::tools());
+    }
     if planning {
         tools.retain(|tool| PLAN_TOOLS.contains(&text(tool, "name")));
         return Ok(json!({ "tools": tools }));

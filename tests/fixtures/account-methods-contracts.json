@@ -1,0 +1,11 @@
+{
+  "valid": [
+    { "methods": [{ "id": "email-method", "kind": "email", "label": "alice@example.test" }, { "id": "passkey-method", "kind": "passkey", "label": "Phone" }] },
+    { "methods": [] }
+  ],
+  "invalid": [
+    {},
+    { "methods": [{ "id": "email", "kind": "email" }] },
+    { "kind": "accountProofRequired", "message": "Removed agent-only refusal." }
+  ]
+}

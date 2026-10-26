@@ -129,19 +129,18 @@ test('claims an installation and sends after relay restarts and beacon session r
     seed.store.updateRun(run.id, { status: 'succeeded', summary: 'The **relayed agent reply** remains readable.', finishedAt: Date.now() })
     seed.store.event(run.id, 'item.completed', 'The **relayed agent reply** remains readable.', { item: { id: 'relayed-reply', type: 'agent_message', text: 'The **relayed agent reply** remains readable.' } })
     seed.store.put('chats', { ...chat, runId: run.id })
-    // A relay that streams opens the conversation from its stream alone: the finite
-    // compatibility read is only for installations on the first relay protocol.
-    const compatibilityReads: string[] = []
-    const collectCompatibility = (request: import('@playwright/test').Request) => {
+    // The conversation opens from its stream alone, without separate event reads.
+    const eventReads: string[] = []
+    const collectEventReads = (request: import('@playwright/test').Request) => {
       if (request.url().includes(`/runs/${run.id}/events?`))
-        compatibilityReads.push(request.url())
+        eventReads.push(request.url())
     }
 
-    page.on('request', collectCompatibility)
+    page.on('request', collectEventReads)
     await page.reload()
     await expect(page.locator('.activity-message').filter({ hasText: 'The relayed agent reply remains readable.' })).toBeVisible()
-    page.off('request', collectCompatibility)
-    expect(compatibilityReads).toEqual([])
+    page.off('request', collectEventReads)
+    expect(eventReads).toEqual([])
     // An external installation commit reaches the open browser stream without
     // navigation or the old three-second snapshot polling.
     const liveRequests: string[] = []
@@ -174,7 +173,7 @@ test('claims an installation and sends after relay restarts and beacon session r
       data: {},
     })).json()
     const identity = await (await page.request.post(`${url}/api/relay/claim`, {
-      data: { code: claim.code, name: 'Hostile fixture', protocol: 1 },
+      data: { code: claim.code, name: 'Hostile fixture', protocol: 5 },
     })).json()
     const incompatible = Reflect.construct(WebSocket, [
       `${url.replace('http:', 'ws:')}/api/relay/${identity.installationId}/connect`,
@@ -182,7 +181,7 @@ test('claims an installation and sends after relay restarts and beacon session r
     ]) as WebSocket
     await once(incompatible, 'open')
     const refused = once(incompatible, 'close')
-    incompatible.send(JSON.stringify({ type: 'hello', versions: [99] }))
+    incompatible.send(JSON.stringify({ type: 'hello', version: 99 }))
     await refused
     await stop(service)
     service = beacon()
@@ -231,7 +230,7 @@ test('claims an installation and sends after relay restarts and beacon session r
       })
     })
     await once(peer, 'open')
-    peer.send(JSON.stringify({ type: 'hello', versions: [1] }))
+    peer.send(JSON.stringify({ type: 'hello', version: 5 }))
     await welcomed
     await expect(page.getByRole('status', { name: 'Installation availability' })).toHaveText('Online')
 

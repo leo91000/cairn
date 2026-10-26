@@ -22,6 +22,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { providers } from '../../../../packages/contracts/accounts'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
+import { resumeRun } from '../../../../packages/contracts/generated/resume-run'
 import { failureReason, sameReason, stopEcho } from '../activity'
 import { api, apiUpload, state } from '../api'
 import { reuseAttachmentKey } from '../attachment-media'
@@ -50,6 +51,7 @@ import Modal from '../components/Modal.vue'
 import NodeExecution from '../components/NodeExecution.vue'
 import PlanBar from '../components/PlanBar.vue'
 import QueueStrip from '../components/QueueStrip.vue'
+import RecoveryNotice from '../components/RecoveryNotice.vue'
 import SkillTextarea from '../components/SkillTextarea.vue'
 import SubagentBar from '../components/SubagentBar.vue'
 import SubagentPanel from '../components/SubagentPanel.vue'
@@ -58,6 +60,7 @@ import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import UiNotice from '../components/UiNotice.vue'
 import VirtualSelect from '../components/VirtualSelect.vue'
+import { contextSummary } from '../context-usage'
 import {
   ArrowDown,
   ArrowUp,
@@ -67,6 +70,7 @@ import {
   Check,
   ChevronDown,
   ChevronLeft,
+  CornerDownRight,
   FileText,
   FolderGit2,
   Hourglass,
@@ -87,12 +91,13 @@ import {
   Zap,
 } from '../icons'
 import { connectionTone, installationKey, routeLabel } from '../installation-context'
+import { modelCatalogs } from '../models'
 import { useReadWhileOpen } from '../reads'
-import { useRetryNotice } from '../run-retry'
+import { useRetryState } from '../run-retry'
 import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
 import { backgroundWait } from '../signal'
 import { chatSkills } from '../skill-mentions'
-import { openSubagentKey, subagentState } from '../subagents'
+import { delegatedChatsKey, openSubagentKey, subagentState } from '../subagents'
 import { iconButton } from '../ui'
 import { useLiveRun } from '../use-live-run'
 import { workspaceActionsKey } from '../workspace-actions'
@@ -149,8 +154,8 @@ const live = useLiveRun(() => streamPath.value, {
   // Also saved under its slug when a link by identifier opened it: the Fil links to slugs.
   savedAs: state => state.chat ? `/chats/${state.chat.slug || state.chat.id}/stream` : undefined,
 })
-// Its stream carries the list while available; a failed open or a finite relay read
-// releases it to the shell, so the Fil keeps working even when the conversation cannot.
+// Its stream carries the list while available; a failed open releases it to the shell,
+// so the Fil keeps working even when the conversation cannot.
 watch(live.carriesList, value => chatListCarried.value = value, { immediate: true, flush: 'sync' })
 onBeforeUnmount(() => chatListCarried.value = false)
 const { events, connectionNotice, catchingUp } = live
@@ -158,6 +163,9 @@ const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
 const draft = ref('')
 const model = ref('')
 const reasoning = ref('')
+const speed = ref('')
+// Names queued messages' speeds; the composer's picker keeps this catalog current.
+const codexModels = computed(() => modelCatalogs.codex.catalog.models)
 const provider = ref<'' | Provider>('')
 // The next messages are plan turns until the user turns it off or implements a plan.
 const planning = ref(false)
@@ -183,7 +191,16 @@ const onWide = () => wide.value = wideQuery.matches
 wideQuery.addEventListener('change', onWide)
 onBeforeUnmount(() => wideQuery.removeEventListener('change', onWide))
 
+const currentSubagents = computed(() => activity.value?.subagents ?? [])
+
 function openSubagent(id: string, opener?: HTMLElement) {
+  // A delegated task is a conversation of its own: open it rather than a panel.
+  const delegation = currentSubagents.value.find(agent => agent.id === id)?.subagent?.delegation
+  if (delegation) {
+    void router.push(chatPath({ id: delegation.chatId }))
+    return
+  }
+
   subagentOpener = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
   openedSubagent.value = id
 }
@@ -199,10 +216,11 @@ async function closeSubagent() {
 }
 
 provide(openSubagentKey, openSubagent)
+const delegatedChats = computed(() => new Map(chats.value.map(chat => [chat.id, chat])))
+provide(delegatedChatsKey, delegatedChats)
 const runActive = computed(() => detail.value?.run?.status === 'running')
 const subagentTeam = computed(() => activity.value?.teams.find(team => team.some(agent => agent.id === openedSubagent.value)))
-const currentSubagents = computed(() => activity.value?.subagents ?? [])
-const subagentBar = computed(() => currentSubagents.value.some(agent => subagentState(agent, runActive.value) === 'running'))
+const subagentBar = computed(() => currentSubagents.value.some(agent => subagentState(agent, runActive.value, delegatedChats.value) === 'running'))
 
 async function detailAction(action: () => void) {
   detailsOpen.value = false
@@ -352,12 +370,10 @@ const active = computed(() => !!detail.value?.run && ['queued', 'running'].inclu
 const suspended = computed(() => isExclusivelySuspended(detail.value?.run))
 // The plan of the current request stays in sight beside the composer while the agent follows it.
 const currentPlan = computed(() => runActive.value && !suspended.value ? activity.value?.plan : undefined)
-const retryNotice = useRetryNotice(() => detail.value?.run)
+const recovery = useRetryState(() => detail.value?.run)
 const scheduled = computed(() => scheduledWakeup(detail.value))
 // The scheduled wait shows as a card in the conversation; these notices explain a run that cannot start.
-const waitNotice = computed(() => retryNotice.value
-  ? { account: null, message: retryNotice.value }
-  : chatWaitNotice(detail.value?.run))
+const waitNotice = computed(() => recovery.value ? null : chatWaitNotice(detail.value?.run))
 const waitNow = ref(Date.now())
 let waitClock: ReturnType<typeof setInterval> | undefined
 watch(() => !!scheduled.value, (waiting) => {
@@ -431,6 +447,7 @@ const chosenProvider = computed({
     provider.value = value
     model.value = ''
     reasoning.value = ''
+    speed.value = ''
   },
 })
 const switchingProvider = computed(() => !!detail.value?.run && chosenProvider.value !== currentProvider.value)
@@ -504,6 +521,7 @@ let submission: {
     model: string
     reasoning: string
     plan: boolean
+    speed: string
     attachmentIds: string[]
   }
 } | undefined
@@ -519,6 +537,7 @@ function newConversation() {
   model.value = ''
   reasoning.value = ''
   planning.value = false
+  speed.value = ''
   agentId.value = MAIN_AGENT_ID
   projectId.value = ''
   createdChat = undefined
@@ -575,6 +594,8 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
     // conversation selection explicit on the wire, including after a reload.
     const selectedModel = model.value || inheritedAssistant.value?.model || ''
     const selectedReasoning = reasoning.value || (!model.value ? inheritedAssistant.value?.reasoning : '') || ''
+    // The speed survives a model change, so it is inherited even with a new model.
+    const selectedSpeed = speed.value || inheritedAssistant.value?.speed || ''
     const content = {
       text,
       mode,
@@ -582,6 +603,7 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
       model: selectedModel,
       reasoning: selectedReasoning,
       plan: planRequested.value,
+      speed: selectedSpeed,
       attachmentIds,
     }
     const submissionKey = JSON.stringify({ chatId: chat.id, editing: editing.value, ...content })
@@ -633,8 +655,10 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
 }
 
 const newSession = ref(false)
+const compacting = ref(false)
+const context = computed(() => contextSummary(detail.value?.contextUsage))
 
-async function action(name: 'pause' | 'stop' | 'restore' | 'new-session', body?: object) {
+async function action(name: 'pause' | 'stop' | 'restore' | 'new-session' | 'compact', body?: object) {
   if (!detail.value || busy.value)
     return false
   busy.value = true
@@ -658,7 +682,7 @@ async function resumeQuota() {
   error.value = ''
   try {
     if (chat.run?.status === 'failed')
-      await api(`/runs/${chat.run.id}/resume`, { method: 'POST' })
+      await resumeRun(api, { runId: chat.run.id })
     await api(`/chats/${chat.id}/pause`, { method: 'POST', body: JSON.stringify({ paused: false }) })
   }
   catch (e) {
@@ -689,6 +713,7 @@ function edit(message: ChatMessage) {
   model.value = message.model
   reasoning.value = message.reasoning || ''
   planning.value = message.plan === true
+  speed.value = message.speed || ''
   textarea.value?.focus()
 }
 
@@ -719,6 +744,7 @@ watch(chatId, (id) => {
   // Plan mode follows the first message into the conversation it created.
   if (!opening)
     planning.value = false
+  speed.value = ''
   submission = undefined
   const destinationId = opening ? createdChat!.id : selectedChatId.value
   createdChat = undefined
@@ -745,6 +771,15 @@ function key(event: KeyboardEvent) {
 </script>
 
 <template>
+  <Modal v-if="compacting" title="Compact the agent context?" @close="compacting = false">
+    <div class="p-6">
+      <p>The coding agent summarizes its earlier context to free space in its window. This uses the agent's model, like a short turn.</p>
+      <p>Every message stays visible in this conversation. Messages you send meanwhile wait for the compaction to finish.</p>
+      <UiButton :disabled="busy || !detail?.compaction?.available" @click="action('compact').then((succeeded) => { if (succeeded) compacting = false })">
+        Compact context
+      </UiButton>
+    </div>
+  </Modal>
   <Modal v-if="newSession" title="Start a fresh agent session?" @close="newSession = false">
     <div class="p-6">
       <p>The conversation history and working files will be preserved. The next message will use a new native agent session.</p>
@@ -775,11 +810,28 @@ function key(event: KeyboardEvent) {
         </dt><dd class="m-0 wrap-anywhere">
           {{ detail?.projectName || state.projects.find(project => project.id === projectId)?.name || 'No project' }}
         </dd>
+        <template v-if="detail?.requester">
+          <dt class="text-muted">
+            From
+          </dt><dd class="m-0 wrap-anywhere">
+            <RouterLink :to="chatPath({ id: detail.requester.chatId })" class="font-semibold text-accent" @click="detailsOpen = false">
+              Delegated by {{ detail.requester.title || 'New conversation' }}
+            </RouterLink>
+          </dd>
+        </template>
         <dt class="text-muted">
           Status
         </dt><dd class="m-0 flex items-center gap-2">
           <span class="size-1.5 rounded-full bg-accent" />{{ chatStatus }}
         </dd>
+        <template v-if="detail?.run">
+          <dt class="text-muted">
+            Context
+          </dt><dd class="m-0" data-testid="context-usage">
+            <span class="block">{{ context.label }}</span>
+            <span v-for="line in context.details" :key="line" class="block text-muted">{{ line }}</span>
+          </dd>
+        </template>
       </dl>
       <button class="chat-detail-action" @click="detailAction(newConversation)">
         <Icon :name="Plus" :size="18" />New chat
@@ -792,6 +844,20 @@ function key(event: KeyboardEvent) {
       >
         <Icon :name="FileText" :size="18" />Files <span class="ml-auto text-muted">{{ fileCount }}</span>
       </button>
+      <template v-if="detail?.compaction?.supported && !inactive">
+        <button
+          class="chat-detail-action"
+          aria-haspopup="dialog"
+          :disabled="!detail.compaction.available"
+          :aria-describedby="detail.compaction.reason ? 'compaction-reason' : undefined"
+          @click="detailAction(() => { compacting = true })"
+        >
+          <Icon :name="Layers" :size="18" />{{ detail.compaction.running ? 'Compacting context…' : 'Compact context' }}
+        </button>
+        <p v-if="detail.compaction.reason && !detail.compaction.running" id="compaction-reason" class="m-0! mb-1! px-3 text-2xs text-muted">
+          {{ detail.compaction.reason }}
+        </p>
+      </template>
       <button class="chat-detail-action" @click="detailAction(() => { history = true })">
         <Icon :name="Search" :size="18" />Search conversations
       </button>
@@ -923,7 +989,22 @@ function key(event: KeyboardEvent) {
                 <span aria-hidden="true" class="text-muted/40">/</span>
                 <span class="flex min-w-0 items-center gap-1.5"><Icon :name="FolderGit2" :size="13" /><span class="truncate max-w-48">{{ heading.projectName }}</span></span>
               </template>
+              <RouterLink
+                v-if="heading.requester"
+                :to="chatPath({ id: heading.requester.chatId })"
+                class="flex min-w-0 items-center gap-1.5 font-semibold text-accent hover:underline"
+                data-testid="chat-requester"
+              >
+                <Icon :name="CornerDownRight" :size="13" /><span class="truncate max-w-56">Delegated by {{ heading.requester.title || 'New conversation' }}</span>
+              </RouterLink>
               <span v-if="detail" class="flex items-center gap-1.5 font-semibold" :class="chatStatus === 'Working' ? 'text-accent' : chatStatus === 'Failed' || chatStatus === 'Interrupted' ? 'text-coral' : ''"><span v-if="chatStatus !== 'Working'" class="size-1 shrink-0 rounded-full" :class="active ? 'bg-accent' : 'bg-muted'" />{{ chatStatus }}<span v-if="chatStatus === 'Working'" class="working-wave"><i /><i /><i /></span></span>
+              <span
+                v-if="context.percent !== null || detail?.contextUsage"
+                class="tabular-nums"
+                :class="(context.percent ?? 0) >= 85 ? 'text-coral' : ''"
+                :title="[context.label, ...context.details].join('\n')"
+                data-testid="context-indicator"
+              >Context {{ context.short }}</span>
               <NodeExecution v-if="detail?.run && state.installationRole === 'owner'" :key="detail.run.id" :run="detail.run" />
             </div>
           </div>
@@ -1132,8 +1213,14 @@ function key(event: KeyboardEvent) {
                 </button>
               </template>
             </UiNotice>
+            <RecoveryNotice
+              v-if="recovery && !quota"
+              :recovery="recovery"
+              :busy="busy"
+              @cancel="action('stop')"
+            />
             <UiNotice
-              v-if="waitNotice && !quota"
+              v-else-if="waitNotice && !quota"
               role="status"
               class="mb-3"
               :tone="waitNotice.account ? 'warning' : 'info'"
@@ -1191,6 +1278,7 @@ function key(event: KeyboardEvent) {
               <template v-if="pending.length || detail?.paused">
                 <QueueStrip
                   :pending="pending"
+                  :models="codexModels"
                   :paused="!!detail?.paused"
                   :working="active"
                   :busy="busy"
@@ -1264,9 +1352,11 @@ function key(event: KeyboardEvent) {
                       v-model:provider="chosenProvider"
                       v-model:model="model"
                       v-model:reasoning="reasoning"
+                      v-model:speed="speed"
                       :inherit="!!inheritedAssistant"
                       :default-model="inheritedAssistant?.model || ''"
                       :default-reasoning="inheritedAssistant?.reasoning || ''"
+                      :default-speed="inheritedAssistant?.speed || ''"
                       :default-source="inheritConversation ? 'conversation' : 'agent'"
                       :switching="switchingProvider"
                       :disabled="busy"

@@ -1,10 +1,8 @@
-//! Validation and upgrade of a saved execution descriptor before a run resumes.
+//! Validation of a saved execution descriptor before a run resumes.
 use super::{
     home::{configure_git, run_credentials},
-    prepare_execution,
-    prepared::{Backend, Mount, Prepared},
+    prepared::{Backend, Mount},
     read_only_workspaces, run_directory, uses_vm,
-    workspace::{args, copy_tree, git, head, path, remove, seed},
 };
 use crate::{
     config::Config,
@@ -49,12 +47,12 @@ pub(super) async fn restore(
         ));
     }
     if microvm && !native && !is_firecracker(&prepared) {
-        let migrated = migrate_to_vm(run, &prepared, config, credentials).await?;
-        return Ok(serde_json::to_value(migrated)?);
+        return Err(Error::conflict(
+            "Unsupported saved execution backend; a new conversation is required.",
+        ));
     }
-    if is_firecracker(&prepared) && !prepared["projectRoot"].is_string() {
-        let project_root = infer_project_root(run, &prepared, config)?;
-        prepared["projectRoot"] = serde_json::to_value(project_root)?;
+    if (microvm || native) && !prepared["projectRoot"].is_string() {
+        return Err(Error::bad("Missing saved execution project root."));
     }
     if prepared["projectRoot"].is_string() {
         adopt_opened_projects(run, &mut prepared)?;
@@ -78,145 +76,6 @@ pub(super) async fn restore(
         configure_git(&root.join("home"), config, credentials).await?;
     }
     Ok(prepared)
-}
-
-/// One-time migration of saved container/shared conversations. Keep the old
-/// checkout intact and seed the new private disk with its uncommitted files.
-async fn migrate_to_vm(
-    run: &Value,
-    prepared: &Value,
-    config: &Config,
-    credentials: &RunCredentials,
-) -> Result<Prepared> {
-    let directory = run_directory(run, config);
-    let old_home = directory.join(if prepared["isolated"] == true {
-        "home/.codex"
-    } else {
-        "codex"
-    });
-    let generation = format!("microvm-{}", &crate::config::id()[..8]);
-    let mut migrated =
-        prepare_execution(run, config, credentials, Some(&old_home), Some(&generation)).await?;
-    let saved = prepared["workspaces"]
-        .as_array()
-        .map_or(&[][..], Vec::as_slice);
-    for old in saved {
-        let known = migrated
-            .workspaces
-            .iter()
-            .any(|w| old["projectId"] == w.project_id);
-        if known {
-            continue;
-        }
-        let project = run_projects(run)
-            .into_iter()
-            .find(|p| p["id"] == old["projectId"])
-            .ok_or_else(|| Error::bad("Saved project is no longer authorized."))?;
-        let project_root = migrated.project_root.clone().unwrap_or_default();
-        let entry = seed(run, &project, config, &project_root, credentials).await?;
-        migrated
-            .mounts
-            .push(Mount::same(&entry.path, read_only_workspaces(run)));
-        migrated.workspaces.push(entry);
-    }
-    for old in saved {
-        let Some(new) = migrated
-            .workspaces
-            .iter()
-            .find(|new| old["projectId"] == new.project_id)
-        else {
-            continue;
-        };
-        let source = Path::new(text(old, "path"));
-        import_working_files(run, &directory, source, &new.path).await?;
-    }
-    let new_home = directory.join("home/.codex");
-    if old_home != new_home {
-        for relative in ["sessions", "archived_sessions", "session_index.jsonl"] {
-            let source = old_home.join(relative);
-            if source.exists() {
-                copy_tree(&source, &new_home.join(relative), false).await?;
-            }
-        }
-    }
-    Ok(migrated)
-}
-
-/// Replace the initial clone's working files so tracked deletions remain
-/// deleted. A prior independent clone also keeps its Git history.
-async fn import_working_files(
-    run: &Value,
-    directory: &Path,
-    old: &Path,
-    target: &Path,
-) -> Result<()> {
-    let source = workspace(old, &[directory.to_owned(), old.to_owned()]).await?;
-    let copy_git = tokio::fs::symlink_metadata(source.join(".git"))
-        .await
-        .is_ok_and(|m| m.is_dir());
-    if !copy_git && source.join(".git").exists() {
-        import_linked_worktree(run, &source, target).await?;
-    }
-    let skip = |name: &std::ffi::OsStr| name == ".git" && !copy_git;
-    let mut targets = tokio::fs::read_dir(target).await?;
-    while let Some(entry) = targets.next_entry().await? {
-        if skip(&entry.file_name()) {
-            continue;
-        }
-        remove(&entry.path(), entry.file_type().await?.is_dir()).await?;
-    }
-    let mut entries = tokio::fs::read_dir(&source).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        if skip(&entry.file_name()) {
-            continue;
-        }
-        copy_tree(&entry.path(), &target.join(entry.file_name()), false).await?;
-    }
-    Ok(())
-}
-
-/// A linked worktree's .git file points outside the guest. Its branch and
-/// commits must become independent before import.
-async fn import_linked_worktree(run: &Value, source: &Path, target: &Path) -> Result<()> {
-    let head = head(source).await?;
-    let branch = git(
-        args(&["-C", path(source)?, "symbolic-ref", "--short", "HEAD"]),
-        10,
-    )
-    .await
-    .unwrap_or_else(|_| format!("feat/recovered-{}", &text(run, "id")[..8]));
-    git(
-        args(&["-C", path(target)?, "fetch", path(source)?, &head]),
-        120,
-    )
-    .await?;
-    git(
-        args(&["-C", path(target)?, "checkout", "-B", &branch, &head]),
-        30,
-    )
-    .await?;
-    Ok(())
-}
-
-/// Descriptors saved before `projectRoot` existed derive it from their workspaces.
-fn infer_project_root(run: &Value, prepared: &Value, config: &Config) -> Result<PathBuf> {
-    let cwd = Path::new(text(prepared, "cwd"));
-    let in_project = prepared["workspaces"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|w| w["path"] == prepared["cwd"]);
-    let project_root = if in_project {
-        cwd.parent()
-            .ok_or_else(|| Error::bad("Invalid saved project root."))?
-    } else {
-        cwd
-    };
-    let directory = run_directory(run, config);
-    if !project_root.starts_with(&directory) || project_root == directory {
-        return Err(Error::bad("Invalid saved project root."));
-    }
-    Ok(project_root.to_owned())
 }
 
 /// Adds projects opened during the run (`run.workspaces`) to the descriptor.

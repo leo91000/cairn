@@ -1,13 +1,19 @@
 <script setup lang="ts">
 import type { ActivityArtifact } from '../activity'
-import { computed, onBeforeUnmount, ref } from 'vue'
 import {
+  computed,
+  inject,
+  onBeforeUnmount,
+  ref,
+} from 'vue'
+import {
+  delegatedChatsKey,
   subagentDots as dots,
   subagentElapsed,
   subagentLabels,
   subagentState,
 } from '../subagents'
-import SubagentAvatar from './SubagentAvatar.vue'
+import SubagentMark from './SubagentMark.vue'
 
 // The subagents of the current request, beside the composer so they stay in sight while the
 // conversation scrolls. Each one opens its full activity; on phones they fold into one button.
@@ -17,7 +23,8 @@ const now = ref(Date.now())
 const timer = setInterval(() => now.value = Date.now(), 1000)
 onBeforeUnmount(() => clearInterval(timer))
 
-const state = (agent: ActivityArtifact) => subagentState(agent, props.active)
+const delegated = inject(delegatedChatsKey, null)
+const state = (agent: ActivityArtifact) => subagentState(agent, props.active, delegated?.value)
 const running = computed(() => props.agents.filter(agent => state(agent) === 'running'))
 const first = computed(() => running.value[0] ?? props.agents[0])
 </script>
@@ -36,7 +43,7 @@ const first = computed(() => running.value[0] ?? props.agents[0])
         data-testid="subagent-chip"
         @click="emit('open', agent.id, $event.currentTarget as HTMLElement)"
       >
-        <SubagentAvatar :agent="agent" :size="20" />
+        <SubagentMark :agent="agent" :size="20" />
         <span class="max-w-40 truncate">{{ agent.title }}</span>
         <span class="size-1.5 shrink-0 rounded-full" :class="dots[state(agent)]" aria-hidden="true" />
         <span v-if="state(agent) === 'running'" class="tabular-nums text-muted" aria-hidden="true">{{ subagentElapsed(agent, active, now) }}</span>
@@ -50,7 +57,7 @@ const first = computed(() => running.value[0] ?? props.agents[0])
       @click="emit('open', first.id, $event.currentTarget as HTMLElement)"
     >
       <span class="flex shrink-0 -space-x-1.5">
-        <SubagentAvatar
+        <SubagentMark
           v-for="agent in agents.slice(0, 3)"
           :key="agent.id"
           :agent="agent"

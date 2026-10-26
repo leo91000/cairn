@@ -1,5 +1,12 @@
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { expect, it } from 'vitest'
 
 const web = readFileSync(new URL('../../apps/web/src/views/Nodes.vue', import.meta.url), 'utf8')
@@ -10,8 +17,15 @@ const script = command.slice('sudo sh -c \''.length, -1)
 
 // Run the command shown to people, with every destructive operation replaced.
 // findmnt and grep failures must stop before even a simulated removal.
-function uninstall(scenario: string) {
-  return spawnSync('sh', ['-c', `
+const policyHeader = readFileSync(new URL('../../crates/installation/src/native/mode.rs', import.meta.url), 'utf8').match(/const SUDO_HEADER: &str = "([^"]+)";/)![1]
+
+function uninstall(scenario: string, policies: Record<string, string> = {}) {
+  const directory = mkdtempSync(join(tmpdir(), 'cairn-uninstall-policies-'))
+  for (const [name, contents] of Object.entries(policies))
+    writeFileSync(join(directory, name), contents)
+  const isolatedScript = script.replaceAll('/etc/sudoers.d', '"$CAIRN_TEST_POLICY_DIR"')
+  try {
+    return spawnSync('sh', ['-c', `
 systemctl() { echo "SYSTEMCTL $*"; [ "$scenario" != reload-failure ]; }
 findmnt() {
   case "$scenario" in
@@ -21,12 +35,28 @@ findmnt() {
     *) echo / ;;
   esac
 }
-grep() { if [ "$scenario" = grep-failure ]; then return 2; fi; command grep "$@"; }
-rm() { echo "REMOVE $*"; [ "$scenario" != rm-failure ]; }
+grep() {
+  if [ "$scenario" = grep-failure ]; then return 2; fi
+  if [ "$scenario" = policy-read-failure ]; then
+    case "$*" in *cairn-native-1000*) return 2 ;; esac
+  fi
+  command grep "$@"
+}
+rm() {
+  echo "REMOVE $*"
+  if [ "$scenario" = policy-delete-failure ]; then
+    case "$*" in *cairn-native-1000*) return 1 ;; esac
+  fi
+  [ "$scenario" != rm-failure ]
+}
 userdel() { echo "USERDEL $*"; [ "$scenario" != userdel-failure ]; }
 id() { [ "$scenario" = userdel-failure ]; }
-${script}
-`], { env: { PATH: '/usr/bin:/bin', scenario }, encoding: 'utf8' })
+${isolatedScript}
+`], { env: { PATH: '/usr/bin:/bin', scenario, CAIRN_TEST_POLICY_DIR: directory }, encoding: 'utf8' })
+  }
+  finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 }
 
 it('shows the same shell command on web and Android', () => {
@@ -50,5 +80,33 @@ it.each(['rm-failure', 'userdel-failure'])('keeps the unit when cleanup fails: %
 it('finishes an unmounted uninstall and reports a failed daemon reload', () => {
   expect(uninstall('success').status).toBe(0)
   expect(uninstall('success').stdout).toContain('REMOVE -f /etc/systemd/system/cairn-native-node.service')
+  // Without a Firecracker node left on the machine, the shared gateway goes too.
+  expect(uninstall('success').stdout).toContain('REMOVE -rf /etc/systemd/system/cairn-node-gateway.service /opt/cairn-gateway /var/lib/cairn-gateway')
   expect(uninstall('reload-failure').status).not.toBe(0)
+})
+
+it('removes owned sudo grants across UID changes before deleting their account', () => {
+  expect(command).toContain(policyHeader)
+  const owned = `${policyHeader}\ncairn-workload ALL=(ALL:ALL) NOPASSWD: ALL\n`
+  const result = uninstall('success', {
+    'cairn-native-1000': owned,
+    'cairn-native-2000': owned,
+    'cairn-native-3000': `${policyHeader}\nother-workload ALL=(ALL:ALL) NOPASSWD: ALL\n`,
+    'cairn-native-4000': 'cairn-workload ALL=(ALL:ALL) NOPASSWD: ALL\n',
+  })
+  expect(result.status).toBe(0)
+  const removals = result.stdout.split('\n').filter(line => line.startsWith('REMOVE -f -- '))
+  expect(removals).toHaveLength(2)
+  expect(removals.some(line => line.endsWith('/cairn-native-1000'))).toBe(true)
+  expect(removals.some(line => line.endsWith('/cairn-native-2000'))).toBe(true)
+  expect(result.stdout.indexOf(removals[1])).toBeLessThan(result.stdout.indexOf('USERDEL'))
+})
+
+it.each(['policy-read-failure', 'policy-delete-failure'])('keeps account and state when sudo cleanup fails: %s', (scenario) => {
+  const result = uninstall(scenario, {
+    'cairn-native-1000': `${policyHeader}\ncairn-workload ALL=(ALL:ALL) NOPASSWD: ALL\n`,
+  })
+  expect(result.status).not.toBe(0)
+  expect(result.stdout).not.toContain('USERDEL')
+  expect(result.stdout).not.toContain('REMOVE -rf /opt/cairn-native')
 })

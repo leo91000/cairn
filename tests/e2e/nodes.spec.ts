@@ -18,6 +18,7 @@ test('registers, configures and revokes a node through the owner interface', asy
   await page.goto(workspacePath('/nodes'))
   await page.getByRole('button', { name: 'Add a machine', exact: true }).click()
   await page.getByLabel('Machine name').fill('Browser Linux')
+  await page.getByText('Connect directly instead').click()
   await page.getByLabel('Direct manager address').fill(workspace.url)
   await page.getByRole('button', { name: 'Create enrollment code' }).click()
   const code = await page.getByLabel('Single-use enrollment code').textContent()
@@ -27,7 +28,7 @@ test('registers, configures and revokes a node through the owner interface', asy
       code,
       name: 'Browser Linux',
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: {
         os: 'linux',
         arch: 'x86_64',
@@ -110,6 +111,7 @@ test('registers, configures and revokes a node through the owner interface', asy
 
 test('conversation placement distinguishes a preference from a strict pin and shows synchronization age', async ({ page, workspace }) => {
   test.setTimeout(60000)
+  await useRelayForHttpMocks(page)
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Inspect the fixture' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
@@ -120,7 +122,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
       code: invitation.code,
       name: 'Recovery server',
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: {
         os: 'linux',
         arch: 'x86_64',
@@ -138,7 +140,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
     // real commit notification instead of relying on an empty scheduler pass.
     const reply = await page.request.post(`${workspace.installationUrl}/internal/nodes/heartbeat`, {
       headers: { authorization: `Bearer ${node.token}` },
-      data: {},
+      data: { runtimeId: 'development', nodeProtocol: 2 },
     })
     expect(reply.ok()).toBe(true)
   }
@@ -149,7 +151,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
       code: destinationInvitation.code,
       name: 'Destination server',
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: {
         os: 'linux',
         arch: 'x86_64',
@@ -205,10 +207,37 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await heartbeat()
   await expect(header).not.toContainText('saved when execution stops', { timeout: 15000 })
   await expect(header).toContainText('Synced 2 min ago')
+  const nativePlacement = await workspace.api(`/api/nodes/placement/${detail.run.id}`)
+  let privilegeStatus = 'pending'
+  const privilegeGeneration = randomUUID()
+  await page.route(`**/nodes/placement/${detail.run.id}`, route => route.fulfill({
+    json: {
+      ...nativePlacement,
+      nodes: nativePlacement.nodes.map((candidate: { id: string }) => candidate.id !== node.nodeId
+        ? candidate
+        : {
+            ...candidate,
+            nativeModeStatus: privilegeStatus,
+            nativeModeRequest: { mode: 'administrator', generation: privilegeGeneration },
+            nativeModeObserved: {
+              mode: privilegeStatus === 'applied' ? 'administrator' : 'protected',
+              generation: privilegeStatus === 'applied' ? privilegeGeneration : null,
+              status: privilegeStatus,
+            },
+          }),
+    },
+  }))
   await header.click()
-  await expect(panel).toContainText('Native process · shared host GPU · files load on demand')
+  await expect(panel).toContainText('Last execution: Native protected · shared host GPU · files load on demand')
+  await expect(panel).toContainText('Node privilege change in progress; current privileges are unconfirmed. New placements are blocked.')
+  privilegeStatus = 'failed'
+  await expect(panel).toContainText('Node privilege change failed; current privileges are unconfirmed. New placements are blocked.')
+  privilegeStatus = 'applied'
+  await expect(panel).toContainText('Confirmed node mode: Native administrator')
+  await expect(panel).toContainText('Last execution: Native protected')
   await page.keyboard.press('Escape')
   await expect(panel).toHaveCount(0)
+  await page.unroute(`**/nodes/placement/${detail.run.id}`)
   workspace.service.store.updateRun(detail.run.id, { status: 'succeeded', executionBackend: null } as any)
   workspace.service.store.updateRun(detail.run.id, {
     storage: {
@@ -301,16 +330,18 @@ test('finishing the first step keeps an agent allowed while it was open', async 
     }
 
     const response = await route.fetch()
-    const agents = await response.json()
+    const { agents } = await response.json()
     const main = agents.find((item: { id: string }) => item.id === MAIN_AGENT_ID)
     await route.fulfill({
       response,
-      json: [...agents, {
-        ...main,
-        id: randomUUID(),
-        name: 'Native helper',
-        access: { ...main.access, backend: 'native', nodes: [randomUUID()] },
-      }],
+      json: {
+        agents: [...agents, {
+          ...main,
+          id: randomUUID(),
+          name: 'Native helper',
+          access: { ...main.access, backend: 'native', nodes: [randomUUID()] },
+        }],
+      },
     })
   })
   // The finishing request is observed below, so it must go through HTTP.
@@ -321,6 +352,7 @@ test('finishing the first step keeps an agent allowed while it was open', async 
   await page.goto(workspacePath('/nodes'))
   await page.getByRole('button', { name: 'Add a machine', exact: true }).click()
   await page.getByLabel('Machine name').fill('Shared Linux')
+  await page.getByText('Connect directly instead').click()
   await page.getByLabel('Direct manager address').fill(workspace.url)
   await page.getByRole('button', { name: 'Create enrollment code' }).click()
   const code = await page.getByLabel('Single-use enrollment code').textContent()
@@ -329,7 +361,7 @@ test('finishing the first step keeps an agent allowed while it was open', async 
       code,
       name: 'Shared Linux',
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: {
         os: 'linux',
         arch: 'x86_64',
@@ -379,7 +411,6 @@ test('native enrollment requires explicit people and native agent grants', async
     memoryMiB: 16384,
     diskMiB: 65536,
     kvm: false,
-    fuse: false,
   }
   // A native agent already runs on another native machine.
   const laptopInvitation = await workspace.api('/api/nodes/enrollments', 'POST', { name: 'Native laptop', backend: 'native' })
@@ -388,7 +419,7 @@ test('native enrollment requires explicit people and native agent grants', async
       code: laptopInvitation.code,
       name: 'Native laptop',
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: nativeCapabilities,
     },
   })
@@ -403,6 +434,7 @@ test('native enrollment requires explicit people and native agent grants', async
   await page.getByRole('option', { name: 'Native process · trusted people only', exact: true }).click()
   await expect(enrollment).toContainText('weaker isolation')
   await enrollment.getByLabel('Machine name').fill('Native desktop')
+  await enrollment.getByText('Connect directly instead').click()
   await enrollment.getByLabel('Direct manager address').fill(workspace.url)
   await enrollment.getByRole('button', { name: 'Create enrollment code' }).click()
   const code = await enrollment.getByLabel('Single-use enrollment code').textContent()
@@ -411,7 +443,7 @@ test('native enrollment requires explicit people and native agent grants', async
       code,
       name: 'Native desktop',
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: nativeCapabilities,
     },
   })
@@ -477,62 +509,6 @@ test('native enrollment requires explicit people and native agent grants', async
   expect((await workspace.api('/api/nodes')).find((value: { id: string }) => value.id === desktop).slots).toBe(6)
 })
 
-test('on an older installation, finishing the first step sends the machine\'s whole list', async ({ page, workspace }) => {
-  test.setTimeout(60000)
-  const earlier = await workspace.api('/api/agents', 'POST', { name: 'Earlier agent', access: { nodes: [] } })
-  await useRelayForHttpMocks(page)
-  // An older installation rejects `add` and replaces the list instead.
-  const bodies: unknown[] = []
-  await page.route('**/api/nodes/*/agents', async (route) => {
-    const body = route.request().postDataJSON()
-    bodies.push(body)
-    if (body.add)
-      await route.fulfill({ status: 400, json: { error: 'Invalid node request.' } })
-    else
-      await route.continue()
-  })
-  await page.goto(workspacePath('/nodes'))
-  await authenticateWorkspace(page)
-  await page.getByRole('button', { name: 'Add a machine', exact: true }).click()
-  await page.getByLabel('Machine name').fill('Older Linux')
-  await page.getByLabel('Direct manager address').fill(workspace.url)
-  await page.getByRole('button', { name: 'Create enrollment code' }).click()
-  const code = await page.getByLabel('Single-use enrollment code').textContent()
-  const response = await page.request.post(`${workspace.installationUrl}/internal/nodes/enroll`, {
-    data: {
-      code,
-      name: 'Older Linux',
-      protocol: 1,
-      runtimeId: 'fixture',
-      capabilities: {
-        os: 'linux',
-        arch: 'x86_64',
-        kvm: true,
-        cpu: 8,
-        memoryMiB: 16384,
-        diskMiB: 65536,
-      },
-    },
-  })
-  expect(response.ok()).toBe(true)
-  const { nodeId } = await response.json()
-  const grant = page.getByRole('dialog', { name: 'Who can use “Older Linux”?' })
-  await expect(grant).toBeVisible({ timeout: 20000 })
-  // Allowed meanwhile from its agent page: the replacing list must keep it.
-  const current = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === earlier.id)
-  await workspace.api(`/api/agents/${earlier.id}`, 'PUT', { ...current, access: { ...current.access, nodes: [nodeId] } })
-  await expect(grant.getByRole('checkbox', { name: /^Earlier agent/ })).toBeDisabled({ timeout: 15000 })
-  await grant.getByRole('checkbox', { name: 'Main agent', exact: true }).check()
-  await grant.getByRole('button', { name: 'Finish', exact: true }).click()
-  await expect(grant).toHaveCount(0)
-  expect(bodies).toEqual([
-    { agentIds: [MAIN_AGENT_ID], add: true },
-    { agentIds: [earlier.id, MAIN_AGENT_ID] },
-  ])
-  const saved = (await workspace.api('/api/nodes')).find((node: { id: string }) => node.id === nodeId)
-  expect(saved.agents.map((item: { id: string }) => item.id).sort()).toEqual([MAIN_AGENT_ID, earlier.id].sort())
-})
-
 test('switching a machine to native enrolls it again and retires the previous node', async ({ page, workspace }) => {
   test.setTimeout(90000)
   const chat = await workspace.api('/api/chats', 'POST', {})
@@ -546,7 +522,7 @@ test('switching a machine to native enrolls it again and retires the previous no
         code,
         name: 'Workstation',
         protocol: 1,
-        runtimeId: 'fixture',
+        runtimeId: 'development',
         capabilities,
       },
     })
@@ -575,6 +551,7 @@ test('switching a machine to native enrolls it again and retires the previous no
   // The backend is the point of the switch: it is not offered again.
   await expect(switching.getByRole('combobox', { name: 'Execution backend' })).toHaveCount(0)
   await expect(switching).toContainText('weaker isolation')
+  await switching.getByText('Connect directly instead').click()
   await switching.getByLabel('Direct manager address').fill(workspace.url)
   await switching.getByRole('button', { name: 'Create enrollment code' }).click()
   const code = await switching.getByLabel('Single-use enrollment code').textContent()
@@ -584,7 +561,6 @@ test('switching a machine to native enrolls it again and retires the previous no
     ...machine,
     backend: 'native',
     kvm: false,
-    fuse: false,
   })
   await page.waitForResponse(async response => response.request().method() === 'GET'
     && new URL(response.url()).pathname.endsWith('/api/nodes')
@@ -596,7 +572,6 @@ test('switching a machine to native enrolls it again and retires the previous no
     ...machine,
     backend: 'native',
     kvm: false,
-    fuse: false,
   })
 
   // The new runtime is configured and offered agents first, then the previous node can be retired.
@@ -628,7 +603,9 @@ test('switching a machine to native enrolls it again and retires the previous no
 test('existing conversation explicitly confirms backend migration and follows its progress', async ({ page, workspace }) => {
   test.setTimeout(60000)
   await useRelayForHttpMocks(page)
-  const chat = await workspace.api('/api/chats', 'POST', {})
+  // Earlier enrollment journeys may change Main's backend or allowed nodes.
+  const agent = workspace.service.agent({ name: 'Migration source', provider: 'codex' })
+  const chat = await workspace.api('/api/chats', 'POST', { agentId: agent.id })
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Keep this conversation' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
   await page.route('**/nodes/placement/*', route => route.fulfill({ json: { nodes: [{ id: 'native-fixture', name: 'Desktop GPU' }], pinnedNodeId: null, preferredNodeId: null } }))
@@ -668,4 +645,87 @@ test('existing conversation explicitly confirms backend migration and follows it
   phase = 'complete'
   await expect(page.getByRole('status').filter({ hasText: 'Migration complete' })).toBeVisible()
   await expect(page).toHaveURL(/\/chats\//)
+})
+
+test('previews node administrator powers and keeps failed transitions visibly blocked', async ({ page, workspace: _workspace }) => {
+  await useRelayForHttpMocks(page)
+  const node: any = {
+    id: randomUUID(),
+    name: 'Disposable administrator',
+    local: false,
+    accepting: true,
+    status: 'online',
+    revoked: false,
+    nativeEnabled: true,
+    nativeAccounts: ['trusted'],
+    tags: [],
+    slots: 2,
+    occupiedSlots: 2,
+    agents: [{ id: 'builder', name: 'Builder', allNodes: true }],
+    capabilities: {
+      os: 'linux',
+      arch: 'x86_64',
+      backend: 'native',
+      ublk: true,
+      nativeModeProtocol: 1,
+      kvm: false,
+      cpu: 4,
+      memoryMiB: 8192,
+      diskMiB: 65536,
+    },
+    limits: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 },
+    nativeModeObserved: { mode: 'protected', generation: null, status: 'applied' },
+  }
+  const requests: any[] = []
+  await page.route('**/api/nodes', route => route.fulfill({ json: [node] }))
+  await page.route(`**/nodes/${node.id}/native-mode`, async (route) => {
+    const change = route.request().postDataJSON()
+    requests.push(change)
+    if (change.confirm) {
+      node.nativeModeRequest = { mode: change.mode, generation: 'g1' }
+      node.nativeModeStatus = 'failed'
+      node.nativeModeObserved = {
+        mode: 'protected',
+        generation: null,
+        status: 'failed',
+        error: 'Stop confirmation unavailable',
+      }
+      return route.fulfill({ json: node })
+    }
+
+    return route.fulfill({
+      json: {
+        previewId: 'preview-one',
+        preview: {
+          mode: change.mode,
+          warning: 'Unrestricted passwordless sudo on the real host. Root can read local credentials and alter Cairn. Returning to protected does not clean or restore this machine.',
+          interruptions: 'Two conversations and their process descendants stop before restart. Files and history remain.',
+          trustedAccounts: ['trusted'],
+          agents: [{ id: 'builder', name: 'Builder' }],
+          conversations: [{ id: 'c1', name: 'First conversation', status: 'running' }, { id: 'c2', name: 'Second conversation', status: 'running' }],
+          tasks: [{ id: 't1', name: 'Nightly build' }],
+        },
+      },
+    })
+  })
+  await page.goto(workspacePath('/nodes'))
+  await authenticateWorkspace(page)
+  const card = page.getByRole('article').filter({ hasText: 'Disposable administrator' })
+  await expect(card).toContainText('Native protected')
+  await card.getByRole('button', { name: 'Switch to Native administrator', exact: true }).click()
+  const review = page.getByRole('dialog', { name: 'Switch Disposable administrator to Native administrator?' })
+  await expect(review).toContainText('real host')
+  await expect(review).toContainText('First conversation')
+  await expect(review).toContainText('Second conversation')
+  await expect(review).toContainText('Nightly build')
+  expect(requests).toEqual([{ mode: 'administrator' }])
+  await review.getByRole('button', { name: 'Confirm access and restart managed executions' }).click()
+  await expect(review).toHaveCount(0)
+  await expect(card).toContainText('Change failed; new placements are blocked')
+  await expect(card).toContainText('Last confirmed: Native protected')
+  await expect(card).toContainText('Current privileges are unconfirmed')
+  await expect(card).toContainText('Native protected')
+  expect(requests[1]).toEqual({ mode: 'administrator', previewId: 'preview-one', confirm: true })
+  await card.getByRole('button', { name: 'Switch to Native administrator', exact: true }).click()
+  expect(requests.at(-1)).toEqual({ mode: 'administrator' })
 })

@@ -31,7 +31,7 @@ async fn installation_slugs_are_unique_stable_and_only_listed_for_authorized_acc
                 json!({
                     "code": code["code"],
                     "name": "Same display name",
-                    "protocol": 4,
+                    "protocol": cairn_protocol::PROTOCOL_VERSION,
                 }),
             )
             .await

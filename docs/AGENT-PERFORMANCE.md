@@ -9,8 +9,8 @@ default binary filter. With a custom filter, include `cairn_performance=info` in
 Worker logs include `run_id`. Every process launch receives a fresh `attempt_id`,
 also passed as optional `runId`/`attemptId` fields in the chat plan. The adapter
 places native RPC and output logs in the same `agent_attempt` tracing span.
-Retained older adapters ignore the optional fields; plans without them log
-`unknown`. Invalid correlation values also become `unknown`.
+Plans without correlation fields log `unknown`. Invalid correlation values also
+become `unknown`.
 
 Activity records have `side=adapter` (normalized events inside the agent process)
 or `side=worker` (events received by the manager). The agent process writes its
@@ -26,9 +26,8 @@ Terminal styling is removed before framing diagnostics, with parser state kept
 across reads and long fragments. Control-sequence bodies are discarded while
 streaming rather than buffered, and incomplete UTF-8 characters wait for the next read.
 Archive transfers add a UUID linking host and guest phases; see
-[VM import timings](VM-IMPORT-TIMINGS.md) for reading, transport, extraction and
-acknowledgement measurements. Guest measurements require the updated VM image;
-host measurements also work with retained older images.
+[VM import timings](#vm-import-timings) for reading, transport, extraction and
+acknowledgement measurements. Host and guest run the same application build.
 
 ## Timings
 
@@ -144,3 +143,38 @@ error text.
 Durations use monotonic clocks within each process. Do not subtract wall-clock
 timestamps from different nodes to infer network delay. Logging remains
 observational; it does not send test messages or resume production conversations.
+
+## VM import timings
+
+VM imports emit structured records under the existing `cairn_performance` target.
+They contain random transfer IDs, VM IDs, fixed phase names and aggregate byte
+counts; they do not include paths, archive contents or credentials.
+
+The host's `vm_import` record links its transfer `id` to `vm_id` and a fixed
+`import_kind` (`entrypoint`, `home`, `chat_inbox` or `other`). Find that VM's ID in
+the run's `{attempt}.vm.json` record. Project imports use `vm_project_import`
+with `import_kind="project"` and the same identifiers.
+The optional `traceId` in import requests links host and guest records by `id`.
+
+| Operation | What its phases measure |
+| --- | --- |
+| `guest_prepare` | Keeps `current_entrypoint` separate from `run_connect` and `run_request`. |
+| `vm_import` / `vm_project_import` | Guest status, connection, request, host `tar` startup, archive streaming, end marker, host `tar` exit and guest acknowledgement. Project imports also measure the ready/reused reply. |
+| `guest_import` / `guest_project_import` | Target preparation, guest `tar` startup, receiving the archive into `tar`, `tar` exit, ownership, permissions where applicable and acknowledgement. Project imports also measure lock acquisition, reopening, publication and `sync`. |
+| `vm_archive_stream` | Total archive `bytes`, `chunks`, cumulative `read_ms` and `write_ms`, labelled `side="host"` or `side="guest"`. |
+
+Host stream reads wait on the archive-producing process; host writes wait on the
+VM transport. Guest reads wait on that binary transport; guest writes wait on
+the archive extractor's stdin.
+These are elapsed waits including scheduling, not exclusive CPU measurements.
+Host and guest work overlaps, so do not add their durations together. There is
+one aggregate stream record per side, rather than one log per chunk.
+
+Phase start records show the last entered step while an operation is blocked.
+Cancellation or failure drops the timer and records `event="incomplete"` with
+the current phase and elapsed time. Completed stream totals are only available
+when streaming reaches its end.
+
+Host timings are in the runner/controller logs; guest timings are in the VM's
+`{vm-id}.boot.log` in runner state. Import trace IDs correlate host and guest
+measurements; invalid or absent trace IDs are recorded as `untraced`.

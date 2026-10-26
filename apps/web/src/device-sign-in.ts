@@ -1,18 +1,8 @@
+import type { PluginSigninFlow as DeviceFlow } from '../../../packages/contracts/generated/typescript/PluginSigninFlow'
 import { computed, ref } from 'vue'
 import { api, ApiError } from './api'
 
-/** A plugin's device sign-in, as the installation shows it: the token never reaches the browser. */
-export interface DeviceFlow {
-  id: string
-  pluginId: string
-  state: 'pending' | 'exchanging' | 'completed' | 'failed' | 'expired'
-  userCode: string
-  verificationUri: string
-  verificationUriComplete?: string | null
-  expiresAt: number
-  /** Why it failed, or the service's guidance. */
-  message?: string | null
-}
+export type { PluginSigninFlow as DeviceFlow } from '../../../packages/contracts/generated/typescript/PluginSigninFlow'
 
 /** The page where the owner enters the code; some services prefill it. */
 export function verificationLink(flow: Pick<DeviceFlow, 'verificationUri' | 'verificationUriComplete'>) {

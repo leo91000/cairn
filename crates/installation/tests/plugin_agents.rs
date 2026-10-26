@@ -1,12 +1,18 @@
 //! Plugin API v2 end to end, through the built-in 1Password package: an ordinary
 //! package with a secret setting, agent grants, commands, a tool, instructions, a
 //! declared program, a view, actions and a test.
+#[allow(unused_imports)]
+use common::{PluginServiceFixture as _, PluginStoreFixture as _};
+
+use common::AgentFixture;
+use common::MissionFixture;
+
 mod common;
 
 use axum::{body::Body, http::StatusCode};
 use cairn_installation::{
     config::{MAIN_AGENT_ID, id},
-    plugins::{agents, connections, legacy, panels},
+    plugins::{agents, connections, panels},
     run_output,
     service::Service,
     validation::text,
@@ -44,7 +50,7 @@ async fn fixture() -> Fixture {
     write_program(&program, OP);
     s.plugins.use_program("onepassword", "op", program.clone());
     let task = s
-        .task(
+        .task_fixture(
             json!({ "name": "Probe", "agentId": MAIN_AGENT_ID, "prompt": "Hello" }),
             None,
         )
@@ -75,13 +81,263 @@ fn write_program(path: &PathBuf, script: &str) {
 }
 
 async fn save(s: &Service, input: Value, existing: Option<&str>) -> Value {
-    connections::save(s, "onepassword", &input, existing)
+    common::save_plugin(s, "onepassword", &input, existing)
         .await
         .unwrap()
 }
 
 fn command(name: &str, args: &[&str]) -> Value {
     json!({ "plugin": "onepassword", "command": name, "args": args })
+}
+
+#[tokio::test]
+async fn quota_failures_explain_the_account_limit_without_echoing_program_output() {
+    let f = fixture().await;
+    let saved = save(
+        &f.s,
+        json!({
+            "name": "Production", "enabled": true,
+            "secrets": { "token": "ops_fixture" }, "agentIds": [MAIN_AGENT_ID],
+        }),
+        None,
+    )
+    .await;
+    let account = text(&saved, "id");
+    write_program(
+        &f.program,
+        r#"#!/bin/sh
+if [ "$1" = service-account ]; then
+    printf '[{"type":"account","action":"read_write","limit":1000,"used":1000,"remaining":0,"reset":18803,"secret":"ops_fixture"}]'
+    exit 0
+fi
+echo 'ops_fixture Too many requests. Your client has been rate-limited. Try again in seconds' >&2
+exit 1
+"#,
+    );
+    let read = command("read", &["--account", account, "op://vault/item/password"]);
+    let error =
+        f.s.plugins
+            .command(&f.s, &f.bearer, &read)
+            .await
+            .unwrap_err();
+    assert!(error.message.contains("daily account quota"), "{error:?}");
+    assert!(error.message.contains("1000/1000"), "{error:?}");
+    assert!(error.message.contains("18803 seconds"), "{error:?}");
+    assert!(error.message.contains("shared"), "{error:?}");
+    assert!(!error.message.contains("ops_fixture"));
+
+    let limits = run(&f, command("limits", &["--account", account]))
+        .await
+        .unwrap();
+    assert_eq!(limits["value"]["limits"][0]["remaining"], 0);
+    assert!(!limits.to_string().contains("ops_fixture"));
+
+    let metadata = mcp(
+        &f,
+        "tools/call",
+        json!({ "name": "onepassword", "arguments": { "operation": "limits", "accountId": account } }),
+    )
+    .await;
+    assert_eq!(
+        metadata["result"]["structuredContent"]["limits"][0]["remaining"],
+        0
+    );
+    assert!(!metadata.to_string().contains("ops_fixture"));
+
+    let result = mcp(
+        &f, "tools/call",
+        json!({ "name": "onepassword", "arguments": { "operation": "fields", "accountId": account, "vault": "vault", "item": "item" } }),
+    ).await;
+    assert_eq!(result["result"]["isError"], true);
+    assert!(
+        result["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("daily account quota")
+    );
+    assert!(!result.to_string().contains("ops_fixture"));
+}
+
+#[tokio::test]
+async fn rate_limit_diagnostics_fall_back_safely_and_choose_the_longest_exhausted_limit() {
+    let f = fixture().await;
+    let saved = save(
+        &f.s,
+        json!({ "name": "Production", "enabled": true, "secrets": { "token": "ops_fixture" }, "agentIds": [MAIN_AGENT_ID] }),
+        None,
+    ).await;
+    let read = command(
+        "read",
+        &["--account", text(&saved, "id"), "op://vault/item/password"],
+    );
+    for diagnostic in [
+        "printf 'ops_fixture invalid-json'",
+        "echo ops_fixture >&2; exit 1",
+        // A host-level stdout-limit error must not hide the original rate limit.
+        "/usr/bin/head -c 1048577 /dev/zero",
+        "printf '[{\"type\":\"account\",\"action\":\"read_write\",\"limit\":\"ops_fixture\",\"used\":1000,\"remaining\":0,\"reset\":1}]'",
+    ] {
+        write_program(
+            &f.program,
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = service-account ]; then {diagnostic}; exit 0; fi\necho 'rate limit exceeded ops_fixture' >&2\nexit 1\n"
+            ),
+        );
+        let error =
+            f.s.plugins
+                .command(&f.s, &f.bearer, &read)
+                .await
+                .unwrap_err();
+        assert!(error.message.contains("rate limit"), "{error:?}");
+        assert!(!error.message.contains("ops_fixture"));
+    }
+    write_program(
+        &f.program,
+        r#"#!/bin/sh
+if [ "$1" = service-account ]; then
+    printf '[{"type":"account","action":"read_write","limit":1000,"used":1000,"remaining":0,"reset":18803},{"type":"token","action":"read","limit":1000,"used":1000,"remaining":0,"reset":60}]'
+    exit 0
+fi
+echo '(429) Too Many Requests ops_fixture' >&2
+exit 1
+"#,
+    );
+    let error =
+        f.s.plugins
+            .command(&f.s, &f.bearer, &read)
+            .await
+            .unwrap_err();
+    assert!(error.message.contains("18803 seconds"), "{error:?}");
+
+    write_program(
+        &f.program,
+        r#"#!/bin/sh
+if [ "$1" = service-account ]; then
+    printf '[{"type":"token","action":"write","limit":100,"used":100,"remaining":0,"reset":3500},{"type":"token","action":"read","limit":1000,"used":1000,"remaining":0,"reset":60},{"type":"account","action":"read_write","limit":1000,"used":900,"remaining":100,"reset":18000}]'
+    exit 0
+fi
+echo 'rate limit exceeded' >&2
+exit 1
+"#,
+    );
+    let error =
+        f.s.plugins
+            .command(&f.s, &f.bearer, &read)
+            .await
+            .unwrap_err();
+    assert!(
+        error.message.contains("hourly service-account quota"),
+        "{error:?}"
+    );
+    assert!(error.message.contains("1000/1000"), "{error:?}");
+    assert!(error.message.contains("60 seconds"), "{error:?}");
+}
+
+#[tokio::test]
+async fn selected_secret_fields_share_one_item_read_and_never_enter_metadata() {
+    let f = fixture().await;
+    let saved = save(
+        &f.s,
+        json!({ "name": "Production", "enabled": true, "secrets": { "token": "ops_fixture" }, "agentIds": [MAIN_AGENT_ID] }),
+        None,
+    ).await;
+    let calls = f.root.path().join("calls");
+    write_program(
+        &f.program,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+[ "$1" = item ] && [ "$2" = get ] || exit 1
+printf '{{"fields":[{{"id":"username","label":"username","value":"alice"}},{{"id":"credential","label":"JIRA_API_TOKEN","type":"CONCEALED","value":"hidden-token"}},{{"id":"notesPlain","value":"unrequested-secret"}}]}}'
+"#,
+            calls.display()
+        ),
+    );
+    let account = text(&saved, "id");
+    let read = |fields| {
+        command(
+            "read-fields",
+            &[
+                "--account",
+                account,
+                "--vault",
+                "vault",
+                "--item",
+                "--help",
+                "--fields",
+                fields,
+            ],
+        )
+    };
+    let result = run(&f, read(r#"["username","JIRA_API_TOKEN"]"#))
+        .await
+        .unwrap();
+    assert_eq!(result["output"], "secret");
+    let values: Value = serde_json::from_str(result["value"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        values,
+        json!({ "username": "alice", "JIRA_API_TOKEN": "hidden-token" })
+    );
+    let invoked = std::fs::read_to_string(&calls).unwrap();
+    assert_eq!(invoked.lines().count(), 1);
+    assert_eq!(
+        invoked.trim(),
+        "item get --vault=vault --format=json -- --help"
+    );
+    for fields in [
+        "[]",
+        "{}",
+        "null",
+        "not-json",
+        "[1]",
+        r#"["username","username"]"#,
+        r#"["username",null]"#,
+        r#"[null,"username"]"#,
+    ] {
+        assert!(run(&f, read(fields)).await.is_err(), "{fields}");
+    }
+    assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 1);
+    let missing =
+        f.s.plugins
+            .command(&f.s, &f.bearer, &read(r#"["missing"]"#))
+            .await
+            .unwrap_err();
+    assert!(!missing.message.contains("hidden-token"));
+    assert!(!missing.message.contains("unrequested-secret"));
+    let metadata = mcp(&f, "tools/call", json!({ "name": "onepassword", "arguments": { "operation": "read-fields", "accountId": account } })).await;
+    assert_eq!(metadata["result"]["isError"], true);
+    assert!(!metadata.to_string().contains("hidden-token"));
+    write_program(
+        &f.program,
+        r#"#!/bin/sh
+printf '{"fields":[{"id":"username","value":"alice"},{"id":"other","label":"username","value":"unrequested-secret"}]}'
+"#,
+    );
+    let by_id = run(&f, read(r#"["username"]"#)).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(by_id["value"].as_str().unwrap()).unwrap(),
+        json!({"username":"alice"})
+    );
+    for fields in [
+        r#"[{"id":"first","label":"duplicate","value":"hidden-token"},{"id":"second","label":"duplicate","value":"unrequested-secret"}]"#,
+        r#"[{"id":"duplicate","type":"OTP","value":"totp-seed"}]"#,
+    ] {
+        write_program(
+            &f.program,
+            &format!("#!/bin/sh\nprintf '%s' '{{\"fields\":{fields}}}'\n"),
+        );
+        let error =
+            f.s.plugins
+                .command(&f.s, &f.bearer, &read(r#"["duplicate"]"#))
+                .await
+                .unwrap_err();
+        assert!(!error.message.contains("hidden-token"));
+        assert!(!error.message.contains("totp-seed"));
+    }
+    f.s.agent_fixture(json!({ "plugins": [] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
+    assert_eq!(run(&f, read(r#"["username"]"#)).await, Err(403));
 }
 
 async fn run(f: &Fixture, input: Value) -> Result<Value, u16> {
@@ -119,7 +375,10 @@ async fn service_accounts_are_instances_with_encrypted_tokens_and_live_grants() 
     // Nothing is granted by default, including Main agent.
     assert_eq!(run(&f, read.clone()).await, Err(403));
     assert_eq!(run(&f, command("accounts", &[])).await, Err(403));
-    let mut update = json!({ "name": "Production", "enabled": true, "agentIds": [MAIN_AGENT_ID] });
+    s.agent_fixture(json!({ "plugins": [account] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
+    let mut update = json!({ "name": "Production", "enabled": true });
     save(s, update.clone(), Some(&account)).await; // an omitted token is kept
     assert_eq!(
         run(&f, command("accounts", &[])).await.unwrap()["value"]["accounts"],
@@ -174,11 +433,15 @@ async fn service_accounts_are_instances_with_encrypted_tokens_and_live_grants() 
     save(s, update.clone(), Some(&account)).await;
     assert_eq!(run(&f, read.clone()).await, Err(403));
     update["enabled"] = json!(true);
-    update["agentIds"] = json!([]);
+    s.agent_fixture(json!({ "plugins": [] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
     save(s, update.clone(), Some(&account)).await;
     assert_eq!(run(&f, read.clone()).await, Err(403));
 
-    update["agentIds"] = json!([MAIN_AGENT_ID]);
+    s.agent_fixture(json!({ "plugins": [account] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
     update["secrets"] = json!({ "token": "ops_rotated" });
     save(s, update.clone(), Some(&account)).await;
     let secrets = s
@@ -191,13 +454,36 @@ async fn service_accounts_are_instances_with_encrypted_tokens_and_live_grants() 
     // The fake CLI only accepts the original token.
     assert_eq!(run(&f, read.clone()).await, Err(502));
 
-    let temporary = s.agent(json!({ "name": "Temporary" }), None).await.unwrap();
-    update["agentIds"] = json!([MAIN_AGENT_ID, temporary["id"]]);
+    let temporary = s
+        .agent_fixture(json!({ "name": "Temporary" }), None)
+        .await
+        .unwrap();
+    s.agent_fixture(
+        json!({ "plugins": [account] }),
+        Some(text(&temporary, "id")),
+    )
+    .await
+    .unwrap();
     update.as_object_mut().unwrap().remove("secrets");
     save(s, update.clone(), Some(&account)).await;
-    s.remove("agents", text(&temporary, "id")).await.unwrap();
+    cairn_installation::api::dispatch(
+        s,
+        &cairn_installation::http::Input {
+            method: "DELETE".into(),
+            path: format!("/api/agents/{}", text(&temporary, "id")),
+            query: std::collections::HashMap::default(),
+            headers: axum::http::HeaderMap::default(),
+            body: Value::Null,
+            identity: Some(cairn_installation::auth::InstallationIdentity::trusted(
+                cairn_installation::auth::InstallationRole::Owner,
+                "fixture-owner",
+            )),
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        s.get(connections::KIND, &account).await.unwrap()["agentIds"],
+        s.instance_fixture(&account).await.unwrap()["agentIds"],
         json!([MAIN_AGENT_ID])
     );
     connections::remove(s, "onepassword", &account)
@@ -217,7 +503,7 @@ async fn service_accounts_are_instances_with_encrypted_tokens_and_live_grants() 
 async fn errors_never_echo_secrets_and_revocation_beats_slow_programs() {
     let f = fixture().await;
     let s = &f.s;
-    let error = connections::save(
+    let error = common::save_plugin(
         s,
         "onepassword",
         &json!({ "name": "Bad", "enabled": true, "secrets": { "token": "private-invalid-token" } }),
@@ -226,7 +512,7 @@ async fn errors_never_echo_secrets_and_revocation_beats_slow_programs() {
     .await
     .unwrap_err();
     assert!(!error.message.contains("private-invalid-token"));
-    let unknown_agent = connections::save(
+    let unknown_agent = common::save_plugin(
         s,
         "onepassword",
         &json!({ "name": "Bad", "enabled": true, "secrets": { "token": "ops_fixture" }, "agentIds": [id()] }),
@@ -465,7 +751,7 @@ async fn owners_see_the_package_view_run_its_actions_and_test_it() {
     let account = text(&saved, "id");
     let view = panels::view(s, "onepassword", account).await.unwrap();
     assert_eq!(view["view"][0]["type"], "section");
-    let result = panels::action(s, "onepassword", account, &json!({ "action": "vaults" }))
+    let result = common::plugin_action(s, "onepassword", account, &json!({ "action": "vaults" }))
         .await
         .unwrap();
     assert_eq!(
@@ -473,68 +759,21 @@ async fn owners_see_the_package_view_run_its_actions_and_test_it() {
         "Production"
     );
     assert!(
-        panels::action(s, "onepassword", account, &json!({ "action": "Bad name" }))
+        common::plugin_action(s, "onepassword", account, &json!({ "action": "Bad name" }))
             .await
             .is_err()
     );
-    let test = panels::test(s, "onepassword", account).await.unwrap();
+    let test = common::plugin_test(s, "onepassword", account)
+        .await
+        .unwrap();
     assert_eq!(test["message"], "Connected · 1 vault");
     write_program(&f.program, "#!/bin/sh\nexit 1\n");
     assert!(
-        panels::test(s, "onepassword", account)
+        common::plugin_test(s, "onepassword", account)
             .await
             .unwrap_err()
             .message
             .contains("1Password request failed")
-    );
-}
-
-#[tokio::test]
-async fn legacy_service_accounts_move_into_instances_once() {
-    let f = fixture().await;
-    let s = &f.s;
-    let account = id();
-    s.store
-        .put(
-            "onepassword",
-            json!({
-                "id": account, "name": "Legacy", "enabled": true,
-                "agentIds": [MAIN_AGENT_ID], "updatedAt": 1,
-            }),
-        )
-        .await
-        .unwrap();
-    let encrypted = s
-        .vault
-        .encrypt(
-            &format!("onepassword:{account}"),
-            &json!({ "token": "ops_fixture" }),
-        )
-        .unwrap();
-    s.store
-        .set(
-            &format!("mcp-secret:onepassword:{account}"),
-            encrypted,
-            None,
-        )
-        .await
-        .unwrap();
-    legacy::migrate(s).await.unwrap();
-    legacy::migrate(s).await.unwrap();
-    assert!(s.store.list("onepassword").await.unwrap().is_empty());
-    let instance = s.get(connections::KIND, &account).await.unwrap();
-    assert_eq!(instance["pluginId"], "onepassword");
-    assert_eq!(instance["name"], "Legacy");
-    assert_eq!(instance["agentIds"], json!([MAIN_AGENT_ID]));
-    // Agents keep their account IDs and the token still reaches op.
-    assert_eq!(
-        run(
-            &f,
-            command("read", &["--account", &account, "op://vault/item/password"])
-        )
-        .await
-        .unwrap()["value"],
-        "secret-with-no-newline"
     );
 }
 
@@ -600,7 +839,7 @@ async fn manifest_constraints_are_checked_before_install_and_defaults_can_be_sav
         serde_json::to_value(&first.manifest).unwrap()
     );
 
-    let saved = connections::save(
+    let saved = common::save_plugin(
         s,
         "statusboard",
         &json!({ "name": "Defaults", "enabled": true }),
@@ -660,7 +899,7 @@ async fn manifest_constraints_are_checked_before_install_and_defaults_can_be_sav
         .unwrap();
     let repaired = registry::active(s, "statusboard").await.unwrap();
     assert_eq!(repaired.manifest.version, "1.0.1");
-    let updated = connections::save(
+    let updated = common::save_plugin(
         s,
         "statusboard",
         &json!({ "name": "Defaults", "enabled": true }),
@@ -769,7 +1008,7 @@ async fn third_party_packages_contribute_forms_commands_tools_and_views() {
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
     registry_install_and_approve(s, status_board()).await;
-    let invalid = connections::save(
+    let invalid = common::save_plugin(
         s,
         "statusboard",
         &json!({ "name": "Main", "enabled": true, "settings": { "region": "mars" }, "secrets": { "apiKey": "k1" } }),
@@ -777,7 +1016,7 @@ async fn third_party_packages_contribute_forms_commands_tools_and_views() {
     )
     .await;
     assert!(invalid.is_err(), "choices come from the manifest");
-    let board = connections::save(
+    let board = common::save_plugin(
         s,
         "statusboard",
         &json!({
@@ -837,7 +1076,7 @@ async fn third_party_packages_contribute_forms_commands_tools_and_views() {
     let id = text(&board, "id");
     let view = panels::view(s, "statusboard", id).await.unwrap();
     assert_eq!(view["view"][0]["type"], "form");
-    let result = panels::action(
+    let result = common::plugin_action(
         s,
         "statusboard",
         id,
@@ -870,16 +1109,13 @@ async fn live_form_completion_preserves_cleared_defaulted_fields() {
     .await;
 
     for settings in [json!({}), json!({ "note": null, "limit": null })] {
-        let completed = cairn_installation::plugins::forms::form(
-            &f.s,
-            "draftdefaults",
-            &json!({ "settings": settings }),
-        )
-        .await
-        .unwrap();
+        let completed =
+            common::plugin_form(&f.s, "draftdefaults", &json!({ "settings": settings }))
+                .await
+                .unwrap();
         assert_eq!(completed["values"], json!({}));
     }
-    let completed = cairn_installation::plugins::forms::form(
+    let completed = common::plugin_form(
         &f.s,
         "draftdefaults",
         &json!({ "settings": { "note": "Edited", "limit": 0 } }),

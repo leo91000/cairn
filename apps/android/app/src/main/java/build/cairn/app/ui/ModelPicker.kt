@@ -128,9 +128,11 @@ private val OpenCodeMark by lazy {
 }
 
 /**
- * One entry point for the coding agent, model and reasoning effort, shared by the composer and
- * agent settings. Empty values preserve server inheritance. When [changeProvider] is set, the sheet
- * also switches between Codex and Claude Code; the caller supplies that provider's catalog.
+ * One entry point for the coding agent, model, reasoning effort and Codex speed, shared by the
+ * composer and agent settings. Empty values preserve server inheritance. When [changeProvider] is
+ * set, the sheet also switches between Codex and Claude Code; the caller supplies that provider's
+ * catalog. When [changeSpeed] is set, Codex models listing speeds offer them; the speed is kept
+ * across model changes.
  */
 @Composable
 fun ModelPicker(
@@ -148,6 +150,9 @@ fun ModelPicker(
     switching: Boolean = false,
     field: Boolean = false,
     conversationDefault: Boolean = false,
+    speed: String = "",
+    defaultSpeed: String = "",
+    changeSpeed: ((String) -> Unit)? = null,
     change: (String, String) -> Unit,
 ) {
     var open by rememberSaveable { mutableStateOf(false) }
@@ -190,6 +195,22 @@ fun ModelPicker(
             defaultReasoning.ifBlank { selected?.defaultReasoningEffort.orEmpty() }
         else selected?.defaultReasoningEffort.orEmpty()
     val effectiveEffort = reasoning.ifBlank { inheritedEffort }
+    // Speeds Codex names in this catalog, to label a saved speed the selected model lacks.
+    val knownTiers = catalog.models.flatMap { it.serviceTiers.orEmpty() }
+    val inheritedSpeed = if (inherit) defaultSpeed else ""
+    val currentSpeed = effectiveSpeed(speed, inheritedSpeed)
+    val speedShown =
+        changeSpeed != null && showsSpeed(provider, selected, speed.ifBlank { inheritedSpeed })
+    // A speed the model lacks runs at standard speed, so the trigger never claims it.
+    val appliedSpeed =
+        if (speedShown && offersSpeed(selected, currentSpeed)) currentSpeed else STANDARD_SPEED
+    // A speed not every account confirms, or a model whose speeds are unknown, is only requested.
+    val speedUncertain = selected?.serviceTiers?.any { it.id == appliedSpeed && it.limited } ?: true
+    val speedTag =
+        appliedSpeed
+            .takeIf { it != STANDARD_SPEED }
+            ?.let { speedLabel(it, knownTiers) + if (speedUncertain) " demandée" else "" }
+            .orEmpty()
     val modelLabel =
         listOfNotNull(
                 selected?.displayName?.ifBlank { selected.model }
@@ -204,12 +225,18 @@ fun ModelPicker(
                 effectiveEffort
                     .takeIf { it.isNotBlank() }
                     ?.let { "effort ${effortLabel(it).lowercase()}" },
+                speedTag.ifBlank { null }?.let { "vitesse $it" },
             )
             .joinToString(" · ")
     Box(modifier) {
         if (field)
-            FieldTrigger(provider, modelLabel, effectiveEffort, enabled, summary) { open = true }
-        else PillTrigger(provider, modelLabel, effectiveEffort, enabled, summary) { open = true }
+            FieldTrigger(provider, modelLabel, effectiveEffort, speedTag, enabled, summary) {
+                open = true
+            }
+        else
+            PillTrigger(provider, modelLabel, effectiveEffort, speedTag, enabled, summary) {
+                open = true
+            }
     }
     if (open)
         ModalBottomSheet(
@@ -239,6 +266,26 @@ fun ModelPicker(
             val reasoningFor: @Composable () -> Unit = {
                 ReasoningControl(selected, reasoning, inheritedEffort, enabled) {
                     change(model, it)
+                }
+                if (changeSpeed != null) {
+                    if (speedShown)
+                        SpeedControl(
+                            selected,
+                            knownTiers,
+                            speed,
+                            inheritedSpeed,
+                            if (inheritedSpeed.isNotBlank()) {
+                                if (conversationDefault) "Défaut Conversation" else "Défaut Agent"
+                            } else "Défaut",
+                            enabled,
+                            changeSpeed,
+                        )
+                    else if (provider != "codex")
+                        Text(
+                            "${providerLabel(provider)} ne propose pas de réglage de vitesse.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                 }
             }
             Column(
@@ -472,6 +519,7 @@ private fun PillTrigger(
     provider: String,
     model: String,
     effort: String,
+    speed: String,
     enabled: Boolean,
     summary: String,
     open: () -> Unit,
@@ -483,7 +531,8 @@ private fun PillTrigger(
         color = MaterialTheme.colorScheme.surfaceVariant,
         modifier =
             Modifier.testTag("model-picker").semantics {
-                contentDescription = "Choisir l’assistant, le modèle et le raisonnement : $summary"
+                contentDescription =
+                    "Choisir l’assistant, le modèle, le raisonnement et la vitesse : $summary"
             },
     ) {
         Row(
@@ -512,6 +561,24 @@ private fun PillTrigger(
                     maxLines = 1,
                 )
             }
+            if (speed.isNotBlank())
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Icon(
+                        SpeedMark,
+                        null,
+                        Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        speed,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                    )
+                }
             Icon(
                 Icons.Default.KeyboardArrowDown,
                 null,
@@ -527,6 +594,7 @@ private fun FieldTrigger(
     provider: String,
     model: String,
     effort: String,
+    speed: String,
     enabled: Boolean,
     summary: String,
     open: () -> Unit,
@@ -539,7 +607,8 @@ private fun FieldTrigger(
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         modifier =
             Modifier.fillMaxWidth().testTag("model-picker").semantics {
-                contentDescription = "Choisir l’assistant, le modèle et le raisonnement : $summary"
+                contentDescription =
+                    "Choisir l’assistant, le modèle, le raisonnement et la vitesse : $summary"
             },
     ) {
         Row(
@@ -569,9 +638,16 @@ private fun FieldTrigger(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                if (effort.isNotBlank())
+                val details =
+                    listOfNotNull(
+                        effort
+                            .ifBlank { null }
+                            ?.let { "Raisonnement ${effortLabel(it).lowercase()}" },
+                        speed.ifBlank { null }?.let { "vitesse $it" },
+                    )
+                if (details.isNotEmpty())
                     Text(
-                        "Raisonnement ${effortLabel(effort).lowercase()}",
+                        details.joinToString(" · "),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -941,6 +1017,107 @@ internal fun ReasoningControl(
     ) {
         change("")
     }
+}
+
+// Lucide "gauge" (ISC), the web app's speed icon.
+private val SpeedMark by lazy {
+    ImageVector.Builder("Speed", 24.dp, 24.dp, 24f, 24f)
+        .addPath(
+            addPathNodes("m12 14l4-4M3.34 19a10 10 0 1 1 17.32 0"),
+            stroke = SolidColor(Color.Black),
+            strokeLineWidth = 2f,
+            strokeLineCap = androidx.compose.ui.graphics.StrokeCap.Round,
+            strokeLineJoin = androidx.compose.ui.graphics.StrokeJoin.Round,
+        )
+        .build()
+}
+
+/**
+ * Codex's speeds for the chosen model, independent of the reasoning level. The usage wording is
+ * Codex's own description of each tier; OpenAI's page explains the plan and credit rates.
+ */
+@Composable
+private fun SpeedControl(
+    model: CodingAgentModel?,
+    knownTiers: List<ServiceTier>,
+    value: String,
+    inherited: String,
+    defaultLabel: String,
+    enabled: Boolean,
+    change: (String) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val tiers = model?.serviceTiers.orEmpty()
+    val current = effectiveSpeed(value, inherited)
+    val offered = offersSpeed(model, current)
+    val applied = if (offered) current else STANDARD_SPEED
+    val tier = tiers.find { it.id == applied }
+    HorizontalDivider(Modifier.padding(vertical = 2.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            "Vitesse",
+            Modifier.weight(1f),
+            style = MaterialTheme.typography.labelLarge,
+            color = colors.onSurfaceVariant,
+        )
+        Text(
+            speedLabel(applied, knownTiers),
+            style = MaterialTheme.typography.titleMedium,
+            color = colors.primary,
+        )
+    }
+    FlowRow(
+        Modifier.testTag("speed-options").semantics { contentDescription = "Vitesse" },
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        EffortChip(
+            "$defaultLabel · ${speedLabel(effectiveSpeed("", inherited), knownTiers)}",
+            value.isBlank(),
+            enabled,
+            Modifier.testTag("speed-default"),
+        ) {
+            change("")
+        }
+        EffortChip("Standard", value == STANDARD_SPEED, enabled) { change(STANDARD_SPEED) }
+        tiers.forEach { option ->
+            EffortChip(option.name.ifBlank { option.id }, value == option.id, enabled) {
+                change(option.id)
+            }
+        }
+        if (value.isNotBlank() && value != STANDARD_SPEED && tiers.none { it.id == value })
+            EffortChip(speedLabel(value, knownTiers), true, false) {}
+    }
+    if (!offered)
+        Text(
+            "Le catalogue de Codex ne liste pas la vitesse ${speedLabel(current, knownTiers)} pour ce modèle : ses tours passeront sans doute en Standard ; chaque tour l’indique.",
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.tertiary,
+        )
+    else if (tier != null) {
+        Text(
+            listOfNotNull(
+                    tier.description.ifBlank { "Vitesse ${tier.name}" },
+                    if (tier.limited)
+                        "Tous vos comptes Codex ne la confirment pas ; les exécutions privilégient un compte qui la confirme. Chaque tour indique s’il passe en Standard ou si Codex ne peut pas confirmer la vitesse."
+                    else null,
+                )
+                .joinToString(" · "),
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurfaceVariant,
+        )
+        val context = androidx.compose.ui.platform.LocalContext.current
+        TextButton(
+            onClick = { runCatching { browse(context, SPEED_USAGE_URL) } },
+            contentPadding = PaddingValues(0.dp),
+        ) {
+            Text("Consommation selon votre offre", style = MaterialTheme.typography.bodySmall)
+        }
+    } else
+        Text(
+            "Vitesse et consommation standard de Codex.",
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurfaceVariant,
+        )
 }
 
 @Composable

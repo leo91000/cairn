@@ -46,6 +46,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.SecureFlagPolicy
 import build.cairn.app.data.*
+import build.cairn.contracts.ResumeRunInput
+import build.cairn.contracts.resumeRun
 import java.io.File
 import java.util.UUID
 import kotlinx.serialization.json.*
@@ -376,6 +378,7 @@ internal fun ChatPage(
     var model by rememberSaveable(id) { mutableStateOf(savedDraft.model) }
     var reasoning by rememberSaveable(id) { mutableStateOf(savedDraft.reasoning) }
     var planning by rememberSaveable(id) { mutableStateOf(savedDraft.plan) }
+    var speed by rememberSaveable(id) { mutableStateOf(savedDraft.speed) }
     var attachments by rememberForm(savedDraft.attachments)
     // Per-file states of the composer: refused before upload, uploading, or failed to upload.
     var rejected by rememberForm(savedDraft.rejected)
@@ -391,6 +394,7 @@ internal fun ChatPage(
     var fullscreen by rememberSaveable(id) { mutableStateOf(false) }
     var queueExpanded by rememberSaveable(id) { mutableStateOf(false) }
     var newSession by remember(id) { mutableStateOf(false) }
+    var compacting by remember(id) { mutableStateOf(false) }
     var cancelledExpanded by rememberSaveable(id) { mutableStateOf(false) }
     BackHandler(selected && fullscreen) { fullscreen = false }
     var choosing by rememberSaveable(id) { mutableStateOf(false) }
@@ -411,6 +415,7 @@ internal fun ChatPage(
                     provider,
                     rejected,
                     planning,
+                    speed,
                 )
     }
     SideEffect { persistDraft() }
@@ -446,7 +451,11 @@ internal fun ChatPage(
                 live.state?.artifacts.orEmpty(),
             )
         }
-    val timeline = remember(history, live.events) { quotaTimeline(history, live.events) }
+    val chats = conversations.state?.chats
+    val timeline =
+        remember(history, live.events, chats) {
+            quotaTimeline(history, live.events).followingDelegations(chats)
+        }
     // Only the latest proposal, before any later request, offers to implement it.
     val implementable =
         remember(timeline) {
@@ -489,8 +498,15 @@ internal fun ChatPage(
     // A subagent's full activity opens in a sheet. The current request's subagents stay in sight
     // above the composer while one of them works.
     var openedSubagent by rememberSaveable(id) { mutableStateOf<String?>(null) }
-    val openSubagent = remember { { agent: String -> openedSubagent = agent } }
     val subagentTeams = remember(timeline) { subagentTeams(timeline) }
+    // A delegated task is a conversation of its own: open it rather than a sheet.
+    val openSubagent =
+        remember(subagentTeams) {
+            { agent: String ->
+                val delegation = subagentTeams.flatten().find { it.id == agent }?.delegation
+                if (delegation != null) openChat(delegation.chatId) else openedSubagent = agent
+            }
+        }
     val currentSubagents = remember(timeline) { currentSubagents(timeline) }
     val subagentBar =
         !fullscreen && currentSubagents.any { it.state(active) == SubagentState.RUNNING }
@@ -537,10 +553,12 @@ internal fun ChatPage(
         else selectedAgent?.takeIf { it.provider == chosenProvider }
     val defaultModel = inheritedAssistant?.model.orEmpty()
     val defaultReasoning = inheritedAssistant?.reasoning.orEmpty()
+    val defaultSpeed = inheritedAssistant?.speed.orEmpty()
     fun chooseProvider(value: String) {
         provider = value
         model = ""
         reasoning = ""
+        speed = ""
     }
     val planAvailable = codingAgent(chosenProvider).planTurns
     val planRequested = planning && planAvailable
@@ -679,6 +697,8 @@ internal fun ChatPage(
             val selectedReasoning = reasoning.ifBlank {
                 if (model.isBlank()) defaultReasoning else ""
             }
+            // The speed survives a model change, so it is inherited even with a new model.
+            val selectedSpeed = speed.ifBlank { defaultSpeed }
             val content = buildJsonObject {
                 put("text", draft.trim())
                 put("mode", mode)
@@ -686,6 +706,7 @@ internal fun ChatPage(
                 put("model", selectedModel)
                 put("reasoning", selectedReasoning)
                 put("plan", plan)
+                put("speed", selectedSpeed)
                 put(
                     "attachmentIds",
                     wireJson.encodeToJsonElement(attachments.map { it.attachment.id }),
@@ -711,6 +732,7 @@ internal fun ChatPage(
                         attachments.map { it.attachment },
                         provider = chosenProvider,
                         plan = plan,
+                        speed = selectedSpeed,
                     )
             try {
                 api.request(
@@ -746,6 +768,7 @@ internal fun ChatPage(
         model = message.model
         reasoning = message.reasoning
         planning = message.plan
+        speed = message.speed
         attachments = message.attachments.map { DraftAttachment(it) }
     }
     // Leaving plan mode is explicit: this queues an ordinary turn in the same conversation, with
@@ -769,6 +792,7 @@ internal fun ChatPage(
                     put("model", message.model)
                     put("reasoning", message.reasoning)
                     put("plan", message.plan)
+                    put("speed", message.speed)
                     put(
                         "attachmentIds",
                         wireJson.encodeToJsonElement(message.attachments.map { it.id }),
@@ -840,6 +864,11 @@ internal fun ChatPage(
                         agentKey = chat?.agentId ?: agent,
                         status = conversation.status,
                         wakeup = scheduledWakeup(chat),
+                        requester = chat?.requester,
+                        openRequester = {
+                            persistDraft()
+                            openChat(it)
+                        },
                         live = conversation.live,
                         harness = chat?.provider,
                         liveSince = waitingTasks?.since ?: chat?.run?.startedAt,
@@ -1049,6 +1078,9 @@ internal fun ChatPage(
                         )
                         Text(chat?.agentName ?: selectedAgent?.name.orEmpty())
                         Text(chat?.projectName ?: "Tous les projets autorisés")
+                        chat?.requester?.let {
+                            Text("Délégué par ${it.title.ifBlank { "Nouvelle conversation" }}")
+                        }
                         Text(
                             if (chat?.paused == true) "En pause"
                             else if (chat?.exclusiveSuspended == true) "Suspendue (exclusivité)"
@@ -1066,6 +1098,43 @@ internal fun ChatPage(
                         Text(
                             "${live.state?.artifacts?.size ?: 0} fichiers · ${questions.size} questions en attente"
                         )
+                        if (chat?.run != null) {
+                            val context = contextSummary(chat.contextUsage)
+                            Text("Contexte : ${context.label}", Modifier.testTag("context-usage"))
+                            context.details.forEach {
+                                Text(
+                                    it,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        chat
+                            ?.compaction
+                            ?.takeIf { it.supported && chat.lifecycle == "active" }
+                            ?.let { compaction ->
+                                TextButton(
+                                    {
+                                        details = false
+                                        compacting = true
+                                    },
+                                    enabled = compaction.available,
+                                ) {
+                                    Text(
+                                        if (compaction.running) "Compaction du contexte…"
+                                        else "Compacter le contexte"
+                                    )
+                                }
+                                compaction.reason
+                                    ?.takeIf { !compaction.running }
+                                    ?.let {
+                                        Text(
+                                            it,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                            }
                         chat?.run?.let {
                             if (state.isOwner) NodePlacement(vm, it)
                             Text(
@@ -1092,7 +1161,20 @@ internal fun ChatPage(
                         )
                         ActionIcon("Masquer l’erreur", CairnIcons.Close) { errorDismissed = true }
                     }
-                if (quota == null) ChatRunWaitingNotice(chat?.run, openConnections, state.isOwner)
+                if (quota == null)
+                    ChatRunWaitingNotice(
+                        chat?.run,
+                        openConnections,
+                        state.isOwner,
+                        state.busy,
+                        {
+                            chat?.let { current ->
+                                vm.perform {
+                                    api.request("POST", "/chats/${segment(current.id)}/stop")
+                                }
+                            }
+                        },
+                    )
                 if (gallery) {
                     ModalBottomSheet(
                         onDismissRequest = { gallery = false },
@@ -1254,6 +1336,8 @@ internal fun ChatPage(
                                                         pauseWait,
                                                         settled = it.run?.status == "succeeded",
                                                         busy = state.busy,
+                                                        openRun = openRun,
+                                                        openChat = openChat,
                                                     )
                                                 },
                                         ) {
@@ -1287,9 +1371,8 @@ internal fun ChatPage(
                                                     chat?.let { current ->
                                                         vm.perform {
                                                             if (current.run?.status == "failed")
-                                                                api.request(
-                                                                    "POST",
-                                                                    "/runs/${segment(current.run.id)}/resume",
+                                                                api.resumeRun(
+                                                                    ResumeRunInput(current.run.id)
                                                                 )
                                                             api.request(
                                                                 "POST",
@@ -1448,6 +1531,7 @@ internal fun ChatPage(
                                             steer = ::steerQueued,
                                             remove = { removing = it },
                                             togglePause = { chat?.let(::togglePause) },
+                                            models = state.modelCatalog("codex").models,
                                             attachments = {
                                                 MessageAttachments(
                                                     vm,
@@ -1599,6 +1683,9 @@ internal fun ChatPage(
                                                 provider = chosenProvider,
                                                 changeProvider = ::chooseProvider,
                                                 switching = switchingProvider,
+                                                speed = speed,
+                                                defaultSpeed = defaultSpeed,
+                                                changeSpeed = { speed = it },
                                             ) { m, r ->
                                                 model = m
                                                 reasoning = r
@@ -1734,6 +1821,19 @@ internal fun ChatPage(
                             buildJsonObject { put("confirm", true) },
                         )
                         newSession = false
+                    }
+                }
+            if (compacting && chat != null)
+                Confirm(
+                    "Compacter le contexte de l’agent ?",
+                    "L’agent résume son contexte antérieur pour libérer de la place dans sa fenêtre, en utilisant son modèle comme pour un court tour. Tous les messages restent visibles ici ; ceux envoyés entre-temps attendent la fin de la compaction.",
+                    state.busy,
+                    state.error,
+                    { compacting = false },
+                ) {
+                    vm.perform {
+                        api.request("POST", "/chats/${segment(chat.id)}/compact")
+                        compacting = false
                     }
                 }
             if (stopping && chat != null)

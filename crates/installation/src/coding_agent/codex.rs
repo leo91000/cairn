@@ -8,10 +8,9 @@ use crate::{
     config::Config,
     error::{Error, Result},
     execution,
-    mcps::RUN_TOKEN_ENV,
     process::Environment,
     rpc::Session,
-    service::{Service, policy},
+    service::Service,
     skills::{atomic_write, private_dir},
     validation::text,
 };
@@ -50,30 +49,8 @@ impl ExecutionAdapter for Codex {
         }
     }
 
-    fn uses_chat(&self, chat_execution: bool, managed_account: bool) -> bool {
-        chat_execution || managed_account
-    }
-
     fn plan_turns(&self) -> bool {
         true
-    }
-
-    fn legacy_args(
-        &self,
-        run: &Value,
-        mcp: &Value,
-        output: &str,
-        session: Option<&str>,
-    ) -> Vec<String> {
-        let mut args = mcp["args"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        args.extend(args_for_run(run, output, session));
-        args
     }
 
     fn validate_agent(&self, _agent: &Value) -> Result<()> {
@@ -132,15 +109,24 @@ impl ExecutionAdapter for Codex {
         plan: &mut Value,
         account: Option<&Lease>,
     ) -> Result<()> {
-        if text(plan, "reasoning").is_empty() {
-            let source = account.map_or("", |account| account.account_id.as_str());
-            if let Some((model, effort)) =
+        let source = account.map_or("", |account| account.account_id.as_str());
+        if text(plan, "reasoning").is_empty()
+            && let Some((model, effort)) =
                 crate::models::cached_defaults(s, source, text(plan, "model")).await?
-            {
-                plan["model"] = model.into();
-                plan["reasoning"] = effort.into();
-            }
+        {
+            plan["model"] = model.into();
+            plan["reasoning"] = effort.into();
         }
+
+        // The turn checks a faster tier with the Codex process that runs it, and says so. Only the
+        // account's own recent catalog lets it confirm the tier, whichever model the turn runs.
+        let tier = crate::models::service_tier(text(plan, "speed")).to_owned();
+        if tier != crate::models::CODEX_STANDARD_TIER
+            && let Some(tiers) = crate::models::account_tiers(s, source).await?
+        {
+            plan["accountTiers"] = tiers;
+        }
+        plan["serviceTier"] = tier.into();
         Ok(())
     }
 
@@ -168,7 +154,12 @@ impl ExecutionAdapter for Codex {
             result
         }
         .await;
-        result.map_err(|_| Error::conflict("The saved Codex conversation is unavailable. Working files were preserved; review them before starting a new run."))
+        result.map_err(|error| {
+            if crate::run_retry::startup_failure(&error).is_some() {
+                return error;
+            }
+            Error::conflict("The saved Codex conversation is unavailable. Working files were preserved; review them before starting a new run.")
+        })
     }
 
     async fn run(
@@ -194,10 +185,9 @@ impl ExecutionAdapter for Codex {
     }
 
     fn mcp_configuration(&self, configuration: &Configuration) -> Result<Value> {
-        let mut args = Vec::new();
         let mut servers = BTreeMap::new();
         for (name, server) in &configuration.servers {
-            let mut value = match server {
+            let value = match server {
                 Server::Http {
                     url,
                     timeout,
@@ -205,7 +195,7 @@ impl ExecutionAdapter for Codex {
                 } => {
                     let mut value = json!({
                         "url": url,
-                        "bearer_token_env_var": RUN_TOKEN_ENV,
+                        "http_headers": configuration.bearer_headers(),
                     });
                     if let Some(timeout) = timeout {
                         value["tool_timeout_sec"] = (*timeout).into();
@@ -233,33 +223,9 @@ impl ExecutionAdapter for Codex {
                     value
                 }
             };
-            args.push("-c".to_owned());
-            args.push(format!("mcp_servers.{name}={}", toml(&value)));
-            // Resident processes receive the current lease with each thread's config.
-            if let Some(server) = value.as_object_mut()
-                && server.remove("bearer_token_env_var").is_some()
-            {
-                server.insert("http_headers".into(), json!(configuration.bearer_headers()));
-            }
             servers.insert(name, value);
         }
-        Ok(json!({ "args": args, "codexConfig": servers }))
-    }
-}
-
-fn toml(value: &Value) -> String {
-    match value {
-        Value::Array(items) => {
-            format!("[{}]", items.iter().map(toml).collect::<Vec<_>>().join(","))
-        }
-        Value::Object(map) => format!(
-            "{{{}}}",
-            map.iter()
-                .map(|(key, value)| format!("{}={}", Value::from(key.as_str()), toml(value)))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        _ => value.to_string(),
+        Ok(json!({ "codexConfig": servers }))
     }
 }
 
@@ -294,15 +260,10 @@ async fn find_session(rpc: &mut Session, run: &Value, cwd: &Path) -> Result<Stri
         }
         return Err(Error::bad("Session mismatch"));
     }
-    let source_kind = if run["chatExecution"].is_object() {
-        "appServer"
-    } else {
-        "exec"
-    };
     let params = json!({
         "limit": 2,
         "cwd": cwd,
-        "sourceKinds": [source_kind],
+        "sourceKinds": ["appServer"],
         "archived": false,
     });
     let result = rpc.request("thread/list", params).await?;
@@ -319,76 +280,4 @@ async fn find_session(rpc: &mut Session, run: &Value, cwd: &Path) -> Result<Stri
         return Ok(text(thread, "id").to_owned());
     }
     Err(Error::bad("No unique session"))
-}
-
-pub(crate) fn args_for_run(run: &Value, output: &str, session: Option<&str>) -> Vec<String> {
-    let agent = &run["snapshot"]["agent"];
-    let access = policy(agent);
-    let mut args = if access["sandbox"] == "yolo" {
-        vec!["--dangerously-bypass-approvals-and-sandbox".into()]
-    } else {
-        vec![
-            "--sandbox".into(),
-            text(&access, "sandbox").into(),
-            "-a".into(),
-            "never".into(),
-        ]
-    };
-    args.extend(
-        [
-            "-c",
-            "forced_login_method=\"chatgpt\"",
-            "-c",
-            "cli_auth_credentials_store=\"file\"",
-        ]
-        .map(str::to_owned),
-    );
-    let roots = || {
-        let mut roots = vec![
-            Path::new(output)
-                .parent()
-                .unwrap_or(Path::new("."))
-                .to_string_lossy()
-                .into_owned(),
-        ];
-        roots.extend(
-            run["workspaces"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|w| text(w, "path").to_owned()),
-        );
-        roots
-            .into_iter()
-            .flat_map(|r| vec!["--add-dir".into(), r])
-            .collect::<Vec<_>>()
-    };
-    if session.is_some() && access["sandbox"] == "workspace-write" {
-        args.extend(roots());
-    }
-    args.push("exec".into());
-    if let Some(session) = session {
-        args.extend(["resume".into(), session.into()]);
-    }
-    args.extend(["--json", "--skip-git-repo-check"].map(str::to_owned));
-    if session.is_none() {
-        args.extend(["--color", "never"].map(str::to_owned));
-    }
-    if !text(agent, "reasoning").is_empty() {
-        args.extend([
-            "-c".into(),
-            format!("model_reasoning_effort={}", agent["reasoning"]),
-        ]);
-    }
-    if !text(agent, "model").is_empty() {
-        args.extend(["--model".into(), text(agent, "model").into()]);
-    }
-    if access["sandbox"] == "workspace-write" {
-        args.extend(["-c", "sandbox_workspace_write.network_access=true"].map(str::to_owned));
-        if session.is_none() {
-            args.extend(roots());
-        }
-    }
-    args.extend(["--output-last-message".into(), output.into(), "-".into()]);
-    args
 }

@@ -10,13 +10,13 @@ import { diskCapacity, formatMiB, nodeDiagnostics } from '../../../../packages/c
 import { nodeBackend } from '../agent-access'
 import {
   api,
-  ApiError,
   notify,
   refresh,
   state,
 } from '../api'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
+import NativeNodeMode from '../components/NativeNodeMode.vue'
 import NodeStorage from '../components/NodeStorage.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
@@ -30,15 +30,17 @@ import {
 const nodes = ref<ExecutionNode[]>([])
 const nativeCallers = ref<Array<{ id: string, email: string }>>([])
 const enrollmentBackend = ref<'firecracker' | 'native'>('firecracker')
+
 // Stops before deleting while a conversation disk is mounted and keeps the unit until the rest is gone, so it can be rerun.
-const nativeUninstallCommand = `sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=$(findmnt -rno TARGET) || { echo "findmnt could not list mounts." >&2; exit 1; }; printf "%s\\n" "$mounts" | grep ^/var/lib/cairn-native/; match=$?; if [ "$match" -ne 1 ]; then echo "Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry." >&2; exit 1; fi; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload'`
+// Both runtimes share the gateway to Cairn; the last one on the machine removes it.
+const nativeUninstallCommand = `sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=$(findmnt -rno TARGET) || { echo "findmnt could not list mounts." >&2; exit 1; }; printf "%s\\n" "$mounts" | grep ^/var/lib/cairn-native/; match=$?; if [ "$match" -ne 1 ]; then echo "Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry." >&2; exit 1; fi; cairn_policy() { grep -Fqx "# Cairn native administrator; protected units retain NoNewPrivileges." "$1" || return $?; grep -Fqx "cairn-workload ALL=(ALL:ALL) NOPASSWD: ALL" "$1"; }; for policy in /etc/sudoers.d/cairn-native-*; do [ -e "$policy" ] || [ -L "$policy" ] || continue; case "$policy" in */cairn-native-*[!0-9]*|*/cairn-native-) continue ;; esac; if [ -L "$policy" ] || [ ! -f "$policy" ]; then echo "Unrecognized native sudo policy: host-owner review required." >&2; exit 1; fi; if cairn_policy "$policy"; then rm -f -- "$policy" || exit; else policy_status=$?; [ "$policy_status" -eq 1 ] || exit "$policy_status"; fi; done; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload && { if [ ! -e /var/lib/cairn-node ]; then systemctl disable --now cairn-node-gateway 2>/dev/null; rm -rf /etc/systemd/system/cairn-node-gateway.service /opt/cairn-gateway /var/lib/cairn-gateway; systemctl daemon-reload; fi; }'`
 // The node a guided backend switch replaces, while the new runtime's enrollment is pending.
 const replacing = ref<ExecutionNode | null>(null)
 // Once the replacement connects and its setup steps end, retiring the previous node is offered.
 let replacement: { previous: string, next: string } | null = null
 const retiring = ref<{ previous: ExecutionNode, next: ExecutionNode } | null>(null)
 const uninstallCommands = {
-  firecracker: 'sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node',
+  firecracker: `sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node; sudo sh -c 'if [ ! -e /var/lib/cairn-native ]; then systemctl disable --now cairn-node-gateway 2>/dev/null; rm -rf /etc/systemd/system/cairn-node-gateway.service /opt/cairn-gateway /var/lib/cairn-gateway; systemctl daemon-reload; fi'`,
   native: nativeUninstallCommand,
 }
 const backendNames = { firecracker: 'Firecracker VM', native: 'native process' }
@@ -56,7 +58,6 @@ const enrollmentCommand = computed(() => {
   return origin ? `sudo cairn node-enroll '${origin.replaceAll('\'', '\'\\\'\'')}' /var/lib/cairn-node/data/node` : ''
 })
 // Machines known when the code was created, to recognise the newly connected one.
-let knownBeforeEnrollment = new Set<string>()
 const error = ref('')
 const busy = ref(false)
 const recovery = ref<NodeSyncSettings | null>(null)
@@ -95,12 +96,9 @@ async function load() {
   if (!enrollment.value)
     return
   const invitation = enrollment.value
-  // Older installations cannot safely associate a guided switch with its replacement.
-  if (replacing.value && !invitation.nodeId)
-    return
   const connected = nodes.value.find(node => !node.local && !node.revoked
     && nodeBackend(node) === (invitation.backend ?? 'firecracker')
-    && (invitation.nodeId ? node.id === invitation.nodeId : !knownBeforeEnrollment.has(node.id)))
+    && node.id === invitation.nodeId)
   if (connected) {
     enrollment.value = null
     adding.value = false
@@ -146,10 +144,10 @@ async function action(operation: () => Promise<void>) {
 
 function enroll() {
   return action(async () => {
-    knownBeforeEnrollment = new Set(nodes.value.map(node => node.id))
     enrollment.value = await api<NodeEnrollment>('/nodes/enrollments', {
       method: 'POST',
-      body: JSON.stringify({ name: name.value, managerUrl: managerUrl.value.trim(), backend: enrollmentBackend.value }),
+      // Without an address, Beacon introduces the machine to the manager.
+      body: JSON.stringify({ name: name.value, managerUrl: managerUrl.value.trim() || undefined, backend: enrollmentBackend.value }),
     })
   })
 }
@@ -219,7 +217,7 @@ function save() {
         slots: node.slots,
         // Exclusive reservations are granted on each agent's page; omitting them keeps them.
         accepting: node.accepting,
-        ...(node.capabilities.backend === 'native' ? { nativeEnabled: node.nativeEnabled, nativeAccounts: node.nativeAccounts } : {}),
+        ...(node.capabilities.backend === 'native' ? { nativeEnabled: node.nativeEnabled, nativeAccounts: node.nativeAccounts, confirmNativeAdministration: node.nativeModeRequest?.mode === 'administrator' } : {}),
       }),
     })
     editing.value = null
@@ -271,16 +269,7 @@ function saveGrants() {
   const agentIds = granted.value.filter(agentId => !allowed(agentId) && !mismatch(agentId))
   return action(async () => {
     if (agentIds.length) {
-      try {
-        await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds, add: true }) })
-      }
-      catch (e) {
-        // An older installation only replaces the list: send the agents already allowed with the new ones.
-        if (!(e instanceof ApiError && e.status === 400 && (e.message === 'Invalid node request.' || /unknown field/i.test(e.message))))
-          throw e
-        const kept = (node.agents ?? []).filter(agent => !agent.allNodes).map(agent => agent.id)
-        await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds: [...new Set([...kept, ...agentIds])] }) })
-      }
+      await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds, add: true, ...(node.nativeModeRequest?.mode === 'administrator' ? { confirmNativeAdministration: true } : {}) }) })
     }
 
     granting.value = null
@@ -311,12 +300,16 @@ function mismatch(agentId: string) {
 }
 
 function allNodes(agentId: string) {
+  if (granting.value?.nativeModeRequest?.mode === 'administrator' && !granting.value.nativeReviewedAgents?.includes(agentId))
+    return false
   return (!mismatch(agentId) && state.agents.some(agent => agent.id === agentId && agent.access?.nodes === null))
     || (granting.value?.agents?.some(agent => agent.id === agentId && agent.allNodes) ?? false)
 }
 
 /** Already allowed on the node being granted, from its latest data, or on every node. */
 function allowed(agentId: string) {
+  if (granting.value?.nativeModeRequest?.mode === 'administrator' && !granting.value.nativeReviewedAgents?.includes(agentId))
+    return false
   return allNodes(agentId) || (granting.value?.agents?.some(agent => agent.id === agentId) ?? false)
 }
 
@@ -380,7 +373,7 @@ function statusLabel(node: ExecutionNode) {
           Connect a trusted Linux machine, then choose its execution backend and authorized agents.
         </p>
         <p class="text-sm text-muted">
-          The node must reach the manager directly over your local network, VPN or an optional public URL. It does not use the relay. Disk blocks never pass through the relay.
+          Cairn introduces the machine to the manager: no manager address, certificate or open port is needed. They connect directly when the networks allow it. Otherwise their traffic, including conversation disks, passes through Cairn’s servers encrypted end to end, so Cairn cannot read it.
         </p>
         <UiAlert v-if="error">
           {{ error }}
@@ -404,16 +397,20 @@ function statusLabel(node: ExecutionNode) {
             maxlength="100"
             required
           ></label>
-          <label>Direct manager address<input
-            v-model="managerUrl"
-            type="url"
-            placeholder="https://manager.vpn.example:4310"
-            aria-describedby="node-manager-address-help"
-            required
-          ></label>
-          <p id="node-manager-address-help" class="text-sm text-muted">
-            Use HTTPS with a certificate trusted by the node. HTTP is allowed only on loopback for local tests. This is the manager’s address, not the beacon app’s address.
-          </p>
+          <details class="text-sm" :open="managerUrl !== ''">
+            <summary class="cursor-pointer text-muted">
+              Connect directly instead
+            </summary>
+            <label class="mt-2 block">Direct manager address<input
+              v-model="managerUrl"
+              type="url"
+              placeholder="https://manager.vpn.example:4310"
+              aria-describedby="node-manager-address-help"
+            ></label>
+            <p id="node-manager-address-help" class="mt-1 text-muted">
+              Optional. A LAN or VPN address keeps node traffic off Cairn’s servers even when the networks prevent a direct connection. Use HTTPS with a certificate trusted by the node; HTTP is allowed only on loopback for local tests. This is the manager’s address, not the beacon app’s address.
+            </p>
+          </details>
           <UiButton type="submit" :disabled="busy">
             Create enrollment code
           </UiButton>
@@ -426,14 +423,13 @@ function statusLabel(node: ExecutionNode) {
           </template>
           <template v-else>
             <p>Assisted installation is unavailable: the manager has no pinned node image. Set <code>CAIRN_NODE_IMAGE</code> on the manager to the deployed image with its digest (<code>image@sha256:…</code>) and create a new code.</p>
-            <p>Meanwhile, on a machine with the matching <code>cairn</code> binary, run:</p>
-            <code v-if="enrollmentCommand" class="block break-all select-all" aria-label="Node enrollment command">{{ enrollmentCommand }}</code>
-            <p>Paste this single-use code, press Enter, then Ctrl+D to finish standard input. It expires {{ new Date(enrollment.expiresAt).toLocaleString() }}:</p>
+            <template v-if="enrollmentCommand">
+              <p>Meanwhile, on a machine with the matching <code>cairn</code> binary, run:</p>
+              <code class="block break-all select-all" aria-label="Node enrollment command">{{ enrollmentCommand }}</code>
+              <p>Paste this single-use code, press Enter, then Ctrl+D to finish standard input. It expires {{ new Date(enrollment.expiresAt).toLocaleString() }}:</p>
+            </template>
           </template>
           <code class="block break-all select-all" aria-label="Single-use enrollment code">{{ enrollment.code }}</code>
-          <UiAlert v-if="replacing && !enrollment.nodeId">
-            Update this installation to track the replacement and finish the guided switch. The previous node is kept.
-          </UiAlert>
           <p class="text-sm text-muted">
             <strong>3.</strong> {{ enrollment.backend === 'native' ? 'This page detects the machine once it connects, opens its configuration to enable native execution and choose trusted people, then asks which agents may use it.' : 'This page detects the machine once it connects and asks which agents may use it, as the last step.' }}
           </p>
@@ -457,6 +453,10 @@ function statusLabel(node: ExecutionNode) {
         <p class="mt-2 text-sm text-muted">
           {{ node.capabilities.backend === 'native' ? 'Native process · shared host GPU · trusted people only' : 'Firecracker VM' }}
         </p>
+        <NativeNodeMode v-if="node.capabilities.backend === 'native'" :node="node" @changed="load" />
+        <UiButton v-if="!node.revoked && node.nativeModeRequest?.mode === 'administrator'" @click="grant(node)">
+          Review agent access to this host
+        </UiButton>
         <template v-if="!node.revoked">
           <div class="capacity-grid" aria-label="Shared capacity">
             <div><span>Slots available</span><strong>{{ node.availableSlots ?? node.slots }} <small>of {{ node.slots }}</small></strong><span>{{ node.occupiedSlots ?? 0 }} active or reserved</span></div>
@@ -654,6 +654,9 @@ function statusLabel(node: ExecutionNode) {
         <p class="text-sm text-muted">
           Chosen agents may run their conversations on this machine. A tag or capability never grants access by itself.
         </p>
+        <p v-if="granting.nativeModeRequest?.mode === 'administrator'" class="text-power">
+          Granting access here gives these agents unrestricted passwordless sudo on the real host. Every trusted person may direct them to administer this machine. Root can read local credentials and defeat cooperative limits. Saving confirms this access.
+        </p>
         <label v-for="agent in state.agents" :key="agent.id" class="access-row">
           <input
             v-if="mismatch(agent.id)"
@@ -731,6 +734,9 @@ function statusLabel(node: ExecutionNode) {
         <fieldset v-if="editing.capabilities.backend === 'native'" class="form-section">
           <legend>Native execution</legend>
           <p>Only selected native agents and trusted people may run here. Disabling native execution or removing a person stops affected work after its lease expires.</p>
+          <p v-if="editing.nativeModeRequest?.mode === 'administrator'" class="text-power">
+            Every trusted person selected here may direct unrestricted host administration through admitted agents. Saving confirms this access.
+          </p>
           <label class="access-row"><input v-model="editing.nativeEnabled" type="checkbox">Enable native execution</label>
           <template v-if="nativeCallers.length">
             <p id="native-trusted-people" class="mt-4 mb-2!">

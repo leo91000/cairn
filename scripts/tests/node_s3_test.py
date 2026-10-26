@@ -6,10 +6,30 @@ Requires the AWS CLI and the project's pinned pnpm/Rust tools.
 import argparse
 import os
 from pathlib import Path
+import resource
 import subprocess
 
 import boto3
 from moto.server import ThreadedMotoServer
+
+NATIVE_S3_KEY_BUFFER_BYTES = 64 * 1024
+NATIVE_S3_OPEN_FILES = 65536
+
+
+def configure_native_s3():
+    # Moto 5.2.3 deep-copies every bucket payload for each version listing before
+    # prefix filtering. Concurrent real GC requests otherwise multiply a Docker
+    # store into several GiB of emulator RAM. Use Moto's supported file-spooling
+    # setting; preserve the real version-list/delete APIs and every purge check.
+    os.environ['MOTO_S3_DEFAULT_KEY_BUFFER_SIZE'] = str(NATIVE_S3_KEY_BUFFER_BYTES)
+    # Spilled originals and simultaneous version-list copies each hold a file.
+    # Provision this test process before starting threads, within its inherited
+    # hard limit. Never change the host configuration or production unit limits.
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and hard < NATIVE_S3_OPEN_FILES:
+        raise RuntimeError('Native Moto fixture requires an open-file hard limit of at least 65536.')
+    if soft != resource.RLIM_INFINITY and soft < NATIVE_S3_OPEN_FILES:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (NATIVE_S3_OPEN_FILES, hard))
 
 
 def main():
@@ -18,11 +38,12 @@ def main():
     parser.add_argument('--qualifier', type=Path)
     parser.add_argument('--benchmark', action='store_true')
     parser.add_argument('--compression-benchmark', action='store_true')
-    parser.add_argument('--migration-tests', action='store_true')
     parser.add_argument('--repo', type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument('--repeat', type=int, default=3)
     parser.add_argument('--case', help='Run one node recovery test against the isolated S3 fixture')
     args = parser.parse_args()
+    if args.native_runtime:
+        configure_native_s3()
     server = ThreadedMotoServer(ip_address='127.0.0.1', port=0, verbose=False)
     server.start()
     try:
@@ -52,20 +73,9 @@ def main():
             remaining = client.list_objects_v2(Bucket='cairn-node-test')
             assert remaining.get('KeyCount', 0) == 0, 'Native purge left remote objects'
             return
-        if args.migration_tests:
-            client.put_bucket_versioning(Bucket='cairn-node-test', VersioningConfiguration={'Status': 'Enabled'})
-            subprocess.run(['node', 'scripts/test-backend.mjs', '-p', 'cairn-installation', '--test', 'storage_startup_migration',
-                            'startup_migration_', '--', '--ignored', '--nocapture', '--test-threads=1'],
-                           cwd=args.repo, env=env, check=True)
-            versions = client.list_object_versions(Bucket='cairn-node-test')
-            assert not versions.get('Versions') and not versions.get('DeleteMarkers'), 'Migration must purge historical source versions'
-            return
         if args.compression_benchmark:
             subprocess.run(['node', 'scripts/test-backend.mjs', '-p', 'cairn-installation', '--release', '--test', 'block_codec_performance',
                             '--', '--ignored', '--nocapture', '--test-threads=1'],
-                           cwd=args.repo, env=env, check=True)
-            subprocess.run(['node', 'scripts/test-backend.mjs', '-p', 'cairn-installation', '--release', '--test', 'storage_startup_migration',
-                            'blocking_upgrade_performance', '--', '--ignored', '--nocapture', '--test-threads=1'],
                            cwd=args.repo, env=env, check=True)
             return
         if args.case:
@@ -89,9 +99,7 @@ def main():
                        cwd=Path(__file__).resolve().parents[2], env=env, check=True)
         remaining = client.list_objects_v2(Bucket='cairn-node-test')
         assert remaining.get('KeyCount', 0) == 0, 'Conversation purge must remove all remote recovery objects'
-        subprocess.run(['node', 'scripts/test-backend.mjs', '-p', 'cairn-installation', '--test', 'storage_startup_migration',
-                        'startup_migration_', '--', '--ignored', '--nocapture', '--test-threads=1'], cwd=args.repo, env=env, check=True)
-        for case in ['idle_conversations_move_twice', 'queued_capacity_transfer', 'active_captures_name', 'obsolete_object_collection', 'interrupted_first_publication', 'shared_publications', 'compressed_publications', 'coalesced_final_publication', 'native_stopped_publications', 'backend_migration']:
+        for case in ['idle_conversations_move_twice', 'queued_capacity_transfer', 'active_captures_name', 'obsolete_object_collection', 'interrupted_first_publication', 'shared_publications', 'compressed_publications', 'coalesced_final_publication', 'backend_migration']:
             subprocess.run(['pnpm', 'test:backend', '--test', 'nodes', case, '--', '--ignored'],
                            cwd=Path(__file__).resolve().parents[2], env=env, check=True)
 

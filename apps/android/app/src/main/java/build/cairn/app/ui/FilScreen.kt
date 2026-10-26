@@ -29,8 +29,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import build.cairn.app.R
 import build.cairn.app.data.*
+import build.cairn.contracts.MissionStateInput
+import build.cairn.contracts.setMissionState
 import kotlinx.coroutines.delay
-import kotlinx.serialization.json.encodeToJsonElement
 
 internal enum class FeedKind {
     QUESTION,
@@ -179,6 +180,15 @@ internal fun buildFeed(
                     chat.run?.startedAt,
                     chatId = chat.id,
                     runId = chat.runId,
+                    // A delegated conversation names the conversation that delegated it.
+                    requester =
+                        chat.requester?.let {
+                            FeedRequester(
+                                it.title.ifBlank { "Nouvelle conversation" },
+                                it.chatId,
+                                null,
+                            )
+                        },
                     harness = chat.provider,
                 )
             val wait = chatWaitNotice(chat.run)
@@ -458,11 +468,16 @@ fun FilScreen(
     fun archive(item: FeedItem) {
         val task = state.tasks.find { it.id == item.taskId } ?: return
         vm.perform {
-            save(
-                "tasks",
-                task.id,
-                wireJson.encodeToJsonElement(task.copy(archived = true, enabled = false)),
+            api.setMissionState(
+                MissionStateInput(
+                    taskId = task.id,
+                    revision = task.revision,
+                    enabled = false,
+                    archived = true,
+                )
             )
+            refresh()
+            notify("Modifications enregistrées")
         }
     }
     fun open(item: FeedItem) {
@@ -788,6 +803,16 @@ private fun FeedRow(
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
                     if (item.unread) UnreadLabel(item)
+                    val delegatedBy = item.requester?.takeIf { item.key.startsWith("chat:") }
+                    if (delegatedBy != null)
+                        Text(
+                            "↳ Délégué par ${delegatedBy.title}",
+                            Modifier.testTag("fil-requester"),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     Text(
                         item.title,
                         style = MaterialTheme.typography.titleMedium,

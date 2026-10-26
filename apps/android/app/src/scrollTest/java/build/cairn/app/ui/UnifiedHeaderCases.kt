@@ -87,19 +87,46 @@ abstract class UnifiedHeaderCases {
                     }
                     val body =
                         when (path) {
+                            "/api/installations/fixture/api/tasks" -> """{"tasks":[]}"""
                             "/api/installations" -> installations
                             "/api/account/session" ->
                                 """{"authenticated":true,"csrf":"fixture","account":{"id":"fixture-account","email":"owner@example.test"},"installations":$installations}"""
                             "/api/installations/fixture/api/agents" ->
                                 wireJson.encodeToString(
-                                    listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
+                                    build.cairn.contracts.ListAgentsOutput(
+                                        listOf(
+                                            Agent(
+                                                exclusiveNodes = emptyList(),
+                                                plugins = emptyList(),
+                                                revision = "",
+                                                createdAt = 0,
+                                                access =
+                                                    AccessPolicy(
+                                                        mcpTools =
+                                                            build.cairn.contracts.McpTools(
+                                                                emptyMap()
+                                                            ),
+                                                        projects = null,
+                                                        skills = null,
+                                                        mcps = null,
+                                                    ),
+                                                id = MAIN_AGENT_ID,
+                                                name = "Agent principal",
+                                            )
+                                        )
+                                    )
                                 )
                             "/api/installations/fixture/api/projects" ->
-                                wireJson.encodeToString(listOf(Project("project", "Cairn")))
-                            "/api/installations/fixture/api/tasks",
+                                wireJson.encodeToString(
+                                    build.cairn.contracts.ListProjectsOutput(
+                                        listOf(
+                                            Project("46d045dd-9bce-51e3-8a99-65aa9384efc9", "Cairn")
+                                        )
+                                    )
+                                )
                             "/api/installations/fixture/api/tasks/activity",
-                            "/api/installations/fixture/api/skills",
-                            "/api/installations/fixture/api/mcps" -> "[]"
+                            "/api/installations/fixture/api/skills" -> "[]"
+                            "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
                             else -> "{}"
                         }
                     return MockResponse()

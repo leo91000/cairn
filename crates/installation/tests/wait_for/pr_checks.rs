@@ -16,7 +16,7 @@ async fn legacy_statuses_cannot_satisfy_multiple_application_bindings() {
             &f.s,
             &f.token,
             &json!({
-                "condition": condition(&f), "reason": "Ambiguous source", "timeoutSeconds": 420,
+                "conditions": [condition(&f)], "reason": "Ambiguous source", "timeoutSeconds": 420,
             }),
         )
         .await;
@@ -293,7 +293,7 @@ async fn check_pagination_and_limits_preserve_complete_head_bound_results() {
     let result = wait_for::schedule(
         &f.s,
         &f.token,
-        &json!({ "condition": condition(&f), "reason": "More", "timeoutSeconds": 420 }),
+        &json!({ "conditions": [condition(&f)], "reason": "More", "timeoutSeconds": 420 }),
     )
     .await;
     assert_eq!(result.unwrap_err().status, 409);
@@ -325,7 +325,7 @@ async fn incomplete_graphql_results_never_expose_errors_or_schedule_success() {
     let result = wait_for::schedule(
         &f.s,
         &f.token,
-        &json!({ "condition": condition(&f), "reason": "Errors", "timeoutSeconds": 420 }),
+        &json!({ "conditions": [condition(&f)], "reason": "Errors", "timeoutSeconds": 420 }),
     )
     .await;
     let error = result.unwrap_err();
@@ -348,9 +348,14 @@ async fn pr_waits_keep_cancellation_permission_and_deadline_contracts() {
                     .unwrap();
             }
             "permission" => {
-                connections::set_enabled(&f.s, "github", &f.instance, &json!({ "enabled": false }))
-                    .await
-                    .unwrap();
+                connections::set_enabled(
+                    &f.s,
+                    "github",
+                    &f.instance,
+                    &cairn_contracts::PluginEnabledInput { enabled: false },
+                )
+                .await
+                .unwrap();
             }
             "deadline" => {
                 f.due().await;
@@ -395,7 +400,7 @@ async fn pr_ids_and_commit_sha_are_canonical_and_invalid_sources_are_rejected() 
         let result = wait_for::schedule(
             &f.s,
             &f.token,
-            &json!({ "condition": source, "reason": "Invalid", "timeoutSeconds": 420 }),
+            &json!({ "conditions": [source], "reason": "Invalid", "timeoutSeconds": 420 }),
         )
         .await;
         assert_eq!(result.unwrap_err().status, 400);

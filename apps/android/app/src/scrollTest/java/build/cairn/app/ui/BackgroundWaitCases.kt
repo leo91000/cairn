@@ -64,9 +64,9 @@ abstract class BackgroundWaitCases {
             history = { _, now ->
                 quotaEvents(now) +
                     listOf(
-                        RunEvent(7, now, "turn.started", "", runId = "run"),
-                        RunEvent(8, now, "turn.completed", "", runId = "run"),
-                        RunEvent(9, now, "status", "succeeded", runId = "run"),
+                        RunEvent(7, now, "turn.started", "", runId = SAVED_RUN_ID),
+                        RunEvent(8, now, "turn.completed", "", runId = SAVED_RUN_ID),
+                        RunEvent(9, now, "status", "succeeded", runId = SAVED_RUN_ID),
                     )
             },
         ) {
@@ -126,7 +126,7 @@ abstract class BackgroundWaitCases {
                         request.method == "POST" &&
                             path in
                                 listOf(
-                                    "/api/installations/fixture/api/runs/run/resume",
+                                    "/api/installations/fixture/api/runs/$SAVED_RUN_ID/resume",
                                     "/api/installations/fixture/api/chats/chat/pause",
                                 )
                     )
@@ -137,7 +137,7 @@ abstract class BackgroundWaitCases {
             }
             org.junit.Assert.assertEquals(
                 listOf(
-                    "/api/installations/fixture/api/runs/run/resume",
+                    "/api/installations/fixture/api/runs/$SAVED_RUN_ID/resume",
                     "/api/installations/fixture/api/chats/chat/pause",
                 ),
                 effects,
@@ -467,15 +467,32 @@ abstract class BackgroundWaitCases {
                     agentId = MAIN_AGENT_ID,
                     agentName = "Agent principal",
                     paused = paused,
-                    runId = "run",
+                    runId = SAVED_RUN_ID,
                     run =
                         Run(
-                            "run",
+                            SAVED_RUN_ID,
                             status = status,
                             startedAt = now - 60_000,
                             snapshot =
                                 Snapshot(
-                                    agent = Agent(provider = if (quota) "claude" else "codex")
+                                    agent =
+                                        Agent(
+                                            exclusiveNodes = emptyList(),
+                                            plugins = emptyList(),
+                                            id = "00000000-0000-4000-8000-000000000000",
+                                            name = "",
+                                            revision = "",
+                                            createdAt = 0,
+                                            access =
+                                                AccessPolicy(
+                                                    mcpTools =
+                                                        build.cairn.contracts.McpTools(emptyMap()),
+                                                    projects = null,
+                                                    skills = null,
+                                                    mcps = null,
+                                                ),
+                                            provider = if (quota) "claude" else "codex",
+                                        )
                                 ),
                             accountWaitReason =
                                 when {
@@ -556,12 +573,59 @@ abstract class BackgroundWaitCases {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
-                                        listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                Agent(
+                                                    exclusiveNodes = emptyList(),
+                                                    plugins = emptyList(),
+                                                    revision = "",
+                                                    createdAt = 0,
+                                                    access =
+                                                        AccessPolicy(
+                                                            mcpTools =
+                                                                build.cairn.contracts.McpTools(
+                                                                    emptyMap()
+                                                                ),
+                                                            projects = null,
+                                                            skills = null,
+                                                            mcps = null,
+                                                        ),
+                                                    id = MAIN_AGENT_ID,
+                                                    name = "Agent principal",
+                                                )
+                                            )
+                                        )
                                     )
                                 "/api/installations/fixture/api/chats/chat" ->
                                     wireJson.encodeToString(chat)
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                "/api/installations/fixture/api/runs/$SAVED_RUN_ID/resume" ->
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ResumeRunOutput(SAVED_RUN_ID)
+                                    )
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -630,7 +694,7 @@ private fun quotaEvents(now: Long): List<RunEvent> {
         type: String,
         text: String = "",
         payload: Map<String, JsonElement>? = null,
-    ) = RunEvent(id, now - 30_000 + id * 1000, type, text, payload, runId = "run")
+    ) = RunEvent(id, now - 30_000 + id * 1000, type, text, payload, runId = SAVED_RUN_ID)
     fun message(id: Long, text: String) =
         event(
             id,
@@ -672,3 +736,5 @@ private class BackgroundWaitVault : SessionVault {
 
     override fun write(origin: String, cookie: String?) = Unit
 }
+
+private const val SAVED_RUN_ID = "123e4567-e89b-42d3-a456-426614174000"

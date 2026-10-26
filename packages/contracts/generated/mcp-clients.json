@@ -1,0 +1,65 @@
+[
+  {
+    "input": "ListMcpsInput",
+    "method": "GET",
+    "name": "listMcps",
+    "output": "ListMcpsOutput",
+    "path": "/mcps"
+  },
+  {
+    "input": "McpInput",
+    "method": "POST",
+    "name": "createMcp",
+    "output": "McpView",
+    "path": "/mcps"
+  },
+  {
+    "input": "UpdateMcpInput",
+    "method": "PUT",
+    "name": "updateMcp",
+    "output": "McpView",
+    "path": "/mcps/{id}"
+  },
+  {
+    "input": "McpIdInput",
+    "method": "DELETE",
+    "name": "deleteMcp",
+    "output": "McpMutationOutput",
+    "path": "/mcps/{id}"
+  },
+  {
+    "input": "McpIdInput",
+    "method": "POST",
+    "name": "testMcp",
+    "output": "McpView",
+    "path": "/mcps/{id}/test"
+  },
+  {
+    "input": "McpIdInput",
+    "method": "POST",
+    "name": "disconnectMcp",
+    "output": "McpMutationOutput",
+    "path": "/mcps/{id}/disconnect"
+  },
+  {
+    "input": "BeginMcpInput",
+    "method": "POST",
+    "name": "beginMcpConnection",
+    "output": "BeginMcpOutput",
+    "path": "/mcps/{id}/connect"
+  },
+  {
+    "input": "McpIdInput",
+    "method": "POST",
+    "name": "mcpConnectionStatus",
+    "output": "McpConnectionStatus",
+    "path": "/mcps/{id}/callback"
+  },
+  {
+    "input": "McpIdInput",
+    "method": "POST",
+    "name": "cancelMcpConnection",
+    "output": "McpMutationOutput",
+    "path": "/mcps/{id}/cancel"
+  }
+]

@@ -1,9 +1,12 @@
 <script setup lang="ts">
-import type { Agent } from '../../../../packages/contracts/contracts'
 import { computed, onMounted, ref } from 'vue'
+import { generateAgentAvatar } from '../../../../packages/contracts/generated/generateAgentAvatar'
+import { getAgentAvatarConfiguration } from '../../../../packages/contracts/generated/getAgentAvatarConfiguration'
+import { setAgentAvatar } from '../../../../packages/contracts/generated/setAgentAvatar'
 import { updateAgentPortrait } from '../agent-avatars'
 import { api, notify, state } from '../api'
 import { LoaderCircle, RefreshCw, Sparkles } from '../icons'
+import { bytesToBase64 } from '../skill-bundle'
 import AgentAvatar from './AgentAvatar.vue'
 import Icon from './Icon.vue'
 import UiButton from './UiButton.vue'
@@ -17,7 +20,7 @@ const error = ref('')
 const fileInput = ref<HTMLInputElement>()
 onMounted(async () => {
   try {
-    configured.value = (await api<{ configured: boolean }>('/agent-avatars')).configured
+    configured.value = (await getAgentAvatarConfiguration(api, {})).configured
   }
   catch (e) { error.value = (e as Error).message }
 })
@@ -28,7 +31,7 @@ async function generate() {
   busy.value = true
   error.value = ''
   try {
-    updateAgentPortrait(await api<Agent>(`/agents/${props.agentId}/avatar/generate`, { method: 'POST' }))
+    updateAgentPortrait(await generateAgentAvatar(api, { agentId: props.agentId }))
   }
   catch (e) { error.value = (e as Error).message }
   finally { busy.value = false }
@@ -48,10 +51,9 @@ async function upload(event: Event) {
 
   busy.value = true
   try {
-    updateAgentPortrait(await api<Agent>(`/agents/${props.agentId}/avatar`, {
-      method: 'PUT',
-      body: file,
-      headers: { 'Content-Type': file.type || 'application/octet-stream' },
+    updateAgentPortrait(await setAgentAvatar(api, {
+      agentId: props.agentId,
+      data: bytesToBase64(new Uint8Array(await file.arrayBuffer())),
     }))
     notify('Portrait updated')
   }

@@ -1,8 +1,8 @@
 //! Adapter for the unmodified Claude Code streaming CLI.
 use crate::{
-    accounts::lenient,
     claude,
     config::Config,
+    context_usage::ContextUsage,
     error::{Error, Result},
     process::command,
     skills::atomic_write,
@@ -26,6 +26,13 @@ use tokio_util::sync::CancellationToken;
 const STOPPED: &str = "Claude execution stopped.";
 const MAX_LINE: usize = 32_000_000;
 const MAX_IMAGE: usize = 10_000_000;
+
+/// Prefix of the context usage requests this adapter sends Claude Code.
+const CONTEXT_REQUEST: &str = "cairn-context-";
+
+/// How long a finished execution waits for the context report requested at a compaction
+/// boundary. Claude Code answers it locally, after the command's result.
+const CONTEXT_REPORT_WAIT: Duration = Duration::from_secs(5);
 
 const DENIED: &str =
     "This tool is outside the agent's access policy. Ask the user in your response.";
@@ -104,6 +111,11 @@ async fn emit(events: &mpsc::Sender<Value>, value: Value) -> Result<()> {
         .send(value)
         .await
         .map_err(|_| Error::unavailable("Claude output stopped."))
+}
+
+/// An execution that compacts the native context instead of delivering a message.
+fn compacting(plan: &Value) -> bool {
+    plan["execution"]["operation"] == "compact"
 }
 
 fn delivered(id: &str) -> Value {
@@ -347,48 +359,91 @@ fn subagent_report(block: &Value, outcome: &Value) -> String {
 }
 
 /// Saved before a turn completes, so a restart never repeats a finished request.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Receipt {
-    #[serde(default, deserialize_with = "lenient::optional_string")]
-    message_id: Option<String>,
-    #[serde(default, deserialize_with = "lenient::strings")]
+    message_id: String,
     delivered: Vec<String>,
-    #[serde(default, deserialize_with = "lenient::optional_string")]
-    text: Option<String>,
-    #[serde(default, deserialize_with = "lenient::optional_string")]
-    item_id: Option<String>,
+    text: String,
+    item_id: String,
 }
 
 impl Receipt {
     async fn read(path: &Path, message_id: &str) -> Option<Self> {
         let bytes = tokio::fs::read(path).await.ok()?;
         let receipt = serde_json::from_slice::<Self>(&bytes).ok()?;
-        // Older adapters could save an unrelated startup/background result before Claude
-        // consumed this request. Such a receipt must never complete it.
-        let completes = receipt.message_id.as_deref() == Some(message_id)
-            && receipt.delivered.iter().any(|id| id == message_id);
+        let completes =
+            receipt.message_id == message_id && receipt.delivered.iter().any(|id| id == message_id);
         completes.then_some(receipt)
     }
 
     /// Replays a completed request without starting Claude Code.
-    async fn replay(
-        self,
-        plan: &Value,
-        message_id: &str,
-        events: &mpsc::Sender<Value>,
-    ) -> Result<()> {
+    async fn replay(self, plan: &Value, events: &mpsc::Sender<Value>) -> Result<()> {
         for id in &self.delivered {
             emit(events, delivered(id)).await?;
         }
-        let body = self.text.as_deref().unwrap_or_default();
-        atomic_write(Path::new(text(plan, "output")), body.as_bytes()).await?;
-        let item_id = self
-            .item_id
-            .unwrap_or_else(|| format!("{message_id}-recovered"));
-        let item = json!({ "id": item_id, "type": "agent_message", "text": self.text });
+        atomic_write(Path::new(text(plan, "output")), self.text.as_bytes()).await?;
+        let item = json!({ "id": self.item_id, "type": "agent_message", "text": self.text });
         emit(events, json!({ "type": "item.completed", "item": item })).await?;
         emit(events, json!({ "type": "turn.completed" })).await
+    }
+}
+
+/// The subscription usage limit Claude Code reports in a `rate_limit_event`.
+#[derive(Debug, PartialEq)]
+struct UsageLimit {
+    status: &'static str,
+    window: Option<String>,
+    /// Milliseconds since the epoch.
+    resets_at: Option<i64>,
+    extra_usage: Option<&'static str>,
+    using_extra_usage: bool,
+}
+
+impl UsageLimit {
+    fn from(info: &Value) -> Option<Self> {
+        let status = |value: &Value| match value.as_str()? {
+            "allowed" => Some("allowed"),
+            "allowed_warning" => Some("allowed_warning"),
+            "rejected" => Some("rejected"),
+            _ => None,
+        };
+        let window = text(info, "rateLimitType");
+        let window = (!window.is_empty()
+            && window.len() <= 64
+            && window
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_'))
+        .then(|| window.to_owned());
+        // Claude Code reports seconds; accept milliseconds from a future CLI too.
+        let resets_at = info["resetsAt"]
+            .as_f64()
+            .filter(|reset| reset.is_finite() && *reset > 0.0)
+            .map(|reset| if reset < 1e12 { reset * 1000.0 } else { reset } as i64);
+        Some(Self {
+            status: status(&info["status"])?,
+            window,
+            resets_at,
+            extra_usage: status(&info["overageStatus"]),
+            using_extra_usage: info["isUsingOverage"] == true || info["overageInUse"] == true,
+        })
+    }
+
+    /// Requests stop until the window resets: extra usage cannot take over.
+    fn blocks(&self) -> bool {
+        self.status == "rejected"
+            && !matches!(self.extra_usage, Some("allowed" | "allowed_warning"))
+    }
+
+    fn event(&self) -> Value {
+        json!({
+            "type": "provider.limit",
+            "status": self.status,
+            "window": self.window,
+            "resetsAt": self.resets_at,
+            "blocked": self.blocks(),
+            "usingExtraUsage": self.using_extra_usage,
+        })
     }
 }
 
@@ -412,6 +467,7 @@ struct Turn<'a> {
     /// The ID Claude Code knows the request by.
     wire_id: String,
     submitted: HashSet<String>,
+    operational_notices: HashSet<String>,
     delivered: HashSet<String>,
     /// Submitted messages whose turn has not produced a result yet.
     pending: HashSet<String>,
@@ -422,6 +478,24 @@ struct Turn<'a> {
     tools: HashMap<String, Value>,
     /// Subagents still working, by the ID of the tool use that started them.
     subagents: HashMap<String, Value>,
+    /// Subagents that reported back, by the same ID, until a new run resumes them.
+    settled: HashMap<String, Value>,
+    /// The ID of each subagent, by the task ID Claude Code keeps across its runs.
+    tasks: HashMap<String, String>,
+    /// The usage limit Claude Code last reported, unless requests run normally.
+    limit: Option<UsageLimit>,
+    /// Subagents by the tool use that resumed them, such as a SendMessage call: before 2.1.292,
+    /// a resumed subagent's messages may name that call rather than an agent ID.
+    resumed_by: HashMap<String, String>,
+    /// Every tool use of this execution, by tool name, including those that already returned.
+    called: HashMap<String, String>,
+    /// Whether a response streamed since the usage limit was reported: requests went through.
+    answered: bool,
+    /// The error Claude Code gave the agent's latest message: `rate_limit` when the usage limit
+    /// refused its request.
+    api_error: String,
+    /// Tool uses whose progress notice was reported: Claude Code repeats it while the tool runs.
+    tool_notices: HashSet<String>,
     /// Streamed blocks of the current message, by index.
     streams: HashMap<usize, Value>,
     /// Content blocks seen per assistant message.
@@ -435,6 +509,29 @@ struct Turn<'a> {
     background_replayed: bool,
     /// The agent finished responding and only its background tasks keep the run open.
     waiting_for_background: bool,
+    /// Context usage requests sent to Claude Code.
+    context_requests: u64,
+    /// Requests up to this number were sent before the latest measured response, so their
+    /// reports describe an older context.
+    context_measured: u64,
+    /// The report requested at a compaction boundary, until it answers or a response measures
+    /// the compacted context.
+    context_pending: Option<u64>,
+    /// The execution finished and only waits for [`Self::context_pending`], until this time.
+    finishing: Option<tokio::time::Instant>,
+    /// The model's context window, from Claude Code's latest context usage report.
+    context_window: Option<u64>,
+    /// The latest context usage shown, so unchanged reports are not repeated.
+    context: Option<ContextUsage>,
+    /// The compaction Claude Code is running, by the ID of its chat item.
+    compaction: Option<String>,
+    /// Compactions Claude Code reported during this execution.
+    compactions: usize,
+    /// Compactions Claude Code started or reported during this execution, each with its own
+    /// item: a resumed or retried compaction never reuses an earlier attempt's divider.
+    compaction_attempts: usize,
+    /// Identifies this launch's compaction items.
+    attempt: String,
 }
 
 impl Turn<'_> {
@@ -452,6 +549,9 @@ impl Turn<'_> {
     }
 
     async fn deliver(&mut self, id: &str) -> Result<()> {
+        if self.operational_notices.contains(id) {
+            return Ok(());
+        }
         if self.delivered.insert(id.to_owned()) {
             self.emit(delivered(id)).await?;
         }
@@ -459,6 +559,13 @@ impl Turn<'_> {
     }
 
     async fn submit_initial(&mut self) -> Result<()> {
+        if compacting(self.plan) {
+            // Claude Code runs its own `/compact` command locally: it is never sent to the
+            // model as a user request, and a restarted attempt simply compacts again.
+            let command = json!({ "id": self.wire_id, "text": "/compact", "attachments": [] });
+            let command = input(&command, self.inbox).await?;
+            return send(&mut self.stdin, command).await;
+        }
         let mut message = crate::chats::execution_text(self.plan);
         if self.plan["execution"]["recovery"] == true {
             message = format!(
@@ -474,8 +581,134 @@ impl Turn<'_> {
         send(&mut self.stdin, initial).await
     }
 
+    /// Asks Claude Code how full its context is. Answering does not call the model.
+    async fn request_context(&mut self) -> Result<()> {
+        self.context_requests += 1;
+        let request = json!({
+            "type": "control_request",
+            "request_id": format!("{CONTEXT_REQUEST}{}", self.context_requests),
+            "request": { "subtype": "get_context_usage", "detail": "summary" },
+        });
+        send(&mut self.stdin, request).await
+    }
+
+    async fn show_context(&mut self, usage: Option<ContextUsage>) -> Result<()> {
+        let Some(usage) = usage else {
+            return Ok(());
+        };
+        if self.context.as_ref() == Some(&usage) {
+            return Ok(());
+        }
+        let event = usage.event();
+        self.context = Some(usage);
+        self.emit(event).await
+    }
+
+    /// Claude Code's answer to a context usage request. Answers whether the execution is now
+    /// complete.
+    async fn on_control_response(&mut self, value: &Value) -> Result<bool> {
+        let response = &value["response"];
+        let Some(number) = text(response, "request_id")
+            .strip_prefix(CONTEXT_REQUEST)
+            .and_then(|number| number.parse::<u64>().ok())
+        else {
+            return Ok(false);
+        };
+
+        if response["subtype"] == "success" {
+            let report = &response["response"];
+            if let Some(window) = report["maxTokens"].as_u64().filter(|window| *window > 0) {
+                self.context_window = Some(window);
+            }
+            // A response measured after this request was sent is more recent than its report.
+            if number > self.context_measured {
+                self.show_context(ContextUsage::claude_report(report))
+                    .await?;
+            }
+        }
+        if self.context_pending == Some(number) {
+            self.context_pending = None;
+        }
+        self.finish_after_report().await
+    }
+
+    /// Completes a finished execution once the compaction's context report answered, or once
+    /// waiting for it took too long. The run then keeps the last usage it showed.
+    async fn finish_after_report(&mut self) -> Result<bool> {
+        let Some(deadline) = self.finishing else {
+            return Ok(false);
+        };
+        if self.context_pending.is_some() && tokio::time::Instant::now() < deadline {
+            return Ok(false);
+        }
+        self.complete().await?;
+        Ok(true)
+    }
+
+    /// A new compaction item's ID, unique to this attempt.
+    fn compaction_id(&mut self) -> String {
+        self.compaction_attempts += 1;
+        format!(
+            "{}-compaction-{}-{}",
+            self.initial_id, self.attempt, self.compaction_attempts
+        )
+    }
+
+    /// `status` while Claude Code compacts, and the `compact_boundary` that ends it.
+    async fn on_compaction(&mut self, value: &Value) -> Result<()> {
+        if value["subtype"] == "status" {
+            if value["status"] == "compacting" && self.compaction.is_none() {
+                let id = self.compaction_id();
+                self.compaction = Some(id.clone());
+                let item =
+                    json!({ "id": id, "type": "context_compaction", "status": "in_progress" });
+                self.emit(json!({ "type": "item.started", "item": item }))
+                    .await?;
+            }
+            let failed = value["compact_result"]
+                .as_str()
+                .is_some_and(|result| result != "success");
+            if failed && let Some(id) = self.compaction.take() {
+                let item = json!({ "id": id, "type": "context_compaction", "status": "failed" });
+                self.emit(json!({ "type": "item.completed", "item": item }))
+                    .await?;
+            }
+            return Ok(());
+        }
+
+        self.compactions += 1;
+        let id = match self.compaction.take() {
+            Some(id) => id,
+            None => self.compaction_id(),
+        };
+        let metadata = &value["compact_metadata"];
+        let mut item = json!({
+            "id": id,
+            "type": "context_compaction",
+            "status": "completed",
+        });
+        if matches!(text(metadata, "trigger"), "manual" | "auto") {
+            item["trigger"] = metadata["trigger"].clone();
+        }
+        for (source, target) in [("pre_tokens", "pre_tokens"), ("post_tokens", "post_tokens")] {
+            if metadata[source].is_u64() {
+                item[target] = metadata[source].clone();
+            }
+        }
+        self.emit(json!({ "type": "item.completed", "item": item }))
+            .await?;
+        // The next response measures the compacted context; until then show Claude Code's estimate.
+        self.request_context().await?;
+        self.context_pending = Some(self.context_requests);
+        Ok(())
+    }
+
     /// Submits messages the user added to the inbox, or answers to pending questions.
     async fn poll_inbox(&mut self) -> Result<()> {
+        // Messages sent while compacting stay queued for the next turn.
+        if compacting(self.plan) {
+            return Ok(());
+        }
         let Some(bytes) =
             crate::chat_inbox::read(self.inbox, crate::chat_inbox::ADAPTER_LIMIT).await?
         else {
@@ -486,6 +719,9 @@ impl Turn<'_> {
         };
         for message in messages {
             let id = text(&message, "id");
+            if message["operationalNotice"] == true {
+                self.operational_notices.insert(id.to_owned());
+            }
             if self.submitted.contains(id) {
                 continue;
             }
@@ -560,6 +796,14 @@ impl Turn<'_> {
                 self.background_tasks(value).await?;
             }
             "system"
+                if value["subtype"] == "compact_boundary"
+                    || (value["subtype"] == "status"
+                        && (value["status"] == "compacting"
+                            || value["compact_result"].is_string())) =>
+            {
+                self.on_compaction(value).await?;
+            }
+            "system"
                 if matches!(
                     text(value, "subtype"),
                     "task_started" | "task_progress" | "task_notification"
@@ -567,16 +811,106 @@ impl Turn<'_> {
             {
                 self.subagent_task(value).await?;
             }
+            "system" if value["subtype"] == "api_retry" => self.engine_retry(value).await?,
+            "system" if value["subtype"] == "informational" => self.engine_notice(value).await?,
+            // Opt-in (CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS) and not enabled: completion stays
+            // correlated with results, and Cairn answers permission requests itself.
+            "system" if value["subtype"] == "session_state_changed" => {}
+            "rate_limit_event" => self.rate_limit(&value["rate_limit_info"]).await?,
             "user" => self.on_user(value).await?,
             "assistant" => self.on_assistant(value).await?,
             "stream_event" if value["parent_tool_use_id"].is_null() => {
                 self.on_stream_event(&value["event"]).await?;
             }
             "control_request" => self.on_control_request(value).await?,
+            "control_response" => return self.on_control_response(value).await,
             "result" => return self.on_result(value).await,
             _ => {}
         }
         Ok(false)
+    }
+
+    /// Claude Code retries a failed API request itself. The turn goes on: this is not a failure,
+    /// and nothing for Cairn to retry or wait for.
+    async fn engine_retry(&self, value: &Value) -> Result<()> {
+        let delay = value["retry_delay_ms"].as_u64().unwrap_or(0);
+        let reason = text(value, "error");
+        let reason = if !reason.is_empty()
+            && reason.len() <= 64
+            && reason
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        {
+            reason
+        } else {
+            "unknown"
+        };
+        let mut retry = json!({
+            "type": "engine.retry",
+            "attempt": value["attempt"].as_u64(),
+            "maxRetries": value["max_retries"].as_u64(),
+            "delayMs": delay,
+            "retryAt": crate::config::now().saturating_add_unsigned(delay),
+            "status": value["error_status"].as_u64(),
+            "reason": reason,
+        });
+        let no_response = &value["no_response"];
+        if no_response.is_object() {
+            retry["noResponse"] = json!({
+                "waitedMs": no_response["waited_ms"].as_u64(),
+                "retryWaitMs": no_response["retry_wait_ms"].as_u64(),
+            });
+        }
+        self.emit(retry).await
+    }
+
+    /// A warning or notice Claude Code raised during the turn.
+    async fn engine_notice(&mut self, value: &Value) -> Result<()> {
+        let message = text(value, "content");
+        if message.trim().is_empty() {
+            return Ok(());
+        }
+        let level = match text(value, "level") {
+            level @ ("info" | "notice" | "suggestion" | "warning") => level,
+            _ => "notice",
+        };
+        // Informational lines naming a tool use report its progress: the first one says it is
+        // running. A warning, a suggestion or a notice that stops the turn is always reported.
+        let tool_use = text(value, "tool_use_id");
+        let progress = matches!(level, "info" | "notice") && value["prevent_continuation"] != true;
+        if progress && !tool_use.is_empty() && !self.tool_notices.insert(tool_use.to_owned()) {
+            return Ok(());
+        }
+        // The worker cuts a long notice once it is redacted.
+        let mut notice = json!({ "type": "engine.notice", "level": level, "message": message });
+        if value["prevent_continuation"] == true {
+            notice["stopsTurn"] = true.into();
+        }
+        self.emit(notice).await
+    }
+
+    /// The subscription's usage-limit state. Only changes are shown: a warning, a limit that
+    /// stops requests, or a return to normal after either.
+    async fn rate_limit(&mut self, info: &Value) -> Result<()> {
+        let Some(limit) = UsageLimit::from(info) else {
+            return Ok(());
+        };
+        if limit.status == "allowed" && self.limit.is_none() {
+            return Ok(());
+        }
+        if self.limit.as_ref() == Some(&limit) {
+            // While the limit refuses requests, Claude Code re-emits it (at most about every 30
+            // seconds per window): a refusal after an answered request. One within that time
+            // falls back to recognizing Claude's wording.
+            if limit.blocks() {
+                self.answered = false;
+            }
+            return Ok(());
+        }
+        self.emit(limit.event()).await?;
+        self.limit = (limit.status != "allowed").then_some(limit);
+        self.answered = false;
+        Ok(())
     }
 
     async fn background_tasks(&mut self, value: &Value) -> Result<()> {
@@ -702,14 +1036,44 @@ impl Turn<'_> {
         Ok(())
     }
 
+    /// The subagent a message comes from, or None for the agent's own. Claude Code names the
+    /// tool use that started it and, from 2.1.292, its agent ID (absent on the agent's own
+    /// messages): the task ID it keeps when it is resumed, so a resumed subagent's steps stay
+    /// with it.
+    fn parent(&self, value: &Value) -> Option<String> {
+        let agent = text(value, "agent_id");
+        if let Some(id) = self.tasks.get(agent) {
+            return Some(id.clone());
+        }
+        let tool_use = value["parent_tool_use_id"].as_str();
+        if let Some(id) = tool_use.and_then(|tool_use| self.resumed_by.get(tool_use)) {
+            return Some(id.clone());
+        }
+        tool_use
+            .or_else(|| (!agent.is_empty()).then_some(agent))
+            .map(str::to_owned)
+    }
+
     // Claude Code emits one assistant event per content block, all sharing the message id.
-    // Count blocks per message so ids match the streamed block index. A subagent's messages name
-    // the tool use that started it: they show as its steps, never as the agent's own reply.
+    // Count blocks per message so ids match the streamed block index. A subagent's messages
+    // show as its steps, never as the agent's own reply.
     async fn on_assistant(&mut self, value: &Value) -> Result<()> {
-        let parent = value["parent_tool_use_id"].as_str();
+        let parent = self.parent(value);
         if parent.is_none() {
             // The agent responds again, so it no longer only waits for background tasks.
             self.waiting_for_background = false;
+            self.api_error = text(value, "error").to_owned();
+            // Subagents have their own context. Local command replies are not model requests.
+            let response = &value["message"];
+            let usage = (response["model"] != "<synthetic>")
+                .then(|| ContextUsage::claude_response(&response["usage"], self.context_window))
+                .flatten();
+            if let Some(usage) = usage {
+                // Reports requested before this response describe the context it replaced.
+                self.context_measured = self.context_requests;
+                self.context_pending = None;
+                self.show_context(Some(usage)).await?;
+            }
         }
         let message = text(&value["message"], "id").to_owned();
         for block in value["message"]["content"].as_array().into_iter().flatten() {
@@ -719,8 +1083,8 @@ impl Turn<'_> {
             let Some(mut item) = item(block, &message, index) else {
                 continue;
             };
-            if let Some(parent) = parent {
-                item["parent_id"] = parent.into();
+            if let Some(parent) = &parent {
+                item["parent_id"] = parent.as_str().into();
                 if item["type"] == "agent_message" {
                     item["type"] = "subagent_message".into();
                 }
@@ -736,6 +1100,8 @@ impl Turn<'_> {
             let running = block["type"] == "tool_use";
             if running {
                 self.tools.insert(text(&item, "id").into(), item.clone());
+                self.called
+                    .insert(text(&item, "id").into(), text(block, "name").into());
             }
             // The plan counts once Claude Code accepts it, with the call's result.
             if item["type"] == "todo_list" {
@@ -756,6 +1122,25 @@ impl Turn<'_> {
     async fn subagent_result(&mut self, item: Value, block: &Value, outcome: &Value) -> Result<()> {
         let id = text(&item, "id").to_owned();
         let mut item = self.subagents.remove(&id).unwrap_or(item);
+        if let Some(agent) = outcome["agentId"]
+            .as_str()
+            .filter(|agent| !agent.is_empty())
+        {
+            self.tasks.insert(agent.to_owned(), id.clone());
+            if item["task_id"].is_null() {
+                item["task_id"] = agent.into();
+            }
+        }
+        // The call that started the subagent can return after a later run resumed it: that run
+        // reports for itself, whether it still works or already reported.
+        if item["resumed"] == true {
+            if item["status"] == "in_progress" {
+                self.subagents.insert(id, item);
+            } else {
+                self.settled.insert(id, item);
+            }
+            return Ok(());
+        }
         let launched = matches!(
             text(outcome, "status"),
             "async_launched" | "remote_launched"
@@ -784,27 +1169,87 @@ impl Turn<'_> {
         // call is complete but the subagent is still working.
         if launched && item["status"] == "in_progress" {
             self.subagents.insert(id, item.clone());
+        } else {
+            self.settled.insert(id, item.clone());
         }
         self.emit(json!({ "type": "item.completed", "item": item }))
             .await
     }
 
-    /// Progress and completion that Claude Code reports for a subagent while it works.
+    /// Progress and completion that Claude Code reports for a subagent while it works. A resumed
+    /// subagent keeps its task ID, while its frames may name another tool use, or none.
     async fn subagent_task(&mut self, value: &Value) -> Result<()> {
-        let id = text(value, "tool_use_id");
-        let Some(item) = self.subagents.get_mut(id) else {
-            return Ok(());
+        let task = text(value, "task_id");
+        let tool_use = text(value, "tool_use_id");
+        let id = if self.subagents.contains_key(tool_use) || self.settled.contains_key(tool_use) {
+            tool_use.to_owned()
+        } else if let Some(id) = self.tasks.get(task) {
+            id.clone()
+        } else {
+            return self.subagent_resumed(value).await;
         };
+        if !task.is_empty() {
+            self.tasks.insert(task.to_owned(), id.clone());
+        }
+        if !tool_use.is_empty() && tool_use != id {
+            self.resumed_by.insert(tool_use.to_owned(), id.clone());
+        }
+        let started = value["subtype"] == "task_started";
+        if !self.subagents.contains_key(&id) {
+            // Only a new run reopens a subagent that reported back: other frames, and another
+            // start of the run that reported, are late and leave it settled.
+            let run = text(value, "run_id");
+            let reopens = started
+                && self.settled.get(&id).is_some_and(|item| {
+                    let reported = text(item, "run_id");
+                    run.is_empty() || reported.is_empty() || run > reported
+                });
+            if !reopens {
+                return Ok(());
+            }
+            let item = self.settled.remove(&id).unwrap();
+            self.subagents.insert(id.clone(), item);
+        }
+        let item = self.subagents.get_mut(&id).unwrap();
+
+        // Claude Code promises that a task's run IDs sort, by plain string comparison, in the
+        // order its runs opened: a frame naming an earlier run is late.
+        let run = text(value, "run_id");
+        let current = text(item, "run_id").to_owned();
+        if !run.is_empty() && !current.is_empty() && run < current.as_str() {
+            return Ok(());
+        }
         let before = item.clone();
-        if !text(value, "task_id").is_empty() {
-            item["task_id"] = value["task_id"].clone();
+        if !task.is_empty() {
+            item["task_id"] = task.into();
+        }
+        if !run.is_empty() {
+            item["run_id"] = run.into();
         }
         let usage = &value["usage"];
         match text(value, "subtype") {
             "task_started" => {
+                // A start naming another run is a resumption, even before the earlier run's tool
+                // result; another start of the current run is not. Frames without run IDs
+                // (before 2.1.292) only start again once the subagent finished.
+                let resumed = if !current.is_empty() && !run.is_empty() {
+                    run != current
+                } else {
+                    before["status"] != "in_progress"
+                };
+                if resumed {
+                    item["status"] = "in_progress".into();
+                    item["resumed"] = true.into();
+                    // Its new run reports again; until then the earlier report stays shown.
+                    item["activity"] = Value::Null;
+                    item["result"] = Value::Null;
+                }
                 item["background"] = (value["is_backgrounded"] == true).into();
                 if item["agent_type"].is_null() {
                     item["agent_type"] = value["subagent_type"].clone();
+                }
+                if !text(value, "parent_task_id").is_empty() {
+                    item["parent_task_id"] = value["parent_task_id"].clone();
                 }
             }
             "task_progress" => {
@@ -837,10 +1282,70 @@ impl Turn<'_> {
         }
         let item = item.clone();
         // A foreground subagent's tool result follows its notification and completes it.
-        if item["status"] != "in_progress" && !self.tools.contains_key(id) {
-            self.subagents.remove(id);
+        if item["status"] != "in_progress" && !self.tools.contains_key(&id) {
+            self.subagents.remove(&id);
+            self.settled.insert(id, item.clone());
         }
         self.emit(json!({ "type": "item.updated", "item": item }))
+            .await
+    }
+
+    /// A subagent an earlier execution started, resumed in this one: by a SendMessage call, or
+    /// by Claude Code itself. It keeps its task ID, but this execution never saw the tool use that
+    /// started it, so it shows as a new row of this execution marked resumed. Its run names the
+    /// SendMessage call or, when Claude Code resumed it, the earlier execution's call that
+    /// started it. Another tool use of this execution, such as a workflow's, starts its own
+    /// agents; a start naming no call is a new agent, such as a forked slash command. A call this
+    /// execution never made only names a resumed subagent the agent itself started: a nested
+    /// agent may start from work this execution does not see.
+    async fn subagent_resumed(&mut self, value: &Value) -> Result<()> {
+        let task = text(value, "task_id");
+        let tool_use = text(value, "tool_use_id");
+        let top_level = text(value, "parent_task_id").is_empty()
+            && value["spawn_depth"].as_u64().is_none_or(|depth| depth <= 1);
+        let resumes = match self.called.get(tool_use) {
+            Some(tool) => tool == "SendMessage",
+            None => !tool_use.is_empty() && top_level,
+        };
+        // Housekeeping agents Claude Code starts itself stay out of the transcript.
+        if value["subtype"] != "task_started"
+            || value["task_type"] != "local_agent"
+            || value["skip_transcript"] == true
+            || value["ambient"] == true
+            || task.is_empty()
+            || !resumes
+        {
+            return Ok(());
+        }
+        let input = json!({
+            "description": value["description"],
+            "subagent_type": value["subagent_type"],
+            "prompt": value["prompt"],
+        });
+        // Clients key rows by run and item ID, and a run's later executions may resume the same
+        // subagent again: each row gets its own ID, named after the subagent's run when known.
+        let row = match text(value, "run_id") {
+            "" => format!("{task}:{}", crate::config::id()),
+            run => format!("{task}:{run}"),
+        };
+        let mut item = subagent(&row, &input);
+        item["resumed"] = true.into();
+        item["task_id"] = task.into();
+        item["background"] = (value["is_backgrounded"] == true).into();
+        for key in ["run_id", "parent_task_id"] {
+            if !text(value, key).is_empty() {
+                item[key] = value[key].clone();
+            }
+        }
+        if let Some(parent) = self.tasks.get(text(value, "parent_task_id")) {
+            item["parent_id"] = parent.as_str().into();
+        }
+        self.tasks.insert(task.to_owned(), row.clone());
+        if !tool_use.is_empty() {
+            self.resumed_by.insert(tool_use.to_owned(), row.clone());
+        }
+        self.subagents.insert(row, item.clone());
+        self.emit(json!({ "type": "item.started", "item": item }))
             .await
     }
 
@@ -849,6 +1354,7 @@ impl Turn<'_> {
         match text(event, "type") {
             "message_start" => {
                 self.waiting_for_background = false;
+                self.answered = true;
                 self.stream_message = text(&event["message"], "id").into();
                 self.streams.clear();
             }
@@ -968,9 +1474,40 @@ impl Turn<'_> {
             } else {
                 result
             };
+            // Claude Code said the usage limit stops requests, and refused the agent's request
+            // for it: report it as such rather than leaving its wording to be recognized. A limit
+            // it answered after (a limit on another model's window, or one a subagent hit), or
+            // whose reset passed, does not explain the failure.
+            let now = crate::config::now();
+            if let Some(limit) = self.limit.as_ref().filter(|limit| {
+                limit.blocks()
+                    && self.api_error == "rate_limit"
+                    && !self.answered
+                    && limit.resets_at.is_none_or(|reset| reset > now)
+            }) {
+                self.emit(json!({
+                    "type": "turn.failed",
+                    "error": {
+                        "message": message,
+                        "code": "usage_limit_reached",
+                        "window": limit.window,
+                        "resetsAt": limit.resets_at,
+                    },
+                }))
+                .await?;
+            }
             return Err(Error::bad_gateway(message));
         }
-        if !result.is_empty() {
+        if compacting(self.plan) && self.compactions == 0 {
+            // Claude Code answers `/compact` successfully even when it had nothing to compact.
+            let message = if self.last.is_empty() {
+                "Claude Code finished without compacting the conversation."
+            } else {
+                self.last.as_str()
+            };
+            return Err(Error::bad_gateway(message));
+        }
+        if !result.is_empty() && !compacting(self.plan) {
             self.last = result.into();
         }
         for id in self.settled(value) {
@@ -996,19 +1533,28 @@ impl Turn<'_> {
             }
             return Ok(false);
         }
+        if self.context_pending.is_some() {
+            // Claude Code answers the compaction's context request after its result: wait
+            // briefly for it so the run shows the compacted context.
+            self.finishing = Some(tokio::time::Instant::now() + CONTEXT_REPORT_WAIT);
+            return Ok(false);
+        }
         self.complete().await?;
         Ok(true)
     }
 
     async fn complete(&self) -> Result<()> {
-        let receipt = Receipt {
-            message_id: Some(self.initial_id.into()),
-            delivered: self.delivered.iter().cloned().collect(),
-            text: Some(self.last.clone()),
-            item_id: Some(self.last_id.clone()),
-        };
-        // Save the receipt before completion so restart cannot repeat a finished request.
-        atomic_write(&self.receipt, &serde_json::to_vec(&receipt)?).await?;
+        // A compaction has no reply to replay: a restart compacts again instead.
+        if !compacting(self.plan) {
+            let receipt = Receipt {
+                message_id: self.initial_id.into(),
+                delivered: self.delivered.iter().cloned().collect(),
+                text: self.last.clone(),
+                item_id: self.last_id.clone(),
+            };
+            // Save the receipt before completion so restart cannot repeat a finished request.
+            atomic_write(&self.receipt, &serde_json::to_vec(&receipt)?).await?;
+        }
         atomic_write(Path::new(text(self.plan, "output")), self.last.as_bytes()).await?;
         self.emit(json!({ "type": "chat.question.closed" })).await?;
         self.emit(json!({ "type": "turn.completed" })).await
@@ -1020,6 +1566,7 @@ impl Turn<'_> {
         mut auth: Option<&mut crate::accounts::claude::Client>,
         cancel: &CancellationToken,
     ) -> Result<()> {
+        self.request_context().await?;
         self.submit_initial().await?;
         let mut buffer = Vec::new();
         let mut timer = tokio::time::interval(Duration::from_millis(250));
@@ -1036,7 +1583,15 @@ impl Turn<'_> {
                         result = client.sync() => result?,
                     }
                 }
-                _ = timer.tick() => self.poll_inbox().await?,
+                _ = timer.tick() => {
+                    if self.finish_after_report().await? {
+                        return Ok(());
+                    }
+                    // A finished execution no longer takes messages.
+                    if self.finishing.is_none() {
+                        self.poll_inbox().await?;
+                    }
+                }
                 bytes = stdout.fill_buf() => {
                     let (count, complete) = take_line(bytes?, &mut buffer)?;
                     stdout.consume(count);
@@ -1087,9 +1642,14 @@ pub async fn run(
     let receipt = Path::new(text(&plan, "output")).with_extension("claude-receipt.json");
     let initial_id = text(&plan["execution"], "messageId");
     if let Some(saved) = Receipt::read(&receipt, initial_id).await {
-        return saved.replay(&plan, initial_id, &events).await;
+        return saved.replay(&plan, &events).await;
     }
 
+    if compacting(&plan) && !plan["sessionId"].is_string() {
+        return Err(Error::conflict(
+            "This conversation has no saved Claude Code session to compact.",
+        ));
+    }
     // Completed receipts above do not launch Claude and must remain replayable.
     if let Some(session) = plan["sessionId"].as_str() {
         validate_session_environment(&directory, session).await?;
@@ -1164,12 +1724,21 @@ pub async fn run(
         initial_id,
         wire_id,
         submitted: HashSet::from([initial_id.to_owned()]),
+        operational_notices: HashSet::new(),
         delivered: HashSet::new(),
         pending: HashSet::from([initial_id.to_owned()]),
         consumed: HashSet::new(),
         questions: HashMap::new(),
         tools: HashMap::new(),
         subagents: HashMap::new(),
+        settled: HashMap::new(),
+        tasks: HashMap::new(),
+        limit: None,
+        resumed_by: HashMap::new(),
+        called: HashMap::new(),
+        answered: false,
+        api_error: String::new(),
+        tool_notices: HashSet::new(),
         streams: HashMap::new(),
         blocks: HashMap::new(),
         stream_message: String::new(),
@@ -1179,6 +1748,16 @@ pub async fn run(
         awaiting_background: HashSet::new(),
         background_replayed: false,
         waiting_for_background: false,
+        context_requests: 0,
+        context_measured: 0,
+        context_pending: None,
+        finishing: None,
+        context_window: None,
+        context: None,
+        compaction: None,
+        compactions: 0,
+        compaction_attempts: 0,
+        attempt: crate::config::id(),
     };
     let operation = turn.execute(&mut stdout, auth.as_mut(), &cancel).await;
     // Closes Claude Code's stdin.

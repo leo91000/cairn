@@ -9,6 +9,7 @@ import {
   watch,
 } from 'vue'
 import { useRouter } from 'vue-router'
+import { setMissionState } from '../../../../packages/contracts/generated/setMissionState'
 import {
   api,
   notify,
@@ -22,6 +23,7 @@ import {
   Check,
   CheckCheck,
   Clock,
+  CornerDownRight,
   ListFilter,
   MoreHorizontal,
   RotateCcw,
@@ -197,7 +199,12 @@ async function archive(item: FilItem) {
   if (!task)
     return
   try {
-    await api(`/tasks/${task.id}`, { method: 'PUT', body: JSON.stringify({ ...task, archived: true, enabled: false }) })
+    await setMissionState(api, {
+      taskId: task.id,
+      revision: task.revision,
+      archived: true,
+      enabled: false,
+    })
     await refresh()
     notify(`${item.title} archived`)
   }
@@ -339,6 +346,9 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                     :badge="badge(item)"
                   />
                   <span class="min-w-0 flex-1">
+                    <span v-if="item.chatId && item.requester" class="mb-1 flex min-w-0 items-center gap-1 text-[11px] leading-tight text-subtle" data-testid="fil-requester">
+                      <Icon :name="CornerDownRight" :size="11" class="shrink-0" /><span class="truncate">Delegated by {{ item.requester.title }}</span>
+                    </span>
                     <span class="flex items-center gap-2 whitespace-nowrap text-[11.5px] font-semibold">
                       <span
                         v-if="isUnread(item)"
@@ -459,6 +469,9 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                   :badge="badge(item)"
                 />
                 <span class="min-w-0 flex-1">
+                  <span v-if="item.chatId && item.requester" class="mb-0.5 flex min-w-0 items-center gap-1 text-[11px] leading-tight text-subtle" data-testid="fil-requester">
+                    <Icon :name="CornerDownRight" :size="11" class="shrink-0" /><span class="truncate">Delegated by {{ item.requester.title }}</span>
+                  </span>
                   <span class="block truncate text-[13.5px] font-semibold leading-tight text-ink">{{ item.title }}</span>
                   <span class="mt-1 flex min-w-0 items-center text-[12px] leading-tight">
                     <template v-if="item.kind === 'running'">

@@ -5,6 +5,8 @@ import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
 
+private const val IMMEDIATE_WAIT_RESULT = "Wait condition already completed"
+
 class ChatWaitTest {
     // A plugin's condition: only the plugin knows what its fields mean.
     private val checks = buildJsonObject {
@@ -422,6 +424,7 @@ class ChatWaitTest {
     @Test
     fun `an immediately completed replacement does not resolve the previous wait`() {
         val observation = buildJsonObject {
+            put("immediate", true)
             put("state", "completed")
             put("type", "github_workflow")
             put("runId", 99)
@@ -527,6 +530,7 @@ class ChatWaitTest {
                 }
             )
         val immediate = buildJsonObject {
+            put("immediate", true)
             put("state", "completed")
             put("type", "run_finished")
             put("status", "succeeded")
@@ -546,42 +550,6 @@ class ChatWaitTest {
             ),
             entries.map { it.wait },
         )
-        // Its hidden call still gives the card the agent's reason, whichever way the provider
-        // records it.
-        for (arguments in
-            listOf(
-                buildJsonObject { put("reason", "Merger après la CI") },
-                JsonPrimitive("""{"reason":"Merger après la CI"}"""),
-            )) {
-            val card =
-                timelineEntries(
-                        listOf(
-                            toolCall("wait_for", "cairn_workspace", arguments = arguments),
-                            event("chat.wait_ready", immediate, IMMEDIATE_WAIT_RESULT),
-                        ),
-                        chat = true,
-                    )
-                    .single()
-            assertEquals("Merger après la CI", card.wait?.reason)
-        }
-        // A call announced without its arguments never borrows an earlier call's reason.
-        val later =
-            timelineEntries(
-                listOf(
-                    toolCall(
-                        "sleep",
-                        "cairn_workspace",
-                        arguments = buildJsonObject { put("reason", "Délai précédent") },
-                    ),
-                    event("chat.sleep", wakeup().json()),
-                    event("chat.wakeup", wakeup().json()),
-                    toolCall("wait_for", "cairn_workspace", arguments = buildJsonObject {}),
-                    event("chat.wait_ready", immediate, IMMEDIATE_WAIT_RESULT),
-                ),
-                chat = true,
-            )
-        assertEquals("", later.last().wait?.reason)
-        // A call's later update cannot lend its reason again once a card used it.
         fun call(type: String, callId: String, reason: String) =
             event(
                 type,
@@ -596,18 +564,6 @@ class ChatWaitTest {
                     }
                 },
             )
-        val raced =
-            timelineEntries(
-                listOf(
-                    call("item.started", "c1", "Premier"),
-                    event("chat.wait_ready", immediate, IMMEDIATE_WAIT_RESULT),
-                    call("item.completed", "c1", "Premier"),
-                    event("chat.wait_ready", immediate, IMMEDIATE_WAIT_RESULT),
-                    call("item.started", "c2", "Second"),
-                ),
-                chat = true,
-            )
-        assertEquals(listOf("Premier", ""), raced.mapNotNull { it.wait?.reason })
         // Recorded with the result, the reason no longer depends on when the call is reported.
         fun ready(reason: String) =
             event(
@@ -837,13 +793,13 @@ class ChatWaitTest {
                 listOf(
                     Run(
                         "watch-1",
-                        taskId = "watch",
+                        taskId = "77bb521a-0c2b-572d-b168-a7ad40ba98eb",
                         status = "waiting",
                         trigger = "manual",
                         wakeup = wakeup(wakeAt = 5000),
                     )
                 ),
-                listOf(Task("watch", "Surveiller la CI")),
+                listOf(Task("77bb521a-0c2b-572d-b168-a7ad40ba98eb", "Surveiller la CI")),
             )
         assertTrue(feed.running.isEmpty())
         assertEquals(listOf("run:watch-1", "chat:later"), feed.waiting.map { it.key })
@@ -852,5 +808,194 @@ class ChatWaitTest {
         assertEquals("Merger après la CI", feed.waiting[0].subtitle)
         assertEquals(5000L, feed.waiting[0].wakeAt)
         assertEquals("2 reprises prévues", feedSummary(feed))
+    }
+
+    // Grouped waits: several external results in one wakeup.
+    private val runId = "11111111-2222-4333-8444-555555555555"
+    private val runCondition = buildJsonObject {
+        put("type", "run_finished")
+        put("runId", runId)
+    }
+    private val failedRun = buildJsonObject {
+        put("state", "completed")
+        put("type", "run_finished")
+        put("runId", runId)
+        put("status", "failed")
+    }
+    private val passedChecks = buildJsonObject {
+        put("state", "completed")
+        put("type", "github_pr_checks")
+        put("pluginId", "github")
+        putJsonObject("display") {
+            put("tone", "ok")
+            put("title", "Required checks passed")
+            put("detail", "")
+        }
+    }
+
+    private fun group(mode: String) = buildJsonObject {
+        put("type", "group")
+        put("mode", mode)
+        putJsonArray("conditions") {
+            add(runCondition)
+            add(checks)
+        }
+    }
+
+    private fun groupWakeup(mode: String, vararg members: JsonObject) =
+        wakeup(group(mode)).copy(display = null, members = JsonArray(members.toList()))
+
+    private fun groupResult(state: String, mode: String, vararg results: JsonElement) =
+        buildJsonObject {
+            put("state", state)
+            put("type", "group")
+            put("mode", mode)
+            putJsonArray("members") {
+                results.forEach { result ->
+                    addJsonObject {
+                        put("condition", checks)
+                        put("result", result)
+                    }
+                }
+            }
+        }
+
+    @Test
+    fun `a group is named by its size and how many results arrived`() {
+        val pending =
+            groupWakeup(
+                "all",
+                buildJsonObject { put("observation", failedRun) },
+                buildJsonObject {
+                    put("display", display)
+                    put("nextCheckAt", 30_000)
+                },
+            )
+        assertEquals(
+            WaitTarget(WaitKind.GROUP, "Attente de 2 résultats", "1 sur 2 résultats", emptyList()),
+            waitTarget(pending),
+        )
+        assertEquals(
+            "2 résultats",
+            waitTarget(groupWakeup("all", JsonObject(emptyMap()), JsonObject(emptyMap()))).short,
+        )
+        val any = waitTarget(groupWakeup("any", JsonObject(emptyMap()), JsonObject(emptyMap())))
+        assertEquals("Attente du premier de 2 résultats", any.title)
+        assertEquals("Premier de 2 résultats", any.short)
+    }
+
+    @Test
+    fun `each grouped condition shows its own progress`() {
+        val members =
+            waitMembers(
+                groupWakeup(
+                    "all",
+                    buildJsonObject { put("observation", failedRun) },
+                    buildJsonObject {
+                        put("display", display)
+                        put("nextCheckAt", 30_000)
+                        put("lastError", "Temporarily unavailable")
+                    },
+                )
+            )
+        assertEquals(
+            listOf(
+                WaitMember(
+                    WaitKind.RUN,
+                    "Exécution Cairn",
+                    listOf("11111111"),
+                    runId,
+                    WaitOutcome(WaitTone.ERROR, "L’exécution a échoué", ""),
+                ),
+                WaitMember(
+                    WaitKind.CONDITION,
+                    "PR #193 checks",
+                    listOf("0b2ddce"),
+                    nextCheckAt = 30_000,
+                    lastError = "Temporarily unavailable",
+                ),
+            ),
+            members,
+        )
+        // Without its plugin's words, a condition reads as its type.
+        assertEquals("Github pr checks", waitMembers(groupWakeup("all"))[1].title)
+        // The final result names the conditions even without a wakeup.
+        val result = groupResult("completed", "all", failedRun, passedChecks)
+        assertEquals(
+            listOf("L’exécution a échoué", "Required checks passed"),
+            waitMembers(null, result).map { it.outcome?.title },
+        )
+        assertEquals("2 résultats", observedTarget(result))
+    }
+
+    @Test
+    fun `a group sums up by its most serious result and never assumes missing ones`() {
+        assertEquals(
+            WaitOutcome(WaitTone.ERROR, "Les 2 résultats sont arrivés", "1 en échec · 1 réussis"),
+            waitOutcome(groupResult("completed", "all", failedRun, passedChecks)),
+        )
+        assertEquals(
+            WaitOutcome(WaitTone.OK, "Les 2 résultats sont arrivés", ""),
+            waitOutcome(groupResult("completed", "all", passedChecks, passedChecks)),
+        )
+        assertEquals(
+            WaitOutcome(WaitTone.OK, "Premier résultat · Required checks passed", ""),
+            waitOutcome(groupResult("completed", "any", JsonNull, passedChecks)),
+        )
+        assertEquals(
+            WaitOutcome(WaitTone.WARNING, "Échéance atteinte", "1 sur 2 résultats"),
+            waitOutcome(groupResult("timed_out", "all", passedChecks, JsonNull)),
+        )
+        assertEquals(
+            WaitOutcome(WaitTone.WARNING, "Échéance atteinte", "Aucun résultat"),
+            waitOutcome(groupResult("timed_out", "any", JsonNull, JsonNull)),
+        )
+    }
+
+    @Test
+    fun `delegated tasks retain their identity and failure outcome in a group`() {
+        val first = buildJsonObject {
+            put("type", "task_finished")
+            put("chatId", "a11ce123-task")
+        }
+        val second = buildJsonObject {
+            put("type", "task_finished")
+            put("chatId", "b11ce123-task")
+        }
+        val failed = buildJsonObject {
+            put("state", "completed")
+            put("type", "task_finished")
+            put("status", "failed")
+            put("error", "Review failed")
+        }
+        val group = buildJsonObject {
+            put("type", "group")
+            put("mode", "all")
+            put("conditions", JsonArray(listOf(first, second)))
+        }
+        val members =
+            waitMembers(
+                wakeup(group)
+                    .copy(
+                        members =
+                            JsonArray(
+                                listOf(
+                                    buildJsonObject { put("observation", failed) },
+                                    JsonObject(emptyMap()),
+                                )
+                            )
+                    )
+            )
+        assertEquals(listOf("a11ce123-task", "b11ce123-task"), members.map { it.chatId })
+        assertEquals(listOf("a11ce123"), members.first().details)
+        assertEquals(WaitKind.TASK, members.first().kind)
+        assertEquals(
+            WaitOutcome(WaitTone.ERROR, "La tâche a échoué", "Review failed"),
+            members.first().outcome,
+        )
+        assertEquals(
+            WaitTone.ERROR,
+            waitOutcome(groupResult("completed", "all", failed, passedChecks)).tone,
+        )
     }
 }

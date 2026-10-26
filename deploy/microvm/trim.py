@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-TARGETS = ("/oldroot/run/data", "/data")
+TARGETS = ("/oldroot/run/data",)
 BUSYBOX = "/oldroot/mnt/busybox"
 INITIAL_DELAY = 10
 INTERVAL = 1800
@@ -135,8 +135,6 @@ def main():
             print(json.dumps(result), flush=True)
             delay = INTERVAL if result["invocationSucceeded"] else ERROR_RETRY
             due[target] = time.monotonic() + delay
-        # A paired workspace may mount after the first system trim. Detect it
-        # promptly instead of delaying its first pass for a whole interval.
         sleep(1, stopped)
 
 

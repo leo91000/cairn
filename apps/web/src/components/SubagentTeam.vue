@@ -8,9 +8,15 @@ import {
   useId,
   watchEffect,
 } from 'vue'
+import { RouterLink } from 'vue-router'
 import { teamEntries } from '../activity'
-import { ChevronDown, GitFork, Maximize2 } from '../icons'
 import {
+  ChevronDown,
+  GitFork,
+  Maximize2,
+} from '../icons'
+import {
+  delegatedChatsKey,
   openSubagentKey,
   subagentDetails,
   subagentElapsed,
@@ -19,15 +25,17 @@ import {
   subagentState,
   subagentSummary,
 } from '../subagents'
+import { chatPath } from '../workspace-links'
 import ActivityContent from './ActivityContent.vue'
 import AgentActions from './AgentActions.vue'
 import Icon from './Icon.vue'
-import SubagentAvatar from './SubagentAvatar.vue'
+import SubagentMark from './SubagentMark.vue'
 
 // The subagents the agent started together: who works, on what, and for how long. A row expands
 // into the subagent's own steps and its report. The card folds once every subagent has finished.
 const props = defineProps<{ agents: ActivityArtifact[], active: boolean }>()
 const openSubagent = inject(openSubagentKey, null)
+const delegated = inject(delegatedChatsKey, null)
 const listId = useId()
 const toggled = ref<boolean | null>(null)
 const expanded = ref(new Set<string>())
@@ -35,13 +43,19 @@ const now = ref(Date.now())
 const labels = subagentLabels
 const pills = subagentPills
 
-const state = (agent: ActivityArtifact) => subagentState(agent, props.active)
-const summary = (agent: ActivityArtifact) => subagentSummary(agent, props.active)
+const state = (agent: ActivityArtifact) => subagentState(agent, props.active, delegated?.value)
+const summary = (agent: ActivityArtifact) => subagentSummary(agent, props.active, delegated?.value)
 const elapsed = (agent: ActivityArtifact) => subagentElapsed(agent, props.active, now.value)
 const states = computed(() => props.agents.map(state))
 const running = computed(() => states.value.filter(value => value === 'running').length)
 const failed = computed(() => states.value.filter(value => value === 'failed').length)
 const open = computed(() => toggled.value ?? (running.value > 0 || failed.value > 0))
+// Delegated tasks are conversations of their own; native subagents work inside this one.
+const heading = computed(() => {
+  const delegated = props.agents.filter(agent => agent.subagent?.delegation).length
+  const noun = delegated === props.agents.length ? 'delegated task' : 'subagent'
+  return props.agents.length === 1 ? `1 ${noun}` : `${props.agents.length} ${noun}s`
+})
 const counts = computed(() => (['running', 'done', 'failed', 'stopped'] as const)
   .map(value => ({ state: value, count: states.value.filter(item => item === value).length }))
   .filter(item => item.count))
@@ -71,7 +85,7 @@ function toggle(id: string) {
     >
       <span class="grid size-6.5 shrink-0 place-items-center rounded-full bg-variant text-muted" aria-hidden="true"><Icon :name="GitFork" :size="13" /></span>
       <span class="min-w-0 flex-1">
-        <span class="block font-heading text-base font-semibold text-ink">{{ agents.length === 1 ? '1 subagent' : `${agents.length} subagents` }}</span>
+        <span class="block font-heading text-base font-semibold text-ink">{{ heading }}</span>
         <span class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-2xs text-muted">
           <span
             v-for="item in counts"
@@ -98,19 +112,22 @@ function toggle(id: string) {
         class="border-b border-line last:border-b-0"
         data-testid="subagent"
       >
-        <button
+        <component
+          :is="agent.subagent!.delegation ? RouterLink : 'button'"
+          :to="agent.subagent!.delegation ? chatPath({ id: agent.subagent!.delegation.chatId }) : undefined"
           class="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-hover/60"
           :class="expanded.has(agent.id) ? 'bg-inset' : ''"
-          :aria-expanded="expanded.has(agent.id)"
+          :aria-expanded="agent.subagent!.delegation ? undefined : expanded.has(agent.id)"
           :aria-label="[agent.title, labels[state(agent)], summary(agent)].join(', ')"
-          @click="toggle(agent.id)"
+          @click="!agent.subagent!.delegation && toggle(agent.id)"
         >
-          <SubagentAvatar :agent="agent" />
+          <SubagentMark :agent="agent" :size="28" />
           <span class="min-w-0 flex-1" aria-hidden="true">
             <span class="flex min-w-0 items-baseline gap-1.5">
               <span class="max-w-full shrink-0 truncate text-base font-semibold text-ink">{{ agent.title }}</span>
               <span v-if="agent.subagent!.type" class="min-w-0 truncate text-2xs text-muted phone:hidden">{{ agent.subagent!.type }}</span>
               <span v-if="agent.subagent!.background" class="shrink-0 text-2xs text-muted phone:hidden">· background</span>
+              <span v-if="agent.subagent!.resumed" class="shrink-0 text-2xs text-muted phone:hidden">· resumed</span>
             </span>
             <span class="block truncate text-2xs text-muted">{{ summary(agent) }}</span>
           </span>
@@ -118,7 +135,7 @@ function toggle(id: string) {
           <span class="inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-2xs font-semibold" :class="pills[state(agent)]" aria-hidden="true">
             <span v-if="state(agent) === 'running'" class="subagent-pulse size-1.5 rounded-full bg-current" />{{ labels[state(agent)] }}
           </span>
-        </button>
+        </component>
         <div v-if="expanded.has(agent.id)" class="grid gap-2 bg-inset px-3 pb-3 pl-13 phone:pl-3" data-testid="subagent-detail">
           <p v-if="agent.subagent!.prompt" class="m-0! line-clamp-4 whitespace-pre-wrap text-xs text-muted">
             <span class="font-semibold text-ink">Prompt · </span>{{ agent.subagent!.prompt }}

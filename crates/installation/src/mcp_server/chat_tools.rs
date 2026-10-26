@@ -33,6 +33,10 @@ fn summary(chat: &Value) -> Value {
         "updatedAt",
         "finishedAt",
         "pendingQuestions",
+        "requestedBy",
+        "requester",
+        "contextUsage",
+        "compaction",
     ] {
         result[key] = chat[key].clone();
     }
@@ -254,6 +258,12 @@ pub(super) async fn invoke(
             )
             .await;
     }
+    if name == "compact_chat" {
+        // Compaction starts model work: the conversation's own grant is checked when it commits.
+        return s
+            .chat_compact_authorized(text(&args, "chatId"), commit_authority)
+            .await;
+    }
     if name == "stop_chat" {
         return s
             .worker
@@ -286,7 +296,7 @@ pub(super) async fn invoke(
                 "edit_chat_message" => {
                     let mut message = args["message"].clone();
                     message["id"] = args["messageId"].clone();
-                    let message = crate::validation::parse("message", message)?;
+                    let message = chats::parse_edit(message)?;
                     chats::edit_as(db, id, text(&args, "messageId"), Some(message), &origin)
                 }
                 "delete_chat_message" => chats::edit(db, id, text(&args, "messageId"), None),

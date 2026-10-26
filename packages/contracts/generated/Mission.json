@@ -1,0 +1,241 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "MissionPluginGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "authorId": {
+          "type": "string"
+        },
+        "connectionId": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "connectionId",
+        "revision",
+        "authorId"
+      ],
+      "type": "object"
+    },
+    "ScheduleFailure": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "scheduledFor": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "message",
+        "scheduledFor",
+        "at"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "agentId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "archived": {
+      "default": false,
+      "type": "boolean"
+    },
+    "authorAccessId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "authorId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "authorRemoved": {
+      "type": "boolean"
+    },
+    "createdAt": {
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "cron": {
+      "default": null,
+      "maxLength": 100,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "enabled": {
+      "default": true,
+      "type": "boolean"
+    },
+    "id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "name": {
+      "maxLength": 100,
+      "minLength": 1,
+      "type": "string"
+    },
+    "nativeAuthorityNodes": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "nativeParentAccess": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "nativeParentRunId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "nativePluginGrants": {
+      "items": {
+        "$ref": "#/definitions/MissionPluginGrant"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "nativePrincipals": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "nativeProvenanceUnknown": {
+      "type": "boolean"
+    },
+    "nextRun": {
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "projectId": {
+      "default": null,
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "prompt": {
+      "maxLength": 50000,
+      "minLength": 1,
+      "type": "string"
+    },
+    "revision": {
+      "type": "string"
+    },
+    "scheduleFailure": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ScheduleFailure"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "scheduleWaitReason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "skills": {
+      "default": null,
+      "items": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "maxItems": 100,
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "tags": {
+      "default": [],
+      "items": {
+        "maxLength": 30,
+        "type": "string"
+      },
+      "maxItems": 10,
+      "type": "array"
+    },
+    "timezone": {
+      "default": "Europe/Paris",
+      "maxLength": 100,
+      "minLength": 1,
+      "type": "string"
+    },
+    "worktree": {
+      "default": true,
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "prompt",
+    "agentId",
+    "projectId",
+    "skills",
+    "tags",
+    "cron",
+    "timezone",
+    "enabled",
+    "archived",
+    "worktree",
+    "revision",
+    "createdAt",
+    "nextRun",
+    "authorId",
+    "authorAccessId",
+    "authorRemoved",
+    "scheduleWaitReason",
+    "scheduleFailure",
+    "nativePrincipals",
+    "nativeAuthorityNodes",
+    "nativeParentRunId",
+    "nativeParentAccess",
+    "nativeProvenanceUnknown",
+    "nativePluginGrants"
+  ],
+  "title": "Mission",
+  "type": "object"
+}

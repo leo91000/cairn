@@ -40,20 +40,6 @@ impl ExecutionAdapter for Opencode {
         crate::opencode::isolate(env, home);
     }
 
-    fn uses_chat(&self, _chat_execution: bool, _managed_account: bool) -> bool {
-        true
-    }
-
-    fn legacy_args(
-        &self,
-        _run: &Value,
-        _mcp: &Value,
-        _output: &str,
-        _session: Option<&str>,
-    ) -> Vec<String> {
-        Vec::new()
-    }
-
     fn validate_agent(&self, agent: &Value) -> Result<()> {
         crate::opencode::model_id(text(agent, "model"))?;
         if crate::service::policy(agent)["sandbox"] != "yolo" {

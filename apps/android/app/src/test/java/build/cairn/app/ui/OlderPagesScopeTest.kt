@@ -114,13 +114,17 @@ class OlderPagesScopeTest {
 
                                     val body =
                                         when (path) {
+                                            "/api/installations/fixture/api/tasks" ->
+                                                """{"tasks":[]}"""
                                             "/api/account/session" -> beaconAccountFixture()
                                             "/api/installations" -> beaconInstallationsFixture()
-                                            "/api/installations/fixture/api/agents",
-                                            "/api/installations/fixture/api/projects",
-                                            "/api/installations/fixture/api/tasks",
-                                            "/api/installations/fixture/api/skills",
-                                            "/api/installations/fixture/api/mcps" -> "[]"
+                                            "/api/installations/fixture/api/projects" ->
+                                                """{"projects":[]}"""
+                                            "/api/installations/fixture/api/agents" ->
+                                                """{"agents":[]}"""
+                                            "/api/installations/fixture/api/skills" -> "[]"
+                                            "/api/installations/fixture/api/mcps" ->
+                                                """{"mcps":[]}"""
                                             else -> "{}"
                                         }
                                     return MockResponse()

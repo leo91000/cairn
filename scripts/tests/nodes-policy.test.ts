@@ -1,20 +1,11 @@
 import type { ExecutionNode } from '../../packages/contracts/nodes'
 import { expect, it } from 'vitest'
-import { agentInput, agentUpdate } from '../../packages/contracts/contracts'
 import {
   formatBytes,
   formatMiB,
-  LOCAL_NODE_ID,
   nodeDiagnostics,
   relativeAge,
 } from '../../packages/contracts/nodes'
-
-it('new agents retain the current runner but partial updates do not grant it', () => {
-  expect(agentInput.parse({ name: 'New agent' }).access.nodes).toEqual([LOCAL_NODE_ID])
-  expect(agentUpdate.parse({ access: { mcps: [] } }).access).not.toHaveProperty('nodes')
-  expect(agentUpdate.parse({ access: { nodes: [] } }).access?.nodes).toEqual([])
-  expect(agentUpdate.parse({ access: { nodes: null } }).access?.nodes).toBeNull()
-})
 
 it('formats node sizes, recovery ages and blocking reasons for people', () => {
   expect(formatMiB(512)).toBe('512 MiB')
@@ -42,7 +33,6 @@ it('formats node sizes, recovery ages and blocking reasons for people', () => {
       os: 'linux',
       arch: 'x86_64',
       kvm: true,
-      fuse: true,
       cpu: 8,
       memoryMiB: 16384,
       diskMiB: 65536,
@@ -58,7 +48,7 @@ it('formats node sizes, recovery ages and blocking reasons for people', () => {
   expect(nodeDiagnostics({ ...node, agents: [] })).toEqual(['No agent can use this machine yet.'])
   expect(nodeDiagnostics({ ...node, status: 'offline', lastSeen: 0 }, 10 * 60_000)[0]).toContain('No contact since 10 min ago')
 
-  // Native nodes need ublk rather than KVM/FUSE, and run under their own service.
+  // Native nodes need ublk without KVM, and run under their own service.
   const native = {
     ...node,
     nativeEnabled: true,
@@ -67,7 +57,6 @@ it('formats node sizes, recovery ages and blocking reasons for people', () => {
       ...node.capabilities,
       backend: 'native' as const,
       kvm: false,
-      fuse: false,
       ublk: true,
     },
   }

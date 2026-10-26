@@ -27,8 +27,7 @@ import UiSwitch from './UiSwitch.vue'
 import VirtualSelect from './VirtualSelect.vue'
 
 // Per node: may the agent run there, and may it reserve the node exclusively.
-// `readOnlyGrants` says why exclusive reservations cannot be changed here (an older installation).
-const props = defineProps<{ nodes: ExecutionNode[], readOnlyGrants?: string }>()
+const props = defineProps<{ nodes: ExecutionNode[], agentId?: string }>()
 const access = defineModel<AgentAccess>('access', { required: true })
 // Nodes the agent may reserve exclusively, a live grant kept beside `access`.
 const exclusiveNodes = defineModel<string[]>('exclusiveNodes', { required: true })
@@ -65,7 +64,7 @@ const backendChoice = computed({
   set: (value: string) => {
     if (value === backend.value)
       return
-    const next = withBackend(exclusiveNodes.value, Boolean(props.readOnlyGrants))
+    const next = withBackend()
     access.value.backend = value as Backend
     access.value.nodes = next.nodes
     exclusiveNodes.value = next.exclusiveNodes
@@ -76,7 +75,7 @@ const allNodes = computed({
   get: () => access.value.nodes === null,
   // "Choose" starts from the nodes it can use today, so turning "All" off only stops future nodes.
   set: (value: boolean) => {
-    access.value.nodes = value ? null : available.value.map(node => node.id)
+    access.value.nodes = value ? null : available.value.filter(node => node.nativeModeRequest?.mode !== 'administrator' || node.nativeReviewedAgents?.includes(props.agentId ?? '')).map(node => node.id)
   },
 })
 
@@ -85,6 +84,7 @@ function details(node: ExecutionNode) {
     return 'local'
   return [
     node.local ? 'local' : '',
+    node.nativeModeRequest?.mode === 'administrator' ? 'Native administrator · unrestricted host sudo; owner review required' : '',
     [...node.tags, ...(node.systemTags ?? [])].join(', '),
     `${node.capabilities.cpu} CPU`,
     formatMiB(node.capabilities.memoryMiB),
@@ -93,7 +93,7 @@ function details(node: ExecutionNode) {
 
 function setRun(node: string, on: boolean) {
   // Without permission to run, an exclusive reservation can never be used, unless it is read-only.
-  const next = withRun(access.value, exclusiveNodes.value, node, on, Boolean(props.readOnlyGrants))
+  const next = withRun(access.value, exclusiveNodes.value, node, on)
   access.value.nodes = next.nodes
   exclusiveNodes.value = next.exclusiveNodes
 }
@@ -129,7 +129,7 @@ function exclusiveBlocked(node: ExecutionNode) {
           All nodes, including future
         </p>
         <p class="text-xs text-muted">
-          {{ backend === 'native' ? 'Native machines must also enable execution and trust everyone directing the conversation.' : 'New VM machines become usable by this agent as soon as they are enrolled.' }}
+          {{ backend === 'native' ? 'Native machines must also enable execution and trust everyone directing the conversation. Administrator nodes require explicit owner review on that node; all-node grants never silently grant host root.' : 'New VM machines become usable by this agent as soon as they are enrolled.' }}
         </p>
       </div>
       <UiSwitch v-model="allNodes" label="All nodes, including future" />
@@ -188,7 +188,7 @@ function exclusiveBlocked(node: ExecutionNode) {
         </div>
         <div class="flex items-center gap-3 compact:col-span-2 compact:justify-between compact:border-t compact:border-line/60 compact:pt-2">
           <span class="hidden text-sm compact:inline">Can run its conversations</span>
-          <span v-if="access.nodes === null" class="text-xs text-muted">Included · all nodes</span>
+          <span v-if="access.nodes === null" class="text-xs text-muted">{{ node.nativeModeRequest?.mode === 'administrator' ? 'Requires owner review on this node' : 'Included · all nodes' }}</span>
           <UiSwitch
             v-else
             :model-value="runsOn(access, node.id)"
@@ -205,7 +205,6 @@ function exclusiveBlocked(node: ExecutionNode) {
             <span class="flex min-w-0 flex-wrap items-center gap-2 compact:justify-end">
               <AccessChip tone="unavailable">{{ runsOn(access, node.id) ? 'Inactive: unavailable on this runtime' : 'Inactive: cannot run here' }}</AccessChip>
               <UiButton
-                v-if="!readOnlyGrants"
                 size="small"
                 :aria-label="`Remove exclusive reservation on ${nodeName(node, node.id)}`"
                 @click="setExclusive(node.id, false)"
@@ -216,7 +215,7 @@ function exclusiveBlocked(node: ExecutionNode) {
             <UiSwitch
               power
               :model-value="exclusiveNodes.includes(node.id)"
-              :disabled="Boolean(readOnlyGrants) || (Boolean(exclusiveBlocked(node)) && !exclusiveNodes.includes(node.id))"
+              :disabled="(Boolean(exclusiveBlocked(node)) && !exclusiveNodes.includes(node.id))"
               :label="`Can reserve ${nodeName(node, node.id)} exclusively`"
               @update:model-value="setExclusive(node.id, $event)"
             />
@@ -250,7 +249,6 @@ function exclusiveBlocked(node: ExecutionNode) {
           Not found
         </AccessChip>
         <UiButton
-          v-if="!readOnlyGrants"
           size="small"
           aria-label="Remove exclusive reservation on a removed node"
           @click="setExclusive(id, false)"
@@ -283,9 +281,6 @@ function exclusiveBlocked(node: ExecutionNode) {
         <b>Reserve exclusively:</b> during intensive work the agent may suspend all other conversations on the machine for up to 15 minutes per request (1 hour with renewals). They resume automatically. Requires permission to run.
       </p>
     </details>
-    <p v-if="readOnlyGrants" class="rounded-xl bg-soft px-5 py-3 text-sm" role="note">
-      Exclusive reservations: {{ readOnlyGrants }}
-    </p>
     <p v-if="exclusiveCount" class="rounded-xl bg-power-surface px-5 py-3 text-xs text-power">
       Exclusive reservation granted on {{ exclusiveCount }} {{ exclusiveCount === 1 ? 'node' : 'nodes' }}. While it holds a reservation, other agents’ conversations on that machine are suspended.
     </p>

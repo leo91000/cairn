@@ -274,7 +274,9 @@ impl Session {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = command.spawn().map_err(|_| unavailable())?;
+        let mut child = command.spawn().map_err(|_| {
+            Error::unavailable("Unable to start the agent process. Check its installation and executable permissions.")
+        })?;
         let mut stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
@@ -464,10 +466,6 @@ impl Rpc {
         };
         self.send(Message::Error { id, error }).await
     }
-
-    pub async fn closed(&self) {
-        self.closed.cancelled().await;
-    }
 }
 
 fn unavailable() -> Error {
@@ -493,6 +491,20 @@ mod tests {
             },
             output,
         )
+    }
+
+    #[tokio::test]
+    async fn missing_agent_executable_is_not_an_established_process_disconnect() {
+        let root = tempfile::TempDir::new().unwrap();
+        let result = Session::spawn(tokio::process::Command::new(
+            root.path().join("missing-codex"),
+        ))
+        .await;
+        let Err(error) = result else {
+            panic!("An absent binary must not start")
+        };
+        assert!(error.message.contains("executable permissions"));
+        assert!(crate::run_retry::startup_failure(&error).is_none());
     }
 
     #[tokio::test(start_paused = true)]

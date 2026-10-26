@@ -146,7 +146,18 @@ abstract class SkillWorkbenchCases {
                             ),
                     )
                 ),
-            connections = listOf(PluginConnection("acct", "github", "octo")),
+            connections =
+                listOf(
+                    PluginConnection(
+                        id = "acct",
+                        pluginId = "github",
+                        name = "octo",
+                        settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                        status = PluginStatus(),
+                        usage = PluginUsage(),
+                        enabled = true,
+                    )
+                ),
         )
 
     private val pdfBundle =
@@ -182,7 +193,7 @@ abstract class SkillWorkbenchCases {
             Skill(
                 "release-notes",
                 "Rédiger les notes de version à partir des commits.",
-                scope = "project",
+                scope = "46d045dd-9bce-51e3-8a99-65aa9384efc9",
                 files = 1,
                 bytes = 900,
             ),
@@ -229,7 +240,13 @@ abstract class SkillWorkbenchCases {
                         json("""{"deleted":true}""")
                     }
                     path == "$api/projects" ->
-                        json(wireJson.encodeToString(listOf(Project("project", "Cairn"))))
+                        json(
+                            wireJson.encodeToString(
+                                build.cairn.contracts.ListProjectsOutput(
+                                    listOf(Project("46d045dd-9bce-51e3-8a99-65aa9384efc9", "Cairn"))
+                                )
+                            )
+                        )
                     path == "$api/skills/global/review/bundle" && request.method == "GET" -> {
                         fixture.bundleLoads++
                         json(wireJson.encodeToString(reviewBundle))
@@ -335,7 +352,22 @@ abstract class SkillWorkbenchCases {
                     path == "$api/plugins" -> json(wireJson.encodeToString(catalog))
                     path == "$api/overview" -> json("{}")
                     path.endsWith("/models") -> json("""{"models":[]}""")
-                    else -> json("[]")
+                    else ->
+                        json(
+                            if (request.requestUrl?.encodedPath?.endsWith("/api/projects") == true)
+                                """{"projects":[]}"""
+                            else if (
+                                request.requestUrl?.encodedPath?.endsWith("/api/agents") == true
+                            )
+                                """{"agents":[]}"""
+                            else if (
+                                request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true
+                            )
+                                """{"tasks":[]}"""
+                            else if (request.requestUrl?.encodedPath?.endsWith("/api/mcps") == true)
+                                """{"mcps":[]}"""
+                            else "[]"
+                        )
                 }
             }
         }

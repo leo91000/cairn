@@ -33,6 +33,21 @@ abstract class PluginsCases {
             id = "discord",
             builtin = true,
             active = "1.0.0",
+            setup =
+                PluginSetup(
+                    effort = "token",
+                    steps =
+                        listOf(
+                            SetupStep("credential", "credential", "Bot token"),
+                            SetupStep(
+                                "settings",
+                                "settings",
+                                "Settings",
+                                settings = listOf("guildId", "channelId", "messageContent"),
+                            ),
+                            SetupStep("people", "people", "Who can talk to it"),
+                        ),
+                ),
             manifest =
                 PluginManifest(
                     id = "discord",
@@ -89,6 +104,19 @@ abstract class PluginsCases {
         PluginEntry(
             id = "notes",
             active = "1.0.0",
+            setup =
+                PluginSetup(
+                    steps =
+                        listOf(
+                            SetupStep(
+                                "settings",
+                                "settings",
+                                "Settings",
+                                settings = listOf("team", "limit", "loud"),
+                            ),
+                            SetupStep("people", "people", "Who can talk to it"),
+                        )
+                ),
             manifest =
                 PluginManifest(
                     id = "notes",
@@ -180,16 +208,19 @@ abstract class PluginsCases {
         )
     private val account =
         PluginConnection(
-            id = "op1",
+            id = "00000000-0000-4000-8000-000000000101",
             pluginId = "onepassword",
             name = "Production",
             agentIds = listOf(MAIN_AGENT_ID),
             secretKeys = listOf("token"),
-            status = PluginStatus("ready"),
+            status = PluginStatus(state = "ready"),
+            settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+            usage = PluginUsage(),
+            enabled = true,
         )
     private val bot =
         PluginConnection(
-            id = "bot",
+            id = "00000000-0000-4000-8000-000000000102",
             pluginId = "discord",
             name = "Support",
             settings =
@@ -199,9 +230,20 @@ abstract class PluginsCases {
                     put("botName", "Cairn Bot")
                 },
             accessMode = "requests",
-            agentId = "helper",
-            status = PluginStatus("connected", "Signed in as Cairn Bot"),
-            requests = listOf(PluginRequest(id = "r", userId = "300", name = "Sarah")),
+            agentId = "08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3",
+            status =
+                PluginStatus(
+                    state = "connected",
+                    message = "Signed in as Cairn Bot",
+                ),
+            requests =
+                listOf(
+                    PluginRequest(
+                        id = "r",
+                        userId = "300",
+                        name = "Sarah",
+                    )
+                ),
             activity =
                 listOf(
                     PluginActivity(
@@ -213,11 +255,14 @@ abstract class PluginsCases {
                         status = "replied",
                     )
                 ),
+            usage = PluginUsage(),
+            enabled = true,
         )
 
     @Test
     fun catalogueSummarisesPluginsAsTheWebDoes() {
-        val catalog = listOf(bot, bot.copy(id = "paused", enabled = false))
+        val catalog =
+            listOf(bot, bot.copy(id = "00000000-0000-4000-8000-000000000105", enabled = false))
         assertEquals(
             PluginSummary(PluginBadge("1 en ligne", PluginTone.OK), "2 bots", 2),
             discord.summary(catalog),
@@ -253,7 +298,7 @@ abstract class PluginsCases {
         assertEquals(PluginBadge("En pause", PluginTone.MUTED), bot.copy(enabled = false).state())
         assertEquals(
             PluginBadge("À vérifier", PluginTone.ATTENTION),
-            bot.copy(status = PluginStatus("needs_review")).state(),
+            bot.copy(status = PluginStatus(state = "needs_review")).state(),
         )
     }
 
@@ -266,7 +311,13 @@ abstract class PluginsCases {
                     key = "region",
                     title = "Region",
                     type = "select",
-                    options = listOf(PluginOption("eu", "Europe")),
+                    options =
+                        listOf(
+                            PluginOption(
+                                value = "eu",
+                                label = "Europe",
+                            )
+                        ),
                 ),
                 PluginSetting(key = "scopes", title = "Scopes", type = "multiselect"),
             )
@@ -321,8 +372,10 @@ abstract class PluginsCases {
         MockWebServer().use { server ->
             val actions = CopyOnWriteArrayList<Pair<String, String>>()
             server.dispatcher = dispatcher { path, body ->
-                if (path.contains("/connections/bot/")) {
-                    actions += path.substringAfter("/connections/bot/") to body
+                if (path.contains("/connections/00000000-0000-4000-8000-000000000102/")) {
+                    actions +=
+                        path.substringAfter("/connections/00000000-0000-4000-8000-000000000102/") to
+                            body
                     "{}"
                 } else null
             }
@@ -415,7 +468,10 @@ abstract class PluginsCases {
                 },
                 payload["settings"],
             )
-            assertEquals("helper", payload["agentId"]?.jsonPrimitive?.content)
+            assertEquals(
+                "08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3",
+                payload["agentId"]?.jsonPrimitive?.content,
+            )
             assertEquals("project", payload["projectId"]?.jsonPrimitive?.content)
             assertEquals(
                 JsonArray(listOf(JsonPrimitive("300"), JsonPrimitive("301"))),
@@ -428,57 +484,62 @@ abstract class PluginsCases {
     @Test
     fun ordinaryFieldsClearStaleErrorsAndPresetsRefreshDependentChoices() {
         val entry =
-            notes.copy(
-                manifest =
-                    notes.manifest!!.copy(
-                        capabilities = emptyList(),
-                        instanceForm = true,
-                        settings =
-                            listOf(
-                                PluginSetting(key = "team", title = "Team", required = true),
-                                PluginSetting(
-                                    key = "more",
-                                    title = "More destinations",
-                                    type = "boolean",
-                                    refresh = true,
+            notes
+                .copy(
+                    manifest =
+                        notes.manifest!!.copy(
+                            capabilities = emptyList(),
+                            instanceForm = true,
+                            settings =
+                                listOf(
+                                    PluginSetting(key = "team", title = "Team", required = true),
+                                    PluginSetting(
+                                        key = "more",
+                                        title = "More destinations",
+                                        type = "boolean",
+                                        refresh = true,
+                                    ),
+                                    PluginSetting(
+                                        key = "extra",
+                                        title = "Extra destinations",
+                                        type = "boolean",
+                                        refresh = true,
+                                    ),
+                                    PluginSetting(
+                                        key = "destination",
+                                        title = "Destination",
+                                        type = "select",
+                                        dynamic = true,
+                                    ),
                                 ),
-                                PluginSetting(
-                                    key = "extra",
-                                    title = "Extra destinations",
-                                    type = "boolean",
-                                    refresh = true,
-                                ),
-                                PluginSetting(
-                                    key = "destination",
-                                    title = "Destination",
-                                    type = "select",
-                                    dynamic = true,
-                                ),
-                            ),
-                        setup =
-                            PluginSetup(
-                                steps =
-                                    listOf(
-                                        SetupStep(
-                                            id = "settings",
-                                            title = "Settings",
-                                            settings =
-                                                listOf("team", "more", "extra", "destination"),
-                                            presets =
-                                                listOf(
-                                                    SetupPreset("basic", "Basic"),
-                                                    SetupPreset(
-                                                        "more",
-                                                        "More places",
-                                                        values =
-                                                            mapOf("more" to true, "extra" to true),
+                            setup =
+                                PluginSetup(
+                                    steps =
+                                        listOf(
+                                            SetupStep(
+                                                id = "settings",
+                                                title = "Settings",
+                                                settings =
+                                                    listOf("team", "more", "extra", "destination"),
+                                                presets =
+                                                    listOf(
+                                                        SetupPreset("basic", "Basic"),
+                                                        SetupPreset(
+                                                            "more",
+                                                            "More places",
+                                                            values =
+                                                                mapOf(
+                                                                    "more" to true,
+                                                                    "extra" to true,
+                                                                ),
+                                                        ),
                                                     ),
-                                                ),
+                                            )
                                         )
-                                    )
-                            ),
-                    )
-            )
+                                ),
+                        )
+                )
+                .let { it.copy(setup = it.manifest!!.setup) }
         MockWebServer().use { server ->
             val forms = CopyOnWriteArrayList<JsonObject>()
             val saved = CopyOnWriteArrayList<String>()
@@ -492,19 +553,34 @@ abstract class PluginsCases {
                             wireJson.encodeToString(
                                 PluginForm(
                                     errors =
-                                        if (values["team"]?.jsonPrimitive?.content.isNullOrEmpty())
-                                            mapOf("team" to "Enter a team")
-                                        else emptyMap(),
-                                    options =
-                                        mapOf(
-                                            "destination" to
-                                                if (
-                                                    values["more"] == JsonPrimitive(true) &&
-                                                        values["extra"] == JsonPrimitive(true)
-                                                )
-                                                    listOf(PluginOption("room", "Room"))
-                                                else emptyList()
+                                        build.cairn.contracts.Errors(
+                                            if (
+                                                values["team"]
+                                                    ?.jsonPrimitive
+                                                    ?.content
+                                                    .isNullOrEmpty()
+                                            )
+                                                mapOf("team" to "Enter a team")
+                                            else emptyMap()
                                         ),
+                                    options =
+                                        build.cairn.contracts.Options(
+                                            mapOf(
+                                                "destination" to
+                                                    if (
+                                                        values["more"] == JsonPrimitive(true) &&
+                                                            values["extra"] == JsonPrimitive(true)
+                                                    )
+                                                        listOf(
+                                                            PluginOption(
+                                                                value = "room",
+                                                                label = "Room",
+                                                            )
+                                                        )
+                                                    else emptyList()
+                                            )
+                                        ),
+                                    values = JsonObject(emptyMap()),
                                 )
                             )
                         }
@@ -564,6 +640,19 @@ abstract class PluginsCases {
     fun requiredWhitespaceChoiceCanBeSavedWithNonblankUnicodeText() {
         val entry =
             notes.copy(
+                setup =
+                    PluginSetup(
+                        effort = "token",
+                        steps =
+                            listOf(
+                                SetupStep(
+                                    "settings",
+                                    "settings",
+                                    "Settings",
+                                    settings = listOf("region", "team", "password"),
+                                )
+                            ),
+                    ),
                 manifest =
                     notes.manifest!!.copy(
                         capabilities = emptyList(),
@@ -577,8 +666,14 @@ abstract class PluginsCases {
                                     default = JsonPrimitive(" "),
                                     options =
                                         listOf(
-                                            PluginOption(" ", "Space option"),
-                                            PluginOption("eu", "Europe"),
+                                            PluginOption(
+                                                value = " ",
+                                                label = "Space option",
+                                            ),
+                                            PluginOption(
+                                                value = "eu",
+                                                label = "Europe",
+                                            ),
                                         ),
                                 ),
                                 PluginSetting(key = "team", title = "Team", required = true),
@@ -589,7 +684,7 @@ abstract class PluginsCases {
                                     required = true,
                                 ),
                             ),
-                    )
+                    ),
             )
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<String>()
@@ -728,7 +823,10 @@ abstract class PluginsCases {
                 payload["settings"],
             )
             assertEquals("requests", payload["accessMode"]?.jsonPrimitive?.content)
-            assertEquals("helper", payload["agentId"]?.jsonPrimitive?.content)
+            assertEquals(
+                "08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3",
+                payload["agentId"]?.jsonPrimitive?.content,
+            )
             // The token is only ever sent to the installation, never echoed back in settings.
             assertFalse(payload["settings"].toString().contains("synthetic_android_token"))
         }
@@ -740,6 +838,11 @@ abstract class PluginsCases {
             id = "forge",
             builtin = true,
             active = "1.0.0",
+            setup =
+                PluginSetup(
+                    effort = "signin",
+                    steps = listOf(SetupStep("credential", "credential", "Sign in with Forge")),
+                ),
             manifest =
                 PluginManifest(
                     id = "forge",
@@ -768,12 +871,12 @@ abstract class PluginsCases {
     private fun deviceFlow(id: String, state: String, message: String? = null) =
         wireJson.encodeToString(
             PluginDeviceFlow(
-                id,
-                "forge",
-                state,
-                "WXYZ-${id.takeLast(1)}234",
-                "https://forge.example/login/device",
-                "https://forge.example/login/device?code=WXYZ",
+                id = id,
+                pluginId = "forge",
+                state = state,
+                userCode = "WXYZ-${id.takeLast(1)}234",
+                verificationUri = "https://forge.example/login/device",
+                verificationUriComplete = "https://forge.example/login/device?code=WXYZ",
                 expiresAt = 1,
                 message = message,
             )
@@ -819,6 +922,20 @@ abstract class PluginsCases {
     fun oauthAccountsUseTheSameEditorWithoutATokenOrDeviceCode() {
         val oauth =
             forge.copy(
+                setup =
+                    PluginSetup(
+                        effort = "app",
+                        steps =
+                            listOf(
+                                SetupStep(
+                                    "settings",
+                                    "settings",
+                                    "Settings",
+                                    settings = listOf("clientId", "clientSecret"),
+                                ),
+                                SetupStep("credential", "credential", "Sign in with Forge"),
+                            ),
+                    ),
                 manifest =
                     requireNotNull(forge.manifest)
                         .copy(
@@ -839,18 +956,18 @@ abstract class PluginsCases {
                                         required = true,
                                     ),
                                 ),
-                        )
+                        ),
             )
         MockWebServer().use { server ->
             val starts = CopyOnWriteArrayList<JsonObject>()
             val saved = CopyOnWriteArrayList<JsonObject>()
             val flow =
                 PluginDeviceFlow(
-                    "oauth-one",
-                    "forge",
-                    "pending",
-                    "",
-                    "https://accounts.google.com/authorize",
+                    id = "oauth-one",
+                    pluginId = "forge",
+                    state = "pending",
+                    userCode = "",
+                    verificationUri = "https://accounts.google.com/authorize",
                     expiresAt = 1,
                 )
             server.dispatcher =
@@ -1179,7 +1296,7 @@ abstract class PluginsCases {
         MockWebServer().use { server ->
             val actions = CopyOnWriteArrayList<String>()
             server.dispatcher = dispatcher { path, body ->
-                if (path.endsWith("/connections/op1/actions")) {
+                if (path.endsWith("/connections/00000000-0000-4000-8000-000000000101/actions")) {
                     actions += body
                     """{"view":[{"type":"list","items":[{"title":"Production vault"}]}]}"""
                 } else null
@@ -1259,7 +1376,10 @@ abstract class PluginsCases {
                 buildJsonObject { put("token", "ops_android_fixture") },
                 payload["secrets"],
             )
-            assertEquals(JsonArray(listOf(JsonPrimitive("helper"))), payload["agentIds"])
+            assertEquals(
+                JsonArray(listOf(JsonPrimitive("08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3"))),
+                payload["agentIds"],
+            )
             assertEquals(JsonObject(emptyMap()), payload["settings"])
         }
     }
@@ -1269,19 +1389,27 @@ abstract class PluginsCases {
         // Runs receive the account's git credentials: one account per agent.
         val github =
             forge.copy(
+                setup =
+                    forge.setup!!.copy(
+                        steps = forge.setup.steps + SetupStep("agents", "agents", "Agents")
+                    ),
                 manifest =
                     requireNotNull(forge.manifest)
                         .copy(
                             agentAccess = PluginAgentAccess(),
                             runCredentials = buildJsonObject { putJsonArray("git") {} },
-                        )
+                        ),
             )
         val work =
             PluginConnection(
-                id = "work",
+                id = "00000000-0000-4000-8000-000000000103",
                 pluginId = "forge",
                 name = "Work",
-                agentIds = listOf("helper"),
+                agentIds = listOf("08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3"),
+                settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                status = PluginStatus(),
+                usage = PluginUsage(),
+                enabled = true,
             )
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<JsonObject>()
@@ -1440,7 +1568,7 @@ abstract class PluginsCases {
         val clientId = "481203947512-k2d9qv0bm3h1.apps.googleusercontent.com"
         val alice =
             PluginConnection(
-                id = "alice",
+                id = "00000000-0000-4000-8000-000000000104",
                 pluginId = "gmail",
                 name = "alice@example.test",
                 settings =
@@ -1449,6 +1577,9 @@ abstract class PluginsCases {
                         put("email", "alice@example.test")
                     },
                 secretKeys = listOf("clientSecret"),
+                status = PluginStatus(),
+                usage = PluginUsage(),
+                enabled = true,
             )
         MockWebServer().use { server ->
             val forms = CopyOnWriteArrayList<JsonObject>()
@@ -1456,11 +1587,11 @@ abstract class PluginsCases {
             val saved = CopyOnWriteArrayList<JsonObject>()
             val flow =
                 PluginDeviceFlow(
-                    "oauth-g",
-                    "gmail",
-                    "pending",
-                    "",
-                    "https://accounts.google.com/o",
+                    id = "oauth-g",
+                    pluginId = "gmail",
+                    state = "pending",
+                    userCode = "",
+                    verificationUri = "https://accounts.google.com/o",
                     expiresAt = 1,
                 )
             server.dispatcher =
@@ -1574,9 +1705,15 @@ abstract class PluginsCases {
             compose.waitUntil(10000) { saved.isNotEmpty() }
             val payload = saved.single()
             assertEquals("bob@example.test", payload["name"]?.jsonPrimitive?.content)
-            assertEquals("alice", payload["sharedFrom"]?.jsonPrimitive?.content)
+            assertEquals(
+                "00000000-0000-4000-8000-000000000104",
+                payload["sharedFrom"]?.jsonPrimitive?.content,
+            )
             assertEquals("oauth-g", payload["credentialFlow"]?.jsonPrimitive?.content)
-            assertEquals(JsonArray(listOf(JsonPrimitive("helper"))), payload["agentIds"])
+            assertEquals(
+                JsonArray(listOf(JsonPrimitive("08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3"))),
+                payload["agentIds"],
+            )
             assertEquals(
                 buildJsonObject {
                     put("clientId", clientId)
@@ -1589,11 +1726,21 @@ abstract class PluginsCases {
             )
             assertEquals(JsonObject(emptyMap()), payload["secrets"])
             assertEquals(2, starts.size)
-            assertTrue(starts.all { it["sharedFrom"]?.jsonPrimitive?.content == "alice" })
+            assertTrue(
+                starts.all {
+                    it["sharedFrom"]?.jsonPrimitive?.content ==
+                        "00000000-0000-4000-8000-000000000104"
+                }
+            )
             // The package hears about the reused app too, never its secret.
             val signedIn = forms.filter { "credentialFlow" in it }
             assertTrue(forms.toString(), signedIn.isNotEmpty())
-            assertTrue(signedIn.all { it["sharedFrom"]?.jsonPrimitive?.content == "alice" })
+            assertTrue(
+                signedIn.all {
+                    it["sharedFrom"]?.jsonPrimitive?.content ==
+                        "00000000-0000-4000-8000-000000000104"
+                }
+            )
             assertTrue(forms.none { it["secrets"]?.jsonObject?.isNotEmpty() == true })
         }
     }
@@ -1612,28 +1759,21 @@ abstract class PluginsCases {
     /** The sign-in button, not the step's title above it. */
     private fun signInButton(label: String) = compose.onNode(hasText(label) and hasClickAction())
 
-    @Test fun editingAnInstanceLeavesItsGrantsToTheAgentPages() = editExistingAccount(older = false)
+    @Test fun editingAnInstanceLeavesItsGrantsToTheAgentPages() = editExistingAccount()
 
     @Test
-    fun anOlderInstallationKeepsTheGrantsOfAnEditedInstance() = editExistingAccount(older = true)
+    fun aGrantRevokedWhileEditingIsNotRestored() = editExistingAccount(revokedMeanwhile = true)
 
-    @Test
-    fun aGrantRevokedWhileEditingIsNotRestored() =
-        editExistingAccount(older = true, revokedMeanwhile = true)
-
-    /**
-     * An older installation (agents without `grantsOnAgent`) reads a missing `agentIds` as "no
-     * agents": the editor then sends the instance's current grants unchanged. A current one keeps
-     * them.
-     */
-    private fun editExistingAccount(older: Boolean, revokedMeanwhile: Boolean = false) {
+    private fun editExistingAccount(revokedMeanwhile: Boolean = false) {
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<String>()
             val editing = java.util.concurrent.atomic.AtomicBoolean(false)
             server.dispatcher =
-                dispatcher(includeGet = true, current = !older) { path, body ->
+                dispatcher(includeGet = true) { path, body ->
                     when {
-                        path.endsWith("/plugins/onepassword/connections/op1") -> {
+                        path.endsWith(
+                            "/plugins/onepassword/connections/00000000-0000-4000-8000-000000000101"
+                        ) -> {
                             saved += body
                             "{}"
                         }
@@ -1661,7 +1801,7 @@ abstract class PluginsCases {
             }
             editing.set(true)
             compose.onNodeWithText("Enregistrer").performClick()
-            // The save reads the instance again first; keep the clock moving for its reply.
+            // Keep the clock moving while the save completes.
             repeat(100) {
                 if (saved.isEmpty()) {
                     compose.mainClock.advanceTimeBy(100)
@@ -1672,18 +1812,112 @@ abstract class PluginsCases {
             }
             compose.waitUntil(10000) { saved.isNotEmpty() }
             val payload = wireJson.parseToJsonElement(saved.single()).jsonObject
-            if (revokedMeanwhile) assertFalse("agentIds" in payload)
-            else if (older)
-                assertEquals(JsonArray(listOf(JsonPrimitive(MAIN_AGENT_ID))), payload["agentIds"])
-            else assertFalse("agentIds" in payload)
+            assertFalse("agentIds" in payload)
         }
+    }
+
+    /**
+     * Project manifest values for existing UI scenarios; requests still cross the generated union,
+     * and replies are wrapped in its real wire envelope.
+     */
+    private fun pluginScenarioInput(
+        path: String,
+        body: String,
+        command: JsonObject?,
+    ): Pair<String, String> {
+        if (command == null) return path to body
+        val kind = command.getValue("kind").jsonPrimitive.content
+        val plugin = command.getValue("pluginId").jsonPrimitive.content
+        val id = command["instanceId"]?.jsonPrimitive?.contentOrNull
+        val base = path.removeSuffix("/manage") + "/$plugin"
+        val instance = base + "/connections" + (id?.let { "/$it" } ?: "")
+        val target =
+            when (kind) {
+                "form" -> "$base/form"
+                "save",
+                "delete" -> instance
+                "action" -> "$instance/actions"
+                "people" ->
+                    "$instance/people/${command.getValue("userId").jsonPrimitive.content}/${command.getValue("operation").jsonPrimitive.content}"
+                else -> "$instance/$kind"
+            }
+        val data = (command["data"] as? JsonObject) ?: JsonObject(emptyMap())
+        return target to
+            (if (kind == "form" && id != null) JsonObject(data + ("instance" to JsonPrimitive(id)))
+                else data)
+                .toString()
+    }
+
+    private fun pluginScenarioOutput(command: JsonObject?, body: String): String {
+        if (command == null) return body
+        val value = wireJson.parseToJsonElement(body)
+        val obj = value as? JsonObject ?: JsonObject(emptyMap())
+        if (obj["operation"] != null) return body
+        val kind = command.getValue("kind").jsonPrimitive.content
+        val emptyInstance =
+            wireJson
+                .encodeToJsonElement(
+                    PluginConnection(
+                        settings = JsonObject(emptyMap()),
+                        status = PluginStatus(),
+                        usage = PluginUsage(),
+                    )
+                )
+                .jsonObject
+        return buildJsonObject {
+            when (kind) {
+                "save",
+                "enabled",
+                "people" -> {
+                    put("kind", if (kind == "save") "saved" else kind)
+                    put("instance", JsonObject(emptyInstance + obj))
+                }
+                "form" -> {
+                    put("kind", "form")
+                    put(
+                        "form",
+                        buildJsonObject {
+                            put("options", JsonObject(emptyMap()))
+                            put("values", JsonObject(emptyMap()))
+                            put("errors", JsonObject(emptyMap()))
+                            put("view", JsonArray(emptyList()))
+                            obj.forEach { (key, value) -> put(key, value) }
+                        },
+                    )
+                }
+                "action" -> {
+                    put("kind", "action")
+                    put("result", value)
+                }
+                "test" -> {
+                    put("kind", "tested")
+                    put("ok", true)
+                    put("message", "")
+                    obj.forEach { (key, value) -> put(key, value) }
+                }
+                "delete" -> {
+                    put("kind", "deleted")
+                    put("deleted", true)
+                }
+                "disconnect" -> {
+                    put("kind", "disconnected")
+                    put("disconnected", true)
+                    put("revoked", JsonNull)
+                    put("message", "")
+                    obj.forEach { (key, value) -> put(key, value) }
+                }
+                else -> {
+                    put("kind", kind)
+                    obj.forEach { (key, value) -> put(key, value) }
+                }
+            }
+        }
+            .toString()
     }
 
     /** Answers the workspace fixture; custom handlers can opt into GETs for polling. */
     private fun dispatcher(
         includeGet: Boolean = false,
-        /** False for an installation that does not mark agents with `grantsOnAgent`. */
-        current: Boolean = true,
         packages: List<PluginEntry> = listOf(onePassword, discord, notes),
         connections: List<PluginConnection> = listOf(bot, account),
         /** Every request as "METHOD path", when a journey checks methods. */
@@ -1692,16 +1926,23 @@ abstract class PluginsCases {
     ) =
         object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
-                val path = request.path.orEmpty()
-                val body = request.body.readUtf8()
-                requests?.add("${request.method} $path")
+                val actualPath = request.path.orEmpty()
+                val actualBody = request.body.readUtf8()
+                val command =
+                    if (actualPath.endsWith("/plugins/manage"))
+                        wireJson.parseToJsonElement(actualBody).jsonObject
+                    else null
+                val (path, body) = pluginScenarioInput(actualPath, actualBody, command)
+                requests?.add("${request.method} $actualPath")
                 if (request.method != "GET") {
                     if (request.getHeader("X-CSRF-Token") != "fixture-csrf")
                         return MockResponse().setResponseCode(403)
                 }
-                if (request.method != "GET" || includeGet) {
+                val method =
+                    if (command?.get("kind") == JsonPrimitive("view")) "GET" else request.method
+                if (method != "GET" || includeGet) {
                     handle(path, body)?.let {
-                        return MockResponse().setBody(it)
+                        return MockResponse().setBody(pluginScenarioOutput(command, it))
                     }
                 }
                 val result =
@@ -1710,20 +1951,41 @@ abstract class PluginsCases {
                         "/api/account/session" -> beaconAccountFixture("fixture-csrf")
                         "/api/installations/fixture/api/agents" ->
                             wireJson.encodeToString(
-                                listOf(
-                                    Agent(
-                                        id = MAIN_AGENT_ID,
-                                        name = "Cairn",
-                                        revision = "r1",
-                                        grantsOnAgent = current,
-                                    ),
-                                    Agent(
-                                        id = "helper",
-                                        name = "Helper",
-                                        access = AccessPolicy(projects = listOf("project")),
-                                        revision = "r1",
-                                        grantsOnAgent = current,
-                                    ),
+                                build.cairn.contracts.ListAgentsOutput(
+                                    listOf(
+                                        Agent(
+                                            exclusiveNodes = emptyList(),
+                                            plugins = emptyList(),
+                                            createdAt = 0,
+                                            access =
+                                                AccessPolicy(
+                                                    mcpTools =
+                                                        build.cairn.contracts.McpTools(emptyMap()),
+                                                    projects = null,
+                                                    skills = null,
+                                                    mcps = null,
+                                                ),
+                                            id = MAIN_AGENT_ID,
+                                            name = "Cairn",
+                                            revision = "r1",
+                                        ),
+                                        Agent(
+                                            exclusiveNodes = emptyList(),
+                                            plugins = emptyList(),
+                                            createdAt = 0,
+                                            id = "08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3",
+                                            name = "Helper",
+                                            access =
+                                                AccessPolicy(
+                                                    mcpTools =
+                                                        build.cairn.contracts.McpTools(emptyMap()),
+                                                    skills = null,
+                                                    mcps = null,
+                                                    projects = listOf("project"),
+                                                ),
+                                            revision = "r1",
+                                        ),
+                                    )
                                 )
                             )
                         "/api/installations/fixture/api/plugins" ->
@@ -1745,15 +2007,28 @@ abstract class PluginsCases {
                                     )
                                 )
                             )
-                        "/api/installations/fixture/api/plugins/discord/connections/bot/view" ->
+                        "/api/installations/fixture/api/plugins/discord/connections/00000000-0000-4000-8000-000000000102/view" ->
                             """{"view":[{"type":"facts","items":[{"label":"Channel","value":"#support"},{"label":"Server","value":"Acme"}]}]}"""
-                        "/api/installations/fixture/api/plugins/onepassword/connections/op1/view" ->
+                        "/api/installations/fixture/api/plugins/onepassword/connections/00000000-0000-4000-8000-000000000101/view" ->
                             """{"view":[{"type":"section","title":"Vaults","children":[{"type":"actions","children":[{"type":"button","label":"Show vaults","action":"vaults"}]}]}]}"""
                         "/api/installations/fixture/api/overview",
                         "/api/installations/fixture/api/codex/models" -> "{}"
-                        else -> "[]"
+                        else ->
+                            if (request.requestUrl?.encodedPath?.endsWith("/api/projects") == true)
+                                """{"projects":[]}"""
+                            else if (
+                                request.requestUrl?.encodedPath?.endsWith("/api/agents") == true
+                            )
+                                """{"agents":[]}"""
+                            else if (
+                                request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true
+                            )
+                                """{"tasks":[]}"""
+                            else if (request.requestUrl?.encodedPath?.endsWith("/api/mcps") == true)
+                                """{"mcps":[]}"""
+                            else "[]"
                     }
-                return MockResponse().setBody(result)
+                return MockResponse().setBody(pluginScenarioOutput(command, result))
             }
         }
 

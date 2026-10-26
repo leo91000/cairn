@@ -1,0 +1,3304 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AccessPolicy": {
+      "additionalProperties": false,
+      "description": "Relational permission view: null is the explicit wildcard, distinct from an\nempty selection. These generated wire models confer no actor authority.",
+      "properties": {
+        "backend": {
+          "default": "firecracker",
+          "pattern": "^(firecracker|native)$",
+          "type": "string"
+        },
+        "delegation": {
+          "default": false,
+          "type": "boolean"
+        },
+        "installation": {
+          "default": false,
+          "type": "boolean"
+        },
+        "mcpTools": {
+          "additionalProperties": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 500,
+            "type": "array"
+          },
+          "propertyNames": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "mcps": {
+          "default": null,
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "nodes": {
+          "default": [
+            "00000000-0000-4000-8000-000000000002"
+          ],
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "projects": {
+          "default": null,
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "sandbox": {
+          "default": "yolo",
+          "pattern": "^(yolo|workspace-write|read-only)$",
+          "type": "string"
+        },
+        "skills": {
+          "default": null,
+          "items": {
+            "maxLength": 160,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "backend",
+        "nodes",
+        "projects",
+        "skills",
+        "mcps",
+        "mcpTools",
+        "installation",
+        "delegation",
+        "sandbox"
+      ],
+      "type": "object"
+    },
+    "AccountSignInMethod": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "label"
+      ],
+      "type": "object"
+    },
+    "Agent": {
+      "properties": {
+        "access": {
+          "$ref": "#/definitions/AccessPolicy"
+        },
+        "avatar": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AgentAvatar"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "exclusiveNodes": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "instructions": {
+          "default": "",
+          "maxLength": 20000,
+          "type": "string"
+        },
+        "model": {
+          "default": "",
+          "maxLength": 100,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "plugins": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "provider": {
+          "default": "codex",
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        },
+        "reasoning": {
+          "default": "high",
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "speed": {
+          "default": "",
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
+        "timeoutMinutes": {
+          "default": 0,
+          "format": "uint16",
+          "maximum": 720,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "provider",
+        "description",
+        "model",
+        "reasoning",
+        "speed",
+        "instructions",
+        "timeoutMinutes",
+        "access",
+        "exclusiveNodes",
+        "plugins",
+        "revision",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "AgentAvatar": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": "string"
+        },
+        "status": {
+          "pattern": "^(generating|ready|failed)$",
+          "type": "string"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "revision",
+        "url"
+      ],
+      "type": "object"
+    },
+    "AgentDelegationEffect": {
+      "additionalProperties": false,
+      "properties": {
+        "alreadySuspended": {
+          "type": "boolean"
+        },
+        "blocked": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "suspended": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "pluginId",
+        "name",
+        "enabled",
+        "suspended",
+        "blocked",
+        "alreadySuspended"
+      ],
+      "type": "object"
+    },
+    "AgentInput": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "agentId"
+      ],
+      "type": "object"
+    },
+    "AgentPreview": {
+      "additionalProperties": false,
+      "properties": {
+        "delegations": {
+          "items": {
+            "$ref": "#/definitions/AgentDelegationEffect"
+          },
+          "type": "array"
+        },
+        "runs": {
+          "$ref": "#/definitions/AgentPreviewRuns"
+        }
+      },
+      "required": [
+        "runs",
+        "delegations"
+      ],
+      "type": "object"
+    },
+    "AgentPreviewRuns": {
+      "additionalProperties": false,
+      "properties": {
+        "queued": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "running": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "queued",
+        "running"
+      ],
+      "type": "object"
+    },
+    "AgentReview": {
+      "additionalProperties": false,
+      "properties": {
+        "nativeNodeReviews": {
+          "default": [],
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "reapproveDelegations": {
+          "default": [],
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        }
+      },
+      "required": [
+        "nativeNodeReviews",
+        "reapproveDelegations"
+      ],
+      "type": "object"
+    },
+    "AgentSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "access": {
+          "$ref": "#/definitions/AccessPolicy"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "exclusiveNodes": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "instructions": {
+          "default": "",
+          "maxLength": 20000,
+          "type": "string"
+        },
+        "model": {
+          "default": "",
+          "maxLength": 100,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "plugins": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "provider": {
+          "default": "codex",
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        },
+        "reasoning": {
+          "default": "high",
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
+        "speed": {
+          "default": "",
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
+        "timeoutMinutes": {
+          "default": 0,
+          "format": "uint16",
+          "maximum": 720,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "provider",
+        "description",
+        "model",
+        "reasoning",
+        "speed",
+        "instructions",
+        "timeoutMinutes",
+        "access",
+        "exclusiveNodes",
+        "plugins"
+      ],
+      "type": "object"
+    },
+    "AgentTransfers": {
+      "additionalProperties": false,
+      "properties": {
+        "chats": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tasks": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tasks",
+        "chats",
+        "runs"
+      ],
+      "type": "object"
+    },
+    "AvatarConfiguration": {
+      "additionalProperties": false,
+      "properties": {
+        "configured": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "configured"
+      ],
+      "type": "object"
+    },
+    "BeginMcpInput": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "native": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "native"
+      ],
+      "type": "object"
+    },
+    "BeginMcpOutput": {
+      "properties": {
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
+    "CreateAgentInput": {
+      "additionalProperties": false,
+      "properties": {
+        "creationId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "review": {
+          "$ref": "#/definitions/AgentReview"
+        },
+        "settings": {
+          "$ref": "#/definitions/AgentSettings"
+        }
+      },
+      "required": [
+        "settings",
+        "review"
+      ],
+      "type": "object"
+    },
+    "CreateMissionInput": {
+      "additionalProperties": false,
+      "properties": {
+        "creationId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/definitions/MissionSettings"
+        }
+      },
+      "required": [
+        "settings"
+      ],
+      "type": "object"
+    },
+    "CreateProjectInput": {
+      "additionalProperties": false,
+      "properties": {
+        "creationId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/definitions/ProjectSettings"
+        }
+      },
+      "required": [
+        "settings"
+      ],
+      "type": "object"
+    },
+    "DeleteAgentOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "deleted"
+      ],
+      "type": "object"
+    },
+    "DeleteMissionOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "deleted"
+      ],
+      "type": "object"
+    },
+    "DeleteProjectOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "deleted"
+      ],
+      "type": "object"
+    },
+    "ListAccountMethodsOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "methods": {
+          "items": {
+            "$ref": "#/definitions/AccountSignInMethod"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "methods"
+      ],
+      "type": "object"
+    },
+    "ListAgentsInput": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ListAgentsOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "agents": {
+          "items": {
+            "$ref": "#/definitions/Agent"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "agents"
+      ],
+      "type": "object"
+    },
+    "ListMcpsInput": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ListMcpsOutput": {
+      "properties": {
+        "mcps": {
+          "items": {
+            "$ref": "#/definitions/McpView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "mcps"
+      ],
+      "type": "object"
+    },
+    "ListMissionsInput": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ListMissionsOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "tasks": {
+          "items": {
+            "$ref": "#/definitions/Mission"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "tasks"
+      ],
+      "type": "object"
+    },
+    "ListPluginInstancesOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "connections": {
+          "items": {
+            "$ref": "#/definitions/PluginConnection"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "connections"
+      ],
+      "type": "object"
+    },
+    "ListProjectsInput": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ListProjectsOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "projects": {
+          "items": {
+            "$ref": "#/definitions/Project"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "projects"
+      ],
+      "type": "object"
+    },
+    "ManagePluginInput": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "setup",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/PluginFormInput"
+            },
+            "instanceId": {
+              "default": null,
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "form",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/PluginConfiguration"
+            },
+            "instanceId": {
+              "default": null,
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "save",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/PluginEnabledInput"
+            },
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "enabled",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "delete",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "disconnect",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "test",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "view",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/PluginActionInput"
+            },
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "action",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/PluginFormInput"
+            },
+            "instanceId": {
+              "default": null,
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "signin",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "flowId": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "signin_status",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "flowId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "flowId": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "signin_cancel",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "flowId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "people",
+              "type": "string"
+            },
+            "operation": {
+              "pattern": "^(approve|deny|remove)$",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            },
+            "userId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pluginId",
+            "instanceId",
+            "userId",
+            "operation"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ManagePluginOutput": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "callbackUrl": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "setup",
+              "type": "string"
+            },
+            "managementUrl": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "manifest": true,
+            "setup": true
+          },
+          "required": [
+            "kind",
+            "manifest",
+            "setup",
+            "callbackUrl",
+            "managementUrl"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "form": {
+              "$ref": "#/definitions/PluginFormResult"
+            },
+            "kind": {
+              "const": "form",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "form"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instance": {
+              "$ref": "#/definitions/PluginConnection"
+            },
+            "kind": {
+              "const": "saved",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "instance"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instance": {
+              "$ref": "#/definitions/PluginConnection"
+            },
+            "kind": {
+              "const": "enabled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "instance"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deleted": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "deleted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "deleted"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "disconnected": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "disconnected",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "revoked": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "disconnected",
+            "revoked",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "tested",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "ok",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "view",
+              "type": "string"
+            },
+            "view": true
+          },
+          "required": [
+            "kind",
+            "view"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The package-defined view/action result has already passed its manifest validator.",
+          "properties": {
+            "kind": {
+              "const": "action",
+              "type": "string"
+            },
+            "result": true
+          },
+          "required": [
+            "kind",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "flow": {
+              "$ref": "#/definitions/PluginSigninFlow"
+            },
+            "kind": {
+              "const": "signin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "flow"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cancelled": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "signinCancelled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "cancelled"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instance": {
+              "$ref": "#/definitions/PluginConnection"
+            },
+            "kind": {
+              "const": "people",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "instance"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "McpConnectionStatus": {
+      "properties": {
+        "pending": {
+          "type": "boolean"
+        },
+        "result": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "pending"
+      ],
+      "type": "object"
+    },
+    "McpEnvironment": {
+      "additionalProperties": {
+        "maxLength": 10000,
+        "type": "string"
+      },
+      "propertyNames": {
+        "pattern": "^[A-Za-z_]\\w*$",
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "McpIdInput": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "McpInput": {
+      "additionalProperties": false,
+      "properties": {
+        "allowPrivateNetwork": {
+          "default": false,
+          "type": "boolean"
+        },
+        "args": {
+          "default": [],
+          "items": {
+            "maxLength": 4000,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "auth": {
+          "default": "none",
+          "pattern": "^(none|bearer|oauth)$",
+          "type": "string"
+        },
+        "clientId": {
+          "default": "",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "clientSecret": {
+          "maxLength": 10000,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "default": "",
+          "maxLength": 1000,
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "enabledTools": {
+          "default": null,
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 500,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "env": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/McpEnvironment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "removeEnv": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "scopes": {
+          "default": "",
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "token": {
+          "maxLength": 10000,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transport": {
+          "default": "http",
+          "pattern": "^(http|stdio)$",
+          "type": "string"
+        },
+        "url": {
+          "default": "",
+          "maxLength": 2000,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "transport",
+        "url",
+        "command",
+        "args",
+        "auth",
+        "clientId",
+        "scopes",
+        "allowPrivateNetwork",
+        "enabled",
+        "enabledTools",
+        "removeEnv"
+      ],
+      "type": "object"
+    },
+    "McpMutationOutput": {
+      "properties": {
+        "completed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "completed"
+      ],
+      "type": "object"
+    },
+    "McpReplacementInput": {
+      "additionalProperties": false,
+      "properties": {
+        "allowPrivateNetwork": {
+          "type": "boolean"
+        },
+        "args": {
+          "items": {
+            "maxLength": 4000,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "auth": {
+          "pattern": "^(none|bearer|oauth)$",
+          "type": "string"
+        },
+        "clientId": {
+          "maxLength": 500,
+          "type": "string"
+        },
+        "clientSecret": {
+          "maxLength": 10000,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "maxLength": 1000,
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "enabledTools": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 500,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "env": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/McpEnvironment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "removeEnv": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "scopes": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "token": {
+          "maxLength": 10000,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transport": {
+          "pattern": "^(http|stdio)$",
+          "type": "string"
+        },
+        "url": {
+          "maxLength": 2000,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "transport",
+        "url",
+        "command",
+        "args",
+        "auth",
+        "clientId",
+        "scopes",
+        "allowPrivateNetwork",
+        "enabled",
+        "enabledTools",
+        "removeEnv"
+      ],
+      "type": "object"
+    },
+    "McpTool": {
+      "description": "Public projection of a third-party tool. Schemas remain opaque JSON.",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inputSchema": true,
+        "name": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "description",
+        "inputSchema"
+      ],
+      "type": "object"
+    },
+    "McpView": {
+      "description": "Current connection state. Tool descriptors are third-party protocol JSON.",
+      "properties": {
+        "allowPrivateNetwork": {
+          "default": false,
+          "type": "boolean"
+        },
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "auth": {
+          "default": "none",
+          "pattern": "^(none|bearer|oauth)$",
+          "type": "string"
+        },
+        "callbackUrl": {
+          "default": "",
+          "type": "string"
+        },
+        "checkedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "clientId": {
+          "default": "",
+          "type": "string"
+        },
+        "command": {
+          "default": "",
+          "type": "string"
+        },
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "enabledTools": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "envKeys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "error": {
+          "default": "",
+          "type": "string"
+        },
+        "hasClientSecret": {
+          "default": false,
+          "type": "boolean"
+        },
+        "hasToken": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "revision": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scopes": {
+          "default": "",
+          "type": "string"
+        },
+        "state": {
+          "default": "untested",
+          "pattern": "^(untested|connected|needs-auth|error)$",
+          "type": "string"
+        },
+        "tools": {
+          "default": [],
+          "description": "Tool catalog as returned by the server.",
+          "items": {
+            "$ref": "#/definitions/McpTool"
+          },
+          "type": "array"
+        },
+        "transport": {
+          "default": "http",
+          "pattern": "^(http|stdio)$",
+          "type": "string"
+        },
+        "url": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "transport",
+        "url",
+        "command",
+        "args",
+        "auth",
+        "clientId",
+        "scopes",
+        "allowPrivateNetwork",
+        "enabled",
+        "enabledTools",
+        "createdAt",
+        "revision",
+        "state",
+        "tools",
+        "checkedAt",
+        "error",
+        "hasToken",
+        "hasClientSecret",
+        "envKeys",
+        "callbackUrl"
+      ],
+      "type": "object"
+    },
+    "MergeAgentsInput": {
+      "additionalProperties": false,
+      "properties": {
+        "confirm": {
+          "type": "boolean"
+        },
+        "sourceId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "targetId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sourceId",
+        "targetId",
+        "confirm"
+      ],
+      "type": "object"
+    },
+    "MergeAgentsOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        },
+        "sourceId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "targetId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "transferred": {
+          "$ref": "#/definitions/AgentTransfers"
+        }
+      },
+      "required": [
+        "sourceId",
+        "targetId",
+        "transferred",
+        "deleted"
+      ],
+      "type": "object"
+    },
+    "Mission": {
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "archived": {
+          "default": false,
+          "type": "boolean"
+        },
+        "authorAccessId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authorId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authorRemoved": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cron": {
+          "default": null,
+          "maxLength": 100,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "nativeAuthorityNodes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "nativeParentAccess": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeParentRunId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativePluginGrants": {
+          "items": {
+            "$ref": "#/definitions/MissionPluginGrant"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "nativePrincipals": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "nativeProvenanceUnknown": {
+          "type": "boolean"
+        },
+        "nextRun": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "projectId": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "maxLength": 50000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "scheduleFailure": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ScheduleFailure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scheduleWaitReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skills": {
+          "default": null,
+          "items": {
+            "maxLength": 160,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "maxLength": 30,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "type": "array"
+        },
+        "timezone": {
+          "default": "Europe/Paris",
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "worktree": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "prompt",
+        "agentId",
+        "projectId",
+        "skills",
+        "tags",
+        "cron",
+        "timezone",
+        "enabled",
+        "archived",
+        "worktree",
+        "revision",
+        "createdAt",
+        "nextRun",
+        "authorId",
+        "authorAccessId",
+        "authorRemoved",
+        "scheduleWaitReason",
+        "scheduleFailure",
+        "nativePrincipals",
+        "nativeAuthorityNodes",
+        "nativeParentRunId",
+        "nativeParentAccess",
+        "nativeProvenanceUnknown",
+        "nativePluginGrants"
+      ],
+      "type": "object"
+    },
+    "MissionInput": {
+      "additionalProperties": false,
+      "properties": {
+        "taskId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskId"
+      ],
+      "type": "object"
+    },
+    "MissionPluginGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "authorId": {
+          "type": "string"
+        },
+        "connectionId": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "connectionId",
+        "revision",
+        "authorId"
+      ],
+      "type": "object"
+    },
+    "MissionSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "archived": {
+          "default": false,
+          "type": "boolean"
+        },
+        "cron": {
+          "default": null,
+          "maxLength": 100,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "projectId": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "maxLength": 50000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "skills": {
+          "default": null,
+          "items": {
+            "maxLength": 160,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "maxLength": 30,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "type": "array"
+        },
+        "timezone": {
+          "default": "Europe/Paris",
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "worktree": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "prompt",
+        "agentId",
+        "projectId",
+        "skills",
+        "tags",
+        "cron",
+        "timezone",
+        "enabled",
+        "archived",
+        "worktree"
+      ],
+      "type": "object"
+    },
+    "MissionStateInput": {
+      "additionalProperties": false,
+      "properties": {
+        "archived": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "taskId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskId",
+        "revision",
+        "enabled",
+        "archived"
+      ],
+      "type": "object"
+    },
+    "PluginActionInput": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "maxLength": 40,
+          "minLength": 1,
+          "type": "string"
+        },
+        "payload": {
+          "default": null
+        },
+        "values": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": "object",
+          "x-cairn-json-object": true
+        }
+      },
+      "required": [
+        "action",
+        "payload",
+        "values"
+      ],
+      "type": "object"
+    },
+    "PluginActivity": {
+      "additionalProperties": false,
+      "properties": {
+        "chatId": {
+          "default": "",
+          "type": "string"
+        },
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "preview": {
+          "default": "",
+          "type": "string"
+        },
+        "status": {
+          "default": "working",
+          "pattern": "^(working|replied|failed|stopped)$",
+          "type": "string"
+        },
+        "userId": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "chatId",
+        "userId",
+        "name",
+        "preview",
+        "status",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "PluginConfiguration": {
+      "additionalProperties": false,
+      "description": "Full Cairn configuration, with manifest settings and secret fields separate.\nMissing agentIds retains grants; agents are forbidden from submitting it at all.",
+      "properties": {
+        "accessMode": {
+          "default": "allowlist",
+          "pattern": "^(allowlist|requests|everyone)$",
+          "type": "string"
+        },
+        "agentId": {
+          "default": "",
+          "type": "string"
+        },
+        "agentIds": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "credentialFlow": {
+          "maxLength": 200,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "maxMessagesPerHour": {
+          "default": 20,
+          "format": "uint32",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maxPerPersonPerHour": {
+          "default": 5,
+          "format": "uint32",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "people": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginLabel"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "projectId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "description": "Required on replacement. Creation has no existing revision.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secrets": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-cairn-json-object": true
+        },
+        "settings": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": "object",
+          "x-cairn-json-object": true
+        },
+        "sharedFrom": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token": {
+          "maxLength": 16384,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "userIds": {
+          "default": [],
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "enabled",
+        "settings",
+        "agentId",
+        "projectId",
+        "accessMode",
+        "userIds",
+        "people",
+        "maxMessagesPerHour",
+        "maxPerPersonPerHour"
+      ],
+      "type": "object"
+    },
+    "PluginConnection": {
+      "additionalProperties": false,
+      "description": "Explicit owner/agent view: no credential, approved policy or native provenance.",
+      "properties": {
+        "accessMode": {
+          "default": "allowlist",
+          "pattern": "^(allowlist|requests|everyone)$",
+          "type": "string"
+        },
+        "activity": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginActivity"
+          },
+          "type": "array"
+        },
+        "agentId": {
+          "default": "",
+          "type": "string"
+        },
+        "agentIds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "maxMessagesPerHour": {
+          "default": 20,
+          "format": "uint32",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maxPerPersonPerHour": {
+          "default": 5,
+          "format": "uint32",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "people": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginLabel"
+          },
+          "type": "array"
+        },
+        "pluginId": {
+          "default": "",
+          "type": "string"
+        },
+        "projectId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requests": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginRequest"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "default": "",
+          "type": "string"
+        },
+        "secretKeys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "settings": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": "object",
+          "x-cairn-json-object": true
+        },
+        "status": {
+          "$ref": "#/definitions/PluginStatus"
+        },
+        "usage": {
+          "$ref": "#/definitions/PluginUsage"
+        },
+        "userIds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "pluginId",
+        "name",
+        "enabled",
+        "revision",
+        "settings",
+        "secretKeys",
+        "agentIds",
+        "agentId",
+        "projectId",
+        "accessMode",
+        "userIds",
+        "people",
+        "maxMessagesPerHour",
+        "maxPerPersonPerHour",
+        "status",
+        "usage",
+        "requests",
+        "activity"
+      ],
+      "type": "object"
+    },
+    "PluginEnabledInput": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "PluginFormInput": {
+      "additionalProperties": false,
+      "properties": {
+        "changed": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentialFlow": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "instance": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secrets": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": "object",
+          "x-cairn-json-object": true
+        },
+        "settings": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": "object",
+          "x-cairn-json-object": true
+        },
+        "sharedFrom": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "settings",
+        "secrets"
+      ],
+      "type": "object"
+    },
+    "PluginFormResult": {
+      "additionalProperties": false,
+      "properties": {
+        "errors": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "options": {
+          "additionalProperties": {
+            "items": {
+              "$ref": "#/definitions/PluginOption"
+            },
+            "type": "array"
+          },
+          "type": "object"
+        },
+        "values": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": "object",
+          "x-cairn-json-object": true
+        },
+        "view": {
+          "default": [],
+          "items": true,
+          "type": "array"
+        }
+      },
+      "required": [
+        "options",
+        "values",
+        "errors",
+        "view"
+      ],
+      "type": "object"
+    },
+    "PluginInstanceInput": {
+      "additionalProperties": false,
+      "properties": {
+        "instanceId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "pluginId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginId",
+        "instanceId"
+      ],
+      "type": "object"
+    },
+    "PluginLabel": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "PluginOption": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "disabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "label": {
+          "default": "",
+          "type": "string"
+        },
+        "value": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "label",
+        "description",
+        "disabled"
+      ],
+      "type": "object"
+    },
+    "PluginRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "mentions": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "updatedAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "userId": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "name",
+        "mentions",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "PluginSigninFlow": {
+      "additionalProperties": false,
+      "properties": {
+        "expiresAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "message": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pluginId": {
+          "default": "",
+          "type": "string"
+        },
+        "state": {
+          "default": "",
+          "type": "string"
+        },
+        "userCode": {
+          "default": "",
+          "type": "string"
+        },
+        "verificationUri": {
+          "default": "",
+          "type": "string"
+        },
+        "verificationUriComplete": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "pluginId",
+        "state",
+        "userCode",
+        "verificationUri",
+        "verificationUriComplete",
+        "expiresAt",
+        "message"
+      ],
+      "type": "object"
+    },
+    "PluginStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "message": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "default": "disconnected",
+          "pattern": "^(disconnected|connecting|connected|needs_review|ready)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "message"
+      ],
+      "type": "object"
+    },
+    "PluginUsage": {
+      "additionalProperties": false,
+      "properties": {
+        "hour": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "hour"
+      ],
+      "type": "object"
+    },
+    "Project": {
+      "properties": {
+        "baseBranch": {
+          "default": "main",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_/.-]*$",
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProjectSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceMode": {
+          "default": "remote",
+          "pattern": "^(remote|local)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "path",
+        "description",
+        "sourceMode",
+        "baseBranch",
+        "origin",
+        "source",
+        "revision",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "ProjectInput": {
+      "additionalProperties": false,
+      "properties": {
+        "projectId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectId"
+      ],
+      "type": "object"
+    },
+    "ProjectSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "baseBranch": {
+          "default": "main",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_/.-]*$",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sourceMode": {
+          "default": "remote",
+          "pattern": "^(remote|local)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "description",
+        "sourceMode",
+        "baseBranch"
+      ],
+      "type": "object"
+    },
+    "ProjectSource": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginId",
+        "source",
+        "instance",
+        "id"
+      ],
+      "type": "object"
+    },
+    "QualificationFixture": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
+          "type": "integer"
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        },
+        "labels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "names": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "nullable": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "omitted": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result": {
+          "$ref": "#/definitions/QualificationResult"
+        }
+      },
+      "required": [
+        "id",
+        "result",
+        "enabled",
+        "nullable",
+        "count",
+        "labels",
+        "names"
+      ],
+      "type": "object"
+    },
+    "QualificationResult": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "resumed",
+              "type": "string"
+            },
+            "runId": {
+              "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "runId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "rejected",
+              "type": "string"
+            },
+            "response": {
+              "$ref": "#/definitions/ResumeRunError"
+            }
+          },
+          "required": [
+            "kind",
+            "response"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ReplaceAgentInput": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "review": {
+          "$ref": "#/definitions/AgentReview"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/definitions/AgentSettings"
+        }
+      },
+      "required": [
+        "agentId",
+        "revision",
+        "settings",
+        "review"
+      ],
+      "type": "object"
+    },
+    "ReplaceMissionInput": {
+      "additionalProperties": false,
+      "properties": {
+        "revision": {
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/definitions/MissionSettings"
+        },
+        "taskId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskId",
+        "revision",
+        "settings"
+      ],
+      "type": "object"
+    },
+    "ReplaceProjectInput": {
+      "additionalProperties": false,
+      "properties": {
+        "projectId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/definitions/ProjectSettings"
+        }
+      },
+      "required": [
+        "projectId",
+        "revision",
+        "settings"
+      ],
+      "type": "object"
+    },
+    "ResumeRunError": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "type": "object"
+    },
+    "ResumeRunInput": {
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "type": "object"
+    },
+    "ResumeRunOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "type": "object"
+    },
+    "RunTaskSnapshot": {
+      "description": "Presentation of task settings in a run snapshot. Chats synthesize the same typed\nsettings without creating a mission or a scheduled commitment.",
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "archived": {
+          "default": false,
+          "type": "boolean"
+        },
+        "cron": {
+          "default": null,
+          "maxLength": 100,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "projectId": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "maxLength": 50000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "skills": {
+          "default": null,
+          "items": {
+            "maxLength": 160,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "maxLength": 30,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "type": "array"
+        },
+        "timezone": {
+          "default": "Europe/Paris",
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "worktree": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "prompt",
+        "agentId",
+        "projectId",
+        "skills",
+        "tags",
+        "cron",
+        "timezone",
+        "enabled",
+        "archived",
+        "worktree"
+      ],
+      "type": "object"
+    },
+    "ScheduleFailure": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "scheduledFor": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "message",
+        "scheduledFor",
+        "at"
+      ],
+      "type": "object"
+    },
+    "SchedulePreviewInput": {
+      "additionalProperties": false,
+      "properties": {
+        "cron": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "timezone": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "cron",
+        "timezone"
+      ],
+      "type": "object"
+    },
+    "SchedulePreviewOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "occurrences": {
+          "items": {
+            "format": "int64",
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "occurrences"
+      ],
+      "type": "object"
+    },
+    "SetAgentAvatarInput": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "data": {
+          "description": "Base64 PNG, JPEG or WebP, at most 5 MiB before normalization.",
+          "maxLength": 6990508,
+          "type": "string"
+        }
+      },
+      "required": [
+        "agentId",
+        "data"
+      ],
+      "type": "object"
+    },
+    "UpdateMcpInput": {
+      "additionalProperties": false,
+      "properties": {
+        "connection": {
+          "$ref": "#/definitions/McpReplacementInput"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "connection"
+      ],
+      "type": "object"
+    }
+  }
+}

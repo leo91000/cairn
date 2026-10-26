@@ -7,8 +7,9 @@ local function resolve(input)
         cairn.fail("1Password CLI supports Linux x86_64 and aarch64 on this installation.")
     end
 
+    -- N excludes prereleases; the Y feed can return a beta while stable is available.
     local response = cairn.http.request({
-        url = "https://app-updates.agilebits.com/check/1/0/CLI2/en/2.0.0/Y",
+        url = "https://app-updates.agilebits.com/check/1/0/CLI2/en/2.0.0/N",
     })
     local version = response.json and response.json.version
     local major, minor, patch

@@ -1,3 +1,5 @@
+use common::MissionFixture;
+
 mod common;
 
 use common::{RelayContext, relay_fixture::router};
@@ -221,7 +223,7 @@ async fn mission_runs_are_unread_until_their_mission_is_opened() {
     let app = App::new().await;
     let task = app
         .service
-        .task(
+        .task_fixture(
             json!({ "name": "Release notes", "prompt": "Write them", "agentId": MAIN_AGENT_ID }),
             None,
         )
@@ -319,7 +321,7 @@ async fn opening_an_old_mission_run_leaves_the_latest_result_unread() {
     let app = App::new().await;
     let task = app
         .service
-        .task(
+        .task_fixture(
             json!({
                 "name": "Release notes",
                 "prompt": "Write them",
@@ -614,7 +616,7 @@ async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_agai
     let app = App::new().await;
     let task = app
         .service
-        .task(
+        .task_fixture(
             json!({ "name": "Device proof", "prompt": "Prove it", "agentId": MAIN_AGENT_ID }),
             None,
         )

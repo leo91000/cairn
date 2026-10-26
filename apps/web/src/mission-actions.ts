@@ -1,5 +1,9 @@
 import type { RunListItem, Task } from '../../../packages/contracts/contracts'
+import type { MissionSettings } from '../../../packages/contracts/generated/typescript/MissionSettings'
 import { ref } from 'vue'
+import { createMission } from '../../../packages/contracts/generated/createMission'
+import { deleteMission } from '../../../packages/contracts/generated/deleteMission'
+import { setMissionState } from '../../../packages/contracts/generated/setMissionState'
 import { api, notify, refresh } from './api'
 import { refreshMissionRuns } from './mission-runs'
 
@@ -25,31 +29,49 @@ export function useMissionActions({ started, removed }: { started: (run: RunList
     finally { busy.value = '' }
   }
 
-  async function save(task: Task, message: string, method = 'PUT', path = `/tasks/${task.id}`) {
+  async function state(task: Task, enabled: boolean, archived: boolean, message: string) {
     try {
-      await api(path, { method, body: JSON.stringify(task) })
+      await setMissionState(api, {
+        taskId: task.id,
+        revision: task.revision,
+        enabled,
+        archived,
+      })
       await refresh()
       notify(message)
     }
     catch (e) { error.value = (e as Error).message }
   }
 
-  const pause = (task: Task) => save({ ...task, enabled: !task.enabled }, task.enabled ? 'Schedule paused' : 'Schedule resumed')
-  const archive = (task: Task) => save({ ...task, archived: !task.archived, enabled: false }, task.archived ? 'Mission restored with its schedule paused' : 'Mission archived')
+  const pause = (task: Task) => state(task, !task.enabled, task.archived, task.enabled ? 'Schedule paused' : 'Schedule resumed')
+  const archive = (task: Task) => state(task, false, !task.archived, task.archived ? 'Mission restored with its schedule paused' : 'Mission archived')
 
-  function duplicate(task: Task) {
-    return save({
-      ...task,
+  async function duplicate(task: Task) {
+    const settings: MissionSettings = {
       name: `${task.name.slice(0, 92)} (copy)`,
+      prompt: task.prompt,
+      agentId: task.agentId,
+      projectId: task.projectId,
+      skills: task.skills,
+      tags: task.tags,
+      cron: task.cron,
+      timezone: task.timezone,
       enabled: false,
       archived: false,
-    }, 'Mission duplicated with its schedule paused', 'POST', '/tasks')
+      worktree: task.worktree,
+    }
+    try {
+      await createMission(api, { settings })
+      await refresh()
+      notify('Mission duplicated with its schedule paused')
+    }
+    catch (e) { error.value = (e as Error).message }
   }
 
   async function remove() {
     const task = deleting.value!
     try {
-      await api(`/tasks/${task.id}`, { method: 'DELETE' })
+      await deleteMission(api, { taskId: task.id })
       removed?.(task)
       deleting.value = null
       await refresh()

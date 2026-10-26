@@ -1,3 +1,6 @@
+use common::McpFixture;
+use common::MissionFixture;
+
 mod common;
 
 use common::relay_fixture::router;
@@ -50,7 +53,7 @@ async fn manual_run(s: &Service, name: &str, prompt: &str) -> Value {
         "prompt": prompt,
         "worktree": false,
     });
-    let task = s.task(task, None).await.unwrap();
+    let task = s.task_fixture(task, None).await.unwrap();
     s.enqueue(task["id"].as_str().unwrap(), "manual", None)
         .await
         .unwrap()
@@ -202,6 +205,43 @@ async fn assert_large_metadata_is_chunked_consistently(
 }
 
 #[tokio::test]
+async fn run_history_includes_the_engine_retries_limits_and_notices() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let (s, origin, server) = served(&root).await;
+    let token = common::relay_fixture::grant(&s, &["read"]).await;
+    let run = manual_run(&s, "Engine", "Engine reports").await;
+    let run_id = run["id"].as_str().unwrap();
+    let reports = [
+        json!({ "type": "engine.retry", "attempt": 1, "maxRetries": 10, "delayMs": 500, "reason": "overloaded" }),
+        json!({ "type": "provider.limit", "status": "allowed_warning", "window": "five_hour", "resetsAt": 1_893_499_200_000_i64, "blocked": false }),
+        json!({ "type": "engine.notice", "level": "warning", "message": "Context is almost full." }),
+    ];
+    for report in &reports {
+        let kind = report["type"].as_str().unwrap();
+        s.store
+            .event(run_id, kind, kind, Some(report.clone()))
+            .await
+            .unwrap();
+    }
+    let mcp = Mcp {
+        http: reqwest::Client::new(),
+        endpoint: format!("{origin}/mcp"),
+        token,
+    };
+    let response = mcp.call("get_run", json!({ "runId": run_id })).await;
+    let payloads: Vec<_> = result(&response)["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["type"] != "status")
+        .map(|event| event["payload"].clone())
+        .collect();
+    assert_eq!(payloads, reports);
+    server.abort();
+}
+
+#[tokio::test]
 async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     let root = TempDir::new().unwrap();
     std::fs::create_dir(root.path().join("home")).unwrap();
@@ -300,14 +340,25 @@ async fn stdio_discovers_and_calls_the_beacon_sdk_fixture() {
         "args": [fixture],
         "env": { "TEST_PREFIX": "configured:" },
     });
-    let item = s.mcps.save(&s, connection, None).await.unwrap();
+    let item = s.mcp_fixture(connection, None).await.unwrap();
     let id = item["id"].as_str().unwrap();
     let tested = s.mcps.test(&s, id).await.unwrap();
-    assert_eq!(tested["state"], "connected", "{tested}");
-    assert_eq!(tested["tools"][0]["name"], "fixture_echo");
-    assert_eq!(tested["envKeys"], json!(["TEST_PREFIX"]));
-    assert!(!tested.to_string().contains("configured:"));
-    let mut client = Client::connect(&s, &s.mcps.get(&s, id).await.unwrap())
+    assert_eq!(
+        serde_json::to_value(tested.server.state).unwrap(),
+        "connected",
+        "{tested:?}"
+    );
+    assert_eq!(
+        serde_json::to_value(&tested.server.tools).unwrap()[0]["name"],
+        "fixture_echo"
+    );
+    assert_eq!(tested.env_keys, vec!["TEST_PREFIX"]);
+    assert!(
+        !serde_json::to_string(&tested)
+            .unwrap()
+            .contains("configured:")
+    );
+    let mut client = Client::connect_server(&s, &s.mcps.server(&s, id).await.unwrap())
         .await
         .unwrap();
     let result = client
@@ -320,14 +371,9 @@ async fn stdio_discovers_and_calls_the_beacon_sdk_fixture() {
     assert_eq!(result["content"][0]["text"], "configured:hello");
     client.close().await;
     s.mcps.disconnect(&s, id, false).await.unwrap();
-    assert!(
-        s.mcps
-            .secrets(&s, id)
-            .await
-            .unwrap()
-            .as_object()
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        s.mcps.server_secrets(&s, id).await.unwrap(),
+        cairn_installation::mcps::record::McpSecrets::default()
     );
 }
 
@@ -356,8 +402,16 @@ async fn legacy_stdio_servers_can_exit_on_the_modern_probe() {
         "command": "node",
         "args": ["-e", LEGACY_SERVER],
     });
-    let item = s.mcps.save(&s, connection, None).await.unwrap();
-    let mut client = Client::connect(&s, &item).await.unwrap();
+    let item = s.mcp_fixture(connection, None).await.unwrap();
+    let mut client = Client::connect_server(
+        &s,
+        &s.mcps
+            .server(&s, item["id"].as_str().unwrap())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     let tools = client.discover().await.unwrap();
     assert_eq!(tools[0]["name"], "legacy_tool");
     client.close().await;
@@ -420,7 +474,7 @@ async fn agents_manage_connections_through_the_self_gateway_without_deadlocks_or
         "token": owner,
         "allowPrivateNetwork": true,
     });
-    let connection = s.mcps.save(&s, self_connection, None).await.unwrap();
+    let connection = s.mcp_fixture(self_connection, None).await.unwrap();
     let run = manual_run(&s, "Manage", "Manage connections").await;
     let run_id = run["id"].as_str().unwrap();
     s.store
@@ -492,7 +546,7 @@ for (const version of ['2026-07-28', '2025-11-25', '2025-06-18']) {
     const catalog = await client.listTools();
     if (catalog.tools.map(t => t.name).join(',') !== 'search,execute') throw Error('invalid compact tools');
     const agents = await client.callTool({ name: 'execute', arguments: {code: 'return await cairn.list_agents({});'} });
-    if (agents.isError || agents.structuredContent.result.length !== 1) throw Error('invalid result ' + JSON.stringify(agents));
+    if (agents.isError || agents.structuredContent.result.agents.length !== 1) throw Error('invalid result ' + JSON.stringify(agents));
     const denied = await client.callTool({ name: 'execute', arguments: {code: 'return await cairn.create_task(input);', input: { name: 'Denied', prompt: 'No' }} });
     if (!denied.isError || !denied._meta['mcp/www_authenticate']) throw Error('scope bypass');
     await client.close();
@@ -594,7 +648,7 @@ async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provide
         "auth": "oauth",
         "allowPrivateNetwork": true,
     });
-    let item = s.mcps.save(&s, connection, None).await.unwrap();
+    let item = s.mcp_fixture(connection, None).await.unwrap();
     let id = item["id"].as_str().unwrap();
     let consent = s.mcps.connect(&s, id, "fixture-session").await.unwrap();
     let http = reqwest::Client::builder()
@@ -623,7 +677,11 @@ async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provide
     };
     assert_eq!(command(b"expire\n").await, "expired");
     let tested = s.mcps.test(&s, id).await.unwrap();
-    assert_eq!(tested["state"], "connected", "{tested}");
+    assert_eq!(
+        serde_json::to_value(tested.server.state).unwrap(),
+        "connected",
+        "{tested:?}"
+    );
     let stats: Value = serde_json::from_str(&command(b"stats\n").await).unwrap();
     assert_eq!(stats, json!({ "refreshes": 1, "exchanges": 1 }));
     // A native session can complete OAuth despite an unrelated (or absent) browser cookie.
@@ -675,6 +733,46 @@ async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provide
     );
     assert!(!s.mcps.capture_native_callback(&s, &params).await.unwrap());
     assert_eq!(finish("native-account").await["result"], "expired");
+    // Cancellation is durable: a captured native response can no longer be exchanged.
+    let pending = s
+        .mcps
+        .connect_native(&s, id, "cancel-session")
+        .await
+        .unwrap();
+    let parameters = consent_callback(&http, &pending).await;
+    assert!(
+        s.mcps
+            .capture_native_callback(&s, &parameters)
+            .await
+            .unwrap()
+    );
+    let mut cancel = common::request("POST", &format!("/api/mcps/{id}/cancel"))
+        .body(Body::empty())
+        .unwrap();
+    cancel
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Owner,
+            "native-account",
+        ));
+    assert_eq!(common::send(&app, cancel).await.status(), StatusCode::OK);
+    assert_eq!(
+        s.mcps
+            .finish_native_callback(&s, id, "cancel-session")
+            .await
+            .unwrap()["result"],
+        "expired"
+    );
+    assert!(
+        s.mcps
+            .server_secrets(&s, id)
+            .await
+            .unwrap()
+            .verifier()
+            .is_empty()
+    );
+    let stats: Value = serde_json::from_str(&command(b"stats\n").await).unwrap();
+    assert_eq!(stats["exchanges"], 2);
     stdin.write_all(b"stop\n").await.unwrap();
     drop(stdin);
     if tokio::time::timeout(Duration::from_secs(2), provider.wait())
@@ -683,4 +781,64 @@ async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provide
     {
         provider.kill().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn current_mcp_sql_roundtrips_selections_and_keeps_credentials_encrypted() {
+    let root = TempDir::new().unwrap();
+    let s = Service::new(config(&root)).await.unwrap();
+    let saved = s
+        .mcp_fixture(
+            json!({
+                "name":"Command fixture",
+                "transport":"stdio",
+                "command":"node",
+                "args":["server.js","","one\ntwo"],
+                "enabledTools":[],
+                "env":{"TOKEN":"synthetic-private-value"}
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let id = saved["id"].as_str().unwrap().to_owned();
+    let server = s.store.mcp_server(&id).await.unwrap().unwrap();
+    assert_eq!(server.args, vec!["server.js", "", "one\ntwo"]);
+    assert_eq!(server.enabled_tools, Some(vec![]));
+    assert!(s.store.get("mcps", &id).await.unwrap().is_none());
+    assert!(s.store.put("mcps", saved.clone()).await.is_err());
+    let key = id.clone();
+    s.store
+        .read(move |db| {
+            let bytes = db.mcp_credentials(&key)?.unwrap();
+            assert!(
+                !bytes
+                    .windows(b"synthetic-private-value".len())
+                    .any(|part| part == b"synthetic-private-value")
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let key = id.clone();
+    assert!(
+        s.store
+            .transaction(move |db| {
+                db.0.execute("UPDATE mcp_servers SET enabled=2 WHERE id=?", [key])?;
+                Ok(())
+            })
+            .await
+            .is_err()
+    );
+    let reopened = cairn_installation::store::Store::open(&s.config.data_dir).unwrap();
+    assert_eq!(reopened.mcp_server(&id).await.unwrap().unwrap(), server);
+    assert_eq!(reopened.mcp_servers().await.unwrap(), vec![server]);
+    s.mcps.disconnect(&s, &id, true).await.unwrap();
+    assert!(reopened.mcp_server(&id).await.unwrap().is_none());
+    assert!(
+        reopened
+            .read(move |db| Ok(db.mcp_credentials(&id)?.is_none()))
+            .await
+            .unwrap()
+    );
 }

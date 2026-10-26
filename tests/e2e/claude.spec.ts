@@ -62,10 +62,10 @@ test('a saved quota failure really resumes its session from the inline card', as
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
   const before = (await workspace.api(`/api/chats/${chat.id}`)).run
   const message = 'You\'ve hit your individual spend limit · your weekly limit resets 3pm (UTC)'
-  // Reproduce a pre-fix persisted failure with a real prepared session and workspace.
+  // A saved structured failure keeps its real prepared session and workspace.
   workspace.service.store.updateRun(before.id, { status: 'failed', error: message, resumeAvailable: true })
   workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, paused: true })
-  workspace.service.store.event(before.id, 'turn.failed', JSON.stringify({ type: 'turn.failed', error: { message } }))
+  workspace.service.store.event(before.id, 'turn.failed', message, { type: 'turn.failed', error: { message } })
   workspace.service.store.event(before.id, 'status', 'failed')
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
@@ -94,12 +94,12 @@ test('Claude agents, chats, questions and scheduled work run on a connected Clau
   await page.getByLabel('Name', { exact: true }).fill('Claude engineer')
   await grantFullAccess(page)
   await openAgentSection(page, 'Coding agent & model')
-  await page.getByRole('button', { name: /^Agent, model and reasoning/ }).click()
+  await page.getByRole('button', { name: /^Agent, model, reasoning and speed/ }).click()
   const agentMenu = page.getByRole('dialog', { name: 'Agent & model' })
   await agentMenu.getByRole('radio', { name: 'Claude Code', exact: true }).click()
   await agentMenu.getByRole('radio', { name: 'Sonnet', exact: true }).click()
   await agentMenu.getByRole('button', { name: 'Close', exact: true }).click()
-  await expect(page.getByRole('button', { name: /^Agent, model and reasoning: Claude Code · Sonnet/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^Agent, model, reasoning and speed: Claude Code · Sonnet/ })).toBeVisible()
   await createAgent(page)
   const agent = (await workspace.api('/api/agents')).find((a: { name: string }) => a.name === 'Claude engineer')
   expect(agent.provider).toBe('claude')
@@ -120,12 +120,13 @@ test('Claude agents, chats, questions and scheduled work run on a connected Clau
   const question = (await workspace.api(`/api/chats/${chat.id}`)).questions.find((q: { status: string }) => q.status === 'pending')
   await workspace.api(`/api/chats/${chat.id}/questions/${question.id}/answer`, 'POST', { id: crypto.randomUUID(), answers: { 0: ['Small change'] } })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
-  const task = await workspace.api('/api/tasks', 'POST', { name: 'Claude scheduled work', prompt: 'Review the workspace', agentId: agent.id })
+  const task = await workspace.api('/api/tasks', 'POST', { settings: { name: 'Claude scheduled work', prompt: 'Review the workspace', agentId: agent.id } })
   const run = await workspace.api(`/api/tasks/${task.id}/run`, 'POST')
   await expect.poll(async () => (await workspace.api(`/api/runs/${run.id}`)).status, { timeout: 20000 }).toBe('succeeded')
   // The run is recorded with the Claude account it used.
-  const account = (await workspace.api('/api/accounts')).accounts.find((a: { provider: string }) => a.provider === 'claude')
-  expect((await workspace.api(`/api/runs/${run.id}`)).accountId).toBe(account.id)
+  const completed = await workspace.api(`/api/runs/${run.id}`)
+  const account = (await workspace.api('/api/accounts')).accounts.find((a: { id: string }) => a.id === completed.accountId)
+  expect(account?.provider).toBe('claude')
 })
 
 test('switching coding agents preserves one chat, context and provider selection after reload', async ({ page, workspace }, testInfo) => {
@@ -141,7 +142,7 @@ test('switching coding agents preserves one chat, context and provider selection
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
   const first = await workspace.api(`/api/chats/${chat.id}`)
   await page.goto(workspacePath(`/chats/${chat.id}`))
-  const picker = page.getByRole('button', { name: /^Agent, model and reasoning/ })
+  const picker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
   const menu = page.getByRole('dialog', { name: 'Agent & model' })
   await picker.click()
   await expect(menu.getByRole('radio', { name: 'Codex', exact: true })).toHaveAttribute('aria-checked', 'true')
@@ -152,7 +153,7 @@ test('switching coding agents preserves one chat, context and provider selection
   await expect(menu.getByRole('radio', { name: 'Claude Code default · Opus Fixture (1M context)', exact: true })).toHaveAccessibleDescription('Opus with 1M context · Best for everyday tasks')
   await expect(menu.getByRole('radio', { name: 'Claude Code default · Opus Fixture (1M context)', exact: true })).toHaveAttribute('aria-checked', 'true')
   // The picker value names the model and effort behind the default, not the alias.
-  await expect(picker).toHaveAccessibleName('Agent, model and reasoning: Claude Code · Opus Fixture (1M context) · Medium reasoning')
+  await expect(picker).toHaveAccessibleName('Agent, model, reasoning and speed: Claude Code · Opus Fixture (1M context) · Medium reasoning')
   await menu.getByRole('radio', { name: 'Sonnet', exact: true }).click()
   await expect(menu.getByRole('radiogroup', { name: 'Reasoning' })).toBeVisible()
   await menu.getByRole('button', { name: 'Close', exact: true }).click()
@@ -184,7 +185,7 @@ test('switching coding agents preserves one chat, context and provider selection
   expect(second.run.workspace).toBe(first.run.workspace)
   expect(second.run.chatExecution.context).toContain('Preserve the existing design')
   await page.reload()
-  await expect(picker).toHaveAccessibleName(/^Agent, model and reasoning: Claude Code/)
+  await expect(picker).toHaveAccessibleName(/^Agent, model, reasoning and speed: Claude Code/)
   await picker.click()
   await expect(menu.getByRole('radio', { name: 'Claude Code', exact: true })).toHaveAttribute('aria-checked', 'true')
   await menu.getByRole('radio', { name: 'Codex', exact: true }).click()
@@ -222,6 +223,52 @@ test('an agent idle until its background build finishes says it is waiting, not 
   await expect(page.getByText('Build checked and task finished', { exact: true })).toBeVisible()
 })
 
+test('Claude retries and warnings read as the engine reported them, not as failures', async ({ page, workspace }, testInfo) => {
+  test.setTimeout(120000)
+  await useRelayForHttpMocks(page)
+  if (!(await workspace.api('/api/accounts')).accounts.some((a: { provider: string }) => a.provider === 'claude'))
+    expect((await connectClaude(workspace)).state).toBe('complete')
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'fixture:engine-retry-slow', provider: 'claude' })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const retry = page.locator('.chat-notice').filter({ hasText: 'Claude Code is retrying the request · attempt 1/10' })
+  await expect(retry).toBeVisible({ timeout: 20000 })
+  await expect(retry.getByText('Servers overloaded · HTTP 529 · next attempt after under a second')).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('claude-engine-retry.png'), animations: 'disabled' })
+
+  // Once work continues the retry leaves the conversation; the engine's warning stays.
+  await expect(page.getByText('Answered after the retries', { exact: true })).toBeVisible({ timeout: 20000 })
+  await expect(retry).toHaveCount(0)
+  const warning = page.locator('.chat-notice').filter({ hasText: 'Claude Code warning' })
+  await expect(warning).toBeVisible()
+  await expect(warning.getByText('Context is almost full.')).toBeVisible()
+  await expect(page.getByText('The agent ran into an error')).toHaveCount(0)
+  await page.screenshot({ path: testInfo.outputPath('claude-engine-warning.png'), animations: 'disabled' })
+})
+
+test('a Claude limit that stops requests waits for an account and shows the reported reset', async ({ page, workspace }, testInfo) => {
+  test.setTimeout(120000)
+  expect((await connectClaude(workspace, 'Structured limit', 'fixture-code:structured-limit@example.test')).state).toBe('complete')
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'fixture:usage-limit', provider: 'claude' })
+  try {
+    // The provider's wording is not a known quota message: only the engine's report says so.
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.accountWaitReason, { timeout: 30000 }).toContain('Usage exhausted.')
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    const card = page.getByRole('status', { name: 'Coding agent quota reached' })
+    await expect(card).toBeVisible()
+    const reset = await page.evaluate(() => new Date(1893499200000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))
+    await expect(card.getByText(/Reset announced:/)).toContainText(reset)
+    await expect(page.locator('.chat-notice').filter({ hasText: '5-hour limit reached' })).toHaveCount(0)
+    await page.screenshot({ path: testInfo.outputPath('claude-structured-limit.png'), animations: 'disabled' })
+  }
+  finally {
+    await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
+  }
+})
+
 test('Claude default names follow available metadata without pinning the model', async ({ page, workspace }, testInfo) => {
   await useRelayForHttpMocks(page)
   let displayName = 'Opus Fixture (1M context)'
@@ -257,7 +304,7 @@ test('Claude default names follow available metadata without pinning the model',
   await authenticateWorkspace(page)
   await page.getByLabel('Name', { exact: true }).fill('Claude default labels')
   await openAgentSection(page, 'Coding agent & model')
-  const picker = page.getByRole('button', { name: /^Agent, model and reasoning/ })
+  const picker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
   await picker.click()
   const menu = page.getByRole('dialog', { name: 'Agent & model' })
   await menu.getByRole('radio', { name: 'Claude Code', exact: true }).click()
@@ -277,7 +324,7 @@ test('Claude default names follow available metadata without pinning the model',
     await choice.click()
     await expect(choice).toHaveAttribute('aria-checked', 'true')
     await menu.getByRole('button', { name: 'Close', exact: true }).click()
-    await expect(picker).toHaveAccessibleName(`Agent, model and reasoning: Claude Code · ${name}`)
+    await expect(picker).toHaveAccessibleName(`Agent, model, reasoning and speed: Claude Code · ${name}`)
     await picker.click()
   }
 

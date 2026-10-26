@@ -46,12 +46,9 @@ impl Retention {
     }
 }
 
-/// Legacy chats fall back to their last update or creation time. Reads do not count.
+/// Only work recorded by the current writer advances inactivity; reads do not count.
 fn inactive_due(chat: &Value, cutoff: Option<i64>) -> bool {
-    let activity = chat["lastActivityAt"]
-        .as_i64()
-        .or_else(|| chat["updatedAt"].as_i64())
-        .or_else(|| chat["createdAt"].as_i64());
+    let activity = chat["lastActivityAt"].as_i64();
     is_active(chat)
         && cutoff
             .zip(activity)
@@ -164,7 +161,10 @@ fn unshare_artifacts(db: &Db<'_>, run: &str) -> Result<()> {
 
 /// Drops pending push notifications and MCP grants tied to the chat or its run.
 fn revoke_chat_access(db: &Db<'_>, chat: &Value, id: &str) -> Result<()> {
-    for prefix in ["push-outbox:", "mcp-grant:"] {
+    if let Some(run) = chat["runId"].as_str() {
+        db.revoke_mcp_run(run)?;
+    }
+    for prefix in ["push-outbox:"] {
         for (key, value) in db.keys(prefix)? {
             let same_run = chat["runId"].is_string() && value["runId"] == chat["runId"];
             if value["chatId"] == id || same_run {
@@ -454,7 +454,7 @@ pub(crate) fn can_request_new_session(chat: &Value, run: Option<&Value>) -> bool
     is_active(chat)
         && chat["sessionRestartRequested"] != true
         && run.is_some_and(|run| {
-            (!run["restoredAt"].is_null() || !chat["restoredAt"].is_null())
+            !run["restoredAt"].is_null()
                 && matches!(
                     RunStatus::of(run),
                     Some(RunStatus::Failed | RunStatus::Interrupted)
@@ -592,6 +592,6 @@ mod tests {
             &json!({ "lifecycle": "trash", "updatedAt": 1 }),
             Some(100)
         ));
-        assert!(inactive_due(&json!({ "createdAt": 1 }), Some(100)));
+        assert!(!inactive_due(&json!({ "createdAt": 1 }), Some(100)));
     }
 }

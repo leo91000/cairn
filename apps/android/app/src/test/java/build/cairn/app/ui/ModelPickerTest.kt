@@ -188,4 +188,85 @@ class ModelPickerTest : ModelPickerCases() {
         compose.waitForIdle()
         assert(chosen.first == "auto/claude-sonnet-4-5") { chosen.toString() }
     }
+
+    @Test
+    fun speedIsKeptAcrossModelsAndOnlyClaimedWhereCodexOffersIt() {
+        val fast = ServiceTier("priority", "Fast", "2x speed, increased usage")
+        val ultrafast =
+            ServiceTier("ultrafast", "Ultrafast", "Fastest speed, highest usage", limited = true)
+        val catalog =
+            ModelCatalog(
+                listOf(
+                    CodingAgentModel(
+                        "gpt-6-astra",
+                        "GPT-6 Astra",
+                        isDefault = true,
+                        defaultReasoningEffort = "medium",
+                        supportedReasoningEfforts = listOf(ReasoningOption("medium")),
+                        serviceTiers = listOf(fast, ultrafast),
+                    ),
+                    CodingAgentModel(
+                        "gpt-6-luna",
+                        "GPT-6 Luna",
+                        defaultReasoningEffort = "low",
+                        supportedReasoningEfforts = listOf(ReasoningOption("low")),
+                        serviceTiers = emptyList(),
+                    ),
+                )
+            )
+        var chosen = Triple("", "", "")
+        compose.setContent {
+            var model by remember { mutableStateOf("") }
+            var reasoning by remember { mutableStateOf("") }
+            var speed by remember { mutableStateOf("") }
+            CairnTheme("light") {
+                Surface(Modifier.fillMaxSize()) {
+                    ModelPicker(
+                        catalog,
+                        model,
+                        reasoning,
+                        "gpt-6-astra",
+                        inherit = true,
+                        speed = speed,
+                        defaultSpeed = "priority",
+                        changeSpeed = {
+                            speed = it
+                            chosen = Triple(model, reasoning, it)
+                        },
+                    ) { m, r ->
+                        model = m
+                        reasoning = r
+                        chosen = Triple(m, r, speed)
+                    }
+                }
+            }
+        }
+        // The agent's Fast speed is inherited and named with Codex's words.
+        compose.onNodeWithContentDescription("vitesse Fast", substring = true).assertExists()
+        compose.onNodeWithTag("model-picker").performClick()
+        compose.onNodeWithTag("speed-default").assertIsSelected()
+        compose.onNodeWithText("Défaut Agent · Fast").assertExists()
+        compose.onNodeWithText("Ultrafast").performClick()
+        compose.waitForIdle()
+        assert(chosen.third == "ultrafast") { chosen.toString() }
+        compose.onNodeWithText("Tous vos comptes Codex", substring = true).assertExists()
+        capture("speed-ultrafast")
+
+        // A model change resets the reasoning level, not the speed, and never claims a speed
+        // the new model lacks.
+        compose.onNodeWithText("GPT-6 Luna").performClick()
+        compose.waitForIdle()
+        assert(chosen == Triple("gpt-6-luna", "", "ultrafast")) { chosen.toString() }
+        compose.onNodeWithText("ne liste pas la vitesse Ultrafast", substring = true).assertExists()
+        capture("speed-unavailable")
+        compose
+            .onNode(hasText("Standard") and hasAnyAncestor(hasTestTag("speed-options")))
+            .performClick()
+        compose.waitForIdle()
+        assert(chosen.third == STANDARD_SPEED) { chosen.toString() }
+        compose.onNodeWithText("Terminé").performClick()
+        compose
+            .onNodeWithContentDescription("vitesse Ultrafast", substring = true)
+            .assertDoesNotExist()
+    }
 }

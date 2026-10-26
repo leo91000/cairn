@@ -58,6 +58,7 @@ impl Worker {
                 recover_or_wait(s, &run).await?;
             }
         }
+        crate::waits::tick_groups(s, &active).await?;
         s.chat_tick(&active).await?;
         crate::waits::tick_missions(s, &active).await?;
         if s.shutdown.is_cancelled() || s.store.kv("deployment-lease").await?.is_some() {
@@ -156,6 +157,9 @@ impl Worker {
         {
             return Ok(());
         }
+        if super::retry::expire(s, &run_id).await? {
+            return Ok(());
+        }
         // Serialize only the preparation window, until placement has reserved
         // the node slot. Running VMs use node slots without a global ceiling.
         let preparation = if execution::uses_vm(&run, &s.config) {
@@ -192,7 +196,12 @@ impl Worker {
         let provider = Provider::of_run(&run)?;
         timing.next("account_acquire");
         let model = text(&run["snapshot"]["agent"], "model");
-        let account = match s.accounts.acquire(s, &run_id, provider, model).await {
+        let speed = text(&run["snapshot"]["agent"], "speed");
+        let account = match s
+            .accounts
+            .acquire_for(s, &run_id, provider, model, speed)
+            .await
+        {
             Ok(account) => account,
             Err(error) => return report_account_wait(s, &run, provider, &error).await,
         };
@@ -245,8 +254,8 @@ impl Worker {
         let expected_message = crate::waits::execution_id(prepared).clone();
         let eligible = s
             .store
-            .read(move |db| {
-                if !eligible_run(db, &id)? {
+            .transaction(move |db| {
+                if !eligible_run(db, &id)? || super::retry::expire_in(db, &id)? {
                     return Ok(false);
                 }
                 let current = db
@@ -460,6 +469,9 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
             });
             if waiting {
                 patch["outcome"] = Value::Null;
+            } else {
+                // A compaction completed before the restart settles like one that did not.
+                crate::chats::keep_reply_after_compaction(&current, &mut patch);
             }
             db.patch_run(id, &patch)?;
             return Ok(false);
@@ -523,6 +535,7 @@ async fn requeue_after_error(store: &Store, run_id: &str, lease: Option<Lease>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_fixture::AgentFixture;
     use std::{future::Future, task::Poll};
 
     async fn fixture() -> (
@@ -557,7 +570,7 @@ mod tests {
         service.store.transaction({
             let run_id = run_id.clone();
             move |db| {
-                let run = json!({ "id": run_id, "status": RunStatus::Queued });
+                let run = json!({ "id": run_id, "status": RunStatus::Queued, "snapshot": { "agent": { "id": crate::config::MAIN_AGENT_ID, "provider": "codex" } } });
                 db.0.execute(
                     "INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'','queued',0,?2)",
                     rusqlite::params![run_id, run.to_string()],
@@ -747,6 +760,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_completed_before_restart_keeps_the_last_reply_and_outcome() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let outcome = json!({ "status": "completed", "messageId": "first" });
+                let record = json!({
+                    "id": "chat-run",
+                    "taskId": "chat",
+                    "trigger": "chat",
+                    "status": "queued",
+                    "createdAt": 0,
+                    "recoveryPending": true,
+                    "sessionId": "saved",
+                    "summary": "Last reply",
+                    "finishedAt": 500,
+                    // Resuming the interrupted compaction cleared the run's outcome.
+                    "outcome": null,
+                    "chatExecution": {
+                        "messageId": "compact:fixture",
+                        "text": "",
+                        "attachments": [],
+                        "recovery": false,
+                        "operation": "compact",
+                        "previous": { "summary": "Last reply", "finishedAt": 500, "outcome": outcome },
+                    },
+                });
+                db.add_run(&record, None)?;
+
+                // The compaction's `turn.completed` was saved; the manager stopped before
+                // settling the run, and a compaction leaves no reply in the checkpoint.
+                let checkpoint = RunCheckpoint::from_value(json!({ "completed": true }))?;
+                assert_eq!(checkpoint.last_message(), "");
+                assert!(!finish_recovery(db, "chat-run", Some(&checkpoint))?);
+
+                let recovered = db.run("chat-run")?.unwrap();
+                assert_eq!(recovered["status"], "succeeded");
+                assert_eq!(recovered["recoveryPending"], false);
+                assert_eq!(recovered["summary"], "Last reply");
+                assert_eq!(recovered["finishedAt"], 500);
+                assert_eq!(recovered["outcome"], outcome);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn completed_turn_with_late_controller_failure_settles_without_relaunch() {
         let (_root, service, _chat_id, run_id, _workspace) = fixture().await;
         let checkpoint = super::super::checkpoint::Checkpoint::new(
@@ -877,6 +938,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_retry_that_expires_during_preparation_cannot_register() {
+        let (_root, service, _chat_id, run_id, workspace) = fixture().await;
+        let prepared = service.store.patch_run(&run_id, json!({
+            "retry": { "attempt": 1, "limit": 5, "nextAttemptAt": now() - 1, "deadlineAt": now() + 60_000 },
+        })).await.unwrap();
+        // Admission captured an eligible run, then waits behind asynchronous work.
+        let active = service.worker.active.lock().await;
+        let registration = service
+            .worker
+            .register(&service, &prepared, CancellationToken::new());
+        tokio::pin!(registration);
+        std::future::poll_fn(|cx| {
+            assert!(registration.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        service
+            .store
+            .patch_run(&run_id, json!({ "retry": { "deadlineAt": now() - 1 } }))
+            .await
+            .unwrap();
+        drop(active);
+        assert!(!registration.await.unwrap());
+        let stopped = service.store.run(&run_id).await.unwrap();
+        assert_eq!(stopped["status"], RunStatus::Failed);
+        assert!(stopped["retry"]["nextAttemptAt"].is_null());
+        assert!(service.worker.active.lock().await.is_empty());
+        assert_eq!(
+            tokio::fs::read_to_string(workspace.join("work.txt"))
+                .await
+                .unwrap(),
+            "Private work"
+        );
+    }
+
+    #[tokio::test]
     async fn deletion_committed_before_registration_prevents_stale_admission() {
         let (_root, service, chat_id, run_id, workspace) = fixture().await;
         let prepared = service.store.run(&run_id).await.unwrap();
@@ -963,7 +1060,7 @@ mod tests {
     async fn an_admission_prepared_before_merge_cannot_register_after_resume() {
         let (_root, service, chat_id, run_id, _workspace) = fixture().await;
         let source = service
-            .agent(json!({ "name": "Source" }), None)
+            .agent_fixture(json!({ "name": "Source" }), None)
             .await
             .unwrap();
         let prepared = service
@@ -997,9 +1094,9 @@ mod tests {
             .await
             .unwrap();
         service
-            .merge_agents(json!({
+            .merge_agents(serde_json::from_value(json!({
                 "sourceId": source["id"], "targetId": crate::config::MAIN_AGENT_ID, "confirm": true,
-            }))
+            })).unwrap())
             .await
             .unwrap();
         let resumed = service.worker.resume(&service, &run_id).await.unwrap();

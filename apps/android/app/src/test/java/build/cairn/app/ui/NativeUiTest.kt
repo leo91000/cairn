@@ -33,8 +33,25 @@ class NativeUiTest {
             installation =
                 Installation("fixture", "Installation de test", InstallationRole.Owner, true),
             ready = true,
-            agents = listOf(Agent(id = "agent", name = "Reviewer")),
-            projects = listOf(Project(id = "project", name = "Cairn")),
+            agents =
+                listOf(
+                    Agent(
+                        exclusiveNodes = emptyList(),
+                        plugins = emptyList(),
+                        revision = "",
+                        createdAt = 0,
+                        access =
+                            AccessPolicy(
+                                mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                                projects = null,
+                                skills = null,
+                                mcps = null,
+                            ),
+                        id = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                        name = "Reviewer",
+                    )
+                ),
+            projects = listOf(Project(id = "46d045dd-9bce-51e3-8a99-65aa9384efc9", name = "Cairn")),
         )
 
     @Test
@@ -43,7 +60,14 @@ class NativeUiTest {
         val restoration = StateRestorationTester(compose)
         restoration.setContent {
             CairnTheme {
-                TaskEditor(vm, workspace, Task(agentId = "agent", projectId = "project")) {}
+                TaskEditor(
+                    vm,
+                    workspace,
+                    Task(
+                        agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                        projectId = "46d045dd-9bce-51e3-8a99-65aa9384efc9",
+                    ),
+                ) {}
             }
         }
         compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
@@ -72,18 +96,18 @@ class NativeUiTest {
                         tasks =
                             listOf(
                                 Task(
-                                    id = "a",
+                                    id = "8a025d72-4937-53c0-a41d-820414dc655d",
                                     name = "Revue quotidienne",
-                                    agentId = "agent",
-                                    projectId = "project",
+                                    agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                                    projectId = "46d045dd-9bce-51e3-8a99-65aa9384efc9",
                                     cron = "0 9 * * *",
                                     nextRun = 1789405200000,
                                 ),
                                 Task(
-                                    id = "b",
+                                    id = "00eada4d-84f3-57cb-837e-3c023a643647",
                                     name = "Ancienne mission",
-                                    agentId = "agent",
-                                    projectId = "project",
+                                    agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                                    projectId = "46d045dd-9bce-51e3-8a99-65aa9384efc9",
                                     archived = true,
                                     enabled = false,
                                 ),

@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const MAX_ATTEMPTS: u64 = 3;
+pub const MAX_ATTEMPTS: u64 = 5;
+pub const MAX_RECOVERY_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -18,6 +19,9 @@ pub enum FailureKind {
 pub struct Cause {
     pub kind: FailureKind,
     pub message: String,
+    /// The adapter confirmed that no new agent turn was submitted.
+    #[serde(default)]
+    pub startup: bool,
 }
 
 impl Cause {
@@ -71,6 +75,8 @@ impl Cause {
             return None;
         }
 
+        let startup = error["recoveryPhase"] == "startup"
+            && matches!(code, "cairn_startup_timeout" | "cairn_startup_connection");
         let kind = [code, info_code]
             .iter()
             .find_map(|code| match *code {
@@ -79,6 +85,8 @@ impl Cause {
                 | "responseStreamConnectionFailed"
                 | "responseStreamDisconnected" => Some(FailureKind::Connection),
                 "request_timeout" | "requestTimeout" => Some(FailureKind::Timeout),
+                "cairn_startup_timeout" if startup => Some(FailureKind::Timeout),
+                "cairn_startup_connection" if startup => Some(FailureKind::Connection),
                 "rate_limit_exceeded" | "rateLimitExceeded" => Some(FailureKind::RateLimit),
                 "server_error"
                 | "internal_error"
@@ -116,8 +124,42 @@ impl Cause {
             .as_str()
             .unwrap_or("Temporary agent failure.")
             .to_owned();
-        Some(Self { kind, message })
+        Some(Self {
+            kind,
+            message,
+            startup,
+        })
     }
+}
+
+/// Only an adapter still before turn submission may use this classification.
+/// An uncertain turn/start or tool operation must not enter this path.
+pub fn startup_failure(error: &crate::error::Error) -> Option<Value> {
+    let timeout = error.status == 504
+        && [
+            "initialize",
+            "account/login/start",
+            "thread/resume",
+            "thread/read",
+            "thread/turns/list",
+            "thread/items/list",
+        ]
+        .iter()
+        .any(|method| error.message == format!("Codex {method} request timed out."));
+    let disconnected = error.status == 503
+        && error.message
+            == "Codex disconnected before finishing the operation. Try again or resume the conversation.";
+    if !timeout && !disconnected {
+        return None;
+    }
+    Some(serde_json::json!({
+        "type": "turn.failed",
+        "error": {
+            "code": if timeout { "cairn_startup_timeout" } else { "cairn_startup_connection" },
+            "recoveryPhase": "startup",
+            "message": error.message,
+        },
+    }))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -126,6 +168,10 @@ pub struct Retry {
     pub attempt: u64,
     pub limit: u64,
     pub next_attempt_at: Option<i64>,
+    #[serde(default)]
+    pub started_at: Option<i64>,
+    #[serde(default)]
+    pub deadline_at: Option<i64>,
     pub cause: Cause,
 }
 
@@ -139,14 +185,32 @@ impl Retry {
         if attempt >= MAX_ATTEMPTS {
             return None;
         }
-        let base_ms = 30_000_i64 * (1 << attempt);
+        let started_at = previous
+            .and_then(|retry| retry["startedAt"].as_i64())
+            .unwrap_or(at);
+        let deadline_at = previous
+            .and_then(|retry| retry["deadlineAt"].as_i64())
+            .unwrap_or_else(|| started_at.saturating_add(MAX_RECOVERY_MS));
+        let base_ms = 5_000_i64 * (1 << attempt);
         let jitter_ms = rand::random_range(0..=base_ms / 5);
+        let next_attempt_at = at.saturating_add(base_ms + jitter_ms);
+        if next_attempt_at >= deadline_at {
+            return None;
+        }
         Some(Self {
             attempt: attempt + 1,
             limit: MAX_ATTEMPTS,
-            next_attempt_at: Some(at.saturating_add(base_ms + jitter_ms)),
+            next_attempt_at: Some(next_attempt_at),
+            started_at: Some(started_at),
+            deadline_at: Some(deadline_at),
             cause,
         })
+    }
+
+    pub fn expired(run: &Value, at: i64) -> bool {
+        run["retry"]["deadlineAt"]
+            .as_i64()
+            .is_some_and(|deadline| at >= deadline)
     }
 
     pub fn waiting(run: &Value, at: i64) -> bool {
@@ -160,6 +224,68 @@ impl Retry {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn startup_timeouts_are_explicit_and_never_include_turn_or_tool_submission() {
+        for method in [
+            "initialize",
+            "account/login/start",
+            "thread/resume",
+            "thread/read",
+            "thread/turns/list",
+            "thread/items/list",
+        ] {
+            let error =
+                crate::error::Error::gateway_timeout(format!("Codex {method} request timed out."));
+            let event = startup_failure(&error).unwrap();
+            let cause = Cause::classify(&event["error"]).unwrap();
+            assert!(cause.startup);
+            assert_eq!(cause.kind, FailureKind::Timeout);
+        }
+        for method in ["turn/start", "turn/steer", "command/exec", "unknown"] {
+            let error =
+                crate::error::Error::gateway_timeout(format!("Codex {method} request timed out."));
+            assert!(startup_failure(&error).is_none());
+        }
+        for status in [400, 401, 403, 409, 500, 502] {
+            assert!(
+                startup_failure(&crate::error::Error::new(
+                    status,
+                    "Codex account/login/start request timed out."
+                ))
+                .is_none()
+            );
+        }
+        assert!(
+            Cause::classify(
+                &serde_json::json!({ "code": "cairn_startup_timeout", "message": "unconfirmed" })
+            )
+            .is_none()
+        );
+        assert!(
+            startup_failure(&crate::error::Error::unavailable(
+                "Account authentication is unavailable."
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn the_recovery_window_survives_restart_and_does_not_schedule_after_its_deadline() {
+        let cause = Cause::classify(&serde_json::json!({ "code": "request_timeout" })).unwrap();
+        let first = Retry::next(None, cause.clone(), 1000).unwrap();
+        let previous = serde_json::to_value(&first).unwrap();
+        assert_eq!(first.started_at, Some(1000));
+        assert_eq!(first.deadline_at, Some(1000 + MAX_RECOVERY_MS));
+        let next = Retry::next(Some(&previous), cause.clone(), 3000).unwrap();
+        assert_eq!(next.started_at, first.started_at);
+        assert_eq!(next.deadline_at, first.deadline_at);
+        assert!(Retry::next(Some(&previous), cause, 1000 + MAX_RECOVERY_MS).is_none());
+        assert!(Retry::expired(
+            &serde_json::json!({ "retry": first }),
+            1000 + MAX_RECOVERY_MS
+        ));
+    }
 
     #[test]
     fn known_transient_codes_and_the_reported_routing_error_are_retriable() {
@@ -249,10 +375,10 @@ mod tests {
         let cause = Cause::classify(&json!({ "message": "workspace routing discovery timed out" }))
             .unwrap();
         let mut previous = None;
-        for attempt in 1..=3 {
+        for attempt in 1..=MAX_ATTEMPTS {
             let retry = Retry::next(previous.as_ref(), cause.clone(), 1000).unwrap();
             assert_eq!(retry.attempt, attempt);
-            let base = 30_000 * (1 << (attempt - 1));
+            let base = 5_000 * (1 << (attempt - 1));
             let due = retry.next_attempt_at.unwrap();
             assert!((1000 + base..=1000 + base + base / 5).contains(&due));
             previous = Some(serde_json::to_value(retry).unwrap());
