@@ -10,7 +10,7 @@ data class GetRunInput(
     val runId: String,
 ) {
     init {
-        require(after <= 9007199254740991L)
+        require(after in 0L..9007199254740991L)
         java.util.UUID.fromString(runId)
     }
 }

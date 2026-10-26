@@ -297,9 +297,11 @@ impl Execution<'_> {
         let state_home = self.prepare_state_home(&prepared).await?;
         let patch = crate::runs::RunChanges {
             workspace: Some(serde_json::from_value(prepared["cwd"].clone())?),
-            boundary: Some(
-                serde_json::json!({"workspaces": prepared["workspaces"],"isolated": prepared["isolated"],"executionBackend": prepared["backend"]}),
-            ),
+            boundary: Some(serde_json::json!({
+                "workspaces": prepared["workspaces"],
+                "isolated": prepared["isolated"],
+                "executionBackend": prepared["backend"],
+            })),
             ..Default::default()
         };
         s.store.change_run(&self.id, patch).await?;

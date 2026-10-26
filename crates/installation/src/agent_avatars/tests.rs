@@ -157,7 +157,10 @@ impl Fixture {
             "description": "Ship tested software",
             "instructions": "PRIVATE INSTRUCTIONS NEVER SENT",
         });
-        self.json("POST", "/api/agents", json!({ "settings": { "exclusiveNodes": [], "plugins": [], "access": cairn_contracts::AccessPolicy::default(), "name": agent["name"], "description": agent["description"], "instructions": agent["instructions"] }, "review": {} })).await
+        self.json("POST", "/api/agents", json!({
+            "settings": { "exclusiveNodes": [], "plugins": [], "access": cairn_contracts::AccessPolicy::default(), "name": agent["name"], "description": agent["description"], "instructions": agent["instructions"] },
+            "review": {},
+        })).await
     }
 
     async fn wait(&self, id: &str, status: &str) -> Value {

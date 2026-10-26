@@ -735,7 +735,11 @@ async fn deferred_target_conversations_are_not_finished_and_cycles_are_rejected(
         )
         .await
         .unwrap();
-    let input = json!({ "conditions": [{ "type": "run_finished", "runId": target["id"] }], "timeoutSeconds": 420, "reason": "Join other work" });
+    let input = json!({
+        "conditions": [{ "type": "run_finished", "runId": target["id"] }],
+        "timeoutSeconds": 420,
+        "reason": "Join other work",
+    });
     assert_eq!(
         wait_for::schedule(&f.s, &f.token, &input)
             .await
@@ -1241,7 +1245,10 @@ async fn measure_wait_metadata() {
                 let condition = if mode == "delay" {
                     json!({ "type": "delay", "seconds": 420 })
                 } else {
-                    json!({ "type": "at", "date": chrono::DateTime::from_timestamp_millis(now() + 420_000).unwrap().to_rfc3339() })
+                    json!({
+                        "type": "at",
+                        "date": chrono::DateTime::from_timestamp_millis(now() + 420_000).unwrap().to_rfc3339(),
+                    })
                 };
                 wait_for::schedule(
                     &f.s,

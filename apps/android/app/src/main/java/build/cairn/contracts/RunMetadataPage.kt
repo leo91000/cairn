@@ -23,6 +23,8 @@ sealed interface RunMetadataPage {
         val preview: RunPreview,
         val totalBytes: Long,
     ) : RunMetadataPage {
-        init {}
+        init {
+            require(totalBytes >= 0L)
+        }
     }
 }

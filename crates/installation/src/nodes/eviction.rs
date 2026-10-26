@@ -662,18 +662,46 @@ mod tests {
             assert!(candidate(db, &run, time - IDLE_MS, None)?.is_some());
             let original = db.run(&run)?.unwrap();
             for change in [
-                crate::runs::RunChanges { status: Some(RunStatus::Queued), ..Default::default() },
-                crate::runs::RunChanges { status: Some(RunStatus::Running), ..Default::default() },
-                crate::runs::RunChanges { recovery_pending: Some(true), ..Default::default() },
-                crate::runs::RunChanges { boundary: Some(json!({ "moveRequest": {} })), ..Default::default() },
-                crate::runs::RunChanges { boundary: Some(json!({ "nodeState": "restoring" })), ..Default::default() },
-                crate::runs::RunChanges { boundary: Some(json!({ "backup": { "status": "error" } })), ..Default::default() },
-                crate::runs::RunChanges { boundary: Some(json!({ "backup": { "status": "saving" } })), ..Default::default() },
-                crate::runs::RunChanges { boundary: Some(json!({ "backup": { "status": "ready", "requestedRevision": 3, "acknowledgedRevision": 2 } })), ..Default::default() },
+                crate::runs::RunChanges {
+                    status: Some(RunStatus::Queued),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    status: Some(RunStatus::Running),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    recovery_pending: Some(true),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    boundary: Some(json!({ "moveRequest": {} })),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    boundary: Some(json!({ "nodeState": "restoring" })),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    boundary: Some(json!({ "backup": { "status": "error" } })),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    boundary: Some(json!({ "backup": { "status": "saving" } })),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    boundary: Some(json!({ "backup": { "status": "ready", "requestedRevision": 3, "acknowledgedRevision": 2 } })),
+                    ..Default::default()
+                },
             ] {
                 db.change_run(&run, change)?;
                 assert!(candidate(db, &run, time - IDLE_MS, None)?.is_none());
-                db.change_run(&run, crate::runs::RunChanges { status: Some(RunStatus::Succeeded), recovery_pending: Some(false), ..Default::default() })?;
+                db.change_run(&run, crate::runs::RunChanges {
+                    status: Some(RunStatus::Succeeded),
+                    recovery_pending: Some(false),
+                    ..Default::default()
+                })?;
                 db.update_run_boundary(&run, &json!({ "moveRequest": null, "nodeState": null, "backup": original["backup"] }))?;
             }
             let saved = db.kv(&checkpoint::key(&run))?.unwrap();

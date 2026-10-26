@@ -12,9 +12,8 @@ data class ListRunsInput(
     val taskId: String? = null,
 ) {
     init {
-        require(limit >= 1)
-        require(limit <= 100)
-        require(offset <= 9007199254740991L)
+        require(limit in 1..100)
+        require(offset in 0L..9007199254740991L)
         status?.let {
             require(
                 Regex("^(queued|running|waiting|succeeded|failed|cancelled|interrupted)\$")

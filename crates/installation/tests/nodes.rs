@@ -1399,7 +1399,10 @@ async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_gran
     })).await;
 
     let mut record = run_record(&run, RunStatus::Running);
-    record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID, "provider": "codex", "access": { "backend": "native" } }, "projects": [project_record] });
+    record["snapshot"] = json!({
+        "agent": { "id": MAIN_AGENT_ID, "provider": "codex", "access": { "backend": "native" } },
+        "projects": [project_record],
+    });
     record["workspaces"] =
         json!([{ "projectId": project, "revision": "a".repeat(40), "path": project_path }]);
     record["nativePrincipals"] = json!([person]);
@@ -4670,8 +4673,17 @@ async fn coalesced_final_publication_survives_a_new_attempt_and_preserves_later_
     let disk_owner = cairn_installation::storage::environment::ownership(&state, &run, "busy")
         .await
         .unwrap();
-    let manifest = json!({ "version": 1, "size": 4096, "blockSize": snapshots::BLOCK, "blocks": [{ "offset": 0, "size": 4096, "hash": null }] });
-    let source = json!({ "master": "http://localhost:4310/", "grant": "synthetic-publication", "policy": { "reserveMiB": 64, "reservePercent": 1 } });
+    let manifest = json!({
+        "version": 1,
+        "size": 4096,
+        "blockSize": snapshots::BLOCK,
+        "blocks": [{ "offset": 0, "size": 4096, "hash": null }],
+    });
+    let source = json!({
+        "master": "http://localhost:4310/",
+        "grant": "synthetic-publication",
+        "policy": { "reserveMiB": 64, "reservePercent": 1 },
+    });
     let remote = RemoteSource::new(
         &source,
         tokio::runtime::Handle::current(),

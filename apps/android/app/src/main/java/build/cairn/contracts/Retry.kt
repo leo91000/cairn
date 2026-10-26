@@ -17,9 +17,7 @@ data class Retry(
     val startedAt: Long? = null,
 ) {
     init {
-        require(attempt >= 1)
-        require(attempt <= 5)
-        require(limit >= 5)
-        require(limit <= 5)
+        require(attempt in 1..5)
+        require(limit in 5..5)
     }
 }

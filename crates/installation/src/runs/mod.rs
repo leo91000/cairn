@@ -41,7 +41,35 @@ pub const RUN_FIELDS: &[&str] = &[
 ];
 
 // One projection of lifecycle columns; the full and summary views share it.
-macro_rules! wire_fields { () => { r#"'$.id',id,'$.taskId',task_id,'$.projectId',project_id,'$.status',status,'$.trigger',trigger,'$.createdAt',created_at,'$.startedAt',started_at,'$.finishedAt',finished_at,'$.error',error,'$.sessionId',session_id,'$.workspace',workspace,'$.workspaceCleanedAt',workspace_cleaned_at,'$.recoveryPending',json(CASE WHEN recovery_pending THEN 'true' ELSE 'false' END),'$.resumeAvailable',json(CASE WHEN resume_available THEN 'true' ELSE 'false' END),'$.resumeCount',resume_count,'$.cancelRequestedAt',cancel_requested_at,'$.accountId',account_id,'$.accountName',account_name,'$.accountWaitReason',account_wait_reason,'$.accountRequired',account_required,'$.capacityWaitUntil',capacity_wait_until,'$.requestedBy',json(requested_by),'$.retry',json(CASE WHEN retry_attempt IS NULL THEN NULL ELSE json_object('attempt',retry_attempt,'limit',retry_limit,'nextAttemptAt',retry_next_at,'startedAt',retry_started_at,'deadlineAt',retry_deadline_at,'cause',json(retry_cause)) END)"# }; }
+macro_rules! wire_fields {
+    () => {
+        r#"
+  '$.id',id,
+  '$.taskId',task_id,
+  '$.projectId',project_id,
+  '$.status',status,
+  '$.trigger',trigger,
+  '$.createdAt',created_at,
+  '$.startedAt',started_at,
+  '$.finishedAt',finished_at,
+  '$.error',error,
+  '$.sessionId',session_id,
+  '$.workspace',workspace,
+  '$.workspaceCleanedAt',workspace_cleaned_at,
+  '$.recoveryPending',json(CASE WHEN recovery_pending THEN 'true' ELSE 'false' END),
+  '$.resumeAvailable',json(CASE WHEN resume_available THEN 'true' ELSE 'false' END),
+  '$.resumeCount',resume_count,
+  '$.cancelRequestedAt',cancel_requested_at,
+  '$.accountId',account_id,
+  '$.accountName',account_name,
+  '$.accountWaitReason',account_wait_reason,
+  '$.accountRequired',account_required,
+  '$.capacityWaitUntil',capacity_wait_until,
+  '$.requestedBy',json(requested_by),
+  '$.retry',json(CASE WHEN retry_attempt IS NULL THEN NULL ELSE json_object('attempt',retry_attempt,'limit',retry_limit,'nextAttemptAt',retry_next_at,'startedAt',retry_started_at,'deadlineAt',retry_deadline_at,'cause',json(retry_cause)) END)
+"#
+    };
+}
 
 pub(crate) const SCHEMA: &str = concat!(
     r#"CREATE TABLE runs(

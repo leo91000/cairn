@@ -423,7 +423,11 @@ async fn deleted_tasks_are_finished_in_status_and_waits() {
     let child_turn = f.running(child).await;
     f.finish(&child_turn).await;
     f.s.store
-        .change_run(&child_turn.run,cairn_installation::runs::RunChanges { summary : Some(("A report that must disappear when deleted").to_owned()), boundary: Some(serde_json::json!({"outcome": { "status": "completed", "reason": "A private outcome" }})), ..Default::default() })
+        .change_run(&child_turn.run,cairn_installation::runs::RunChanges {
+            summary : Some(("A report that must disappear when deleted").to_owned()),
+            boundary: Some(serde_json::json!({"outcome": { "status": "completed", "reason": "A private outcome" }})),
+            ..Default::default()
+        })
         .await
         .unwrap();
     f.s.chat_trash(child, true).await.unwrap();
@@ -480,7 +484,13 @@ async fn the_requester_waits_for_its_task_and_reads_the_report() {
     assert_eq!(resumed["run"]["status"], "succeeded", "Still waiting");
 
     f.s.store
-        .change_run(&delegated_turn.run,cairn_installation::runs::RunChanges { status : Some(cairn_contracts::RunStatus::Succeeded), finished_at : Some(Some(cairn_installation::config::now())), summary : Some(("**2 findings**\n\n1. Retry can reorder a steered message.").to_owned()), boundary: Some(serde_json::json!({"outcome": { "status": "completed", "reason": "Reviewed", "evidence": ["diff"] }})), ..Default::default() })
+        .change_run(&delegated_turn.run,cairn_installation::runs::RunChanges {
+            status : Some(cairn_contracts::RunStatus::Succeeded),
+            finished_at : Some(Some(cairn_installation::config::now())),
+            summary : Some(("**2 findings**\n\n1. Retry can reorder a steered message.").to_owned()),
+            boundary: Some(serde_json::json!({"outcome": { "status": "completed", "reason": "Reviewed", "evidence": ["diff"] }})),
+            ..Default::default()
+        })
         .await
         .unwrap();
     f.s.chat_tick(&HashSet::new()).await.unwrap();

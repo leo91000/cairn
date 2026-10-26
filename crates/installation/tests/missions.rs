@@ -31,7 +31,14 @@ async fn mission_commands_preserve_revisions_retries_relations_and_frozen_runs()
     let s = Service::new(common::config(root.path())).await.unwrap();
     std::fs::create_dir_all(&s.config.home).unwrap();
     let creation = id();
-    let settings = json!({"name":"  Mission  ","prompt":"  Inspect  ","agentId":MAIN_AGENT_ID,"cron":"0 9 * * *","skills":[],"tags":["review","review"]});
+    let settings = json!({
+        "name":"  Mission  ",
+        "prompt":"  Inspect  ",
+        "agentId":MAIN_AGENT_ID,
+        "cron":"0 9 * * *",
+        "skills":[],
+        "tags":["review","review"],
+    });
     let command = json!({"creationId":creation,"settings":settings});
     let (status, first) = request(&s, "POST", "/api/tasks", command.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
@@ -42,7 +49,11 @@ async fn mission_commands_preserve_revisions_retries_relations_and_frozen_runs()
     assert_eq!(first["skills"], json!([]));
     assert_eq!(first["tags"], json!(["review", "review"]));
     let path = format!("/api/tasks/{creation}");
-    let replacement = json!({"taskId":creation,"revision":first["revision"],"settings":{ "name":"Updated","prompt":"New work","agentId":MAIN_AGENT_ID,"skills":null }});
+    let replacement = json!({
+        "taskId":creation,
+        "revision":first["revision"],
+        "settings":{ "name":"Updated","prompt":"New work","agentId":MAIN_AGENT_ID,"skills":null },
+    });
     let (left, right) = tokio::join!(
         request(&s, "PUT", &path, replacement.clone()),
         request(&s, "PUT", &path, replacement)

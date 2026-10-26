@@ -16,6 +16,6 @@ data class PluginSigninFlow(
     val verificationUriComplete: String? = null,
 ) {
     init {
-        require(expiresAt <= 9007199254740991L)
+        require(expiresAt in 0L..9007199254740991L)
     }
 }

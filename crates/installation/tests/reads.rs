@@ -100,7 +100,6 @@ impl App {
             "finishedAt": now(),
             "summary": "## Release ready\n\nI **shipped** the `0.53` notes.",
         });
-        let (run_id, task) = (run.clone(), task.to_owned());
         self.service
             .store
             .transaction(move |db| {

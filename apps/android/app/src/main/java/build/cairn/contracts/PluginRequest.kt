@@ -13,6 +13,7 @@ data class PluginRequest(
     val userId: String = "",
 ) {
     init {
-        require(updatedAt <= 9007199254740991L)
+        require(mentions >= 0L)
+        require(updatedAt in 0L..9007199254740991L)
     }
 }

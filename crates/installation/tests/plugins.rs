@@ -1393,7 +1393,14 @@ async fn rate_limits_and_changed_agent_access_stop_admission() {
         let result = common::save_plugin(
             &s,
             "discord",
-            &json!({ "name": "Bad", "settings": settings, "userIds": ["300"], "agentId": connection.agent_id, "enabled": false, "token": "t" }),
+            &json!({
+                "name": "Bad",
+                "settings": settings,
+                "userIds": ["300"],
+                "agentId": connection.agent_id,
+                "enabled": false,
+                "token": "t",
+            }),
             None,
         )
         .await;
@@ -2356,7 +2363,16 @@ async fn optional_questions_are_not_republished_on_later_turns() {
         .await
         .unwrap();
     let question = "d".repeat(64);
-    s.question_receive(run, json!({ "id": question, "blocking": false, "fields": [{ "id": "0", "title": "Optional?", "secret": false, "options": [] }] })).await.unwrap();
+    s.question_receive(
+        run,
+        json!({
+            "id": question,
+            "blocking": false,
+            "fields": [{ "id": "0", "title": "Optional?", "secret": false, "options": [] }],
+        }),
+    )
+    .await
+    .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     s.question_release(run, Some(&question)).await.unwrap();
     s.store
@@ -2501,8 +2517,14 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     let (mock, server) = mock(&s).await;
     for invalid in [
         json!({ "manifest": pinger("1.0.0", &["onepassword.read"])["manifest"], "source": "return {}" }),
-        json!({ "manifest": { "id": "discord", "name": "Fake", "version": "1", "apiVersion": 2, "capabilities": [] }, "source": "return {}" }),
-        json!({ "manifest": { "id": "broken", "name": "Broken", "version": "1", "apiVersion": 2, "capabilities": [] }, "source": "return function() end" }),
+        json!({
+            "manifest": { "id": "discord", "name": "Fake", "version": "1", "apiVersion": 2, "capabilities": [] },
+            "source": "return {}",
+        }),
+        json!({
+            "manifest": { "id": "broken", "name": "Broken", "version": "1", "apiVersion": 2, "capabilities": [] },
+            "source": "return function() end",
+        }),
     ] {
         assert!(registry::install(&s, &invalid).await.is_err());
     }
@@ -2517,7 +2539,12 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
         .unwrap()
         .clone();
     assert_eq!(entry["status"], "needs_approval");
-    let input = json!({ "name": "Core status", "settings": { "team": "configured-team" }, "token": "secret-key", "enabled": true });
+    let input = json!({
+        "name": "Core status",
+        "settings": { "team": "configured-team" },
+        "token": "secret-key",
+        "enabled": true,
+    });
     assert_eq!(
         common::save_plugin(&s, "pinger", &input, None)
             .await
@@ -2907,7 +2934,19 @@ async fn deleting_a_shared_source_during_setup_does_not_commit_its_draft_or_secr
     registry::approve(&s, "shared-fenced", "1", text(&installed, "digest"))
         .await
         .unwrap();
-    let source = common::save_plugin(&s,"shared-fenced",&json!({ "name": "Source", "enabled": false, "settings": { "clientId": "app" }, "secrets": { "clientSecret": "synthetic-secret" } }),None).await.unwrap();
+    let source = common::save_plugin(
+        &s,
+        "shared-fenced",
+        &json!({
+            "name": "Source",
+            "enabled": false,
+            "settings": { "clientId": "app" },
+            "secrets": { "clientSecret": "synthetic-secret" },
+        }),
+        None,
+    )
+    .await
+    .unwrap();
     let source_id = text(&source, "id");
     let input = json!({ "name": "Stale draft", "enabled": false, "settings": { "check": true }, "sharedFrom": source_id });
     let remove = async {

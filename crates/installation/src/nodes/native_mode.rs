@@ -290,7 +290,11 @@ pub async fn change(
         if change.mode == Mode::Administrator && owner.is_none() {
             node["nativeModeProposal"] = json!({ "previewId": preview, "mode": change.mode, "status": "awaiting-owner" });
             db.put("nodes", &node)?;
-            return Ok(json!({ "status": "awaiting-owner", "node": super::public(node), "message": "The installation owner must review and confirm native administrator in this node's details. An agent cannot elevate its host." }));
+            return Ok(json!({
+                "status": "awaiting-owner",
+                "node": super::public(node),
+                "message": "The installation owner must review and confirm native administrator in this node's details. An agent cannot elevate its host.",
+            }));
         }
         node["nativeModeProposal"] = Value::Null;
         let generation = id();

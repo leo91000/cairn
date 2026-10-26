@@ -571,7 +571,28 @@ impl Service {
             checkpoint["completed"] = true.into();
             for key in ["process", "settled", "controllerRecoveries"] { checkpoint[key] = Value::Null; }
             db.set(&key, &checkpoint, None)?;
-            let mut patch = crate::runs::RunChanges { session_id : Some(None), resume_available : Some(false), status : Some(RunStatus::Succeeded), error : Some(None), cancel_requested_at : Some(None), recovery_pending : Some(false), boundary: Some(serde_json::json!({"snapshot": proposed["snapshot"],"nodeId": node["id"],"resources": placement["resources"],"requiredRuntime": node["runtimeId"],"pinnedNodeId": null,"preferredNodeId": null,"backendMigration": null,"backendMigrationError": null,"nodeState": null,"storage": { "mode": nodes::ON_DEMAND },"backup": { "id": point["id"], "snapshotId": point["snapshotId"], "capturedAt": point["capturedAt"], "status": "ready" }})), ..Default::default() };
+            let mut patch = crate::runs::RunChanges {
+                session_id : Some(None),
+                resume_available : Some(false),
+                status : Some(RunStatus::Succeeded),
+                error : Some(None),
+                cancel_requested_at : Some(None),
+                recovery_pending : Some(false),
+                boundary: Some(serde_json::json!({
+                    "snapshot": proposed["snapshot"],
+                    "nodeId": node["id"],
+                    "resources": placement["resources"],
+                    "requiredRuntime": node["runtimeId"],
+                    "pinnedNodeId": null,
+                    "preferredNodeId": null,
+                    "backendMigration": null,
+                    "backendMigrationError": null,
+                    "nodeState": null,
+                    "storage": { "mode": nodes::ON_DEMAND },
+                    "backup": { "id": point["id"], "snapshotId": point["snapshotId"], "capturedAt": point["capturedAt"], "status": "ready" },
+                })),
+                ..Default::default()
+            };
             let grant = migration_grant(db, &current, &agent, &source)?;
             policy::apply(patch.boundary.as_mut().unwrap(), &grant);
             db.change_run(&run_id, patch)?;
@@ -746,7 +767,9 @@ mod tests {
                 "nativeAccounts": ["owner", "editor"],
             }))?;
             let origin = Origin::Run(parent.clone());
-            let mut historical = json!({ "snapshot": { "agent": { "id": target, "access": { "backend": "firecracker", "nodes": [node] } } } });
+            let mut historical = json!({
+                "snapshot": { "agent": { "id": target, "access": { "backend": "firecracker", "nodes": [node] } } },
+            });
             assert!(prospective(db, &historical, &agent, &origin).is_err());
             historical["nativePrincipals"] = json!(["editor"]);
             historical["nativeAuthorityNodes"] = json!([node]);

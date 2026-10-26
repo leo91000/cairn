@@ -198,7 +198,12 @@ fn restore_after_restart(db: &mut Db<'_>) -> Result<()> {
             continue;
         }
         if db.kv(&checkpoint::key(id))?.is_none() && run.started_at.is_some() {
-            let patch = crate::runs::RunChanges { status : Some(RunStatus::Interrupted), finished_at : Some(Some(now())), summary : Some(("This run has no restart checkpoint. Review its working files before retrying.").to_owned()), ..Default::default() };
+            let patch = crate::runs::RunChanges {
+                status : Some(RunStatus::Interrupted),
+                finished_at : Some(Some(now())),
+                summary : Some(("This run has no restart checkpoint. Review its working files before retrying.").to_owned()),
+                ..Default::default()
+            };
             db.change_run(id, patch)?;
             continue;
         }

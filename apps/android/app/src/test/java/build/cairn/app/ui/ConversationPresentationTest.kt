@@ -266,7 +266,7 @@ class ConversationPresentationTest {
         Run(
             id = "retry",
             status = "queued",
-            accountWaitReason = "Temporary agent error. Retrying in 30 seconds (attempt 1/3).",
+            accountWaitReason = "Temporary agent error. Retrying in 30 seconds (attempt 1/5).",
             retry =
                 RunRetry(
                     attempt = 1,
@@ -285,7 +285,7 @@ class ConversationPresentationTest {
     fun `retry counts down locally with ceiling and never shows negative seconds`() {
         assertEquals(retryRun.accountWaitReason, retryNotice(retryRun, 1000))
         assertEquals(
-            "Temporary agent error. Retrying in 20 seconds (attempt 1/3).",
+            "Temporary agent error. Retrying in 20 seconds (attempt 1/5).",
             chatWaitNotice(retryRun, 11_100)!!.message,
         )
         assertTrue(retryNotice(retryRun, 30_999)!!.contains("in 1 seconds"))
@@ -326,21 +326,21 @@ class ConversationPresentationTest {
     fun `retry shared contract decodes nullable and absent records and deadlines`() {
         val decoded =
             wireJson.decodeFromString<Run>(
-                """{"id":"retry","status":"queued","retry":{"attempt":2,"limit":3,"nextAttemptAt":31000,"cause":{"kind":"timeout","message":"Temporary timeout"}}}"""
+                """{"id":"retry","status":"queued","retry":{"attempt":2,"limit":5,"nextAttemptAt":31000,"cause":{"kind":"timeout","message":"Temporary timeout"}},"taskId":"fixture-task"}"""
             )
         assertEquals(31_000L, decoded.retry!!.nextAttemptAt)
         assertEquals("timeout", decoded.retry.cause.kind)
-        assertTrue(retryNotice(decoded, 1000)!!.contains("attempt 2/3"))
-        assertEquals(null, wireJson.decodeFromString<Run>("""{"id":"r","status":"queued"}""").retry)
+        assertTrue(retryNotice(decoded, 1000)!!.contains("attempt 2/5"))
+        assertEquals(null, wireJson.decodeFromString<Run>("""{"id":"r","status":"queued","taskId":"fixture-task"}""").retry)
         assertEquals(
             null,
-            wireJson.decodeFromString<Run>("""{"id":"r","status":"queued","retry":null}""").retry,
+            wireJson.decodeFromString<Run>("""{"id":"r","status":"queued","retry":null,"taskId":"fixture-task"}""").retry,
         )
         assertEquals(
             null,
             wireJson
                 .decodeFromString<Run>(
-                    """{"id":"r","status":"queued","retry":{"attempt":1,"limit":3,"nextAttemptAt":null,"cause":{"kind":"server","message":"Busy"}}}"""
+                    """{"id":"r","status":"queued","retry":{"attempt":1,"limit":5,"nextAttemptAt":null,"cause":{"kind":"server","message":"Busy"}},"taskId":"fixture-task"}"""
                 )
                 .retry!!
                 .nextAttemptAt,
@@ -597,7 +597,7 @@ class ConversationPresentationTest {
     fun `run outcomes and project revisions survive decoding and task attention grouping`() {
         val run =
             wireJson.decodeFromString<Run>(
-                """{"id":"r","status":"succeeded","outcome":{"status":"blocked","reason":"Missing access","evidence":["403"],"reportedAt":10},"workspaces":[{"projectId":"p","path":"/p","revision":"abcdef"}]}"""
+                """{"id":"r","status":"succeeded","outcome":{"status":"blocked","reason":"Missing access","evidence":["403"],"reportedAt":10},"workspaces":[{"projectId":"p","path":"/p","revision":"abcdef","kind":"worktree"}],"taskId":"fixture-task"}"""
             )
         assertEquals("À examiner", taskGroup(Task(), run))
         assertEquals("abcdef", run.workspaces.single().revision)

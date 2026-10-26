@@ -1293,7 +1293,21 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         let resumed = f
             .service
             .store
-            .change_run(run_id,cairn_installation::runs::RunChanges { recovery_pending : Some(true), status : Some(cairn_contracts::RunStatus::Queued), boundary: Some(serde_json::json!({"placementTransition": false,"targetNodeId": null,"moveReservation": reservation,"nodeId": node["id"],"nodeState": "resuming"})), ..Default::default() })
+            .change_run(
+                run_id,
+                cairn_installation::runs::RunChanges {
+                    recovery_pending: Some(true),
+                    status: Some(cairn_contracts::RunStatus::Queued),
+                    boundary: Some(serde_json::json!({
+                        "placementTransition": false,
+                        "targetNodeId": null,
+                        "moveReservation": reservation,
+                        "nodeId": node["id"],
+                        "nodeState": "resuming",
+                    })),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         common::set_checkpoint(
@@ -2956,8 +2970,18 @@ async fn resume_run_preserves_native_human_and_delegated_provenance() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(f.service.store.run(run_id).await.unwrap(), run);
     let public = common::relay_fixture::grant(&f.service, &["run"]).await;
-    let request = common::request("POST", "/mcp").header("authorization", format!("Bearer {public}"))
-        .body(Body::from(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": common::mcp_arguments("resume_run", &json!({ "runId": run_id })) }).to_string())).unwrap();
+    let request = common::request("POST", "/mcp")
+        .header("authorization", format!("Bearer {public}"))
+        .body(Body::from(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": common::mcp_arguments("resume_run", &json!({ "runId": run_id })),
+            })
+            .to_string(),
+        ))
+        .unwrap();
     let denied = read_json(common::send(&f.router, request).await).await;
     assert_eq!(denied["result"]["isError"], true, "{denied}");
     let (_, unknown) = resume_coordinator(&f, false).await;

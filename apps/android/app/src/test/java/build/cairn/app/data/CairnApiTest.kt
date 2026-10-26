@@ -375,7 +375,7 @@ class CairnApiTest {
     fun `models accept list and detail wire formats and preserve task controls`() {
         val run =
             wireJson.decodeFromString<Run>(
-                """{"id":"r","status":"running","taskName":"Review","agentName":"Agent","usage":null,"startedAt":null}"""
+                """{"id":"r","taskId":"task","status":"running","taskName":"Review","agentName":"Agent","usage":null,"startedAt":null}"""
             )
         assertEquals("Review", run.title)
         assertTrue(run.active)

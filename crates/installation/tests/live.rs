@@ -743,7 +743,14 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
         .store
         .set(
             &format!("chat-question:{chat_id}:question"),
-            json!({ "id": "question", "chatId": chat_id, "runId": f.run, "blocking": false, "fields": [], "status": "pending" }),
+            json!({
+                "id": "question",
+                "chatId": chat_id,
+                "runId": f.run,
+                "blocking": false,
+                "fields": [],
+                "status": "pending",
+            }),
             None,
         )
         .await
@@ -1202,9 +1209,13 @@ async fn profile_conversation_opening() {
                 db.event(&heavy_run, "chat.user", &format!("Question {turn}"), None)?;
                 for call in 0..25 {
                     let item = format!("tool-{turn}-{call}");
-                    let started = json!({ "item": { "id": item, "type": "command_execution", "command": "pnpm test", "status": "in_progress" } });
+                    let started = json!({
+                        "item": { "id": item, "type": "command_execution", "command": "pnpm test", "status": "in_progress" },
+                    });
                     db.event(&heavy_run, "item.started", "pnpm test", Some(&started))?;
-                    let completed = json!({ "item": { "id": item, "type": "command_execution", "command": "pnpm test", "aggregated_output": output, "exit_code": 0, "status": "completed" } });
+                    let completed = json!({
+                        "item": { "id": item, "type": "command_execution", "command": "pnpm test", "aggregated_output": output, "exit_code": 0, "status": "completed" },
+                    });
                     db.event(&heavy_run, "item.completed", "pnpm test", Some(&completed))?;
                 }
                 // The last answer streams as many small snapshots, as a long reply does.

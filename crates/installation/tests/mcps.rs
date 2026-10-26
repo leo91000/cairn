@@ -226,7 +226,13 @@ async fn run_history_includes_the_engine_retries_limits_and_notices() {
     let run_id = run["id"].as_str().unwrap();
     let reports = [
         json!({ "type": "engine.retry", "attempt": 1, "maxRetries": 10, "delayMs": 500, "reason": "overloaded" }),
-        json!({ "type": "provider.limit", "status": "allowed_warning", "window": "five_hour", "resetsAt": 1_893_499_200_000_i64, "blocked": false }),
+        json!({
+            "type": "provider.limit",
+            "status": "allowed_warning",
+            "window": "five_hour",
+            "resetsAt": 1_893_499_200_000_i64,
+            "blocked": false,
+        }),
         json!({ "type": "engine.notice", "level": "warning", "message": "Context is almost full." }),
     ];
     for report in &reports {

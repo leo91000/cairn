@@ -1054,7 +1054,17 @@ pub(crate) async fn tick_missions(s: &Service, active: &HashSet<String>) -> Resu
                 db.set(&key, &checkpoint, None)?;
                 let mut wakeup = run["wakeup"].clone();
                 wakeup["observation"] = observed;
-                db.change_run(&run_id,crate::runs::RunChanges { status : Some(RunStatus::Queued), recovery_pending : Some(true), finished_at : Some(None), summary : Some(("").to_owned()), error : Some(None), retry : Some(None), account_wait_reason : Some(None), boundary: Some(serde_json::json!({"missionTurnId": wakeup["id"],"waitContinuation": wakeup,"wakeup": null,"outcome": null})), ..Default::default() })?;
+                db.change_run(&run_id,crate::runs::RunChanges {
+                    status : Some(RunStatus::Queued),
+                    recovery_pending : Some(true),
+                    finished_at : Some(None),
+                    summary : Some(("").to_owned()),
+                    error : Some(None),
+                    retry : Some(None),
+                    account_wait_reason : Some(None),
+                    boundary: Some(serde_json::json!({"missionTurnId": wakeup["id"],"waitContinuation": wakeup,"wakeup": null,"outcome": null})),
+                    ..Default::default()
+                })?;
                 db.event(
                     &run_id,
                     "run.wakeup",

@@ -96,7 +96,7 @@ abstract class NodePlacementCases {
                                         failed.set(true)
                                         "{}"
                                     } else
-                                        """{"previewId":"review","preview":{"mode":"administrator","trustedAccounts":["trusted"],"agents":[{"id":"builder","name":"Builder"}],"conversations":[{"id":"one","name":"Première conversation","status":"running"},{"id":"two","name":"Deuxième conversation","status":"running"}],"tasks":[{"id":"night","name":"Tâche nocturne"}]}}"""
+                                        """{"previewId":"review","preview":{"mode":"administrator","trustedAccounts":["trusted"],"agents":[{"id":"builder","name":"Builder"}],"conversations":[{"id":"one","name":"Première conversation","status":"running","taskId":"fixture-task"},{"id":"two","name":"Deuxième conversation","status":"running","taskId":"fixture-task"}],"tasks":[{"id":"night","name":"Tâche nocturne"}]}}"""
                                 }
                                 "/api/installations/fixture/api/nodes" -> {
                                     val status = if (failed.get()) "failed" else "applied"

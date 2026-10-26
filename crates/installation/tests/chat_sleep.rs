@@ -513,7 +513,11 @@ async fn delay_rejects_invalid_inputs_and_pending_steering_but_accepts_missions(
     let task = f
         .service
         .task_fixture(
-            json!({ "name": "Scheduled task", "prompt": "Do work", "agentId": cairn_installation::config::MAIN_AGENT_ID }),
+            json!({
+                "name": "Scheduled task",
+                "prompt": "Do work",
+                "agentId": cairn_installation::config::MAIN_AGENT_ID,
+            }),
             None,
         )
         .await
@@ -727,7 +731,10 @@ async fn dates_are_absolute_timezone_aware_and_repeated_calls_keep_the_deadline(
         "Keep the legacy timer shape for older binaries"
     );
     let offset = chrono::FixedOffset::east_opt(7200).unwrap();
-    let equivalent = json!({ "conditions": [{ "type": "at", "date": date.with_timezone(&offset).to_rfc3339() }], "reason": "Wait until date" });
+    let equivalent = json!({
+        "conditions": [{ "type": "at", "date": date.with_timezone(&offset).to_rfc3339() }],
+        "reason": "Wait until date",
+    });
     assert_eq!(
         wait_for::schedule(&f.service, &f.token, &equivalent)
             .await
@@ -744,7 +751,10 @@ async fn dates_are_absolute_timezone_aware_and_repeated_calls_keep_the_deadline(
         json!({ "type": "at", "date": "tomorrow" }),
         json!({ "type": "at", "date": "2026-10-23T09:00:00" }),
         json!({ "type": "at", "date": "2026-02-30T09:00:00Z" }),
-        json!({ "type": "at", "date": chrono::DateTime::from_timestamp_millis(now() + 86_500_000).unwrap().to_rfc3339() }),
+        json!({
+            "type": "at",
+            "date": chrono::DateTime::from_timestamp_millis(now() + 86_500_000).unwrap().to_rfc3339(),
+        }),
         json!({ "type": "at", "date": date.to_rfc3339(), "seconds": 10 }),
     ] {
         assert!(

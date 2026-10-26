@@ -16,5 +16,9 @@ data class RunContentOutput(
     val sha256: String,
     val totalBytes: Long,
 ) {
-    init {}
+    init {
+        nextOffset?.let { require(it >= 0L) }
+        require(offset >= 0L)
+        require(totalBytes >= 0L)
+    }
 }

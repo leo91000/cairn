@@ -72,7 +72,7 @@ class AccountsJourneyTest {
                                     "/api/installations/fixture/api/accounts" ->
                                         """{"accounts":[${server.accounts.joinToString(",")}],"signIn":${server.signIn}}"""
                                     "/api/installations/fixture/api/runs" ->
-                                        """[{"id":"run","status":"running","taskName":"Revue des dépendances"}]"""
+                                        """[{"id":"run","status":"running","taskName":"Revue des dépendances","taskId":"fixture-task"}]"""
                                     "/api/installations/fixture/api/overview",
                                     "/api/installations/fixture/api/codex/models",
                                     "/api/installations/fixture/api/claude/models" -> "{}"

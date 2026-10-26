@@ -81,7 +81,17 @@ async fn request(
 }
 
 fn create_profile(mut settings: Value) -> Value {
-    let mut access = json!({ "backend": "firecracker", "nodes": [], "projects": [], "skills": [], "mcps": [], "mcpTools": {}, "installation": false, "delegation": false, "sandbox": "read-only" });
+    let mut access = json!({
+        "backend": "firecracker",
+        "nodes": [],
+        "projects": [],
+        "skills": [],
+        "mcps": [],
+        "mcpTools": {},
+        "installation": false,
+        "delegation": false,
+        "sandbox": "read-only",
+    });
     if settings["provider"] == "opencode" {
         access["sandbox"] = "yolo".into();
     }
@@ -107,7 +117,10 @@ async fn replacement(s: &Service, args: Value) -> Value {
         .unwrap();
     let mut settings = serde_json::to_value(&current.settings).unwrap();
     let mut patch = args["agent"].clone();
-    let review = json!({ "nativeNodeReviews": patch.as_object_mut().unwrap().remove("nativeNodeReviews").unwrap_or_else(|| json!([])), "reapproveDelegations": patch.as_object_mut().unwrap().remove("reapproveDelegations").unwrap_or_else(|| json!([])) });
+    let review = json!({
+        "nativeNodeReviews": patch.as_object_mut().unwrap().remove("nativeNodeReviews").unwrap_or_else(|| json!([])),
+        "reapproveDelegations": patch.as_object_mut().unwrap().remove("reapproveDelegations").unwrap_or_else(|| json!([])),
+    });
     if let Some(access) = patch.get_mut("access") {
         let mut complete = settings["access"].clone();
         cairn_installation::store::merge(&mut complete, access);
@@ -2216,7 +2229,12 @@ async fn plugin_setup_is_available_on_both_endpoints_without_granting_private_ac
                 .unwrap()
                 .ends_with("/plugins/oauth/callback")
         );
-        let forbidden = json!({ "pluginId": "onepassword", "kind": "save", "instanceId": saved["id"], "data": { "agentIds": [MAIN_AGENT_ID] } });
+        let forbidden = json!({
+            "pluginId": "onepassword",
+            "kind": "save",
+            "instanceId": saved["id"],
+            "data": { "agentIds": [MAIN_AGENT_ID] },
+        });
         let denied = if internal {
             call(&s, &configuration, "manage_plugin", forbidden).await
         } else {
@@ -3103,7 +3121,19 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
     let chat = cairn_installation::config::id();
     let run = cairn_installation::config::id();
     let node = cairn_installation::config::id();
-    s.store.put("nodes", json!({ "id": node, "runtimeId": "development", "capabilities": { "backend": "native" }, "nativeEnabled": true, "nativeAccounts": [] })).await.unwrap();
+    s.store
+        .put(
+            "nodes",
+            json!({
+                "id": node,
+                "runtimeId": "development",
+                "capabilities": { "backend": "native" },
+                "nativeEnabled": true,
+                "nativeAccounts": [],
+            }),
+        )
+        .await
+        .unwrap();
     s.store
         .set(
             "native-authority",
@@ -3117,7 +3147,17 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
     let profile = s.agent_fixture(json!({ "name": "Native destination", "access": { "backend": "native", "nodes": [node] } }), None).await.unwrap();
     let mut previous = profile.clone();
     previous["access"]["backend"] = "firecracker".into();
-    common::add_run(&s.store, &json!({ "id": run, "taskId": "fixture", "status": "succeeded", "createdAt": 0, "snapshot": { "agent": previous } })).await;
+    common::add_run(
+        &s.store,
+        &json!({
+            "id": run,
+            "taskId": "fixture",
+            "status": "succeeded",
+            "createdAt": 0,
+            "snapshot": { "agent": previous },
+        }),
+    )
+    .await;
     s.store
         .put(
             "chats",
@@ -3204,7 +3244,14 @@ async fn waiting_missions_are_visible_and_cancellable_through_both_installation_
     ] {
         let (run, _) = active_run(&s, &main).await;
         let run_id = run["id"].as_str().unwrap();
-        let wakeup = json!({ "id": cairn_installation::config::id(), "messageId": null, "reason": "Mission CI", "seconds": 60, "createdAt": 1, "wakeAt": 60_001 });
+        let wakeup = json!({
+            "id": cairn_installation::config::id(),
+            "messageId": null,
+            "reason": "Mission CI",
+            "seconds": 60,
+            "createdAt": 1,
+            "wakeAt": 60_001,
+        });
         s.store
             .change_run(
                 run_id,
@@ -3648,7 +3695,10 @@ async fn typed_project_lifecycle_has_the_same_contract_on_both_tools() {
         ("/mcp", owner_token.as_str()),
         ("/mcp-installation", agent_token),
     ] {
-        let input = json!({ "creationId": cairn_installation::config::id(), "settings": { "name": "Typed project", "path": root.path() } });
+        let input = json!({
+            "creationId": cairn_installation::config::id(),
+            "settings": { "name": "Typed project", "path": root.path() },
+        });
         let (_, created) =
             node_management_call(&app, endpoint, token, "save_project", input.clone()).await;
         let first = result(&created).clone();
@@ -3662,7 +3712,11 @@ async fn typed_project_lifecycle_has_the_same_contract_on_both_tools() {
         )
         .await;
         assert_eq!(result(&read), &first);
-        let replacement = json!({ "projectId": project_id, "revision": first["revision"], "settings": { "name": "Replaced", "path": root.path(), "sourceMode": "local" } });
+        let replacement = json!({
+            "projectId": project_id,
+            "revision": first["revision"],
+            "settings": { "name": "Replaced", "path": root.path(), "sourceMode": "local" },
+        });
         let (_, replaced) = node_management_call(
             &app,
             endpoint,
@@ -3932,7 +3986,14 @@ async fn typed_mcp_commands_share_revisions_secret_redaction_and_human_oauth_bou
         ("/mcp", public.as_str()),
         ("/mcp-installation", agent_token),
     ] {
-        let input = json!({"name":"Typed MCP","url":"https://example.test/mcp","auth":"oauth","clientSecret":"synthetic-secret","enabled":false,"enabledTools":[]});
+        let input = json!({
+            "name":"Typed MCP",
+            "url":"https://example.test/mcp",
+            "auth":"oauth",
+            "clientSecret":"synthetic-secret",
+            "enabled":false,
+            "enabledTools":[],
+        });
         let (_, created) =
             node_management_call(&app, endpoint, token, "create_mcp", input.clone()).await;
         let view = result(&created).clone();
@@ -4081,7 +4142,13 @@ async fn plugin_preparation_cannot_publish_after_instance_or_agent_revocation() 
             )
             .await
             .unwrap();
-            let initial = json!({ "name": "Initial", "enabled": true, "settings": { "check": false }, "secrets": { "apiKey": "synthetic-one" }, "agentIds": [MAIN_AGENT_ID] });
+            let initial = json!({
+                "name": "Initial",
+                "enabled": true,
+                "settings": { "check": false },
+                "secrets": { "apiKey": "synthetic-one" },
+                "agentIds": [MAIN_AGENT_ID],
+            });
             let saved = common::save_plugin(&s, "fenced", &initial, None)
                 .await
                 .unwrap();
@@ -4094,7 +4161,13 @@ async fn plugin_preparation_cannot_publish_after_instance_or_agent_revocation() 
                 args["data"] = json!({ "settings": { "check": true }, "secrets": {}, "revision": saved["revision"] });
             }
             if operation == "save" {
-                args["data"] = json!({ "name": "Stale edit", "enabled": true, "settings": { "check": true }, "secrets": { "apiKey": "synthetic-two" }, "revision": saved["revision"] });
+                args["data"] = json!({
+                    "name": "Stale edit",
+                    "enabled": true,
+                    "settings": { "check": true },
+                    "secrets": { "apiKey": "synthetic-two" },
+                    "revision": saved["revision"],
+                });
             }
             let revoke = async {
                 started.notified().await;

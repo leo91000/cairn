@@ -136,7 +136,7 @@ JSON Schema's UUID format; clients never grant authority through validation.
 
 ### Development reset
 
-The fresh installation schema is now version 7. Earlier development databases
+The fresh installation schema is now version 8. Earlier development databases
 are rejected, without being rewritten. Stop the development processes, remove the
 **disposable development data directory** (SQLite, vault and related local state)
 and start with a newly empty data directory. Recreate projects/agents and rerun
@@ -466,7 +466,7 @@ summary feeds decode like Rust. Public output JSON schemas continue to use the
 serialization contract. This distinction also preserves required nullable command
 selections in the previously converted domains.
 
-The fresh schema is version 7; no historical format reader or migration is added.
+The fresh schema is version 8; no historical format reader or migration is added.
 The A1/A2 `project_measurement` harness includes `run_storage_layouts`, comparing
 identical deterministic documents against the seven-column runs mapping at
 `7fecc082`, with the same indexes, WAL and audit. Measurement results belong in the

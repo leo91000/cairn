@@ -76,6 +76,7 @@ data class Run(
     init {
         accountRequired?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
         provider?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
+        require(resumeCount >= 0L)
         require(
             Regex("^(queued|running|waiting|succeeded|failed|cancelled|interrupted)\$")
                 .containsMatchIn(status)

@@ -469,6 +469,7 @@ async fn merge_http_is_owner_only_and_both_mcp_interfaces_have_the_same_effect()
                     )
                     .await
                     .unwrap();
+                let caller = s.store.run(&caller.id).await.unwrap();
                 let configuration = s.mcps.run_configuration(&s, &caller).await.unwrap();
                 (
                     "/mcp-installation",

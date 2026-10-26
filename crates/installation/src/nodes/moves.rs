@@ -362,7 +362,11 @@ async fn record_request(
                     }
                 }
             }
-            let mut patch = crate::runs::RunChanges { capacity_wait_until : Some(None), boundary: Some(serde_json::json!({"movementError": null,"moveRequest": move_request,"nodeState": NodeState::Pausing})), ..Default::default() };
+            let mut patch = crate::runs::RunChanges {
+                capacity_wait_until : Some(None),
+                boundary: Some(serde_json::json!({"movementError": null,"moveRequest": move_request,"nodeState": NodeState::Pausing})),
+                ..Default::default()
+            };
             if idle || expected == RunStatus::Queued {
                 patch.status = Some(RunStatus::Queued);
                 patch.recovery_pending = Some(true);
@@ -748,9 +752,17 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
         session_id: Some(serde_json::from_value(backup["sessionId"].clone())?),
         recovery_pending: Some(!idle),
         status: Some(status),
-        boundary: Some(
-            serde_json::json!({"storage": { "mode": super::ON_DEMAND },"movementError": null,"nodeId": node,"nodeState": node_state,"resources": movement["resources"],"requiredTags": required_tags,"moveRequest": null,"moveReservation": reservation,"restoredAt": captured_at}),
-        ),
+        boundary: Some(serde_json::json!({
+            "storage": { "mode": super::ON_DEMAND },
+            "movementError": null,
+            "nodeId": node,
+            "nodeState": node_state,
+            "resources": movement["resources"],
+            "requiredTags": required_tags,
+            "moveRequest": null,
+            "moveReservation": reservation,
+            "restoredAt": captured_at,
+        })),
         ..Default::default()
     };
     let owner = run_id.clone();

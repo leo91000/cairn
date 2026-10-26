@@ -13,9 +13,8 @@ data class ReadRunContentInput(
     val sha256: String? = null,
 ) {
     init {
-        eventId?.let { require(it >= 1L) }
-        eventId?.let { require(it <= 9007199254740991L) }
-        require(offset <= 9007199254740991L)
+        eventId?.let { require(it in 1L..9007199254740991L) }
+        require(offset in 0L..9007199254740991L)
         java.util.UUID.fromString(runId)
         sha256?.let { require(Regex("^[0-9a-f]{64}\$").containsMatchIn(it)) }
     }

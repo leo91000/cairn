@@ -9,7 +9,7 @@ data class RunHistoryOutput(
     val events: List<kotlinx.serialization.json.JsonElement?>,
     val hasMore: Boolean,
     val nextAfter: Long,
-    val run: kotlinx.serialization.json.JsonElement,
+    val run: kotlinx.serialization.json.JsonElement?,
 ) {
     init {}
 }

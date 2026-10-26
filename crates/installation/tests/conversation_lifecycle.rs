@@ -1034,7 +1034,14 @@ async fn retention_protects_pending_work_recent_completion_and_worker_finalizati
                 .store
                 .set(
                     &format!("chat-question:{chat_id}:question"),
-                    json!({ "id": "question", "chatId": chat_id, "runId": run, "blocking": false, "fields": [], "status": "pending" }),
+                    json!({
+                        "id": "question",
+                        "chatId": chat_id,
+                        "runId": run,
+                        "blocking": false,
+                        "fields": [],
+                        "status": "pending",
+                    }),
                     None,
                 )
                 .await

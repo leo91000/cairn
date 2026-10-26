@@ -528,6 +528,51 @@
       ],
       "type": "object"
     },
+    "CancelRunOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "cancelled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "cancelled"
+      ],
+      "type": "object"
+    },
+    "Cause": {
+      "properties": {
+        "kind": {
+          "pattern": "^(connection|timeout|rate-limit|server)$",
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "startup": {
+          "default": false,
+          "description": "The adapter confirmed that no new agent turn was submitted.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    "CleanupRunOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "cleaned": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "cleaned"
+      ],
+      "type": "object"
+    },
     "CreateAgentInput": {
       "additionalProperties": false,
       "properties": {
@@ -613,6 +658,28 @@
       },
       "required": [
         "deleted"
+      ],
+      "type": "object"
+    },
+    "GetRunInput": {
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "after"
       ],
       "type": "object"
     },
@@ -718,6 +785,48 @@
       },
       "required": [
         "projects"
+      ],
+      "type": "object"
+    },
+    "ListRunsInput": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "default": 20,
+          "format": "uint16",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "default": null,
+          "pattern": "^(queued|running|waiting|succeeded|failed|cancelled|interrupted)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "taskId": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "limit",
+        "offset",
+        "status",
+        "taskId"
       ],
       "type": "object"
     },
@@ -2993,6 +3102,46 @@
         }
       ]
     },
+    "ReadRunContentInput": {
+      "additionalProperties": false,
+      "properties": {
+        "eventId": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        },
+        "sha256": {
+          "default": null,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "runId",
+        "offset",
+        "sha256"
+      ],
+      "type": "object"
+    },
     "ReplaceAgentInput": {
       "additionalProperties": false,
       "properties": {
@@ -3100,6 +3249,921 @@
       ],
       "type": "object"
     },
+    "Retry": {
+      "properties": {
+        "attempt": {
+          "format": "uint64",
+          "maximum": 5,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "cause": {
+          "$ref": "#/definitions/Cause"
+        },
+        "deadlineAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint64",
+          "maximum": 5,
+          "minimum": 5,
+          "type": "integer"
+        },
+        "nextAttemptAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "startedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attempt",
+        "limit",
+        "cause"
+      ],
+      "type": "object"
+    },
+    "Run": {
+      "description": "The full wire view shares its lifecycle fields with SQL. Payloads owned by\nunconverted domains use explicit client type references at this boundary;\nthey do not define or decide run admission/transitions (A6-A13/A18).",
+      "properties": {
+        "accountId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "accountName": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "accountRequired": {
+          "default": null,
+          "pattern": "^(codex|claude|opencode)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "accountWaitReason": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agentName": {
+          "default": "",
+          "type": "string"
+        },
+        "backup": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "NodeBackup"
+        },
+        "cancelRequestedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "capacityWaitUntil": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "chatExecution": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "ChatExecution"
+        },
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        },
+        "dismissal": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "OutcomeDismissal"
+        },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "executionBackend": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finishedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "isolated": {
+          "default": false,
+          "type": "boolean"
+        },
+        "movementError": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeMode": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "NativeModeState"
+        },
+        "nodeId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nodeState": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "TaskOutcome"
+        },
+        "pinnedNodeId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preferredNodeId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preview": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projectId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "default": null,
+          "pattern": "^(codex|claude|opencode)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recoveryPending": {
+          "default": false,
+          "type": "boolean"
+        },
+        "requestedBy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RunRequester"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "resources": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "NodeResources"
+        },
+        "restoredAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "resumeAvailable": {
+          "default": false,
+          "type": "boolean"
+        },
+        "resumeCount": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Retry"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sessionId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RunSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sourceTaskId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "pattern": "^(queued|running|waiting|succeeded|failed|cancelled|interrupted)$",
+          "type": "string"
+        },
+        "storage": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "RunStorage"
+        },
+        "summary": {
+          "default": "",
+          "type": "string"
+        },
+        "suspendedByExclusive": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "ExclusiveReservation"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "taskName": {
+          "default": "",
+          "type": "string"
+        },
+        "trigger": {
+          "default": "",
+          "type": "string"
+        },
+        "unread": {
+          "default": false,
+          "type": "boolean"
+        },
+        "usage": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "RunUsage"
+        },
+        "wakeup": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "ChatWakeup"
+        },
+        "workspace": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspaceCleanedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "workspaces": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/RunWorkspace"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "taskId",
+        "status"
+      ],
+      "type": "object"
+    },
+    "RunContentOutput": {
+      "properties": {
+        "data": {
+          "type": "string"
+        },
+        "encoding": {
+          "type": "string"
+        },
+        "eventId": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "format": {
+          "type": "string"
+        },
+        "nextOffset": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "totalBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "runId",
+        "eventId",
+        "encoding",
+        "format",
+        "offset",
+        "totalBytes",
+        "sha256",
+        "data",
+        "nextOffset"
+      ],
+      "type": "object"
+    },
+    "RunHistoryOutput": {
+      "properties": {
+        "events": {
+          "description": "Engine/event payloads are owned by A7, not the run-transition conversion.",
+          "items": true,
+          "type": "array"
+        },
+        "hasMore": {
+          "type": "boolean"
+        },
+        "nextAfter": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "run": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/RunMetadataPage"
+            }
+          ],
+          "description": "Existing byte-bounded preview; full metadata is read through read_run_content."
+        }
+      },
+      "required": [
+        "run",
+        "events",
+        "nextAfter",
+        "hasMore"
+      ],
+      "type": "object"
+    },
+    "RunInput": {
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "type": "object"
+    },
+    "RunMetadataPage": {
+      "description": "A byte-bounded metadata page is either complete or an explicit preview. The\nfull record remains available through read_run_content in either case.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "complete",
+              "type": "string"
+            },
+            "run": {
+              "$ref": "#/definitions/Run"
+            }
+          },
+          "required": [
+            "kind",
+            "run"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "truncated",
+              "type": "string"
+            },
+            "preview": {
+              "$ref": "#/definitions/RunPreview"
+            },
+            "totalBytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "preview",
+            "totalBytes"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RunMissionInput": {
+      "additionalProperties": false,
+      "properties": {
+        "taskId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskId"
+      ],
+      "type": "object"
+    },
+    "RunPreview": {
+      "properties": {
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "finishedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "projectId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "pattern": "^(queued|running|waiting|succeeded|failed|cancelled|interrupted)$",
+          "type": "string"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "trigger": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "taskId",
+        "projectId",
+        "status",
+        "trigger",
+        "createdAt",
+        "startedAt",
+        "finishedAt"
+      ],
+      "type": "object"
+    },
+    "RunRequester": {
+      "additionalProperties": false,
+      "properties": {
+        "chatId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "taskId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "type": "object"
+    },
+    "RunSkill": {
+      "properties": {
+        "bundle": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content": {
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "content"
+      ],
+      "type": "object"
+    },
+    "RunSnapshot": {
+      "properties": {
+        "agent": {
+          "$ref": "#/definitions/Agent"
+        },
+        "availableProjects": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/Project"
+          },
+          "type": "array"
+        },
+        "delegation": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Project"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "projects": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/Project"
+          },
+          "type": "array"
+        },
+        "skills": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/RunSkill"
+          },
+          "type": "array"
+        },
+        "task": {
+          "$ref": "#/definitions/RunTaskSnapshot"
+        }
+      },
+      "required": [
+        "task",
+        "agent"
+      ],
+      "type": "object"
+    },
+    "RunState": {
+      "description": "Lifecycle fields have one SQL authority. Engine/node/chat payloads are adapted\nseparately at their domain boundaries, never merged into this state.",
+      "properties": {
+        "accountId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "accountName": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "accountRequired": {
+          "default": null,
+          "pattern": "^(codex|claude|opencode)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "accountWaitReason": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cancelRequestedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "capacityWaitUntil": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finishedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "projectId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recoveryPending": {
+          "default": false,
+          "type": "boolean"
+        },
+        "requestedBy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RunRequester"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "resumeAvailable": {
+          "default": false,
+          "type": "boolean"
+        },
+        "resumeCount": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Retry"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sessionId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "pattern": "^(queued|running|waiting|succeeded|failed|cancelled|interrupted)$",
+          "type": "string"
+        },
+        "summary": {
+          "default": "",
+          "type": "string"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "trigger": {
+          "default": "",
+          "type": "string"
+        },
+        "workspace": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspaceCleanedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "taskId",
+        "projectId",
+        "status",
+        "trigger",
+        "createdAt",
+        "startedAt",
+        "finishedAt",
+        "summary",
+        "error",
+        "sessionId",
+        "workspace",
+        "workspaceCleanedAt",
+        "recoveryPending",
+        "resumeAvailable",
+        "resumeCount",
+        "cancelRequestedAt",
+        "accountId",
+        "accountName",
+        "accountWaitReason",
+        "accountRequired",
+        "capacityWaitUntil",
+        "retry",
+        "requestedBy"
+      ],
+      "type": "object"
+    },
     "RunTaskSnapshot": {
       "description": "Presentation of task settings in a run snapshot. Chats synthesize the same typed\nsettings without creating a mission or a scheduled commitment.",
       "properties": {
@@ -3110,6 +4174,32 @@
         "archived": {
           "default": false,
           "type": "boolean"
+        },
+        "authorAccessId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authorId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authorRemoved": {
+          "default": false,
+          "type": "boolean"
+        },
+        "createdAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "cron": {
           "default": null,
@@ -3132,6 +4222,56 @@
           "minLength": 1,
           "type": "string"
         },
+        "nativeAuthorityNodes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "nativeParentAccess": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeParentRunId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativePluginGrants": {
+          "default": null,
+          "items": {
+            "$ref": "#/definitions/MissionPluginGrant"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "nativePrincipals": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "nativeProvenanceUnknown": {
+          "default": false,
+          "type": "boolean"
+        },
+        "nextRun": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "projectId": {
           "default": null,
           "format": "uuid",
@@ -3144,6 +4284,31 @@
           "maxLength": 50000,
           "minLength": 1,
           "type": "string"
+        },
+        "revision": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scheduleFailure": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ScheduleFailure"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "scheduleWaitReason": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "skills": {
           "default": null,
@@ -3181,15 +4346,33 @@
         "id",
         "name",
         "prompt",
-        "agentId",
+        "agentId"
+      ],
+      "type": "object"
+    },
+    "RunWorkspace": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "projectId": {
+          "type": "string"
+        },
+        "revision": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
         "projectId",
-        "skills",
-        "tags",
-        "cron",
-        "timezone",
-        "enabled",
-        "archived",
-        "worktree"
+        "path",
+        "kind"
       ],
       "type": "object"
     },

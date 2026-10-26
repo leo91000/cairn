@@ -468,7 +468,15 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
             };
             let waiting = current.trigger != "chat" && record.boundary["wakeup"].is_object();
             if waiting && current.session_id.is_none() {
-                db.change_run(id,crate::runs::RunChanges { status : Some(RunStatus::Failed), finished_at : Some(Some(now())), recovery_pending : Some(false), account_wait_reason : Some(None), error : Some(Some("Cannot wait without a saved agent session. Working files were preserved.".into())), boundary: Some(serde_json::json!({"wakeup": null})), ..Default::default() })?;
+                db.change_run(id,crate::runs::RunChanges {
+                    status : Some(RunStatus::Failed),
+                    finished_at : Some(Some(now())),
+                    recovery_pending : Some(false),
+                    account_wait_reason : Some(None),
+                    error : Some(Some("Cannot wait without a saved agent session. Working files were preserved.".into())),
+                    boundary: Some(serde_json::json!({"wakeup": null})),
+                    ..Default::default()
+                })?;
                 return Ok(false);
             }
             let mut patch = crate::runs::RunChanges {
@@ -602,7 +610,12 @@ mod tests {
         service.store.transaction({
             let run_id = run_id.clone();
             move |db| {
-                let run = json!({ "id": run_id, "taskId": run_id, "status": RunStatus::Queued, "snapshot": { "agent": { "id": crate::config::MAIN_AGENT_ID, "provider": "codex" } } });
+                let run = json!({
+                    "id": run_id,
+                    "taskId": run_id,
+                    "status": RunStatus::Queued,
+                    "snapshot": { "agent": { "id": crate::config::MAIN_AGENT_ID, "provider": "codex" } },
+                });
                 db.add_run_fixture(&run, None)?;
                 Ok(())
             }
@@ -984,7 +997,26 @@ mod tests {
     #[tokio::test]
     async fn a_retry_that_expires_during_preparation_cannot_register() {
         let (_root, service, _chat_id, run_id, workspace) = fixture().await;
-        let _prepared = service.store.change_run(&run_id,crate::runs::RunChanges { retry : Some(Some(serde_json::from_value(json!({ "attempt": 1, "limit": 5, "nextAttemptAt": now() - 1, "deadlineAt": now() + 60_000, "cause": {"kind":"timeout","message":"temporary"} })).unwrap())), ..Default::default() }).await.unwrap();
+        let _prepared = service
+            .store
+            .change_run(
+                &run_id,
+                crate::runs::RunChanges {
+                    retry: Some(Some(
+                        serde_json::from_value(json!({
+                            "attempt": 1,
+                            "limit": 5,
+                            "nextAttemptAt": now() - 1,
+                            "deadlineAt": now() + 60_000,
+                            "cause": {"kind":"timeout","message":"temporary"},
+                        }))
+                        .unwrap(),
+                    )),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         let prepared = service.store.run(&run_id).await.unwrap();
         // Admission captured an eligible run, then waits behind asynchronous work.
         let active = service.worker.active.lock().await;

@@ -35,9 +35,9 @@ data class Mission(
 ) {
     init {
         java.util.UUID.fromString(agentId)
-        require(createdAt <= 9007199254740991L)
+        require(createdAt in 0L..9007199254740991L)
         java.util.UUID.fromString(id)
-        nextRun?.let { require(it <= 9007199254740991L) }
+        nextRun?.let { require(it in 0L..9007199254740991L) }
         projectId?.let { java.util.UUID.fromString(it) }
     }
 }

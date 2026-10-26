@@ -212,11 +212,23 @@ impl StorageEntity for PluginInstance {
             rusqlite::Transaction::new_unchecked(db.0, rusqlite::TransactionBehavior::Immediate)
                 .unwrap();
         for n in 0..1000 {
-            Db(&tx).save_agent(&Agent {
-                id: AgentId(uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | (n+10000))),
-                settings: serde_json::from_value(json!({ "name": format!("Agent {n}"), "access": cairn_contracts::AccessPolicy::default(), "exclusiveNodes": [], "plugins": [] })).unwrap(),
-                revision: "fixture".into(), created_at: 1700000000000, avatar: None,
-            }).unwrap();
+            Db(&tx)
+                .save_agent(&Agent {
+                    id: AgentId(uuid::Uuid::from_u128(
+                        (4_u128 << 76) | (2_u128 << 62) | (n + 10000),
+                    )),
+                    settings: serde_json::from_value(json!({
+                        "name": format!("Agent {n}"),
+                        "access": cairn_contracts::AccessPolicy::default(),
+                        "exclusiveNodes": [],
+                        "plugins": [],
+                    }))
+                    .unwrap(),
+                    revision: "fixture".into(),
+                    created_at: 1700000000000,
+                    avatar: None,
+                })
+                .unwrap();
         }
         tx.commit().unwrap();
     }
@@ -349,31 +361,69 @@ CREATE INDEX agent_plugins_resource ON agent_plugins(instance_id,agent_id);").un
 #[tokio::test]
 #[ignore = "local measurement; run alone with --ignored --nocapture --test-threads=1"]
 async fn plugin_storage_layouts() {
-    let instances: Vec<_> = (0..1000).map(|n| {
-        let instance_id = uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | n).to_string();
-        let agent_id = uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | (n+10000)).to_string();
-        let mut instance = PluginInstance::draft(&instance_id,"fixture",json!({ "channel": format!("channel-{n}"), "description": "Deterministic instance storage qualification. ".repeat(8), "scope": true, "audiences": ["engineering","support"] }),vec!["clientSecret".into()]);
-        instance.name = format!("Instance {n:04}"); instance.revision = "revision".into(); instance.enabled = n % 3 != 0;
-        instance.updated_at = 1700000000000; instance.max_messages_per_hour = 20;
-        instance.agent_ids = vec![agent_id.clone()];
-        if n % 3 != 0 {
-            instance.agent_id = agent_id;
-            instance.owner_access_id = Some("owner-access".into());
-            let mut access = cairn_contracts::AccessPolicy::default();
-            if n % 5 == 1 {
-                access.backend = "native".into();
-                instance.native_authority = Some(cairn_installation::plugins::connections::NativeAuthority {
-                    native_principals: vec!["owner-account".into()], native_authority_nodes: vec!["00000000-0000-4000-8000-000000000002".into()],
-                    native_provenance_unknown: false, native_parent_run_id: None, native_parent_access: None, native_plugin_grants: None, plugin_owner_account_id: "owner-account".into(),
-                });
+    let instances: Vec<_> = (0..1000)
+        .map(|n| {
+            let instance_id =
+                uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | n).to_string();
+            let agent_id =
+                uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | (n + 10000)).to_string();
+            let mut instance = PluginInstance::draft(
+                &instance_id,
+                "fixture",
+                json!({
+                    "channel": format!("channel-{n}"),
+                    "description": "Deterministic instance storage qualification. ".repeat(8),
+                    "scope": true,
+                    "audiences": ["engineering","support"],
+                }),
+                vec!["clientSecret".into()],
+            );
+            instance.name = format!("Instance {n:04}");
+            instance.revision = "revision".into();
+            instance.enabled = n % 3 != 0;
+            instance.updated_at = 1700000000000;
+            instance.max_messages_per_hour = 20;
+            instance.agent_ids = vec![agent_id.clone()];
+            if n % 3 != 0 {
+                instance.agent_id = agent_id;
+                instance.owner_access_id = Some("owner-access".into());
+                let mut access = cairn_contracts::AccessPolicy::default();
+                if n % 5 == 1 {
+                    access.backend = "native".into();
+                    instance.native_authority =
+                        Some(cairn_installation::plugins::connections::NativeAuthority {
+                            native_principals: vec!["owner-account".into()],
+                            native_authority_nodes: vec![
+                                "00000000-0000-4000-8000-000000000002".into(),
+                            ],
+                            native_provenance_unknown: false,
+                            native_parent_run_id: None,
+                            native_parent_access: None,
+                            native_plugin_grants: None,
+                            plugin_owner_account_id: "owner-account".into(),
+                        });
+                }
+                instance.granted_access = Some(access);
+                instance.access_mode = if n % 2 == 0 {
+                    cairn_contracts::PluginAccessMode::Everyone
+                } else {
+                    cairn_contracts::PluginAccessMode::Requests
+                };
+                instance.user_ids = vec!["person1".into(), "person2".into()];
+                instance.people = vec![
+                    cairn_contracts::PluginLabel {
+                        id: "person1".into(),
+                        name: "First person".into(),
+                    },
+                    cairn_contracts::PluginLabel {
+                        id: "person2".into(),
+                        name: "Second person".into(),
+                    },
+                ];
             }
-            instance.granted_access = Some(access);
-            instance.access_mode = if n % 2 == 0 { cairn_contracts::PluginAccessMode::Everyone } else { cairn_contracts::PluginAccessMode::Requests };
-            instance.user_ids = vec!["person1".into(),"person2".into()];
-            instance.people = vec![cairn_contracts::PluginLabel { id: "person1".into(),name: "First person".into() },cairn_contracts::PluginLabel { id: "person2".into(),name: "Second person".into() }];
-        }
-        instance
-    }).collect();
+            instance
+        })
+        .collect();
     measure(&instances);
 }
 
@@ -476,7 +526,10 @@ fn write<E: StorageEntity>(db: &Connection, reference: bool, entity: &E, replace
 fn distribution(samples: &[u128]) -> Value {
     let mut sorted = samples.to_vec();
     sorted.sort_unstable();
-    json!({ "p50Us": sorted[sorted.len()/2] as f64 / 1000.0, "p95Us": sorted[(sorted.len()*95/100).min(sorted.len()-1)] as f64 / 1000.0 })
+    json!({
+        "p50Us": sorted[sorted.len()/2] as f64 / 1000.0,
+        "p95Us": sorted[(sorted.len()*95/100).min(sorted.len()-1)] as f64 / 1000.0,
+    })
 }
 
 fn measured<T>(samples: &mut Vec<u128>, f: impl FnOnce() -> T) -> T {
@@ -762,7 +815,11 @@ fn mcp_storage_layouts() {
         auth:if index%3==0{AuthKind::None}else{AuthKind::OAuth},client_id:format!("client-{index}"),scopes:"read write".into(),
         enabled:index%5!=0,enabled_tools:match index%3{0=>None,1=>Some(vec![]),_=>Some(vec!["echo".into(),"search".into()])},
         created_at:1_700_000_000_000,revision:1,state:ConnectionState::Connected,checked_at:Some(1_700_000_001_000),error:String::new(),allow_private_network:false,
-        tools:(0..8).map(|tool|json!({"name":format!("tool_{tool}"),"description":"External tool description. ".repeat(12),"inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}})).collect(),
+        tools:(0..8).map(|tool|json!({
+            "name":format!("tool_{tool}"),
+            "description":"External tool description. ".repeat(12),
+            "inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]},
+        })).collect(),
     }).collect();
     measure(&servers);
 }
