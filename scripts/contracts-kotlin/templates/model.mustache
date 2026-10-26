@@ -2,13 +2,14 @@
 @Serializable
 {{#properties}}{{#constValue}}@SerialName("{{&.}}")
 {{/constValue}}{{/properties}}{{#additionalPropertiesSchema}}@JvmInline
-value class {{&className}}(val value: Map<String, {{#additionalProperties}}{{>type}}{{/additionalProperties}}>)
+value class {{&className}}(val value: Map<String, {{#additionalProperties}}{{>type}}{{/additionalProperties}}>) : Map<String, {{#additionalProperties}}{{>type}}{{/additionalProperties}}> by value
 {{/additionalPropertiesSchema}}{{^additionalPropertiesSchema}}{{#hasProperties}}data {{/hasProperties}}class {{&className}}(
 {{#properties}}{{^constValue}}{{^isRequired}}{{^defaultValue}}{{#nullable}}    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
 {{/nullable}}{{/defaultValue}}{{/isRequired}}    val {{&kotlinName}}: {{>type}}{{#defaultValue}} = {{>default_value}}{{/defaultValue}}{{^defaultValue}}{{^isRequired}} = null{{/isRequired}}{{/defaultValue}},
 {{/constValue}}{{/properties}}){{#interfaces}}{{#first}} : {{/first}}{{^first}}, {{/first}}{{&className}}{{/interfaces}} {
     init {
-{{#properties}}{{^constValue}}{{#minimum}}        require({{&kotlinName}} >= {{&.}}{{#isLong}}L{{/isLong}})
+{{#properties}}{{^constValue}}{{#validations}}{{#type}}{{#PATTERN}}        {{#nullable}}{{&kotlinName}}?.let { require(Regex({{&value.value.kotlinString}}).containsMatchIn(it)) }{{/nullable}}{{^nullable}}require(Regex({{&value.value.kotlinString}}).containsMatchIn({{&kotlinName}})){{/nullable}}
+{{/PATTERN}}{{/type}}{{/validations}}{{#minimum}}        require({{&kotlinName}} >= {{&.}}{{#isLong}}L{{/isLong}})
 {{/minimum}}{{#maximum}}        require({{&kotlinName}} <= {{&.}}{{#isLong}}L{{/isLong}})
 {{/maximum}}{{#isSystemClass}}{{#systemClass}}{{#UUID}}        {{#nullable}}{{&kotlinName}}?.let { java.util.UUID.fromString(it) }{{/nullable}}{{^nullable}}java.util.UUID.fromString({{&kotlinName}}){{/nullable}}
 {{/UUID}}{{/systemClass}}{{/isSystemClass}}{{/constValue}}{{/properties}}    }

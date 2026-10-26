@@ -67,12 +67,16 @@ abstract class ResourceSaveCases {
     fun restoredTaskEditorReplaysItsUncertainCreation() =
         saveAfterFailure("tasks", true, restore = true)
 
+    @Test
+    fun projectBaseBranchCanBeReplaced() = saveAfterFailure("projects", false, editBranch = true)
+
     private fun saveAfterFailure(
         kind: String,
         loseResponse: Boolean,
         rejectReplay: Boolean = false,
         restore: Boolean = false,
         malformedResponse: Boolean = false,
+        editBranch: Boolean = false,
     ) {
         val savedId = if (kind == "tasks") "saved" else "00000000-0000-4000-8000-000000000005"
         val uncertainResponse = loseResponse || malformedResponse
@@ -187,7 +191,8 @@ abstract class ResourceSaveCases {
                                 path.endsWith("/plugins/github/projects") ->
                                     """{"items":[{"id":"owner/repository","name":"owner/repository","description":"","defaultBranch":"main","badges":["Private"],"imported":false}],"nextPage":null}"""
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                path.endsWith("/agents") -> """[{"id":"agent","name":"Agent"}]"""
+                                path.endsWith("/agents") ->
+                                    """{"agents":[{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"d3153f9f-724b-59c3-9614-ab78f231c4d3","instructions":"","model":"","name":"Agent","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0}]}"""
                                 else ->
                                     if (
                                         request.requestUrl
@@ -195,6 +200,11 @@ abstract class ResourceSaveCases {
                                             ?.endsWith("/api/projects") == true
                                     )
                                         """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
                                     else "[]"
                             }
                         )
@@ -271,6 +281,22 @@ abstract class ResourceSaveCases {
                             .isNotEmpty()
                     }
                     compose.onNodeWithText("owner/repository").performScrollTo().performClick()
+                }
+                if (editBranch) {
+                    compose
+                        .onNodeWithText("Branche de base")
+                        .performScrollTo()
+                        .performTextReplacement("")
+                    compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                    compose
+                        .onNodeWithText("Branche de base")
+                        .performTextReplacement("invalid branch")
+                    compose.onNodeWithText("Enregistrer").performClick()
+                    compose
+                        .onNodeWithText("Saisissez un nom de branche de base valide.")
+                        .assertExists()
+                    assertTrue(mutations.isEmpty())
+                    compose.onNodeWithText("Branche de base").performTextReplacement("develop")
                 }
                 compose
                     .onNode(hasScrollAction() and hasAnyDescendant(hasText("Nom")))
@@ -359,6 +385,26 @@ abstract class ResourceSaveCases {
                         .jsonPrimitive
                         .content,
                 )
+                if (editBranch) {
+                    assertEquals(
+                        "develop",
+                        mutations
+                            .first()
+                            .second["settings"]!!
+                            .jsonObject["baseBranch"]!!
+                            .jsonPrimitive
+                            .content,
+                    )
+                    assertEquals(
+                        "develop",
+                        mutations
+                            .last()
+                            .second["settings"]!!
+                            .jsonObject["baseBranch"]!!
+                            .jsonPrimitive
+                            .content,
+                    )
+                }
                 if (kind == "import") {
                     val import = mutations.first().second
                     assertEquals("github", import["pluginId"]!!.jsonPrimitive.content)

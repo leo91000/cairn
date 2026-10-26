@@ -1,4 +1,6 @@
+use common::AgentFixture;
 use common::ProjectFixture;
+use common::StoreAgentFixture;
 
 mod common;
 
@@ -195,7 +197,6 @@ fn access_covers_unchanged_or_wider_grants_but_not_reduced_ones() {
         "skills": null,
         "mcps": ["m"],
         "mcpTools": { "m": ["read"] },
-        "github": false,
         "sandbox": "workspace-write",
         "nodes": ["laptop"],
         "maxResources": null,
@@ -204,7 +205,6 @@ fn access_covers_unchanged_or_wider_grants_but_not_reduced_ones() {
         "projects": ["a"],
         "mcps": ["m"],
         "mcpTools": { "m": ["read"] },
-        "github": false,
         "sandbox": "workspace-write",
         "nodes": null,
     }));
@@ -213,7 +213,6 @@ fn access_covers_unchanged_or_wider_grants_but_not_reduced_ones() {
         "projects": ["a", "b"],
         "mcps": null,
         "mcpTools": {},
-        "github": false,
         "sandbox": "yolo",
     }));
     assert!(covers(&wider, &granted));
@@ -238,7 +237,7 @@ async fn scoped_access_rejects_other_projects_expired_grants_and_reduced_permiss
     let mut restricted = restricted_agent("Restricted");
     restricted["access"]["projects"] = json!([projects[0]["id"]]);
     restricted["access"]["sandbox"] = "read-only".into();
-    let agent = s.agent(restricted, None).await.unwrap();
+    let agent = s.agent_fixture(restricted, None).await.unwrap();
     let run = run(&s, Value::Null, text(&agent, "id")).await;
     patch_run(&s, &run, json!({ "status": RunStatus::Running })).await;
     let config = s.mcps.run_configuration(&s, &run).await.unwrap();
@@ -256,11 +255,11 @@ async fn scoped_access_rejects_other_projects_expired_grants_and_reduced_permiss
     let mut widened = agent.clone();
     widened["access"]["projects"] = json!([projects[0]["id"], projects[1]["id"]]);
     widened["access"]["sandbox"] = "workspace-write".into();
-    s.store.put("agents", widened).await.unwrap();
+    s.store.put_agent_fixture(widened).await.unwrap();
     project_workspaces::authorize(&s, token).await.unwrap();
     let mut changed = agent.clone();
     changed["access"]["projects"] = json!([]);
-    s.store.put("agents", changed).await.unwrap();
+    s.store.put_agent_fixture(changed).await.unwrap();
     assert_eq!(
         project_workspaces::authorize(&s, token)
             .await
@@ -828,7 +827,7 @@ async fn isolated_commits_keep_the_configured_owner_for_main_and_restricted_agen
     )
     .unwrap();
     let agent = s
-        .agent(restricted_agent("Another agent"), None)
+        .agent_fixture(restricted_agent("Another agent"), None)
         .await
         .unwrap();
     for agent_id in [MAIN_AGENT_ID, text(&agent, "id")] {
@@ -865,7 +864,7 @@ async fn isolated_commits_fall_back_to_the_granted_plugin_account() {
     )
     .unwrap();
     let agent = s
-        .agent(restricted_agent("Dedicated agent"), None)
+        .agent_fixture(restricted_agent("Dedicated agent"), None)
         .await
         .unwrap();
     for (agent_id, name, expected) in [

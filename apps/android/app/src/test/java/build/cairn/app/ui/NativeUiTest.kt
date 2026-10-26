@@ -33,7 +33,24 @@ class NativeUiTest {
             installation =
                 Installation("fixture", "Installation de test", InstallationRole.Owner, true),
             ready = true,
-            agents = listOf(Agent(id = "agent", name = "Reviewer")),
+            agents =
+                listOf(
+                    Agent(
+                        exclusiveNodes = emptyList(),
+                        plugins = emptyList(),
+                        revision = "",
+                        createdAt = 0,
+                        access =
+                            AccessPolicy(
+                                mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                                projects = null,
+                                skills = null,
+                                mcps = null,
+                            ),
+                        id = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                        name = "Reviewer",
+                    )
+                ),
             projects = listOf(Project(id = "46d045dd-9bce-51e3-8a99-65aa9384efc9", name = "Cairn")),
         )
 
@@ -46,7 +63,10 @@ class NativeUiTest {
                 TaskEditor(
                     vm,
                     workspace,
-                    Task(agentId = "agent", projectId = "46d045dd-9bce-51e3-8a99-65aa9384efc9"),
+                    Task(
+                        agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                        projectId = "46d045dd-9bce-51e3-8a99-65aa9384efc9",
+                    ),
                 ) {}
             }
         }
@@ -78,7 +98,7 @@ class NativeUiTest {
                                 Task(
                                     id = "a",
                                     name = "Revue quotidienne",
-                                    agentId = "agent",
+                                    agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
                                     projectId = "46d045dd-9bce-51e3-8a99-65aa9384efc9",
                                     cron = "0 9 * * *",
                                     nextRun = 1789405200000,
@@ -86,7 +106,7 @@ class NativeUiTest {
                                 Task(
                                     id = "b",
                                     name = "Ancienne mission",
-                                    agentId = "agent",
+                                    agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
                                     projectId = "46d045dd-9bce-51e3-8a99-65aa9384efc9",
                                     archived = true,
                                     enabled = false,

@@ -201,7 +201,7 @@ test('Discord bots are set up through the package’s own form and keep the toke
   await expect(review.getByRole('checkbox', { name: /Reapprove the new access for #support on Acme/ })).toBeChecked()
   const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await review.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await saving).postDataJSON().reapproveDelegations).toEqual([botId])
+  expect((await saving).postDataJSON().review.reapproveDelegations).toEqual([botId])
   await expect(review).toHaveCount(0)
 
   // An earlier change elsewhere already suspended the bot: a later edit never reapproves it by default.
@@ -216,7 +216,7 @@ test('Discord bots are set up through the package’s own form and keep the toke
   // Alone, a delegation already suspended does not open the review, and is not reapproved.
   const direct = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await describe('Answers support questions')
-  expect((await direct).postDataJSON()).not.toHaveProperty('reapproveDelegations')
+  expect((await direct).postDataJSON().review.reapproveDelegations).toEqual([])
   await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
   await expect(review).toHaveCount(0)
 
@@ -232,14 +232,14 @@ test('Discord bots are set up through the package’s own form and keep the toke
   await expect(review).toContainText('Already suspended by an earlier change. Reapprove only after checking its current access.')
   const unchecked = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await review.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await unchecked).postDataJSON()).not.toHaveProperty('reapproveDelegations')
+  expect((await unchecked).postDataJSON().review.reapproveDelegations).toEqual([])
   await expect(review).toHaveCount(0)
   // Checked deliberately, it is reapproved.
   await describe('Answers support questions in Acme')
   await earlier.check()
   const checked = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await review.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await checked).postDataJSON().reapproveDelegations).toEqual([botId])
+  expect((await checked).postDataJSON().review.reapproveDelegations).toEqual([botId])
   await expect(review).toHaveCount(0)
   await page.goto(workspacePath('/plugins/discord'))
 

@@ -192,6 +192,11 @@ impl Service {
                     if let Some(project) = db.project(&creation_id.to_string())? {
                         return Ok(project);
                     }
+                    if db.agent(&creation_id.to_string())?.is_some() {
+                        return Err(Error::conflict(
+                            "This creation identity belongs to a different resource.",
+                        ));
+                    }
                     if db.0.query_row(
                         "SELECT EXISTS(SELECT 1 FROM records WHERE id=?)",
                         [creation_id.to_string()],

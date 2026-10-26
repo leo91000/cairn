@@ -25,8 +25,8 @@ test('selects live models and supported reasoning for agents and queued chat tur
   const menu = page.getByRole('dialog', { name: 'Agent & model' })
   const reasoning = menu.getByRole('radiogroup', { name: 'Reasoning' })
   const effort = (name: string) => reasoning.getByRole('radio', { name, exact: true })
-  // Before the menu opens, the picker names the model and effort Codex uses by default.
-  await expect(picker).toHaveAccessibleName('Agent, model, reasoning and speed: Codex · Quick coder · Low reasoning')
+  // A new profile uses the same high effort as the generated server and Android defaults.
+  await expect(picker).toHaveAccessibleName('Agent, model, reasoning and speed: Codex · Quick coder · High reasoning')
   await picker.click()
   await expect(menu.getByRole('radio', { name: 'Deep thinker', exact: true })).toBeVisible()
   await expect(menu.getByRole('radio', { name: 'Quick coder', exact: true })).toHaveCount(1)
@@ -114,7 +114,7 @@ test('keeps the Codex speed across models, for agents and queued chat turns', as
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.screenshot({ path: testInfo.outputPath('speed-agent-desktop-light.png'), animations: 'disabled' })
   await menu.getByRole('button', { name: 'Close', exact: true }).click()
-  await expect(picker).toHaveAccessibleName('Agent, model, reasoning and speed: Codex · Quick coder · Low reasoning · Fast speed')
+  await expect(picker).toHaveAccessibleName('Agent, model, reasoning and speed: Codex · Quick coder · High reasoning · Fast speed')
   await createAgent(page)
   const agent = workspace.service.store.list('agents').find(agent => agent.name === 'Speed explorer')!
   expect(agent.speed).toBe('priority')

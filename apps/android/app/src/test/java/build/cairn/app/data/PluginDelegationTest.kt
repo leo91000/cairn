@@ -5,10 +5,25 @@ import org.junit.Test
 
 /** The owner's warning about what a bot's people can do; nothing is refused. */
 class PluginDelegationTest {
-    private fun agent(access: AccessPolicy) = Agent(id = "helper", name = "Helper", access = access)
+    private fun agent(access: AccessPolicy) =
+        Agent(
+            exclusiveNodes = emptyList(),
+            plugins = emptyList(),
+            revision = "",
+            createdAt = 0,
+            id = "08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3",
+            name = "Helper",
+            access = access,
+        )
 
     private val limited =
-        AccessPolicy(projects = emptyList(), mcps = emptyList(), sandbox = "read-only")
+        AccessPolicy(
+            mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+            skills = null,
+            projects = emptyList(),
+            mcps = emptyList(),
+            sandbox = "read-only",
+        )
 
     @Test
     fun `broad agents get a warning for listed people`() {
@@ -45,7 +60,9 @@ class PluginDelegationTest {
             ),
             agent(limited.copy(sandbox = "yolo", mcps = null))
                 .delegationRisks(
-                    listOf(PluginConnection(agentIds = listOf("helper"))),
+                    listOf(
+                        PluginConnection(agentIds = listOf("08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3"))
+                    ),
                     everyone = true,
                 ),
         )
@@ -57,9 +74,19 @@ class PluginDelegationTest {
         val warning = listOf("utiliser ses plugins, comme GitHub ou 1Password")
         assertEquals(
             warning,
-            helper.delegationRisks(listOf(PluginConnection(agentIds = listOf("helper"))), true),
+            helper.delegationRisks(
+                listOf(PluginConnection(agentIds = listOf("08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3"))),
+                true,
+            ),
         )
-        assertEquals(warning, helper.delegationRisks(emptyList(), true, listOf("helper")))
+        assertEquals(
+            warning,
+            helper.delegationRisks(
+                emptyList(),
+                true,
+                listOf("08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3"),
+            ),
+        )
         assertEquals(
             emptyList<String>(),
             helper.delegationRisks(emptyList(), true, listOf("other")),

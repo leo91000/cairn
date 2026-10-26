@@ -173,7 +173,7 @@ pub(crate) fn forget_agent(db: &Db<'_>, agent_id: &str) -> Result<()> {
 fn snapshot(db: &Db<'_>, node: &Value, mode: Mode) -> Result<Value> {
     let node_id = text(node, "id");
     let agents = db
-        .list("agents")?
+        .agent_snapshots()?
         .into_iter()
         .filter(|agent| crate::native::policy::native(agent) && super::agent_allows(agent, node_id))
         .map(|agent| json!({ "id": agent["id"], "name": agent["name"], "revision": agent["revision"], "access": policy(&agent) }))
@@ -320,6 +320,7 @@ pub async fn change(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_fixture::StoreAgentFixture;
 
     #[test]
     fn protected_mode_requires_the_current_controller_acknowledgement() {
@@ -356,7 +357,7 @@ mod tests {
             "nativePrincipals": [person], "nativeAuthorityNodes": [node_id], "nativeProvenanceUnknown": false,
         });
         store.put("nodes", node.clone()).await.unwrap();
-        store.put("agents", agent).await.unwrap();
+        store.put_agent_fixture(agent).await.unwrap();
         store.put("node-attempts", json!({ "id": attempt_id, "runId": run_id, "nodeId": node_id, "nativeMode": mode, "released": false })).await.unwrap();
         store
             .set(
@@ -422,8 +423,7 @@ mod tests {
         run["snapshot"] = json!({ "agent": { "id": agent_id, "access": { "backend": "native", "nodes": [node_id] } } });
         run["backendMigration"] = json!({ "sourceReadReady": true, "grant": grant });
         store
-            .put(
-                "agents",
+            .put_agent_fixture(
                 json!({ "id": agent_id, "access": { "backend": "firecracker", "nodes": [] } }),
             )
             .await

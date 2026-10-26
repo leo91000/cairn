@@ -7,6 +7,7 @@ import build.cairn.app.BuildConfig
 import build.cairn.contracts.AccountSignInMethod
 import build.cairn.contracts.ListProjectsInput
 import build.cairn.contracts.listAccountMethods
+import build.cairn.contracts.listAgents
 import build.cairn.contracts.listProjects
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
@@ -770,7 +771,7 @@ constructor(
     suspend fun refresh() = coroutineScope {
         val target = api
         val owner = state.value.isOwner
-        val agents = async { target.get<List<Agent>>("/agents") }
+        val agents = async { target.listAgents(build.cairn.contracts.ListAgentsInput()).agents }
         val projects = async { target.listProjects(ListProjectsInput()).projects }
         val tasks = async { target.get<List<Task>>("/tasks") }
         val skills = async { target.get<List<Skill>>("/skills") }
@@ -820,7 +821,8 @@ constructor(
     suspend fun refreshAgentPortraits() {
         val target = api
         val before = state.value.agents.associate { it.id to it.avatar }
-        val portraits = target.get<List<Agent>>("/agents").associateBy { it.id }
+        val portraits =
+            target.listAgents(build.cairn.contracts.ListAgentsInput()).agents.associateBy { it.id }
         if (connection === target && state.value.session.authenticated)
             mutable.update { current ->
                 current.copy(

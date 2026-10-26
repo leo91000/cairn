@@ -137,7 +137,7 @@ fn record_name(db: &Db<'_>, chat: &Value, kind: &str, key: &str, deleted: &str) 
     } else {
         "projectId"
     };
-    Ok(match db.get(kind, text(chat, id_key))? {
+    Ok(match db.agent_snapshot(text(chat, id_key))? {
         Some(record) => record["name"].clone(),
         // Keep the name remembered on the chat after its agent or project is removed.
         None => chat.get(key).cloned().unwrap_or_else(|| deleted.into()),
@@ -293,7 +293,7 @@ fn message_provider(db: &Db<'_>, chat: &Value, message: &Value) -> Result<String
         return Ok(Provider::of_run(&run)?.as_str().to_owned());
     }
     let agent = required(
-        db.get("agents", text(chat, "agentId"))?,
+        db.agent_snapshot(text(chat, "agentId"))?,
         "This agent is no longer available.",
     )?;
     Ok(Provider::of_agent(&agent)?.as_str().to_owned())
@@ -368,7 +368,7 @@ fn require_sendable(db: &Db<'_>, chat: &Value, messages: &[Value], id: &str) -> 
         ));
     }
     let agent = required(
-        db.get("agents", text(chat, "agentId"))?,
+        db.agent_snapshot(text(chat, "agentId"))?,
         "This agent is no longer available.",
     )?;
     crate::nodes::require_node(&agent)?;
@@ -897,7 +897,7 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
     crate::native::policy::authorize_run_in(db, run_id, origin)?;
     let run = required(db.run(run_id)?, "Run not found")?;
     let agent = required(
-        db.get("agents", text(&run["snapshot"]["agent"], "id"))?,
+        db.agent_snapshot(text(&run["snapshot"]["agent"], "id"))?,
         "Agent not found",
     )?;
     if !crate::service::covers(&agent, &run["snapshot"]["agent"]) {
@@ -957,7 +957,7 @@ pub(crate) fn create_as(
     origin: &crate::native::policy::Origin,
 ) -> Result<Value> {
     let input = parse_as::<ChatInput>("chat", input)?;
-    let agent = required(db.get("agents", &input.agent_id)?, "Agent not found")?;
+    let agent = required(db.agent_snapshot(&input.agent_id)?, "Agent not found")?;
     crate::native::policy::authorize_origin(db, &agent, origin)?;
     let created_at = now();
     let mut chat = serde_json::to_value(NewChat {
@@ -1664,8 +1664,18 @@ mod tests {
         let store = crate::store::Store::open(root.path()).unwrap();
         store
             .transaction(|db| {
-                db.put("agents", &json!({ "id": "codex", "provider": "codex" }))?;
-                db.put("agents", &json!({ "id": "claude", "provider": "claude" }))?;
+                let codex = cairn_contracts::AgentId(uuid::Uuid::new_v4());
+                let claude = cairn_contracts::AgentId(uuid::Uuid::new_v4());
+                for (agent_id, provider) in [(codex, "codex"), (claude, "claude")] {
+                    let settings = serde_json::from_value(json!({
+                        "name": provider,
+                        "provider": provider,
+                        "access": cairn_contracts::AccessPolicy::default(),
+                        "exclusiveNodes": [],
+                        "plugins": [],
+                    }))?;
+                    db.save_agent(&crate::agents::new_agent(settings, Some(agent_id)))?;
+                }
                 let run = json!({
                     "id": "claude-run",
                     "taskId": "switched",
@@ -1674,9 +1684,9 @@ mod tests {
                     "snapshot": { "agent": { "provider": "claude" } },
                 });
                 db.add_run(&run, None)?;
-                let new_codex = json!({ "id": "new-codex", "runId": null, "agentId": "codex" });
-                let new_claude = json!({ "id": "new-claude", "runId": null, "agentId": "claude" });
-                let switched = json!({ "id": "switched", "runId": "claude-run", "agentId": "codex" });
+                let new_codex = json!({ "id": "new-codex", "runId": null, "agentId": codex });
+                let new_claude = json!({ "id": "new-claude", "runId": null, "agentId": claude });
+                let switched = json!({ "id": "switched", "runId": "claude-run", "agentId": codex });
                 let fast = |provider: &str| json!({ "id": id(), "provider": provider, "speed": "priority" });
                 let refused = |chat: &Value, message: &Value| {
                     validate_speed(db, chat, message).unwrap_err().status == 400
@@ -1715,7 +1725,7 @@ mod tests {
                     "snapshot": { "agent": { "provider": "codex", "speed": "priority" } },
                 });
                 db.add_run(&running, None)?;
-                let steering = json!({ "id": "steering", "runId": "codex-run", "agentId": "codex" });
+                let steering = json!({ "id": "steering", "runId": "codex-run", "agentId": codex });
                 let switching = json!({
                     "id": "switching",
                     "chatId": "steering",

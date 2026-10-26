@@ -1,0 +1,72 @@
+[
+  {
+    "input": "SetAgentAvatarInput",
+    "method": "POST",
+    "name": "setAgentAvatar",
+    "output": "Agent",
+    "path": "/agents/{agentId}/avatar/upload"
+  },
+  {
+    "input": "ListAgentsInput",
+    "method": "GET",
+    "name": "listAgents",
+    "output": "ListAgentsOutput",
+    "path": "/agents"
+  },
+  {
+    "input": "AgentInput",
+    "method": "GET",
+    "name": "getAgent",
+    "output": "Agent",
+    "path": "/agents/{agentId}"
+  },
+  {
+    "input": "CreateAgentInput",
+    "method": "POST",
+    "name": "createAgent",
+    "output": "Agent",
+    "path": "/agents"
+  },
+  {
+    "input": "ReplaceAgentInput",
+    "method": "PUT",
+    "name": "replaceAgent",
+    "output": "Agent",
+    "path": "/agents/{agentId}"
+  },
+  {
+    "input": "AgentInput",
+    "method": "DELETE",
+    "name": "deleteAgent",
+    "output": "DeleteAgentOutput",
+    "path": "/agents/{agentId}"
+  },
+  {
+    "input": "ReplaceAgentInput",
+    "method": "POST",
+    "name": "previewAgent",
+    "output": "AgentPreview",
+    "path": "/agents/{agentId}/preview"
+  },
+  {
+    "input": "MergeAgentsInput",
+    "method": "POST",
+    "name": "mergeAgents",
+    "output": "MergeAgentsOutput",
+    "path": "/agents/{sourceId}/merge"
+  },
+  {
+    "input": "ListAgentsInput",
+    "method": "GET",
+    "name": "getAgentAvatarConfiguration",
+    "output": "AvatarConfiguration",
+    "path": "/agent-avatars"
+  },
+  {
+    "input": "AgentInput",
+    "method": "POST",
+    "name": "generateAgentAvatar",
+    "output": "Agent",
+    "path": "/agents/{agentId}/avatar/generate"
+  }
+]

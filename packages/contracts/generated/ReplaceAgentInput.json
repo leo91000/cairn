@@ -1,0 +1,222 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AccessPolicy": {
+      "additionalProperties": false,
+      "description": "Permission relations remain owned by A3. Their typed wire view preserves null (all)\nseparately from an empty selection. No authority is supplied by this DTO.",
+      "properties": {
+        "backend": {
+          "default": "firecracker",
+          "pattern": "^(firecracker|native)$",
+          "type": "string"
+        },
+        "delegation": {
+          "default": false,
+          "type": "boolean"
+        },
+        "installation": {
+          "default": false,
+          "type": "boolean"
+        },
+        "mcpTools": {
+          "additionalProperties": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 500,
+            "type": "array"
+          },
+          "propertyNames": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "mcps": {
+          "default": null,
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "nodes": {
+          "default": [
+            "00000000-0000-4000-8000-000000000002"
+          ],
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "projects": {
+          "default": null,
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "sandbox": {
+          "default": "yolo",
+          "pattern": "^(yolo|workspace-write|read-only)$",
+          "type": "string"
+        },
+        "skills": {
+          "default": null,
+          "items": {
+            "maxLength": 160,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mcpTools"
+      ],
+      "type": "object"
+    },
+    "AgentReview": {
+      "additionalProperties": false,
+      "properties": {
+        "nativeNodeReviews": {
+          "default": [],
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "reapproveDelegations": {
+          "default": [],
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "AgentSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "access": {
+          "$ref": "#/definitions/AccessPolicy"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "exclusiveNodes": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "instructions": {
+          "default": "",
+          "maxLength": 20000,
+          "type": "string"
+        },
+        "model": {
+          "default": "",
+          "maxLength": 100,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "plugins": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "provider": {
+          "default": "codex",
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        },
+        "reasoning": {
+          "default": "high",
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
+        "speed": {
+          "default": "",
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
+        "timeoutMinutes": {
+          "default": 0,
+          "format": "uint16",
+          "maximum": 720,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "access",
+        "exclusiveNodes",
+        "plugins"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "agentId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "review": {
+      "$ref": "#/definitions/AgentReview"
+    },
+    "revision": {
+      "type": "string"
+    },
+    "settings": {
+      "$ref": "#/definitions/AgentSettings"
+    }
+  },
+  "required": [
+    "agentId",
+    "revision",
+    "settings",
+    "review"
+  ],
+  "title": "ReplaceAgentInput",
+  "type": "object"
+}

@@ -165,7 +165,7 @@ pub(crate) fn authorize(db: &Db<'_>, expected: &Connection) -> Result<Connection
         return Err(denied());
     }
     if !current.agent_id.is_empty() {
-        let agent = db.get("agents", &current.agent_id)?.ok_or_else(denied)?;
+        let agent = db.agent_snapshot(&current.agent_id)?.ok_or_else(denied)?;
         if policy(&agent) != current.granted_access {
             return Err(denied());
         }
@@ -835,7 +835,7 @@ where
                 ));
             }
             for agent in &connection.agent_ids {
-                if db.get("agents", agent)?.is_none() {
+                if db.agent_snapshot(agent)?.is_none() {
                     return Err(Error::bad("A selected agent no longer exists."));
                 }
             }
@@ -857,7 +857,7 @@ where
             }
             if !connection.agent_id.is_empty() {
                 let agent = db
-                    .get("agents", &connection.agent_id)?
+                    .agent_snapshot(&connection.agent_id)?
                     .ok_or_else(|| Error::bad("Agent not found."))?;
                 let access = policy(&agent);
                 delegation_rules(db, &connection, &access)?;
@@ -986,7 +986,7 @@ pub(crate) fn delegation_effects(
     owner: Option<&str>,
 ) -> Result<Value> {
     let access = policy(agent);
-    let saved = db.get("agents", agent_id)?;
+    let saved = db.agent_snapshot(agent_id)?;
     let mut effects = Vec::new();
     for value in db.list(KIND)? {
         if value["agentId"] != agent_id {

@@ -12,5 +12,8 @@ data class ProjectSettings(
     val path: String,
     val sourceMode: String = "remote",
 ) {
-    init {}
+    init {
+        require(Regex("^[a-zA-Z0-9][a-zA-Z0-9_/.-]*\$").containsMatchIn(baseBranch))
+        require(Regex("^(remote|local)\$").containsMatchIn(sourceMode))
+    }
 }

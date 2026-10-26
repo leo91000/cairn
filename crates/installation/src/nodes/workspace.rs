@@ -46,7 +46,7 @@ async fn authorize(s: &Service, node: &str, attempt: &str) -> Result<(Value, Val
     let plan: Value = serde_json::from_slice(&bytes)?;
     let run = s.store.run(text(&plan, "runId")).await?;
     let checkpoint = super::checkpoint(s, text(&plan, "runId")).await?;
-    let agent = s.get("agents", super::run_agent(&run)).await?;
+    let agent = s.agent_snapshot(super::run_agent(&run)).await?;
     let ownership = s
         .store
         .get("node-attempts", attempt)
