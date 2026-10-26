@@ -427,10 +427,6 @@ where
         .await
 }
 
-pub async fn refresh(s: &Service, server: &McpServer) -> Result<()> {
-    refresh_authorized(s, server, |_| Ok(())).await
-}
-
 pub(crate) async fn refresh_authorized<F>(
     s: &Service,
     server: &McpServer,

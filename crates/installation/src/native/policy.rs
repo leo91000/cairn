@@ -346,11 +346,6 @@ pub(crate) fn authorize_origin(db: &Db<'_>, agent: &Value, source: &Origin) -> R
     ))
 }
 
-pub fn authorize_caller(db: &Db<'_>, agent: &Value, caller: Option<&str>) -> Result<()> {
-    let source = caller.map_or(Origin::Unknown, |caller| Origin::Human(caller.into()));
-    authorize_origin(db, agent, &source).map(|_| ())
-}
-
 pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<Value> {
     let agent = db
         .agent_snapshot(text(chat, "agentId"))?

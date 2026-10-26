@@ -466,10 +466,6 @@ impl Rpc {
         };
         self.send(Message::Error { id, error }).await
     }
-
-    pub async fn closed(&self) {
-        self.closed.cancelled().await;
-    }
 }
 
 fn unavailable() -> Error {
