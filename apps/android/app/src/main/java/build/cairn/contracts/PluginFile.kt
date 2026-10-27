@@ -9,5 +9,7 @@ data class PluginFile(
     val bytes: Long,
     val path: String,
 ) {
-    init {}
+    init {
+        require(bytes >= 0L)
+    }
 }

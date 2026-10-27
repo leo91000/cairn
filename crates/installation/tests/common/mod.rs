@@ -537,6 +537,7 @@ pub fn instance_configuration(
 }
 
 pub mod run_fixture;
+
 // Existing behavioral suites use JSON wire assertions. Inputs decode through the
 // canonical package contract; these helpers own no validation or persistence.
 pub async fn package_install(

@@ -1181,6 +1181,17 @@
       "additionalProperties": false,
       "description": "A program on the installation the package may run through `exec`.",
       "properties": {
+        "cache": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginProgramCache"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional foreground cache daemon, isolated to a saved instance and revision."
+        },
         "description": {
           "default": "",
           "type": "string"
@@ -1202,6 +1213,27 @@
       "required": [
         "name",
         "description"
+      ],
+      "type": "object"
+    },
+    "PluginProgramCache": {
+      "additionalProperties": false,
+      "properties": {
+        "daemonArgs": {
+          "description": "Static arguments to the same executable. It must remain in the foreground.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "socketEnv": {
+          "description": "Cairn supplies a private Unix socket path to the daemon and its clients.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "daemonArgs",
+        "socketEnv"
       ],
       "type": "object"
     },

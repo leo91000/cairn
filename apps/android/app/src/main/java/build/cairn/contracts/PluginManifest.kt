@@ -51,5 +51,7 @@ data class PluginManifest(
     val tools: List<PluginTool> = listOf(),
     val version: String,
 ) {
-    init {}
+    init {
+        require(apiVersion >= 0L)
+    }
 }

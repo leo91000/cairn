@@ -645,7 +645,10 @@ pub(crate) async fn operation(
             .invoke(
                 s,
                 args,
-                crate::capabilities::ResumeContext::Public(scopes.to_vec(), credential.map(str::to_owned)),
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
             )
             .await;
     }
