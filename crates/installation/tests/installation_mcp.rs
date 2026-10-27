@@ -4329,7 +4329,13 @@ async fn expired_installation_authorization_cannot_publish_a_prepared_package() 
     )
     .await;
     s.store
-        .patch_run(run["id"].as_str().unwrap(), json!({"status":"completed"}))
+        .change_run(
+            run["id"].as_str().unwrap(),
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Succeeded),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     std::fs::write(&resume, "").unwrap();
