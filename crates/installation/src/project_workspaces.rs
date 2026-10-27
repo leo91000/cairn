@@ -291,6 +291,9 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
                 )
             },
         ),
+        "task_models" => {
+            ToolResult::from_result(crate::delegation::models(s, bearer, args).await, summary)
+        }
         "task_status" => {
             ToolResult::from_result(crate::delegation::status(s, bearer, args).await, summary)
         }

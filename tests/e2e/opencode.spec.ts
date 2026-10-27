@@ -366,3 +366,38 @@ test('OpenCode Go displays three quotas, reset times and the provider balance se
   expect(refreshed.remainingPercent).toBe(0)
   expect(JSON.stringify(refreshed)).not.toContain(apiKey)
 })
+
+test('OpenCode explains an unavailable connection without claiming its quota is exhausted', async ({ page, workspace }) => {
+  initializeRepository(workspace.projectPath)
+  const accounts = (await workspace.api('/api/accounts')).accounts
+  if (!accounts.some((account: { provider: string, enabled: boolean, state: string }) => account.provider === 'opencode' && account.enabled && account.state === 'ready')) {
+    await workspace.api('/api/accounts', 'POST', {
+      provider: 'opencode',
+      name: 'Route diagnostic',
+      modelProvider: 'opencode',
+      apiKey: 'synthetic-browser-route-key',
+    })
+  }
+
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const model = 'openrouter/anthropic/claude-sonnet-4.6'
+  try {
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+      id: crypto.randomUUID(),
+      provider: 'opencode',
+      model,
+      text: 'Check the connection before starting.',
+    })
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.accountWaitReason).toContain(`No enabled OpenCode account supports model ${model}`)
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await signIn(page)
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 900 })
+      await expect(page.getByText(`No enabled OpenCode account supports model ${model}. Choose a model available through your connections or connect its model provider.`, { exact: true }).first()).toBeVisible()
+      await expect(page.getByRole('status', { name: 'Coding agent quota reached' })).toHaveCount(0)
+    }
+  }
+  finally {
+    await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
+  }
+})

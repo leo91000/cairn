@@ -34,6 +34,37 @@ async fn connect(s: &Service) -> Value {
 }
 
 #[tokio::test]
+async fn incompatible_model_routes_are_not_reported_as_exhausted_usage_or_busy_slots() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let account = connect(&s).await;
+    s.accounts
+        .update(&s, text(&account, "id"), &json!({ "maxConcurrentRuns": 1 }))
+        .await
+        .unwrap();
+    let lease = s
+        .accounts
+        .acquire(&s, "busy-zen", Provider::Opencode, MODEL)
+        .await
+        .unwrap()
+        .unwrap();
+    let error = s
+        .accounts
+        .acquire(
+            &s,
+            "wrong-route",
+            Provider::Opencode,
+            "opencode-go/ling-3.1-flash-free",
+        )
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("supports"), "{}", error.message);
+    assert!(!error.message.contains("available usage"));
+    assert!(!error.message.contains("free OpenCode account slot"));
+    s.accounts.release(&lease).await.unwrap();
+}
+
+#[tokio::test]
 async fn api_keys_are_private_provider_bound_and_fenced_against_live_replacement() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;

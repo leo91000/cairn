@@ -601,15 +601,26 @@ impl Accounts {
             timing.finish();
             return Ok(Some(lease));
         }
-        Err(self.waiting(s, provider).await?)
+        Err(self.waiting(s, provider, model).await?)
     }
 
     /// Why no account can take a run now.
-    async fn waiting(&self, s: &Service, provider: Provider) -> Result<Error> {
+    async fn waiting(&self, s: &Service, provider: Provider, model: &str) -> Result<Error> {
         let accounts = self.of(s, provider).await?;
-        let leases = self.leases.lock().await;
         let label = provider.label();
         let ready = accounts.iter().filter(|a| a.is_ready()).collect::<Vec<_>>();
+        let mut compatible = Vec::new();
+        for account in ready.iter().copied().filter(|a| a.enabled) {
+            if provider != Provider::Opencode
+                || provider
+                    .driver()
+                    .supports(s, &account.id, model, "")
+                    .await?
+            {
+                compatible.push(account);
+            }
+        }
+        let leases = self.leases.lock().await;
         let full = |a: &&Account| a.enabled && running(&leases, &a.id) >= a.parallel_runs();
         let message = if ready.is_empty() && accounts.iter().any(|a| a.state == AccountState::Error)
         {
@@ -618,7 +629,11 @@ impl Accounts {
             format!("Connect a {label} account in Connections before running this agent.")
         } else if ready.iter().all(|a| !a.enabled) {
             format!("Every {label} account is paused. Resume one in Connections to continue.")
-        } else if ready.iter().any(full) {
+        } else if provider == Provider::Opencode && compatible.is_empty() {
+            format!(
+                "No enabled {label} account supports model {model}. Choose a model available through your connections or connect its model provider."
+            )
+        } else if compatible.iter().any(full) {
             format!(
                 "Waiting for a free {label} account slot. The run starts when another finishes."
             )

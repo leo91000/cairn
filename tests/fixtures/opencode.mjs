@@ -65,6 +65,7 @@ async function main() {
         name: 'OpenCode Go',
         models: {
           'ling-3.1-flash-free': nativeModel('ling-3.1-flash-free', 'Ling 3.1 Flash Free', ['medium', 'high']),
+          'retired-model': { ...nativeModel('retired-model', 'Retired model', []), status: 'deprecated' },
         },
       },
       {

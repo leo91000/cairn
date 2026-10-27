@@ -151,13 +151,22 @@ access is restricted. It requires no external OAuth connection or personal token
 Disabling the option, ending or cancelling the execution, or changing its chat
 turn invalidates the access. See [the installation-access decision](adr/0064-opt-in-installation-tools-for-agents.md).
 
-An agent with **Task delegation** also finds `delegate_task`, `task_status` and
+An agent with **Task delegation** also finds `task_models`, `delegate_task`, `task_status` and
 `task_cancel` on `cairn_workspace` in conversations it did not receive as a
 delegated task. `delegate_task` takes the task text and optionally a title, an
 agent the caller covers, a project, a coding agent (`codex`, `claude`,
 `opencode`), a model, a reasoning effort and a retry `requestId`. It returns the
 delegated conversation; `task_status` with its `chatId` returns its state, outcome,
 pending questions and final report. See [delegated tasks](adr/0059-delegated-tasks.md).
+
+Before choosing a model, call `task_models` with the coding agent's `provider`.
+It returns the same catalog as public MCP and `cairn_installation`'s `list_models`,
+without granting installation management. For OpenCode, copy the entry's
+`model` (`auto/…`): Cairn chooses an available connection in the user's order.
+The `provider` argument selects the coding agent (`opencode`), not Go or Zen.
+Only use a route's `provider/model` when a specific connection is requested.
+Delegation rejects models absent from connected accounts before creating a
+conversation; a connected account with exhausted usage may still queue normally.
 
 ## Managing conversations
 
