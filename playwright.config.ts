@@ -70,6 +70,12 @@ export default defineConfig({
     { name: 'journeys-task-focus', testMatch: 'task-focus.spec.ts' },
     { name: 'layout-webkit-task-focus', testMatch: 'task-focus.spec.ts', use: { browserName: 'webkit' } },
     { name: 'journeys-agent-access', testMatch: 'agent-access.spec.ts' },
+    {
+      name: 'layout-webkit-agent-priorities',
+      testMatch: 'agent-access.spec.ts',
+      grep: /automatic placement saves ordered node priorities/,
+      use: { browserName: 'webkit', hasTouch: true },
+    },
     { name: 'journeys-skill-mentions', testMatch: 'skill-mentions.spec.ts' },
     { name: 'layout-webkit-skill-mentions', testMatch: 'skill-mentions.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'journeys-skill-bundles', testMatch: 'skill-bundles.spec.ts' },

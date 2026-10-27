@@ -4,6 +4,16 @@ Reference: web commit `2e9868233295af713eede804c7d70b9f514df04b` (v0.21.12).
 This audit compares user actions and information, with native Android presentation.
 It does not assert pixel equality between a browser and Material components.
 
+## Node priority drag and drop
+
+Both apps let owners drag a node priority handle onto another row, then save the
+agent's draft as before. Up/down buttons remain available for keyboard and
+accessibility use; cancelling a drag leaves the draft unchanged. Web handles use
+pointer capture for mouse, pen and touch; Android handles use native drag gestures.
+This changes the presentation of existing ordered `nodePriorities`, already
+editable through public MCP and `cairn_installation`; grants and placement rules
+are unchanged.
+
 ## Feature map
 
 Automatic agent placement: both apps offer VM only, native only and automatic
