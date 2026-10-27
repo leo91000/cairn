@@ -475,22 +475,57 @@ async fn node_storage_controls_share_probes_persistence_and_permissions_across_b
     std::fs::create_dir(root.path().join("home")).unwrap();
     let probes = Arc::new(Mutex::new(Vec::<Value>::new()));
     let fail_probe = Arc::new(AtomicBool::new(false));
+    let hold_probe = Arc::new(AtomicBool::new(false));
+    let probed = Arc::new(tokio::sync::Notify::new());
+    let release_probe = Arc::new(tokio::sync::Notify::new());
+    let applied = Arc::new(Mutex::new(
+        std::collections::BTreeMap::<String, Value>::new(),
+    ));
+    let holding = hold_probe.clone();
+    let entered = probed.clone();
+    let released = release_probe.clone();
+    let configured = applied.clone();
     let recorded = probes.clone();
     let failure = fail_probe.clone();
-    let controller = axum::Router::new().route(
-        "/internal/execution/{node}/storage-policy",
-        axum::routing::post(move |axum::Json(policy): axum::Json<Value>| {
-            let recorded = recorded.clone();
-            let failure = failure.clone();
-            async move {
-                recorded.lock().unwrap().push(policy);
-                if failure.load(Ordering::SeqCst) {
-                    return StatusCode::CONFLICT;
+    let controller = axum::Router::new()
+        .route(
+            "/internal/execution/{node}/storage-policy/probe",
+            axum::routing::post(move |axum::Json(policy): axum::Json<Value>| {
+                let recorded = recorded.clone();
+                let failure = failure.clone();
+                let holding = holding.clone();
+                let entered = entered.clone();
+                let released = released.clone();
+                async move {
+                    recorded.lock().unwrap().push(policy);
+                    if failure.load(Ordering::SeqCst) {
+                        return StatusCode::CONFLICT;
+                    }
+                    if holding.swap(false, Ordering::SeqCst) {
+                        entered.notify_one();
+                        released.notified().await;
+                    }
+                    StatusCode::OK
                 }
-                StatusCode::OK
-            }
-        }),
-    );
+            }),
+        )
+        .route(
+            "/internal/execution/{node}/storage-policy",
+            axum::routing::post(
+                move |axum::extract::Path(node): axum::extract::Path<String>,
+                      axum::Json(configuration): axum::Json<Value>| {
+                    let configured = configured.clone();
+                    async move {
+                        assert!(configuration["generation"].as_u64().unwrap() > 0);
+                        configured
+                            .lock()
+                            .unwrap()
+                            .insert(node, configuration["policy"].clone());
+                        StatusCode::OK
+                    }
+                },
+            ),
+        );
     let (url, server) = common::serve_locally(controller).await;
     let mut config = common::config(root.path());
     config.public_url = url;
@@ -549,6 +584,51 @@ async fn node_storage_controls_share_probes_persistence_and_permissions_across_b
             .unwrap();
         assert_eq!(saved["storage"], policy);
 
+        assert_eq!(applied.lock().unwrap().get(node), Some(&policy));
+
+        // A draft that loses its revision during the side-effect-free probe
+        // must not reach the mutating controller route.
+        hold_probe.store(true, Ordering::SeqCst);
+        let pending_app = app.clone();
+        let pending_token = token.to_owned();
+        let pending_node = node.to_owned();
+        let mut draft = policy.clone();
+        draft["memoryCacheMiB"] = 1024.into();
+        let revision = s.get_node(node).await.unwrap().revision;
+        let pending = tokio::spawn(async move {
+            node_management_call(
+                &pending_app,
+                endpoint,
+                &pending_token,
+                "update_node_storage",
+                json!({ "nodeId": pending_node, "revision": revision, "storage": draft }),
+            )
+            .await
+        });
+        probed.notified().await;
+        let current = s.get_node(node).await.unwrap();
+        let (_, changed) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "update_node",
+            json!({ "nodeId": node, "node": {
+                "revision": current.revision, "name": "Changed during probe",
+                "tags": current.tags, "limits": current.limits,
+                "slots": current.slots, "accepting": current.accepting
+            } }),
+        )
+        .await;
+        assert_eq!(result(&changed)["name"], "Changed during probe");
+        release_probe.notify_one();
+        let (_, rejected) = pending.await.unwrap();
+        assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+        assert_eq!(
+            s.get_node(node).await.unwrap().storage,
+            serde_json::from_value(policy.clone()).unwrap()
+        );
+        assert_eq!(applied.lock().unwrap().get(node), Some(&policy));
+
         fail_probe.store(true, Ordering::SeqCst);
         let mut rejected = policy.clone();
         rejected["memoryCacheMiB"] = 1024.into();
@@ -565,6 +645,35 @@ async fn node_storage_controls_share_probes_persistence_and_permissions_across_b
         fail_probe.store(false, Ordering::SeqCst);
         last_node = node.to_owned();
     }
+    hold_probe.store(true, Ordering::SeqCst);
+    let pending_app = app.clone();
+    let pending_token = agent_token.to_owned();
+    let pending_node = last_node.clone();
+    let revision = s.get_node(&last_node).await.unwrap().revision;
+    let mut draft = policy.clone();
+    draft["memoryCacheMiB"] = 1024.into();
+    let pending = tokio::spawn(async move {
+        node_management_call(
+            &pending_app,
+            "/mcp-installation",
+            &pending_token,
+            "update_node_storage",
+            json!({ "nodeId": pending_node, "revision": revision, "storage": draft }),
+        )
+        .await
+    });
+    probed.notified().await;
+    s.agent_fixture(
+        json!({ "name": "Main agent", "access": { "installation": false } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    release_probe.notify_one();
+    let (_, denied) = pending.await.unwrap();
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    assert_eq!(applied.lock().unwrap().get(&last_node), Some(&policy));
+
     let before = probes.lock().unwrap().len();
     let read_token = common::relay_fixture::grant(&s, &["read"]).await;
     let (_, denied) = node_management_call(

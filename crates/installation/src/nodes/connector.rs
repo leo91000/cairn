@@ -545,6 +545,18 @@ async fn heartbeat(
                         });
                     }
                     forward_leases(&controller, &runner, &value, started).await?;
+                    let storage: crate::storage::policy::Configuration =
+                        serde_json::from_value(value["storagePolicy"].clone())?;
+                    if health["storagePolicy"] != value["storagePolicy"] {
+                        let _ = controller
+                            .post(format!("{}/storage-policy", runner.trim_end_matches('/')))
+                            .bearer_auth(runner_credential().await?)
+                            .json(&storage)
+                            .timeout(Duration::from_secs(3))
+                            .send()
+                            .await;
+                    }
+
                     if health["diskGrowth"]["protocol"] == 1 && value["diskGrowth"]["protocol"] == 1
                     {
                         // The manager commits grants before this response. A lost

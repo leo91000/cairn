@@ -550,7 +550,7 @@ pub(crate) async fn configure_storage(
         .await?;
     let response = s
         .http
-        .post(format!("{}/storage-policy", controller_url(s, node)))
+        .post(format!("{}/storage-policy/probe", controller_url(s, node)))
         .bearer_auth(runner_secret(s).await?)
         .json(&policy)
         .timeout(std::time::Duration::from_secs(30))
@@ -561,7 +561,7 @@ pub(crate) async fn configure_storage(
         return Err(Error::conflict("Node did not pass its storage probe."));
     }
     let node = node.to_owned();
-    let value = s
+    let (value, configuration) = s
         .store
         .transaction(move |db| {
             authorize(db)?;
@@ -578,10 +578,62 @@ pub(crate) async fn configure_storage(
             }
             record.storage = policy;
             record.revision = id();
-            db.save_node(&record)
+            let record = db.save_node(&record)?;
+            let configuration = db
+                .node_storage_configuration(&node)?
+                .ok_or_else(|| Error::not_found("Node missing."))?;
+            Ok((record, configuration))
         })
         .await?;
+    if apply_storage_configuration(s, &request.node_id.to_string(), &configuration)
+        .await
+        .is_err()
+    {
+        return Err(Error::unavailable(
+            "Storage settings were saved, but the node has not confirmed them. It will retry automatically.",
+        ));
+    }
     public(value)
+}
+
+async fn apply_storage_configuration(
+    s: &Service,
+    node: &str,
+    configuration: &crate::storage::policy::Configuration,
+) -> Result<()> {
+    let response = s
+        .http
+        .post(format!("{}/storage-policy", controller_url(s, node)))
+        .bearer_auth(runner_secret(s).await?)
+        .json(configuration)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|_| Error::unavailable("Node storage configuration unavailable."))?;
+    if !response.status().is_success() {
+        return Err(Error::unavailable(
+            "Node storage configuration was not confirmed.",
+        ));
+    }
+    Ok(())
+}
+
+async fn reconcile_local_storage(s: &Service, observed: &Value) -> Result<()> {
+    let configuration = s
+        .store
+        .read(|db| db.node_storage_configuration(LOCAL_NODE_ID))
+        .await?;
+    if let Some(configuration) = configuration
+        && serde_json::to_value(&configuration)? != *observed
+    {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            apply_storage_configuration(s, LOCAL_NODE_ID, &configuration),
+        )
+        .await
+        .map_err(|_| Error::unavailable("Local storage reconciliation pending."))??;
+    }
+    Ok(())
 }
 
 pub(crate) async fn configure_node(
@@ -1136,6 +1188,7 @@ struct HeartbeatReply {
     limits: Resources,
     leases: Vec<Lease>,
     native_mode: cairn_contracts::NativeModeRequest,
+    storage_policy: crate::storage::policy::Configuration,
     #[serde(skip_serializing_if = "Value::is_null")]
     disk_growth: Value,
     heartbeat_interval_ms: i64,
@@ -1251,6 +1304,9 @@ fn record_heartbeat(
     db.save_node(&node)?;
     let leases = renew_leases(db, &node_id, expected.lease_ms)?;
     Ok(Ok(HeartbeatReply {
+        storage_policy: db
+            .node_storage_configuration(&node_id)?
+            .ok_or_else(|| Error::not_found("Node missing."))?,
         native_mode: node.native_mode_request.clone().unwrap_or_default(),
         disk_growth,
         node_id,
@@ -1355,6 +1411,7 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
             "Local controller version mismatch; deploy all components at the same version.",
         ));
     }
+    let observed_storage = health["storagePolicy"].clone();
     let capabilities = health["capabilities"].clone();
     if !capabilities.is_object() {
         return Ok(());
@@ -1420,7 +1477,14 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
             db.save_node(&record)?;
             Ok(())
         })
-        .await
+        .await?;
+    if let Err(error) = reconcile_local_storage(s, &observed_storage).await {
+        tracing::warn!(
+            status = error.status,
+            "Local storage policy reconciliation pending"
+        );
+    }
+    Ok(())
 }
 
 /// Linux suspend time counts toward a remote execution lease.

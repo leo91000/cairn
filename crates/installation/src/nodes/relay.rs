@@ -224,7 +224,7 @@ fn route(method: &str, path: &str) -> Result<()> {
                 )
         }
         ["runs", id, "projects", project] => method == "POST" && uuid(id) && uuid(project),
-        ["storage-policy"] => method == "POST",
+        ["storage-policy"] | ["storage-policy", "probe"] => method == "POST",
         ["disks", id, operation] => {
             method == "POST"
                 && uuid(id)

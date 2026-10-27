@@ -597,12 +597,21 @@ null/absent observations, native state, resource bounds and complete revisions.
 The common registry owns inventory, eligible native callers, enrollment,
 configuration, native-mode review, storage configuration and revocation. Config
 replacements check and rotate their revision in the writer transaction; heartbeats
-retain it. A storage probe rechecks both revision and authorization before commit.
+retain it. Storage validation does not mutate the controller; the writer rechecks
+both revision and authorization before publishing a policy. The SQL writer advances
+an internal storage generation only when the six policy fields change. Controllers
+apply committed generation-tagged packets in order, ignore older packets, and
+reject a different policy at the same generation. A disconnected apply retains its
+controller task; a controller restart reports its acknowledgement as unknown.
+Heartbeats reconcile the latest committed packet, including after a lost or failed
+confirmation. A command that saved settings without receiving confirmation says so
+explicitly; both apps retain that error and can reload the saved desired policy.
+The controller policy file keeps its current flat typed policy format.
 Native privilege confirmation still compares the exact owner preview and current
 access, with an explicit configuration revision, and waits for the current
 supervisor generation. No scope or installation grant provides a human owner
-proof. Certificate enrollment, machine bearer revocation and transport protocols
-are unchanged.
+proof. Certificate enrollment, machine bearer revocation, TLS/DTLS channels and
+current component-version fences are unchanged.
 
 A10/A11 still own attempts, placements, exclusive reservations, maintenance and
 disk publication/growth. Their named `node_boundary` / `nodes_boundary` /

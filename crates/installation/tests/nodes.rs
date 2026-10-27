@@ -6581,3 +6581,99 @@ async fn incompatible_local_health_keeps_the_configuration_committed_while_its_w
     assert!(!fenced.execution_ready);
     server.abort();
 }
+
+#[tokio::test]
+async fn saved_storage_policy_is_retried_after_the_controller_fails_to_confirm_it() {
+    let failed = Arc::new(AtomicBool::new(true));
+    let applied = Arc::new(Mutex::new(Value::Null));
+    let observed = applied.clone();
+    let configured = applied.clone();
+    let failure = failed.clone();
+    let capacity = capabilities(true, 8, 16384, 131072);
+    let health_capacity = capacity.clone();
+    let controller = Router::new()
+        .route(
+            "/health",
+            axum::routing::get(move || {
+                let applied = observed.clone();
+                let capabilities = health_capacity.clone();
+                async move {
+                    Json(json!({
+                        "status": "ok",
+                        "runtimeId": "development",
+                        "nodeProtocol": 2,
+                        "capabilities": capabilities,
+                        "sharedResources": true,
+                        "budget": { "slots": 4, "limits": limits(4, 8192, 32768) },
+                        "pool": { "capacity": 4 },
+                        "storagePolicy": applied.lock().unwrap().clone(),
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/storage-policy/probe",
+            axum::routing::post(|| async { StatusCode::OK }),
+        )
+        .route(
+            "/storage-policy",
+            axum::routing::post(move |Json(configuration): Json<Value>| {
+                let applied = configured.clone();
+                let failure = failure.clone();
+                async move {
+                    if failure.load(Ordering::SeqCst) {
+                        return StatusCode::SERVICE_UNAVAILABLE;
+                    }
+                    *applied.lock().unwrap() = configuration;
+                    StatusCode::OK
+                }
+            }),
+        );
+    let (url, server) = common::serve_locally(controller).await;
+    let owner = Owner::with_runner(common::HOST.into(), url).await;
+    std::fs::write(
+        owner.service.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket": "synthetic-storage", "awsBinary": "/bin/true" }).to_string(),
+    )
+    .unwrap();
+    owner
+        .put_node_fixture(json!({
+            "id": LOCAL_NODE_ID,
+            "name": "Current runner",
+            "local": true,
+            "capabilities": capacity,
+            "limits": limits(4, 8192, 32768),
+            "slots": 4,
+        }))
+        .await;
+    let before = owner.service.get_node(LOCAL_NODE_ID).await.unwrap();
+    let policy = Policy {
+        memory_cache_mi_b: 512,
+        ..Policy::default()
+    };
+    let (status, error) = owner
+        .call(
+            "PUT",
+            &format!("/api/nodes/{LOCAL_NODE_ID}/storage"),
+            json!({ "nodeId": LOCAL_NODE_ID, "revision": before.revision, "storage": policy }),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{error}");
+    assert!(text(&error, "error").contains("were saved"), "{error}");
+    let saved = owner.service.get_node(LOCAL_NODE_ID).await.unwrap();
+    assert_eq!(saved.storage, policy);
+    assert_ne!(saved.revision, before.revision);
+    assert!(applied.lock().unwrap().is_null());
+
+    failed.store(false, Ordering::SeqCst);
+    cairn_installation::nodes::refresh_local(&owner.service)
+        .await
+        .unwrap();
+    assert_eq!(
+        applied.lock().unwrap()["policy"],
+        serde_json::to_value(policy).unwrap()
+    );
+    assert_eq!(applied.lock().unwrap()["generation"], 1);
+    server.abort();
+}

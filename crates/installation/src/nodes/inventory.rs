@@ -51,6 +51,7 @@ CREATE TABLE nodes(
     runtime_id TEXT NOT NULL,
     last_seen INTEGER CHECK(last_seen IS NULL OR last_seen BETWEEN 0 AND 9007199254740991),
     created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),
+    storage_generation INTEGER NOT NULL DEFAULT 0 CHECK(storage_generation BETWEEN 0 AND 9007199254740991),
     storage_cache_mi_b INTEGER NOT NULL,
     storage_memory_cache_mi_b INTEGER NOT NULL,
     storage_reserve_mi_b INTEGER NOT NULL,
@@ -346,7 +347,7 @@ impl Db<'_> {
     fn write_node(&self, node: &ExecutionNode) -> Result<ExecutionNode> {
         node.limits.validate().map_err(Error::bad)?;
         node.storage.validate().map_err(Error::bad)?;
-        self.0.prepare_cached("INSERT INTO nodes(id,name,revision,local,accepting,revoked,cap_os,cap_arch,backend,kvm,ublk,native_mode_protocol,capacity_cpu,capacity_memory_mi_b,capacity_disk_mi_b,capacity_disk_total_mi_b,limit_cpu,limit_memory_mi_b,limit_disk_mi_b,slots,runtime_slots,native_enabled,native_mode_request,native_mode_observed,native_mode_proposal,native_mode_status,exclusive_reservations,exclusive_reservation,usage,budget_error,pressure,execution_ready,maintenance,maintenance_error,maintenance_generation,maintenance_started_at,image_digest,update_error,runtime_id,last_seen,created_at,storage_cache_mi_b,storage_memory_cache_mi_b,storage_reserve_mi_b,storage_reserve_percent,storage_backup_seconds,storage_max_dirty_seconds,disk_growth_protocol,retained_runs,disk_capacity,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43,?44,?45,?46,?47,?48,?49,?50,?51) ON CONFLICT(id) DO UPDATE SET name=excluded.name,revision=excluded.revision,local=excluded.local,accepting=excluded.accepting,revoked=excluded.revoked,cap_os=excluded.cap_os,cap_arch=excluded.cap_arch,backend=excluded.backend,kvm=excluded.kvm,ublk=excluded.ublk,native_mode_protocol=excluded.native_mode_protocol,capacity_cpu=excluded.capacity_cpu,capacity_memory_mi_b=excluded.capacity_memory_mi_b,capacity_disk_mi_b=excluded.capacity_disk_mi_b,capacity_disk_total_mi_b=excluded.capacity_disk_total_mi_b,limit_cpu=excluded.limit_cpu,limit_memory_mi_b=excluded.limit_memory_mi_b,limit_disk_mi_b=excluded.limit_disk_mi_b,slots=excluded.slots,runtime_slots=excluded.runtime_slots,native_enabled=excluded.native_enabled,native_mode_request=excluded.native_mode_request,native_mode_observed=excluded.native_mode_observed,native_mode_proposal=excluded.native_mode_proposal,native_mode_status=excluded.native_mode_status,exclusive_reservations=excluded.exclusive_reservations,exclusive_reservation=excluded.exclusive_reservation,usage=excluded.usage,budget_error=excluded.budget_error,pressure=excluded.pressure,execution_ready=excluded.execution_ready,maintenance=excluded.maintenance,maintenance_error=excluded.maintenance_error,maintenance_generation=excluded.maintenance_generation,maintenance_started_at=excluded.maintenance_started_at,image_digest=excluded.image_digest,update_error=excluded.update_error,runtime_id=excluded.runtime_id,last_seen=excluded.last_seen,created_at=excluded.created_at,storage_cache_mi_b=excluded.storage_cache_mi_b,storage_memory_cache_mi_b=excluded.storage_memory_cache_mi_b,storage_reserve_mi_b=excluded.storage_reserve_mi_b,storage_reserve_percent=excluded.storage_reserve_percent,storage_backup_seconds=excluded.storage_backup_seconds,storage_max_dirty_seconds=excluded.storage_max_dirty_seconds,disk_growth_protocol=excluded.disk_growth_protocol,retained_runs=excluded.retained_runs,disk_capacity=excluded.disk_capacity,updated_at=excluded.updated_at")?.execute(params![
+        self.0.prepare_cached("INSERT INTO nodes(id,name,revision,local,accepting,revoked,cap_os,cap_arch,backend,kvm,ublk,native_mode_protocol,capacity_cpu,capacity_memory_mi_b,capacity_disk_mi_b,capacity_disk_total_mi_b,limit_cpu,limit_memory_mi_b,limit_disk_mi_b,slots,runtime_slots,native_enabled,native_mode_request,native_mode_observed,native_mode_proposal,native_mode_status,exclusive_reservations,exclusive_reservation,usage,budget_error,pressure,execution_ready,maintenance,maintenance_error,maintenance_generation,maintenance_started_at,image_digest,update_error,runtime_id,last_seen,created_at,storage_cache_mi_b,storage_memory_cache_mi_b,storage_reserve_mi_b,storage_reserve_percent,storage_backup_seconds,storage_max_dirty_seconds,disk_growth_protocol,retained_runs,disk_capacity,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43,?44,?45,?46,?47,?48,?49,?50,?51) ON CONFLICT(id) DO UPDATE SET name=excluded.name,revision=excluded.revision,local=excluded.local,accepting=excluded.accepting,revoked=excluded.revoked,cap_os=excluded.cap_os,cap_arch=excluded.cap_arch,backend=excluded.backend,kvm=excluded.kvm,ublk=excluded.ublk,native_mode_protocol=excluded.native_mode_protocol,capacity_cpu=excluded.capacity_cpu,capacity_memory_mi_b=excluded.capacity_memory_mi_b,capacity_disk_mi_b=excluded.capacity_disk_mi_b,capacity_disk_total_mi_b=excluded.capacity_disk_total_mi_b,limit_cpu=excluded.limit_cpu,limit_memory_mi_b=excluded.limit_memory_mi_b,limit_disk_mi_b=excluded.limit_disk_mi_b,slots=excluded.slots,runtime_slots=excluded.runtime_slots,native_enabled=excluded.native_enabled,native_mode_request=excluded.native_mode_request,native_mode_observed=excluded.native_mode_observed,native_mode_proposal=excluded.native_mode_proposal,native_mode_status=excluded.native_mode_status,exclusive_reservations=excluded.exclusive_reservations,exclusive_reservation=excluded.exclusive_reservation,usage=excluded.usage,budget_error=excluded.budget_error,pressure=excluded.pressure,execution_ready=excluded.execution_ready,maintenance=excluded.maintenance,maintenance_error=excluded.maintenance_error,maintenance_generation=excluded.maintenance_generation,maintenance_started_at=excluded.maintenance_started_at,image_digest=excluded.image_digest,update_error=excluded.update_error,runtime_id=excluded.runtime_id,last_seen=excluded.last_seen,created_at=excluded.created_at,storage_generation=nodes.storage_generation+CASE WHEN nodes.storage_cache_mi_b!=excluded.storage_cache_mi_b OR nodes.storage_memory_cache_mi_b!=excluded.storage_memory_cache_mi_b OR nodes.storage_reserve_mi_b!=excluded.storage_reserve_mi_b OR nodes.storage_reserve_percent!=excluded.storage_reserve_percent OR nodes.storage_backup_seconds!=excluded.storage_backup_seconds OR nodes.storage_max_dirty_seconds!=excluded.storage_max_dirty_seconds THEN 1 ELSE 0 END,storage_cache_mi_b=excluded.storage_cache_mi_b,storage_memory_cache_mi_b=excluded.storage_memory_cache_mi_b,storage_reserve_mi_b=excluded.storage_reserve_mi_b,storage_reserve_percent=excluded.storage_reserve_percent,storage_backup_seconds=excluded.storage_backup_seconds,storage_max_dirty_seconds=excluded.storage_max_dirty_seconds,disk_growth_protocol=excluded.disk_growth_protocol,retained_runs=excluded.retained_runs,disk_capacity=excluded.disk_capacity,updated_at=excluded.updated_at")?.execute(params![
             node.id.to_string(),
             node.name,
             node.revision,
@@ -416,6 +417,27 @@ impl Db<'_> {
             .into_iter()
             .map(|n| Ok(serde_json::to_value(n)?))
             .collect()
+    }
+
+    pub(crate) fn node_storage_configuration(
+        &self,
+        node: &str,
+    ) -> Result<Option<crate::storage::policy::Configuration>> {
+        self.0.query_row(
+            "SELECT storage_generation,storage_cache_mi_b,storage_memory_cache_mi_b,storage_reserve_mi_b,storage_reserve_percent,storage_backup_seconds,storage_max_dirty_seconds FROM nodes WHERE id=?1 AND revoked=0",
+            [node],
+            |row| Ok(crate::storage::policy::Configuration {
+                generation: row.get::<_, i64>(0)? as u64,
+                policy: NodeStoragePolicy {
+                    cache_mi_b: row.get::<_, i64>(1)? as u64,
+                    memory_cache_mi_b: row.get::<_, i64>(2)? as u64,
+                    reserve_mi_b: row.get::<_, i64>(3)? as u64,
+                    reserve_percent: row.get::<_, i64>(4)? as u64,
+                    backup_seconds: row.get::<_, i64>(5)? as u64,
+                    max_dirty_seconds: row.get::<_, i64>(6)? as u64,
+                },
+            }),
+        ).optional().map_err(Error::internal)
     }
 
     pub fn save_node_boundary(&self, node: &Value) -> Result<Value> {

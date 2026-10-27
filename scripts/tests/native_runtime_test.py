@@ -180,6 +180,13 @@ def main():
             finally:
                 connection.close()
 
+        policy_generation = 0
+
+        def storage_policy(policy):
+            nonlocal policy_generation
+            policy_generation += 1
+            return api('/storage-policy', dict(generation=policy_generation, policy=policy))
+
         class Bridge(http.server.BaseHTTPRequestHandler):
             def log_message(self, *_):
                 pass
@@ -287,7 +294,7 @@ def main():
             if not controller_started:
                 api('/node-budget', dict(limits=dict(diskMiB=4096, cpu=2, memoryMiB=1024), slots=1))
                 controller_started = True
-            api('/storage-policy', contexts[runs[0]]['policy'])
+            storage_policy(contexts[runs[0]]['policy'])
 
         def prepare_base(run):
             project = str(uuid.uuid4())
@@ -613,7 +620,7 @@ def main():
             # Real cgroup backpressure must stop all descendant CPUs while the
             # controller/backend remain able to publish and acknowledge blocks.
             policy = dict(contexts[run]['policy'], backupSeconds=5, maxDirtySeconds=5)
-            api('/storage-policy', policy)
+            storage_policy(policy)
             eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is True, timeout=25)
             descendant = managed(run) / 'descendant'
             size = descendant.stat().st_size
@@ -626,15 +633,15 @@ def main():
             eventually(lambda: descendant.stat().st_size > size)
             status = api('/disks/' + run + '/storage-status')
             receipt = dict(attempt=resumed, backupId=point['backupId'], generation=point['generation'], grantId=status['grantId'])
-            api('/storage-policy', contexts[run]['policy'])
+            storage_policy(contexts[run]['policy'])
             (managed(run) / 'persisted').write_text('unpublished mutation')
             # Stopping a protected workload must thaw its owned unit before
             # systemd can deliver termination signals. No manual thaw in this test.
-            api('/storage-policy', policy)
+            storage_policy(policy)
             eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is True, timeout=25)
             api('/runs/' + resumed, method='DELETE')
             fenced(run, resumed)
-            api('/storage-policy', contexts[run]['policy'])
+            storage_policy(contexts[run]['policy'])
             assert api('/disks/' + run + '/storage-status')['dirtyBytes'] > 0
             try:
                 api('/disks/' + run + '/evict', receipt)
