@@ -128,17 +128,13 @@ pub(crate) fn run_agent(run: &Value) -> &str {
     text(&run["snapshot"]["agent"], "id")
 }
 
-pub(crate) fn checkpoint_key(run: &str) -> String {
-    format!("run-checkpoint:{run}")
-}
-
 /// The run's resume checkpoint, or `null` when none was recorded.
 pub(crate) async fn checkpoint(s: &Service, run: &str) -> Result<Value> {
-    Ok(s.store.kv(&checkpoint_key(run)).await?.unwrap_or_default())
+    Ok(s.store.checkpoint_boundary(run).await?.unwrap_or_default())
 }
 
 pub(crate) fn db_checkpoint(db: &Db<'_>, run: &str) -> Result<Value> {
-    Ok(db.kv(&checkpoint_key(run))?.unwrap_or_default())
+    Ok(db.checkpoint_boundary(run)?.unwrap_or_default())
 }
 
 pub(crate) async fn runner_secret(s: &Service) -> Result<String> {

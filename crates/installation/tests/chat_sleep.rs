@@ -65,11 +65,7 @@ impl Fixture {
         let token = text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
         service
             .store
-            .set(
-                &format!("run-checkpoint:{run_id}"),
-                json!({ "completed": true, "launched": true }),
-                None,
-            )
+            .save_checkpoint_boundary(&run_id, json!({ "completed": true, "launched": true }))
             .await
             .unwrap();
         Self {
@@ -381,14 +377,13 @@ async fn failed_paused_turn_cannot_replay_its_wakeup_after_manual_resume() {
             .unwrap();
         f.service
             .store
-            .set(
-                &format!("run-checkpoint:{}", f.run),
+            .save_checkpoint_boundary(
+                &f.run,
                 json!({
                     "completed": true,
                     "launched": true,
                     "prepared": { "backend": "fixture" },
                 }),
-                None,
             )
             .await
             .unwrap();
@@ -591,10 +586,9 @@ async fn replacing_a_native_session_retires_its_pending_questions_before_startup
         if fresh_session {
             f.service
                 .store
-                .set(
-                    &format!("run-checkpoint:{}", f.run),
+                .save_checkpoint_boundary(
+                    &f.run,
                     json!({ "completed": true, "launched": true, "freshSession": true }),
-                    None,
                 )
                 .await
                 .unwrap();

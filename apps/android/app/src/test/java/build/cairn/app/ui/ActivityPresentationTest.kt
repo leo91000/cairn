@@ -14,7 +14,10 @@ class ActivityPresentationTest {
                 "{\"item\":{\"type\":\"agent_message\",\"text\":\"native diagnostic\",\"id\":\"x\"}}\n",
                 "{\"item\":{\"type\":\"command_execution\",\"command\":\"native diagnostic\",\"exit_code\":1}}\n",
             )) {
-            val presentation = presentActivity(RunEvent(1, 1, "diagnostic", text))
+            val presentation = presentActivity(RunEvent(id = 1,
+createdAt = 1,
+type = "diagnostic",
+text = text))
 
             assertEquals(ActivityKind.NOTICE, presentation.kind)
             assertEquals("Diagnostic de l’agent", presentation.title)
@@ -34,7 +37,11 @@ class ActivityPresentationTest {
         val original =
             corpus.take(15).mapIndexed { index, value ->
                 val data = value.jsonObject
-                RunEvent(index.toLong() + 1, index.toLong(), data.string("type"), "", data)
+                RunEvent(id = index.toLong() + 1,
+createdAt = index.toLong(),
+type = data.string("type"),
+text = "",
+payload = kotlinx.serialization.json.JsonObject(data))
             }
         val replay = timelineEntries(original)
         assertEquals(3, replay.count { it.message })
@@ -66,17 +73,19 @@ class ActivityPresentationTest {
         }
         val wakeup = ChatWakeup("wake", "message", "Pending", 60, 0, 60_000, condition = condition)
         val scheduled =
-            RunEvent(1, 1, "chat.wait", "", wireJson.encodeToJsonElement(wakeup).jsonObject)
+            RunEvent(id = 1,
+createdAt = 1,
+type = "chat.wait",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(wireJson.encodeToJsonElement(wakeup).jsonObject))
         corpus.drop(15).forEachIndexed { index, value ->
             val data = value.jsonObject
             val ready =
-                RunEvent(
-                    2,
-                    2,
-                    data.string("type"),
-                    data.string("text"),
-                    data["payload"] as? JsonObject,
-                )
+                RunEvent(id = 2,
+createdAt = 2,
+type = data.string("type"),
+text = data.string("text"),
+payload = kotlinx.serialization.json.JsonObject(data["payload"] as? JsonObject))
             val waits =
                 timelineEntries(listOf(scheduled, ready), chat = true).mapNotNull { it.wait }
             assertEquals("case $index", if (immediate[index]) 2 else 1, waits.size)
@@ -100,40 +109,39 @@ class ActivityPresentationTest {
         assertEquals("Plain output", presentActivity(event("output", "Plain output")).raw)
     }
 
-    private fun event(type: String, text: String) = RunEvent(1, 1000, type, text)
+    private fun event(type: String, text: String) = RunEvent(id = 1,
+createdAt = 1000,
+type = type,
+text = text)
 
     private fun tool(command: String, code: Int = 0) =
-        RunEvent(
-            1,
-            1000,
-            "item.completed",
-            "",
-            mapOf(
+        RunEvent(id = 1,
+createdAt = 1000,
+type = "item.completed",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                 "item" to
                     buildJsonObject {
                         put("type", "command_execution")
                         put("command", command)
                         put("exit_code", code)
                     }
-            ),
-        )
+            )))
 
     @Test
     fun `background waits are labelled in the activity log`() {
         fun waiting(vararg descriptions: String) =
-            RunEvent(
-                1,
-                1000,
-                "turn.waiting",
-                "",
-                mapOf(
+            RunEvent(id = 1,
+createdAt = 1000,
+type = "turn.waiting",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                     "type" to JsonPrimitive("turn.waiting"),
                     "tasks" to
                         buildJsonArray {
                             descriptions.forEach { addJsonObject { put("description", it) } }
                         },
-                ),
-            )
+                )))
         val waiting = presentActivity(waiting("Build", "Watch CI"))
         assertEquals(ActivityKind.NOTICE, waiting.kind)
         assertEquals("En attente de tâches en arrière-plan", waiting.title)
@@ -183,7 +191,11 @@ class ActivityPresentationTest {
             put("tool", "github__checks")
             put("result", buildJsonObject { put("isError", true) })
         }
-        val p = presentActivity(RunEvent(1, 1000, "item.completed", "", mapOf("item" to item)))
+        val p = presentActivity(RunEvent(id = 1,
+createdAt = 1000,
+type = "item.completed",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf("item" to item))))
         assertTrue(p.failed)
         assertEquals(ActivityKind.TOOL, p.kind)
     }

@@ -54,13 +54,11 @@ class RecentWindowResumeTest {
                 val olderRequests = CopyOnWriteArrayList<String>()
                 val state = LiveState(chat = Chat("diagnostic", title = "Diagnostic"))
                 fun message(n: Int) =
-                    RunEvent(
-                        n.toLong(),
-                        n.toLong(),
-                        "chat.user",
-                        "Message %03d".format(n),
-                        runId = "fixture",
-                    )
+                    RunEvent(id = n.toLong(),
+createdAt = n.toLong(),
+type = "chat.user",
+text = "Message %03d".format(n),
+runId = "fixture")
                 fun stream(cursor: Int, batch: LiveBatch): MockResponse {
                     val frame =
                         "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(batch)}\n\n"

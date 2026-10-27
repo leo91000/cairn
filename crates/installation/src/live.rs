@@ -126,14 +126,7 @@ struct Batch {
     state: Option<State>,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HistoryPage {
-    events: Vec<crate::store::Event>,
-    history: String,
-    oldest: i64,
-    has_older: bool,
-}
+use cairn_contracts::HistoryPage;
 
 struct Request {
     after: i64,

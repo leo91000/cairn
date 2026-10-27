@@ -202,7 +202,7 @@ impl Fixture {
     async fn checkpoint(&self, run: &str) -> Value {
         self.service
             .store
-            .kv(&format!("run-checkpoint:{run}"))
+            .checkpoint_boundary(&run)
             .await
             .unwrap()
             .unwrap()
@@ -2346,7 +2346,7 @@ async fn controller_capacity_rejection_waits_and_retries_without_an_agent_sessio
             let mut saved = fixture.checkpoint(run_id).await;
             saved["capacityRetryAt"] = (cairn_installation::config::now() - 1).into();
             s.store
-                .set(&format!("run-checkpoint:{run_id}"), saved, None)
+                .save_checkpoint_boundary(&run_id, saved)
                 .await
                 .unwrap();
             let previous = rejections.load(Ordering::SeqCst);
@@ -2366,7 +2366,7 @@ async fn controller_capacity_rejection_waits_and_retries_without_an_agent_sessio
         let mut saved = fixture.checkpoint(run_id).await;
         saved["capacityRetryAt"] = (cairn_installation::config::now() - 1).into();
         s.store
-            .set(&format!("run-checkpoint:{run_id}"), saved, None)
+            .save_checkpoint_boundary(&run_id, saved)
             .await
             .unwrap();
         busy.store(false, Ordering::SeqCst);

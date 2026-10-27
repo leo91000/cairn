@@ -388,12 +388,11 @@ abstract class ChatSwipeCases {
                                 if (chat == null) emptyList()
                                 else
                                     (if (paginated) 101..103 else 1..30).map {
-                                        RunEvent(
-                                            it.toLong(),
-                                            it.toLong(),
-                                            "item.completed",
-                                            "",
-                                            mapOf(
+                                        RunEvent(id = it.toLong(),
+createdAt = it.toLong(),
+type = "item.completed",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                                                 "item" to
                                                     buildJsonObject {
                                                         put("id", "answer-$it")
@@ -405,8 +404,7 @@ abstract class ChatSwipeCases {
                                                                     .repeat(12),
                                                         )
                                                     }
-                                            ),
-                                        )
+                                            )))
                                     }
                             val state =
                                 if (chat == null) LiveState(chats = chats)

@@ -13,17 +13,15 @@ class EngineStatusTest {
 
     private fun event(type: String, body: JsonObjectBuilder.() -> Unit = {}): RunEvent {
         val id = ++serial
-        return RunEvent(
-            id,
-            id * 1000,
-            type,
-            "",
-            buildJsonObject {
+        return RunEvent(id = id,
+createdAt = id * 1000,
+type = type,
+text = "",
+payload = kotlinx.serialization.json.JsonObject(buildJsonObject {
                 put("type", type)
                 body()
-            },
-            runId = "run",
-        )
+            }),
+runId = "run")
     }
 
     private fun retry(attempt: Int) =
@@ -300,12 +298,11 @@ class EngineStatusTest {
     fun `the usage banner gives the reset the engine reported`() {
         val resetsAt = 1_893_499_200_000L
         val failed =
-            RunEvent(
-                1,
-                1,
-                "turn.failed",
-                "",
-                buildJsonObject {
+            RunEvent(id = 1,
+createdAt = 1,
+type = "turn.failed",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(buildJsonObject {
                     put(
                         "error",
                         buildJsonObject {
@@ -314,9 +311,8 @@ class EngineStatusTest {
                             put("resetsAt", resetsAt)
                         },
                     )
-                },
-                runId = "run",
-            )
+                }),
+runId = "run")
         val run =
             Run(
                 id = "run",
@@ -357,12 +353,11 @@ class EngineStatusTest {
 
         // The runner repeats the failure without its reset, in wording the banner recognizes.
         fun failure(id: Long, message: String, reset: Long? = null) =
-            RunEvent(
-                id,
-                id,
-                "turn.failed",
-                "",
-                buildJsonObject {
+            RunEvent(id = id,
+createdAt = id,
+type = "turn.failed",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(buildJsonObject {
                     put(
                         "error",
                         buildJsonObject {
@@ -373,9 +368,8 @@ class EngineStatusTest {
                             }
                         },
                     )
-                },
-                runId = "run",
-            )
+                }),
+runId = "run")
         val known = "Claude AI usage limit reached"
         val reported = failure(2, known, resetsAt)
         assertEquals(

@@ -103,11 +103,7 @@ impl Fixture {
         let config = s.mcps.run_configuration(&s, &run).await.unwrap();
         let token = text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
         s.store
-            .set(
-                &format!("run-checkpoint:{run_id}"),
-                json!({ "completed": true, "launched": true }),
-                None,
-            )
+            .save_checkpoint_boundary(&run_id, json!({ "completed": true, "launched": true }))
             .await
             .unwrap();
         let f = Self {
@@ -147,12 +143,11 @@ impl Fixture {
         let config = f.s.mcps.run_configuration(&f.s, &run).await.unwrap();
         f.token = text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
         f.s.store
-            .set(
-                &format!("run-checkpoint:{}", f.run),
+            .save_checkpoint_boundary(
+                &f.run,
                 json!({
                     "completed": true, "launched": true, "remainingMs": 90_000,
                 }),
-                None,
             )
             .await
             .unwrap();
@@ -1347,7 +1342,7 @@ async fn mission_plugin_wait_survives_restart_and_resumes_on_the_pinned_result()
     assert!(resumed["wakeup"].is_null());
     let checkpoint = restarted
         .store
-        .kv(&format!("run-checkpoint:{}", f.run))
+        .checkpoint_boundary(&f.run)
         .await
         .unwrap()
         .unwrap();

@@ -72,34 +72,32 @@ class ContextCompactionJourneyTest {
                 )
             val events =
                 listOf(
-                    RunEvent(1, 1789315189000, "chat.user", "Refactorise le module de paiement"),
-                    RunEvent(
-                        2,
-                        1789315190000,
-                        "context.usage",
-                        "",
-                        mapOf("usage" to item("contextTokens" to 150_000)),
-                    ),
-                    RunEvent(
-                        3,
-                        1789315190100,
-                        "item.started",
-                        "",
-                        mapOf(
+                    RunEvent(id = 1,
+createdAt = 1789315189000,
+type = "chat.user",
+text = "Refactorise le module de paiement"),
+                    RunEvent(id = 2,
+createdAt = 1789315190000,
+type = "context.usage",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf("usage" to item("contextTokens" to 150_000)))),
+                    RunEvent(id = 3,
+createdAt = 1789315190100,
+type = "item.started",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                             "item" to
                                 item(
                                     "id" to "compaction-1",
                                     "type" to "context_compaction",
                                     "status" to "in_progress",
                                 )
-                        ),
-                    ),
-                    RunEvent(
-                        4,
-                        1789315190200,
-                        "item.completed",
-                        "",
-                        mapOf(
+                        ))),
+                    RunEvent(id = 4,
+createdAt = 1789315190200,
+type = "item.completed",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                             "item" to
                                 item(
                                     "id" to "compaction-1",
@@ -109,22 +107,19 @@ class ContextCompactionJourneyTest {
                                     "pre_tokens" to 167_500,
                                     "post_tokens" to 9_100,
                                 )
-                        ),
-                    ),
-                    RunEvent(
-                        5,
-                        1789315190300,
-                        "item.completed",
-                        "",
-                        mapOf(
+                        ))),
+                    RunEvent(id = 5,
+createdAt = 1789315190300,
+type = "item.completed",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                             "item" to
                                 item(
                                     "id" to "answer",
                                     "type" to "agent_message",
                                     "text" to "Le module est refactorisé.",
                                 )
-                        ),
-                    ),
+                        ))),
                 )
             fun stream(state: LiveState, events: List<RunEvent> = emptyList()): MockResponse {
                 val body =

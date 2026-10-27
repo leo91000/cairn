@@ -9,6 +9,7 @@ use crate::{
     store::Db,
     validation::text,
 };
+use cairn_contracts::EventKind;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, time::Duration};
@@ -531,7 +532,7 @@ mod tests {
                 db.add_run_fixture(&run, None)?;
                 db.event(
                     "run",
-                    "chat.user",
+                    &EventKind::ChatUser,
                     "Configurer les mises à jour Android",
                     None,
                 )?;
@@ -542,7 +543,7 @@ mod tests {
                         "text": "Les mises à jour Android fonctionnent.",
                     },
                 });
-                db.event("run", "item.completed", "", Some(&reply))?;
+                db.event("run", &EventKind::ItemCompleted, "", Some(&reply))?;
                 Ok(())
             })
             .await
@@ -558,7 +559,7 @@ mod tests {
         s.store
             .transaction(|db| {
                 for _ in 0..12 {
-                    db.event("run", "chat.user", "Merci, continue", None)?;
+                    db.event("run", &EventKind::ChatUser, "Merci, continue", None)?;
                 }
                 Ok(())
             })
@@ -811,19 +812,19 @@ mod tests {
             .transaction(|db| {
                 for index in 0..15 {
                     let body = format!("Recent {index} {}", "é".repeat(3000));
-                    db.event("run", "chat.user", &body, None)?;
+                    db.event("run", &EventKind::ChatUser, &body, None)?;
                 }
                 let private = json!({ "text": "secret answer" });
                 db.event(
                     "run",
-                    "chat.user",
+                    &EventKind::ChatUser,
                     "Answered a private question.",
                     Some(&private),
                 )?;
                 let partial = json!({
                     "item": { "id": "latest", "type": "agent_message", "text": "partial" },
                 });
-                db.event("run", "item.updated", "partial", Some(&partial))?;
+                db.event("run", &EventKind::ItemUpdated, "partial", Some(&partial))?;
                 let tool = json!({
                     "item": {
                         "id": "tool",
@@ -831,17 +832,17 @@ mod tests {
                         "aggregated_output": "tool secret",
                     },
                 });
-                db.event("run", "item.completed", "tool secret", Some(&tool))?;
+                db.event("run", &EventKind::ItemCompleted, "tool secret", Some(&tool))?;
                 let latest = json!({
                     "item": { "id": "latest", "type": "agent_message", "text": "Latest reply" },
                 });
                 for _ in 0..2 {
-                    db.event("run", "item.completed", "", Some(&latest))?;
+                    db.event("run", &EventKind::ItemCompleted, "", Some(&latest))?;
                 }
                 let full_body = format!("{}Preserve the end", "é".repeat(20_000));
                 db.event(
                     "run",
-                    "chat.user",
+                    &EventKind::ChatUser,
                     &full_body,
                     Some(&json!({ "text": full_body })),
                 )?;
@@ -900,7 +901,12 @@ mod tests {
                         _ => "",
                     };
                     let body = format!("{}{marker}", "x".repeat(40_000));
-                    db.event("run", "chat.user", &body, Some(&json!({ "text": body })))?;
+                    db.event(
+                        "run",
+                        &EventKind::ChatUser,
+                        &body,
+                        Some(&json!({ "text": body })),
+                    )?;
                 }
                 Ok(())
             })
@@ -929,7 +935,12 @@ mod tests {
             s.store
                 .transaction(|db| {
                     let body = "x".repeat(80_000);
-                    db.event("run", "chat.user", &body, Some(&json!({ "text": body })))?;
+                    db.event(
+                        "run",
+                        &EventKind::ChatUser,
+                        &body,
+                        Some(&json!({ "text": body })),
+                    )?;
                     Ok(())
                 })
                 .await

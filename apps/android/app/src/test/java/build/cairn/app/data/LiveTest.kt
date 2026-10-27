@@ -11,21 +11,19 @@ import org.junit.Test
 
 class LiveTest {
     private fun message(id: Long, text: String, delta: Boolean = false, itemId: String = "answer") =
-        RunEvent(
-            id,
-            id * 10,
-            "item.updated",
-            "",
-            mapOf(
+        RunEvent(id = id,
+createdAt = id * 10,
+type = "item.updated",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                 "item" to
                     buildJsonObject {
                         put("id", itemId)
                         put("type", "agent_message")
                         put(if (delta) "delta" else "text", text)
                     }
-            ),
-            runId = "r1",
-        )
+            )),
+runId = "r1")
 
     private fun frame(cursor: Long, batch: LiveBatch) =
         "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(batch)}\n\n"
@@ -122,14 +120,12 @@ class LiveTest {
                             )
                     )
                 fun item(id: Long, body: JsonObjectBuilder.() -> Unit) =
-                    RunEvent(
-                        id,
-                        id,
-                        "item.completed",
-                        "",
-                        mapOf("item" to buildJsonObject(body)),
-                        runId = "r1",
-                    )
+                    RunEvent(id = id,
+createdAt = id,
+type = "item.completed",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf("item" to buildJsonObject(body))),
+runId = "r1")
                 val spawn =
                     item(1) {
                         put("id", "worker")
@@ -376,23 +372,24 @@ class LiveTest {
     @Test
     fun `backwards page keeps latest message snapshot and intervening tools`() {
         fun message(id: Long, content: String) =
-            RunEvent(
-                id,
-                id,
-                "item.updated",
-                content,
-                mapOf(
+            RunEvent(id = id,
+createdAt = id,
+type = "item.updated",
+text = content,
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                     "item" to
                         buildJsonObject {
                             put("id", "m")
                             put("type", "agent_message")
                             put("text", content)
                         }
-                ),
-            )
+                )))
         val merged =
             mergeHistory(
-                listOf(message(1, "old"), RunEvent(2, 2, "output", "tool")),
+                listOf(message(1, "old"), RunEvent(id = 2,
+createdAt = 2,
+type = "output",
+text = "tool")),
                 listOf(message(3, "complete")),
             )
         assertEquals(2, merged.size)
@@ -421,7 +418,10 @@ class LiveTest {
             accumulator.append(
                 listOf(
                     message(2, "duplicate", true),
-                    RunEvent(3, 30, "turn.started", ""),
+                    RunEvent(id = 3,
+createdAt = 30,
+type = "turn.started",
+text = ""),
                     message(4, "Nouvelle réponse"),
                 )
             )
@@ -440,7 +440,10 @@ class LiveTest {
         accumulator.append(listOf(message(1, "baseline")))
         assertThrows(IllegalArgumentException::class.java) {
             accumulator.append(
-                listOf(RunEvent(2, 20, "turn.started", ""), message(3, "delta", true))
+                listOf(RunEvent(id = 2,
+createdAt = 20,
+type = "turn.started",
+text = ""), message(3, "delta", true))
             )
         }
         assertEquals(1L, accumulator.cursor)

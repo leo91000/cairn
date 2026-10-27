@@ -119,9 +119,9 @@ impl Fixture {
             .unwrap();
         self.s.chat_acknowledge(&run_id, &message).await.unwrap();
         let config = self.s.mcps.run_configuration(&self.s, &run).await.unwrap();
-        self.s.store.set(&format!("run-checkpoint:{run_id}"), json!({
+        self.s.store.save_checkpoint_boundary(&run_id, json!({
             "runnerId": id(), "nodeId": LOCAL_NODE_ID, "prepared": { "backend": "firecracker" },
-        }), None).await.unwrap();
+        })).await.unwrap();
         (run_id, text(&config["env"], "CAIRN_MCP_RUN_TOKEN").into())
     }
 
@@ -315,7 +315,7 @@ async fn replaced_attempt_and_invalid_input_cannot_reuse_a_reservation() {
     let acquired = exclusive::acquire(&f.s, &f.token, &request())
         .await
         .unwrap();
-    f.s.store.set(&format!("run-checkpoint:{}", f.run), json!({ "runnerId": id(), "nodeId": LOCAL_NODE_ID, "prepared": { "backend": "firecracker" } }), None).await.unwrap();
+    f.s.store.save_checkpoint_boundary(&f.run, json!({ "runnerId": id(), "nodeId": LOCAL_NODE_ID, "prepared": { "backend": "firecracker" } })).await.unwrap();
     f.until(|record| record["state"] == "released").await;
     assert!(acquired["expiresAt"].as_i64().unwrap() > now());
 }

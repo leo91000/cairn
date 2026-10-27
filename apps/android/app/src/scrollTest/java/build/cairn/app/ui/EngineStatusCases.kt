@@ -26,17 +26,15 @@ abstract class EngineStatusCases {
 
     private fun event(type: String, body: JsonObjectBuilder.() -> Unit = {}): RunEvent {
         val id = ++serial
-        return RunEvent(
-            id,
-            id * 1000,
-            type,
-            "",
-            buildJsonObject {
+        return RunEvent(id = id,
+createdAt = id * 1000,
+type = type,
+text = "",
+payload = kotlinx.serialization.json.JsonObject(buildJsonObject {
                 put("type", type)
                 body()
-            },
-            runId = "run",
-        )
+            }),
+runId = "run")
     }
 
     private fun retry(attempt: Int) =

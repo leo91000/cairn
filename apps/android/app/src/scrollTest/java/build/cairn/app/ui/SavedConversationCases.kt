@@ -38,7 +38,11 @@ abstract class SavedConversationCases {
                 )
             val chat = Chat("saved", runId = run.id, updatedAt = 10, status = run.status)
             val oldState = LiveState(chat = chat, run = run)
-            val event = RunEvent(1, 1, "chat.user", "Saved output", runId = run.id)
+            val event = RunEvent(id = 1,
+createdAt = 1,
+type = "chat.user",
+text = "Saved output",
+runId = run.id)
             val history = "v1:run:1"
             val path = "/chats/saved/stream"
             val requests = AtomicInteger()

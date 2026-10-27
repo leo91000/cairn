@@ -4,7 +4,11 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class OlderPagesTest {
-    private fun event(id: Long) = RunEvent(id, id, "chat.user", "Message $id", runId = "r1")
+    private fun event(id: Long) = RunEvent(id = id,
+createdAt = id,
+type = "chat.user",
+text = "Message $id",
+runId = "r1")
 
     private fun snapshot() =
         LiveSnapshot(

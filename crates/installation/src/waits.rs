@@ -2,6 +2,7 @@
 //! Cairn provides time waits and run dependencies; plugins granted to the agent add
 //! theirs (see `plugins::conditions`).
 use crate::chats::{chat_for_run, continuation};
+use crate::worker::checkpoint::RunCheckpoint;
 use crate::{
     config::{id, now},
     conversation_lifecycle::require_active,
@@ -12,6 +13,7 @@ use crate::{
     store::Db,
     validation::{text, uuid},
 };
+use cairn_contracts::EventKind;
 use chrono::{DateTime, SecondsFormat, Utc};
 use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
@@ -629,8 +631,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
                 announced["reason"] = input["reason"].clone();
                 announced["immediate"] = true.into();
                 db.event(
-                    text(&run, "id"),
-                    owner.event("wait_ready"),
+                    text(&run, "id"), &EventKind::from_adapter(owner.event("wait_ready")),
                     "Wait condition already completed",
                     Some(&announced),
                 )?;
@@ -665,8 +666,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
             owner.record["updatedAt"] = created.into();
             owner.save(db)?;
             db.event(
-                text(&run, "id"),
-                owner.event("wait"),
+                text(&run, "id"), &EventKind::from_adapter(owner.event("wait")),
                 text(&wakeup, "reason"),
                 Some(&wakeup),
             )?;
@@ -791,7 +791,7 @@ pub(crate) fn record_members(db: &Db<'_>, owner: &mut Owner, run: &Value) -> Res
         owner.record["wakeup"]["observation"] = result.clone();
         db.event(
             text(run, "id"),
-            owner.event("wait_ready"),
+            &EventKind::from_adapter(owner.event("wait_ready")),
             "Wait condition resolved",
             Some(&result),
         )?;
@@ -1040,18 +1040,16 @@ pub(crate) async fn tick_missions(s: &Service, active: &HashSet<String>) -> Resu
                 let Some(observed) = observation(db, &run, &run, now())? else {
                     return Ok(());
                 };
-                let key = format!("run-checkpoint:{run_id}");
-                let mut checkpoint = db
-                    .kv(&key)?
+                            let mut checkpoint = RunCheckpoint::load_in(db, &run_id)?
                     .ok_or_else(|| Error::conflict("Waiting mission has no saved checkpoint."))?;
                 // Keep remainingMs: elapsed waiting time never spends the execution budget.
-                checkpoint["completed"] = false.into();
-                checkpoint["settled"] = Value::Null;
-                checkpoint["lastMessage"] = Value::Null;
-                checkpoint["lastError"] = Value::Null;
-                checkpoint["retryCause"] = Value::Null;
-                checkpoint["controllerRecoveries"] = Value::Null;
-                db.set(&key, &checkpoint, None)?;
+                checkpoint.completed = Some(false);
+                checkpoint.settled = Some(None);
+                checkpoint.last_message = None;
+                checkpoint.last_error = Some(None);
+                checkpoint.retry_cause = Some(None);
+                checkpoint.controller_recoveries = None;
+                checkpoint.store_in(db, &run_id)?;
                 let mut wakeup = run["wakeup"].clone();
                 wakeup["observation"] = observed;
                 db.change_run(&run_id,crate::runs::RunChanges {
@@ -1066,8 +1064,7 @@ pub(crate) async fn tick_missions(s: &Service, active: &HashSet<String>) -> Resu
                     ..Default::default()
                 })?;
                 db.event(
-                    &run_id,
-                    "run.wakeup",
+                    &run_id, &EventKind::RunWakeup,
                     "Resuming after scheduled wait",
                     Some(&wakeup),
                 )?;

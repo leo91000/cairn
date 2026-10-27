@@ -67,10 +67,10 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
             )
         }
         "checkpoint" => {
-            s.store.set(&format!("run-checkpoint:{run_id}"), json!({
+            s.store.save_checkpoint_boundary(&run_id, json!({
                 "runnerId": command["attempt"], "nodeId": nodes::LOCAL_NODE_ID,
                 "prepared": { "backend": "native", "isolated": true }, "runtimeId": "synthetic"
-            }), None).await?;
+            })).await?;
             Ok(json!({ "ok": true }))
         }
         "publish" | "live-publish" => {

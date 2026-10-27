@@ -11,14 +11,12 @@ class AgentPlanTest {
 
     private fun event(type: String, item: JsonObject? = null, text: String = ""): RunEvent {
         val id = ++serial
-        return RunEvent(
-            id,
-            id * 1000,
-            type,
-            text,
-            item?.let { mapOf("item" to it) },
-            runId = "chat",
-        )
+        return RunEvent(id = id,
+createdAt = id * 1000,
+type = type,
+text = text,
+payload = kotlinx.serialization.json.JsonObject(item?.let { mapOf("item" to it) }),
+runId = "chat")
     }
 
     private fun plan(
@@ -57,7 +55,11 @@ class AgentPlanTest {
         )
 
     private fun user(text: String) =
-        RunEvent(++serial, serial * 1000, "chat.user", text, mapOf("text" to JsonPrimitive(text)))
+        RunEvent(id = ++serial,
+createdAt = serial * 1000,
+type = "chat.user",
+text = text,
+payload = kotlinx.serialization.json.JsonObject(mapOf("text" to JsonPrimitive(text))))
 
     private fun kinds(timeline: List<TimelineEntry>) = timeline.map {
         when {

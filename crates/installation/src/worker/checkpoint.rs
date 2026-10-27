@@ -5,6 +5,7 @@ use crate::{
     run_status::RunStatus,
     store::{Db, Store},
 };
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{
@@ -16,11 +17,7 @@ use tokio::sync::Mutex;
 /// Absent (`None`), explicitly `null` (`Some(None)`) or set (`Some(Some(_))`).
 type Nullable<T> = Option<Option<T>>;
 
-pub fn key(run_id: &str) -> String {
-    format!("run-checkpoint:{run_id}")
-}
-
-/// Restart state persisted under `run-checkpoint:{id}`.
+/// Restart state persisted once in `run_checkpoints`, serialized from this type.
 ///
 /// Unconverted chat/node boundaries still serialize these named fields. Nullable
 /// assignments retain null versus absent; no untyped decision fields round-trip.
@@ -153,23 +150,30 @@ impl RunCheckpoint {
     }
 
     pub async fn load(store: &Store, run_id: &str) -> Result<Option<Self>> {
-        store
-            .kv(&key(run_id))
-            .await?
-            .map(Self::from_value)
-            .transpose()
+        let run_id = run_id.to_owned();
+        store.read(move |db| Self::load_in(db, &run_id)).await
     }
 
     pub fn load_in(db: &Db<'_>, run_id: &str) -> Result<Option<Self>> {
-        db.kv(&key(run_id))?.map(Self::from_value).transpose()
+        let encoded: Option<String> =
+            db.0.prepare_cached("SELECT state FROM run_checkpoints WHERE run_id=?")?
+                .query_row([run_id], |row| row.get(0))
+                .optional()?;
+        encoded
+            .map(|data| serde_json::from_str(&data).map_err(Into::into))
+            .transpose()
     }
 
     pub async fn store(&self, store: &Store, run_id: &str) -> Result<()> {
-        store.set(&key(run_id), self.to_value()?, None).await
+        let (state, run_id) = (self.clone(), run_id.to_owned());
+        store.write(move |db| state.store_in(db, &run_id)).await
     }
 
     pub fn store_in(&self, db: &Db<'_>, run_id: &str) -> Result<()> {
-        db.set(&key(run_id), &self.to_value()?, None)
+        db.0.prepare_cached(
+            "INSERT INTO run_checkpoints(run_id,state) VALUES(?,?) ON CONFLICT(run_id) DO UPDATE SET state=excluded.state"
+        )?.execute(params![run_id, serde_json::to_string(self)?])?;
+        Ok(())
     }
 
     pub fn launched(&self) -> bool {
@@ -444,5 +448,41 @@ mod tests {
         checkpoint.account_pause("attempt", 30_000);
         assert_eq!(checkpoint.deadline(), None);
         assert!(!checkpoint.expired());
+    }
+}
+
+// Temporary JSON adapters are owned by the unconverted node/chat domains. They
+// cannot persist arbitrary checkpoint fields or create a second source of truth.
+impl Db<'_> {
+    pub fn checkpoint_boundary(&self, run_id: &str) -> Result<Option<Value>> {
+        RunCheckpoint::load_in(self, run_id)?
+            .map(|state| state.to_value())
+            .transpose()
+    }
+
+    pub fn save_checkpoint_boundary(&self, run_id: &str, value: &Value) -> Result<()> {
+        RunCheckpoint::from_value(value.clone())?.store_in(self, run_id)
+    }
+
+    pub fn delete_checkpoint(&self, run_id: &str) -> Result<()> {
+        self.0
+            .execute("DELETE FROM run_checkpoints WHERE run_id=?", [run_id])?;
+        Ok(())
+    }
+}
+
+impl Store {
+    pub async fn checkpoint_boundary(&self, run_id: &str) -> Result<Option<Value>> {
+        let run_id = run_id.to_owned();
+        self.read(move |db| db.checkpoint_boundary(&run_id)).await
+    }
+
+    pub async fn save_checkpoint_boundary(&self, run_id: &str, value: Value) -> Result<()> {
+        RunCheckpoint::from_value(value)?.store(self, run_id).await
+    }
+
+    pub async fn delete_checkpoint(&self, run_id: &str) -> Result<()> {
+        let run_id = run_id.to_owned();
+        self.write(move |db| db.delete_checkpoint(&run_id)).await
     }
 }

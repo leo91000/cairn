@@ -1,4 +1,5 @@
 use crate::common::run_fixture::DbRunFixture;
+use cairn_contracts::EventKind;
 use common::MissionFixture;
 
 mod common;
@@ -113,7 +114,7 @@ impl Fixture {
             .store
             .transaction(move |db| {
                 for n in 0..count {
-                    db.event(&run, "output", &format!("event-{n}"), None)?;
+                    db.event(&run, &EventKind::Output, &format!("event-{n}"), None)?;
                 }
                 Ok(())
             })
@@ -425,7 +426,7 @@ async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
         .transaction(move |db| {
             let tool =
                 json!({ "item": { "id": "tool", "type": "command_execution", "command": "ls" } });
-            db.event(&run, "item.completed", "ls", Some(&tool))?;
+            db.event(&run, &EventKind::ItemCompleted, "ls", Some(&tool))?;
             let mut answer = String::new();
             for n in 0..=300 {
                 answer.push_str(&format!("word {n} "));
@@ -436,9 +437,14 @@ async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
                 };
                 let message =
                     json!({ "item": { "id": "answer", "type": "agent_message", "text": answer } });
-                db.event(&run, kind, &answer, Some(&message))?;
+                db.event(
+                    &run,
+                    &EventKind::from_adapter(kind),
+                    &answer,
+                    Some(&message),
+                )?;
             }
-            db.event(&run, "turn.completed", "", None)?;
+            db.event(&run, &EventKind::TurnCompleted, "", None)?;
             Ok(())
         })
         .await
@@ -608,7 +614,7 @@ async fn writes_during_replay_and_slow_readers_do_not_block_or_lose_events() {
         .store
         .transaction(move |db| {
             for _ in 0..500 {
-                db.event(&run, "output", &"x".repeat(16000), None)?;
+                db.event(&run, &EventKind::Output, &"x".repeat(16000), None)?;
             }
             Ok(())
         })
@@ -626,7 +632,7 @@ async fn writes_during_replay_and_slow_readers_do_not_block_or_lose_events() {
         .service
         .store
         .transaction(move |db| {
-            db.event(&run, "output", "must not escape", None)?;
+            db.event(&run, &EventKind::Output, "must not escape", None)?;
             Err::<(), _>(Error::bad("rollback"))
         })
         .await;
@@ -822,7 +828,7 @@ async fn wire_deltas_reestablish_baselines_after_reconnect_and_keep_rest_compati
             .store
             .event(
                 &f.run,
-                "item.updated",
+                &EventKind::ItemUpdated,
                 content,
                 Some(json!({
                     "item": { "id": "message", "type": "agent_message", "text": content },
@@ -1028,7 +1034,7 @@ async fn profile_long_answer_delivery_with_small_wire_deltas() {
                 .store
                 .event(
                     &f.run,
-                    "item.updated",
+                    &EventKind::ItemUpdated,
                     value,
                     Some(json!({
                         "item": { "id": "profile", "type": "agent_message", "text": value },
@@ -1070,23 +1076,23 @@ async fn backwards_pages_skip_superseded_long_answers_but_keep_reused_ids_in_old
     f.service
         .store
         .transaction(move |db| {
-            db.event(&run, "turn.started", "", None)?;
+            db.event(&run, &EventKind::TurnStarted, "", None)?;
             db.event(
                 &run,
-                "item.completed",
+                &EventKind::ItemCompleted,
                 "previous turn",
                 Some(&json!({
                     "item": { "id": "m", "type": "agent_message", "text": "previous turn" },
                 })),
             )?;
-            db.event(&run, "turn.completed", "", None)?;
-            db.event(&run, "turn.started", "", None)?;
-            db.event(&run, "chat.user", "Older question", None)?;
+            db.event(&run, &EventKind::TurnCompleted, "", None)?;
+            db.event(&run, &EventKind::TurnStarted, "", None)?;
+            db.event(&run, &EventKind::ChatUser, "Older question", None)?;
             for n in 0..80 {
                 let text = format!("{}-{n}", "x".repeat(300_000));
                 db.event(
                     &run,
-                    "item.updated",
+                    &EventKind::ItemUpdated,
                     &text,
                     Some(&json!({
                         "item": { "id": "m", "type": "agent_message", "text": text },
@@ -1205,18 +1211,18 @@ async fn profile_conversation_opening() {
             }
             let output = "test output line\n".repeat(90);
             for turn in 0..40 {
-                db.event(&heavy_run, "turn.started", "", None)?;
-                db.event(&heavy_run, "chat.user", &format!("Question {turn}"), None)?;
+                db.event(&heavy_run, &EventKind::TurnStarted, "", None)?;
+                db.event(&heavy_run, &EventKind::ChatUser, &format!("Question {turn}"), None)?;
                 for call in 0..25 {
                     let item = format!("tool-{turn}-{call}");
                     let started = json!({
                         "item": { "id": item, "type": "command_execution", "command": "pnpm test", "status": "in_progress" },
                     });
-                    db.event(&heavy_run, "item.started", "pnpm test", Some(&started))?;
+                    db.event(&heavy_run, &EventKind::ItemStarted, "pnpm test", Some(&started))?;
                     let completed = json!({
                         "item": { "id": item, "type": "command_execution", "command": "pnpm test", "aggregated_output": output, "exit_code": 0, "status": "completed" },
                     });
-                    db.event(&heavy_run, "item.completed", "pnpm test", Some(&completed))?;
+                    db.event(&heavy_run, &EventKind::ItemCompleted, "pnpm test", Some(&completed))?;
                 }
                 // The last answer streams as many small snapshots, as a long reply does.
                 let updates = if turn == 39 { 300 } else { 40 };
@@ -1226,9 +1232,9 @@ async fn profile_conversation_opening() {
                     answer.push_str(&"More detail. ".repeat(6));
                     let kind = if update == updates { "item.completed" } else { "item.updated" };
                     let message = json!({ "item": { "id": format!("answer-{turn}"), "type": "agent_message", "text": answer } });
-                    db.event(&heavy_run, kind, &answer, Some(&message))?;
+                    db.event(&heavy_run, &EventKind::from_adapter(kind), &answer, Some(&message))?;
                 }
-                db.event(&heavy_run, "turn.completed", "", None)?;
+                db.event(&heavy_run, &EventKind::TurnCompleted, "", None)?;
             }
             Ok(())
         })
@@ -1351,7 +1357,7 @@ async fn profile_conversation_opening() {
         let run = f.run.clone();
         f.service
             .store
-            .transaction(move |db| db.event(&run, "output", &format!("live {n}"), None))
+            .transaction(move |db| db.event(&run, &EventKind::Output, &format!("live {n}"), None))
             .await
             .unwrap();
         let (_, batch) = follower.batch().await;

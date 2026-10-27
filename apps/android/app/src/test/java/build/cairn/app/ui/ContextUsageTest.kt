@@ -61,14 +61,12 @@ class ContextUsageTest {
             item: JsonObject? = null,
             extra: Map<String, JsonElement> = emptyMap(),
         ) =
-            RunEvent(
-                id,
-                id * 1000,
-                type,
-                "",
-                (item?.let { mapOf("item" to it) } ?: emptyMap()) + extra,
-                runId = "run",
-            )
+            RunEvent(id = id,
+createdAt = id * 1000,
+type = type,
+text = "",
+payload = kotlinx.serialization.json.JsonObject((item?.let { mapOf("item" to it) } ?: emptyMap()) + extra),
+runId = "run")
         val started = buildJsonObject {
             put("id", "c")
             put("type", "context_compaction")
@@ -85,7 +83,11 @@ class ContextUsageTest {
         val entries =
             timelineEntries(
                 listOf(
-                    RunEvent(1, 1000, "chat.user", "Première demande", runId = "run"),
+                    RunEvent(id = 1,
+createdAt = 1000,
+type = "chat.user",
+text = "Première demande",
+runId = "run"),
                     event(
                         2,
                         "context.usage",
@@ -112,23 +114,25 @@ class ContextUsageTest {
     @Test
     fun `a compaction its coding agent failed or stopped without closing it ends`() {
         val started =
-            RunEvent(
-                1,
-                1000,
-                "item.started",
-                "",
-                mapOf(
+            RunEvent(id = 1,
+createdAt = 1000,
+type = "item.started",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                     "item" to
                         buildJsonObject {
                             put("id", "c")
                             put("type", "context_compaction")
                             put("status", "in_progress")
                         }
-                ),
-                runId = "run",
-            )
+                )),
+runId = "run")
         fun end(type: String, text: String = "", runId: String = "run") =
-            RunEvent(2, 2000, type, text, runId = runId)
+            RunEvent(id = 2,
+createdAt = 2000,
+type = type,
+text = text,
+runId = runId)
         fun state(vararg events: RunEvent) =
             timelineEntries(listOf(started) + events, chat = true).mapNotNull { it.compaction }
 
@@ -142,7 +146,11 @@ class ContextUsageTest {
         // A later execution does not revive it; another run's failure does not end it.
         assertEquals(
             "stopped",
-            state(end("status", "cancelled"), RunEvent(3, 3000, "turn.started", "", runId = "run"))
+            state(end("status", "cancelled"), RunEvent(id = 3,
+createdAt = 3000,
+type = "turn.started",
+text = "",
+runId = "run"))
                 .single()
                 .state,
         )

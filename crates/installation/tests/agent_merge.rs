@@ -1,3 +1,4 @@
+use cairn_contracts::EventKind;
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
@@ -98,7 +99,7 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
             chat["deletedAt"] = 1.into();
             db.put("chats", &chat)?;
             db.put_message(&json!({ "id": id(), "chatId": chat["id"], "createdAt": 1, "text": "Keep this message" }))?;
-            db.event(run["id"].as_str().unwrap(), "status", "Keep this history", None)?;
+            db.event(run["id"].as_str().unwrap(), &EventKind::Status, "Keep this history", None)?;
             db.set(&format!("agent-avatar:{}", source["id"].as_str().unwrap()), &json!({ "fixture": true }), None)
         }
     }).await.unwrap();
@@ -207,11 +208,7 @@ async fn same_engine_merge_keeps_the_conversation_model_on_implicit_follow_up() 
             let run = run.clone();
             move |db| {
                 db.add_run_fixture(&run, None)?;
-                db.set(
-                    &format!("run-checkpoint:{}", run["id"].as_str().unwrap()),
-                    &json!({}),
-                    None,
-                )?;
+                db.save_checkpoint_boundary(run["id"].as_str().unwrap(), &json!({}))?;
                 chat["runId"] = run["id"].clone();
                 db.put("chats", &chat)?;
                 Ok(())

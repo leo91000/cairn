@@ -14,6 +14,7 @@ use crate::{
     store::Db,
     validation::text,
 };
+use cairn_contracts::EventKind;
 use futures_util::{StreamExt, stream};
 use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -526,7 +527,7 @@ fn record(db: &Db<'_>, group: Vec<Watch>, observed: &Result<Observed>) -> Result
         } else if let Some(result) = result {
             db.event(
                 text(&run, "id"),
-                owner.event("wait_ready"),
+                &EventKind::from_adapter(owner.event("wait_ready")),
                 "Wait condition resolved",
                 Some(&result),
             )?;

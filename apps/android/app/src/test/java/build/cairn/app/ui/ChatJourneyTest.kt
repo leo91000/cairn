@@ -128,12 +128,11 @@ class ChatJourneyTest {
                     }
                     .toByteArray()
             val event =
-                RunEvent(
-                    1,
-                    1789315200000,
-                    "item.completed",
-                    "",
-                    mapOf(
+                RunEvent(id = 1,
+createdAt = 1789315200000,
+type = "item.completed",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                         "item" to
                             buildJsonObject {
                                 put("id", "answer")
@@ -143,8 +142,7 @@ class ChatJourneyTest {
                                     "J’ai terminé la **revue du projet**. Les changements sont cohérents et les vérifications passent.\n\nLes points essentiels :\n- Une conversation plus lisible\n- Les fichiers regroupés au même endroit\n\n[Ouvrir le compte rendu](/api/installations/fixture/api/runs/run/artifacts/report-v2).",
                                 )
                             }
-                    ),
-                )
+                    )))
             fun stream(state: LiveState, events: List<RunEvent> = emptyList()): MockResponse {
                 val body =
                     "event: batch\nid: ${events.lastOrNull()?.id ?: 0}\ndata: ${wireJson.encodeToString(LiveBatch(events,state,false,false))}\n\n"
@@ -269,19 +267,19 @@ class ChatJourneyTest {
                                                 ),
                                         ),
                                         listOf(
-                                            RunEvent(
-                                                9,
-                                                1789315189000,
-                                                "chat.user",
-                                                "Peux-tu examiner le projet et préparer un compte rendu ?",
-                                            ),
-                                            RunEvent(10, 1789315190000, "turn.started", ""),
-                                            RunEvent(
-                                                11,
-                                                1789315190100,
-                                                "item.started",
-                                                "",
-                                                mapOf(
+                                            RunEvent(id = 9,
+createdAt = 1789315189000,
+type = "chat.user",
+text = "Peux-tu examiner le projet et préparer un compte rendu ?"),
+                                            RunEvent(id = 10,
+createdAt = 1789315190000,
+type = "turn.started",
+text = ""),
+                                            RunEvent(id = 11,
+createdAt = 1789315190100,
+type = "item.started",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                                                     "item" to
                                                         buildJsonObject {
                                                             put("id", "command-1")
@@ -289,14 +287,12 @@ class ChatJourneyTest {
                                                             put("command", "git status --short")
                                                             put("status", "in_progress")
                                                         }
-                                                ),
-                                            ),
-                                            RunEvent(
-                                                12,
-                                                1789315190200,
-                                                "item.completed",
-                                                "",
-                                                mapOf(
+                                                ))),
+                                            RunEvent(id = 12,
+createdAt = 1789315190200,
+type = "item.completed",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                                                     "item" to
                                                         buildJsonObject {
                                                             put("id", "command-1")
@@ -308,8 +304,7 @@ class ChatJourneyTest {
                                                                 "Workspace clean",
                                                             )
                                                         }
-                                                ),
-                                            ),
+                                                ))),
                                             event.copy(id = 13),
                                         ),
                                     )

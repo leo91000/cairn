@@ -1,3 +1,4 @@
+use cairn_contracts::EventKind;
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
@@ -1169,7 +1170,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     s.store
         .event(
             run["id"].as_str().unwrap(),
-            "engine.retry",
+            &EventKind::EngineRetry,
             "retry",
             Some(engine.clone()),
         )
@@ -2129,12 +2130,11 @@ async fn mission_conversion_matches_public_mcp_and_installation_tools() {
             .unwrap();
         let original = s.store.run(run_id).await.unwrap();
         s.store
-            .set(
-                &format!("run-checkpoint:{run_id}"),
+            .save_checkpoint_boundary(
+                &run_id,
                 json!({
                     "prepared": {}, "completed": true,
                 }),
-                None,
             )
             .await
             .unwrap();
@@ -2829,11 +2829,7 @@ async fn chat_recovery_tools_preserve_confirmation_and_retention_rules() {
         .await
         .unwrap();
     s.store
-        .set(
-            &format!("run-checkpoint:{run_id}"),
-            json!({ "launched": true }),
-            None,
-        )
+        .save_checkpoint_boundary(&run_id, json!({ "launched": true }))
         .await
         .unwrap();
     let mut chat = s.chat_create(json!({})).await.unwrap();
@@ -3416,11 +3412,7 @@ async fn chat_compaction_matches_public_mcp_and_installation_tools() {
             .await
             .unwrap();
         s.store
-            .set(
-                &format!("run-checkpoint:{run_id}"),
-                json!({ "launched": true, "completed": true }),
-                None,
-            )
+            .save_checkpoint_boundary(&run_id, json!({ "launched": true, "completed": true }))
             .await
             .unwrap();
         let mut chat = s.chat_create(json!({})).await.unwrap();
@@ -3572,12 +3564,7 @@ async fn resume_run_is_one_capability_on_http_public_and_installation() {
         }
         assert_eq!(after["status"], "queued");
         assert!(after["retry"].is_null());
-        let checkpoint = s
-            .store
-            .kv(&format!("run-checkpoint:{id}"))
-            .await
-            .unwrap()
-            .unwrap();
+        let checkpoint = s.store.checkpoint_boundary(&id).await.unwrap().unwrap();
         assert_eq!(
             checkpoint["prepared"],
             json!({ "cwd": "/saved/workspace", "marker": "retained" })

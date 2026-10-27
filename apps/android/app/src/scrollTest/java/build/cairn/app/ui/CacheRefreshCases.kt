@@ -49,7 +49,11 @@ abstract class CacheRefreshCases {
             fun frame(id: Long): String {
                 val batch =
                     LiveBatch(
-                        listOf(RunEvent(id, id, "chat.user", "Output $id", runId = "fixture")),
+                        listOf(RunEvent(id = id,
+createdAt = id,
+type = "chat.user",
+text = "Output $id",
+runId = "fixture")),
                         LiveState(chat = Chat("cache-refresh")),
                         false,
                         false,

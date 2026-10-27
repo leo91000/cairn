@@ -92,18 +92,15 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
         )
     private val events =
         listOf(
-            RunEvent(
-                1,
-                timestamp - 60000,
-                "chat.user",
-                "Peux-tu simplifier cette interface et vérifier les détails ?",
-            ),
-            RunEvent(
-                2,
-                timestamp,
-                "item.completed",
-                "",
-                mapOf(
+            RunEvent(id = 1,
+createdAt = timestamp - 60000,
+type = "chat.user",
+text = "Peux-tu simplifier cette interface et vérifier les détails ?"),
+            RunEvent(id = 2,
+createdAt = timestamp,
+type = "item.completed",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                     "item" to
                         buildJsonObject {
                             put("id", "reply")
@@ -114,8 +111,7 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                                     "longue-adresse".repeat(8),
                             )
                         }
-                ),
-            ),
+                ))),
         )
 
     private val chats =

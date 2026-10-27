@@ -38,7 +38,11 @@ class ChatWaitTest {
     private var id = 0L
 
     private fun event(type: String, payload: JsonObject, text: String = "") =
-        (++id).let { RunEvent(it, it * 60_000, type, text, payload) }
+        (++id).let { RunEvent(id = it,
+createdAt = it * 60_000,
+type = type,
+text = text,
+payload = kotlinx.serialization.json.JsonObject(payload)) }
 
     private fun ChatWakeup.json() = wireJson.encodeToJsonElement(this).jsonObject
 

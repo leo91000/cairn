@@ -21,7 +21,10 @@ class HistoryCacheTest {
     private fun cache() = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
 
     private fun record() =
-        CachedHistory(2, "v1:r:1", LiveState(), listOf(RunEvent(2, 1, "item.completed", "saved")))
+        CachedHistory(2, "v1:r:1", LiveState(), listOf(RunEvent(id = 2,
+createdAt = 1,
+type = "item.completed",
+text = "saved")))
 
     @Test
     fun `warm reads and neighboring saves reuse retained payload sizes`() = runBlocking {
@@ -37,7 +40,11 @@ class HistoryCacheTest {
         val cache = cache()
         cache.save(
             "retained",
-            record().copy(events = listOf(RunEvent(2, 1, "output", "", payload))),
+            record().copy(events = listOf(RunEvent(id = 2,
+createdAt = 1,
+type = "output",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(payload)))),
             true,
         )
         val initial = strings.get()
@@ -56,7 +63,10 @@ class HistoryCacheTest {
     @Test
     fun `previously loaded pages and reading position survive on disk beyond the initial window`() =
         runBlocking {
-            val events = (1L..1250L).map { RunEvent(it, it, "chat.user", "Message $it") }
+            val events = (1L..1250L).map { RunEvent(id = it,
+createdAt = it,
+type = "chat.user",
+text = "Message $it") }
             val original =
                 CachedHistory(
                     1250,
@@ -78,7 +88,10 @@ class HistoryCacheTest {
     @Test
     fun `the byte budget evicts only the oldest prefix and clears its reading position`() =
         runBlocking {
-            val events = (1L..4L).map { RunEvent(it, it, "output", "x".repeat(1200 * 1024)) }
+            val events = (1L..4L).map { RunEvent(id = it,
+createdAt = it,
+type = "output",
+text = "x".repeat(1200 * 1024)) }
             val first = cache()
             first.save(
                 "bytes",
@@ -131,7 +144,10 @@ class HistoryCacheTest {
             "huge",
             record()
                 .copy(
-                    events = listOf(RunEvent(2, 1, "item.completed", "x".repeat(4 * 1024 * 1024)))
+                    events = listOf(RunEvent(id = 2,
+createdAt = 1,
+type = "item.completed",
+text = "x".repeat(4 * 1024 * 1024)))
                 ),
             true,
         )

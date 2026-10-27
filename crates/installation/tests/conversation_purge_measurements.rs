@@ -1,5 +1,6 @@
 //! Opt-in local C5 experiment; no production cleanup policy or latency gate.
 use crate::common::run_fixture::DbRunFixture;
+use cairn_contracts::EventKind;
 
 mod common;
 
@@ -84,7 +85,7 @@ async fn populate(service: &Service, count: usize) -> Value {
                 for event in 0..16 {
                     db.event(
                         run,
-                        "agent.message",
+                        &EventKind::from_adapter("agent.message"),
                         &format!("{event}:{}", "x".repeat(1024)),
                         None,
                     )?;
@@ -107,11 +108,7 @@ async fn populate(service: &Service, count: usize) -> Value {
                     }),
                     None,
                 )?;
-                db.set(
-                    &format!("run-checkpoint:{run}"),
-                    &json!({ "completed": true }),
-                    None,
-                )?;
+                db.save_checkpoint_boundary(&run, &json!({ "completed": true }))?;
                 db.put("chats", &chat)?;
             }
             Ok(())
@@ -125,7 +122,7 @@ async fn populate(service: &Service, count: usize) -> Value {
              (SELECT coalesce(sum(length(CAST(data AS BLOB))),0) FROM runs) +
              (SELECT coalesce(sum(length(CAST(data AS BLOB))),0) FROM chat_messages) +
              (SELECT coalesce(sum(length(CAST(text AS BLOB))),0) FROM events) +
-             (SELECT coalesce(sum(length(CAST(data AS BLOB))),0) FROM kv WHERE key LIKE 'artifact:%' OR key LIKE 'run-checkpoint:%')",
+             (SELECT coalesce(sum(length(CAST(data AS BLOB))),0) FROM kv WHERE key LIKE 'artifact:%' )",
             [], |row| row.get::<_, i64>(0),
         )?;
         Ok(json!({
@@ -259,7 +256,7 @@ async fn trial(count: usize, chained: bool, repeat: usize) {
             "events": db.0.query_row("SELECT count(*) FROM events", [], |row| row.get::<_, i64>(0))?,
             "messages": db.0.query_row("SELECT count(*) FROM chat_messages", [], |row| row.get::<_, i64>(0))?,
             "artifacts": db.keys("artifact:")?.len(),
-            "checkpoints": db.keys("run-checkpoint:")?.len(),
+            "checkpoints": db.0.query_row("SELECT count(*) FROM run_checkpoints", [], |row| row.get::<_, i64>(0))?,
         }))
     }).await.unwrap();
     for (kind, value) in remaining.as_object().unwrap() {

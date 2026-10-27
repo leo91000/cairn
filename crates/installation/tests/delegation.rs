@@ -71,11 +71,7 @@ impl Fixture {
         let config = self.s.mcps.run_configuration(&self.s, &run).await.unwrap();
         self.s
             .store
-            .set(
-                &format!("run-checkpoint:{run_id}"),
-                json!({ "completed": true, "launched": true }),
-                None,
-            )
+            .save_checkpoint_boundary(&run_id, json!({ "completed": true, "launched": true }))
             .await
             .unwrap();
         Turn {

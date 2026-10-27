@@ -13,18 +13,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Event {
-    pub id: i64,
-    run_id: String,
-    created_at: i64,
-    #[serde(rename = "type")]
-    kind: String,
-    text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    payload: Option<Box<serde_json::value::RawValue>>,
-}
+use cairn_contracts::EventKind;
+pub use cairn_contracts::RunEvent as Event;
 
 #[derive(Clone)]
 pub struct Store(Arc<Pool>);
@@ -39,7 +29,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-const DATABASE_VERSION: i64 = 9;
+const DATABASE_VERSION: i64 = 10;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -87,6 +77,7 @@ impl Store {
 CREATE INDEX IF NOT EXISTS records_kind ON records(kind,updated_at DESC);
 CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL,type TEXT NOT NULL,text TEXT NOT NULL,payload TEXT);
+CREATE TABLE run_checkpoints(run_id TEXT PRIMARY KEY NOT NULL REFERENCES runs(id) ON DELETE CASCADE,state TEXT NOT NULL CHECK(json_valid(state) AND json_type(state)='object'));
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id,id);
 CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY,data TEXT NOT NULL,expires INTEGER);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at INTEGER NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL);",
@@ -289,7 +280,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
     pub async fn event(
         &self,
         id: &str,
-        kind: &str,
+        kind: &EventKind,
         text: &str,
         payload: Option<Value>,
     ) -> Result<()> {
@@ -641,7 +632,13 @@ impl Db<'_> {
         Ok(counts.into())
     }
 
-    pub fn event(&self, run: &str, kind: &str, text: &str, payload: Option<&Value>) -> Result<()> {
+    pub fn event(
+        &self,
+        run: &str,
+        kind: &EventKind,
+        text: &str,
+        payload: Option<&Value>,
+    ) -> Result<()> {
         let text = text.chars().take(16000).collect::<String>();
         self.0
             .prepare_cached(
@@ -650,7 +647,7 @@ impl Db<'_> {
             .execute(params![
                 run,
                 now(),
-                kind,
+                kind.as_str(),
                 text,
                 payload.map(Value::to_string)
             ])?;
@@ -716,7 +713,7 @@ impl Db<'_> {
                     "recovered": true,
                 },
             });
-            self.event(&id, "item.completed", &summary, Some(&payload))?;
+            self.event(&id, &EventKind::ItemCompleted, &summary, Some(&payload))?;
             self.0.execute(
                 "UPDATE events SET created_at=? WHERE id=?",
                 params![finished, self.0.last_insert_rowid()],
@@ -859,8 +856,9 @@ fn within_budget(
             id,
             run_id: run,
             created_at: created,
-            kind,
+            kind: EventKind::from_adapter(&kind),
             text,
+            display_id: None,
             payload: payload
                 .map(serde_json::value::RawValue::from_string)
                 .transpose()?,

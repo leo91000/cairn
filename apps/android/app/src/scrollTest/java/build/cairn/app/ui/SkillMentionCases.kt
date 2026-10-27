@@ -76,7 +76,10 @@ abstract class SkillMentionCases {
                         Skill("broken", "Invalide", valid = false),
                     )
             val history =
-                listOf(RunEvent(1, 1789315200000, "chat.user", "Merci d’utiliser \$review ici"))
+                listOf(RunEvent(id = 1,
+createdAt = 1789315200000,
+type = "chat.user",
+text = "Merci d’utiliser \$review ici"))
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {

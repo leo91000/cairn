@@ -1,4 +1,6 @@
 //! Durable run deliverables. Publishing succeeds only after bytes and metadata are committed.
+use cairn_contracts::EventKind;
+
 pub mod file;
 pub mod sharing;
 
@@ -265,7 +267,7 @@ impl Artifacts {
         let publication = Publication::parse(args, visibility)?;
         let run_id = text(&run, "id");
         let checkpoint = required(
-            s.store.kv(&format!("run-checkpoint:{run_id}")).await?,
+            s.store.checkpoint_boundary(&run_id).await?,
             "Workspace is not ready",
         )?;
         let attempt = text(&checkpoint, "runnerId");
@@ -277,7 +279,7 @@ impl Artifacts {
         let current = crate::project_workspaces::authorize(s, bearer).await?;
         let current_checkpoint = s
             .store
-            .kv(&format!("run-checkpoint:{run_id}"))
+            .checkpoint_boundary(&run_id)
             .await?
             .unwrap_or_default();
         let message_id = crate::waits::execution_id(&run);
@@ -410,7 +412,7 @@ async fn commit(
             let run = text(&record, "runId").to_owned();
             crate::conversation_lifecycle::require_active_run(db, &run)?;
             let current = crate::project_workspaces::authorize_in(db, &token)?;
-            let checkpoint = db.kv(&format!("run-checkpoint:{run}"))?.unwrap_or_default();
+            let checkpoint = db.checkpoint_boundary(&run)?.unwrap_or_default();
             if current["id"] != run
                 || checkpoint["runnerId"] != expected_attempt
                 || *crate::waits::execution_id(&current) != record["messageId"]
@@ -425,7 +427,12 @@ async fn commit(
                 &record,
                 None,
             )?;
-            db.event(&run, "artifact", text(&record, "title"), Some(&record))?;
+            db.event(
+                &run,
+                &EventKind::Artifact,
+                text(&record, "title"),
+                Some(&record),
+            )?;
             Ok(record)
         })
         .await

@@ -62,14 +62,12 @@ class ScrollResumeTest {
                         if (empty) emptyList()
                         else
                             (end - 19..end).map { n ->
-                                RunEvent(
-                                    n.toLong(),
-                                    n.toLong(),
-                                    "chat.user",
-                                    "Message %03d\nUne ligne de diagnostic.\nUne autre ligne de diagnostic."
+                                RunEvent(id = n.toLong(),
+createdAt = n.toLong(),
+type = "chat.user",
+text = "Message %03d\nUne ligne de diagnostic.\nUne autre ligne de diagnostic."
                                         .format(n),
-                                    runId = "fixture",
-                                )
+runId = "fixture")
                             }
                     val json =
                         wireJson.encodeToString(

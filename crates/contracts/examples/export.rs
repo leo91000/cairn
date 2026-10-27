@@ -43,6 +43,8 @@ fn main() {
     export::<GetRunInput>(root, &mut generator, Contract::Deserialize);
     export::<ReadRunContentInput>(root, &mut generator, Contract::Deserialize);
     export::<RunContentOutput>(root, &mut generator, Contract::Serialize);
+    export::<RunEvent>(root, &mut generator, Contract::Deserialize);
+    export::<HistoryPage>(root, &mut generator, Contract::Deserialize);
     export::<RunHistoryOutput>(root, &mut generator, Contract::Serialize);
     export::<Run>(root, &mut generator, Contract::Serialize);
     export::<RunState>(root, &mut generator, Contract::Serialize);

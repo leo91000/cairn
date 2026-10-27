@@ -13,6 +13,7 @@ use crate::{
     service::Service,
     validation::text,
 };
+use cairn_contracts::EventKind;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -143,7 +144,9 @@ async fn record_failure(
     } else {
         "error"
     };
-    s.store.event(run_id, kind, &summary, None).await
+    s.store
+        .event(run_id, &EventKind::from_adapter(kind), &summary, None)
+        .await
 }
 
 /// Controller recovery is bounded on both local and remote nodes. An explicit

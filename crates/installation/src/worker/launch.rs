@@ -20,6 +20,7 @@ use crate::{
     supervisor::Supervised,
     validation::text,
 };
+use cairn_contracts::EventKind;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
@@ -240,13 +241,15 @@ impl Execution<'_> {
         s.store.change_run(&self.id, patch).await?;
         if let Some(name) = account_name.as_str() {
             let message = format!("Using {} account: {name}", self.provider.label());
-            s.store.event(&self.id, "status", &message, None).await?;
+            s.store
+                .event(&self.id, &EventKind::Status, &message, None)
+                .await?;
         }
         // Marks where an attempt begins, for labels that last one attempt.
         s.store
             .event(
                 &self.id,
-                "status",
+                &EventKind::Status,
                 "Preparing workspace",
                 Some(json!({ "attempt": true })),
             )
@@ -441,7 +444,12 @@ impl Execution<'_> {
                         })
                         .await?;
                     s.store
-                        .event(&self.id, "turn.failed", &error.message, Some(failure))
+                        .event(
+                            &self.id,
+                            &EventKind::TurnFailed,
+                            &error.message,
+                            Some(failure),
+                        )
                         .await?;
                 }
                 return Err(error);
@@ -449,8 +457,7 @@ impl Execution<'_> {
         };
         let Some(session) = session else {
             s.store.event(
-                &self.id,
-                "status",
+                &self.id, &EventKind::Status,
                 "Restarting with preserved files after the node mode change; no resumable engine session was recorded.",
                 None,
             ).await?;
@@ -466,7 +473,7 @@ impl Execution<'_> {
         s.store
             .event(
                 &self.id,
-                "status",
+                &EventKind::Status,
                 "Resuming saved conversation and workspace",
                 None,
             )
@@ -855,7 +862,9 @@ impl Execution<'_> {
             ));
         }
         let message = format!("Executing on node {node_id}");
-        s.store.event(&self.id, "status", &message, None).await
+        s.store
+            .event(&self.id, &EventKind::Status, &message, None)
+            .await
     }
 
     /// Launches the supervised process and records its output until it exits.
@@ -1033,8 +1042,7 @@ impl Execution<'_> {
         s.store.change_run(&self.id, patch).await?;
         s.store
             .event(
-                &self.id,
-                "status",
+                &self.id, &EventKind::Status,
                 "Usage exhausted. Saving this session and restoring capacity or switching accounts.",
                 None,
             )
@@ -1062,7 +1070,9 @@ impl Execution<'_> {
             "Resuming saved session with {label} account: {}",
             name.as_str().unwrap_or("")
         );
-        s.store.event(&self.id, "status", &message, None).await
+        s.store
+            .event(&self.id, &EventKind::Status, &message, None)
+            .await
     }
 
     async fn wait_for_account(&mut self, model: &str) -> Result<()> {
@@ -1177,7 +1187,7 @@ impl Execution<'_> {
         }).await?;
         let details = details.filter(|_| status == RunStatus::Failed);
         s.store
-            .event(&self.id, "status", status.as_str(), details)
+            .event(&self.id, &EventKind::Status, status.as_str(), details)
             .await
     }
 

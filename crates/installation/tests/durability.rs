@@ -1,4 +1,5 @@
 use crate::common::run_fixture::DbRunFixture;
+use cairn_contracts::EventKind;
 use common::AgentFixture;
 use common::MissionFixture;
 use common::ProjectFixture;
@@ -67,16 +68,16 @@ async fn restart_restores_missing_chat_summaries_once_without_repeating_existing
                         "type": "item.completed",
                         "item": { "id": "existing", "type": "agent_message", "text": format!("{COMPLETE}\n") },
                     });
-                    db.event(run_id, "item.completed", COMPLETE, Some(&existing))?;
+                    db.event(run_id, &EventKind::ItemCompleted, COMPLETE, Some(&existing))?;
                 }
                 if index == 5 {
                     let longer = json!({
                         "item": { "type": "agent_message", "text": "x".repeat(100_001) },
                     });
-                    db.event(run_id, "item.completed", "", Some(&longer))?;
+                    db.event(run_id, &EventKind::ItemCompleted, "", Some(&longer))?;
                 }
                 if index == 2 {
-                    db.event(run_id, "chat.user", "Check again", None)?;
+                    db.event(run_id, &EventKind::ChatUser, "Check again", None)?;
                 }
             }
             Ok(())

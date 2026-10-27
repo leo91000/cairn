@@ -1,3 +1,4 @@
+use cairn_contracts::EventKind;
 use common::McpFixture;
 use common::MissionFixture;
 
@@ -238,7 +239,12 @@ async fn run_history_includes_the_engine_retries_limits_and_notices() {
     for report in &reports {
         let kind = report["type"].as_str().unwrap();
         s.store
-            .event(run_id, kind, kind, Some(report.clone()))
+            .event(
+                run_id,
+                &EventKind::from_adapter(kind),
+                kind,
+                Some(report.clone()),
+            )
             .await
             .unwrap();
     }
@@ -273,7 +279,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
             "item": { "id": index, "type": "command_execution", "aggregated_output": output },
         });
         s.store
-            .event(run_id, "item.completed", "tool output", Some(item))
+            .event(run_id, &EventKind::ItemCompleted, "tool output", Some(item))
             .await
             .unwrap();
     }
@@ -291,14 +297,14 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     s.store
         .event(
             run_id,
-            "item.completed",
+            &EventKind::ItemCompleted,
             "Large answer",
             Some(payload.clone()),
         )
         .await
         .unwrap();
     s.store
-        .event(run_id, "turn.completed", "Done", None)
+        .event(run_id, &EventKind::TurnCompleted, "Done", None)
         .await
         .unwrap();
     let response = mcp

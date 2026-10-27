@@ -1,4 +1,5 @@
 //! Test-only stdin/stdout bridge to the native fixture APIs. Never shipped in the image.
+use cairn_contracts::EventKind;
 use run_fixture::DbRunFixture;
 
 #[path = "../tests/common/mission_fixture.rs"]
@@ -132,7 +133,7 @@ async fn main() -> Result<()> {
                 "event" => {
                     db.event(
                         string(0),
-                        string(1),
+                        &EventKind::from_adapter(string(1)),
                         string(2),
                         args.get(3).filter(|v| !v.is_null()),
                     )?;

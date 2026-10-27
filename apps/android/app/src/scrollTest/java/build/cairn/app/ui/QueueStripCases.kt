@@ -74,19 +74,19 @@ abstract class QueueStripCases {
                 )
             val events =
                 listOf(
-                    RunEvent(
-                        1,
-                        System.currentTimeMillis() - 60000,
-                        "chat.user",
-                        "Peux-tu revoir l’interface de la file d’attente ?",
-                    ),
-                    RunEvent(2, System.currentTimeMillis() - 50000, "turn.started", ""),
-                    RunEvent(
-                        3,
-                        System.currentTimeMillis() - 40000,
-                        "item.completed",
-                        "",
-                        mapOf(
+                    RunEvent(id = 1,
+createdAt = System.currentTimeMillis() - 60000,
+type = "chat.user",
+text = "Peux-tu revoir l’interface de la file d’attente ?"),
+                    RunEvent(id = 2,
+createdAt = System.currentTimeMillis() - 50000,
+type = "turn.started",
+text = ""),
+                    RunEvent(id = 3,
+createdAt = System.currentTimeMillis() - 40000,
+type = "item.completed",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                             "item" to
                                 buildJsonObject {
                                     put("id", "answer")
@@ -96,8 +96,7 @@ abstract class QueueStripCases {
                                         "Je regarde le composant actuel et je prépare une version plus lisible.",
                                     )
                                 }
-                        ),
-                    ),
+                        ))),
                 )
             server.dispatcher =
                 object : Dispatcher() {

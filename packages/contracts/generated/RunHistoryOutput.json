@@ -262,6 +262,37 @@
       ],
       "type": "object"
     },
+    "EventPreview": {
+      "properties": {
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "runId",
+        "createdAt",
+        "type"
+      ],
+      "type": "object"
+    },
     "MissionPluginGrant": {
       "additionalProperties": false,
       "properties": {
@@ -845,6 +876,97 @@
       ],
       "type": "object"
     },
+    "RunEvent": {
+      "description": "The event's ordering identity is distinct from a client's presentation identity.",
+      "properties": {
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "displayId": {
+          "description": "Client cache identity; never supplied by the event writer.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "description": "Redacted adapter JSON, retained without constructing a second object tree.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-cairn-json-object": true
+        },
+        "runId": {
+          "default": "",
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "createdAt",
+        "type",
+        "text",
+        "runId"
+      ],
+      "type": "object"
+    },
+    "RunEventPage": {
+      "description": "An oversized event retains its cursor, while its exact JSON remains available\nthrough read_run_content. No success-shaped partial event is returned.",
+      "oneOf": [
+        {
+          "properties": {
+            "event": {
+              "$ref": "#/definitions/RunEvent"
+            },
+            "kind": {
+              "const": "complete",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "event"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "truncated",
+              "type": "string"
+            },
+            "preview": {
+              "$ref": "#/definitions/EventPreview"
+            },
+            "totalBytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "preview",
+            "totalBytes"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "RunMetadataPage": {
       "description": "A byte-bounded metadata page is either complete or an explicit preview. The\nfull record remains available through read_run_content in either case.",
       "oneOf": [
@@ -1318,8 +1440,9 @@
   },
   "properties": {
     "events": {
-      "description": "Engine/event payloads are owned by A7, not the run-transition conversion.",
-      "items": true,
+      "items": {
+        "$ref": "#/definitions/RunEventPage"
+      },
       "type": "array"
     },
     "hasMore": {

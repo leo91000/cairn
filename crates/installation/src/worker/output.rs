@@ -1,5 +1,6 @@
 use super::checkpoint::{Checkpoint, RunCheckpoint};
 use crate::{config::now, error::Result, run_output, service::Service, validation::text};
+use cairn_contracts::EventKind;
 use serde_json::{Value, json};
 use std::sync::LazyLock;
 use tokio::{
@@ -260,14 +261,18 @@ pub(super) async fn record(
         s.store
             .update_run_boundary(id, serde_json::json!({ "diskCapacity": event["capacity"] }))
             .await?;
-        s.store.event(id, "status", &message, Some(event)).await?;
+        s.store
+            .event(id, &EventKind::Status, &message, Some(event))
+            .await?;
         return Ok(false);
     }
     if event["type"] == "turn.speed" {
         let event = run_output::payload(&event, secrets);
         let (message, outcome) = speed_notice(s, id, &event).await?;
         if let Some(message) = message {
-            s.store.event(id, "status", message, Some(event)).await?;
+            s.store
+                .event(id, &EventKind::Status, message, Some(event))
+                .await?;
         }
         // Recorded once its notice is stored, so a retry after a failure still shows it.
         s.store
@@ -369,7 +374,9 @@ async fn record_raw(
     if recorded.is_empty() {
         return Ok(());
     }
-    s.store.event(id, kind, recorded, None).await
+    s.store
+        .event(id, &EventKind::from_adapter(kind), recorded, None)
+        .await
 }
 
 /// Handles chat protocol messages, which are not run output.
@@ -519,7 +526,14 @@ async fn store_event(s: &Service, id: &str, raw: &str, event: &Value) -> Result<
         "" => "output",
         kind => kind,
     };
-    s.store.event(id, kind, &value, Some(event.clone())).await
+    s.store
+        .event(
+            id,
+            &EventKind::from_adapter(kind),
+            &value,
+            Some(event.clone()),
+        )
+        .await
 }
 
 fn truncate(value: &str, limit: usize) -> String {

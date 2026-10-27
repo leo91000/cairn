@@ -8,6 +8,7 @@ use crate::{
     store::Db,
     validation::text,
 };
+use cairn_contracts::EventKind;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -247,7 +248,9 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
     } else {
         format!("Moving the conversation to {destination}. Running commands are interrupted.")
     };
-    s.store.event(run_id, "status", &message, None).await?;
+    s.store
+        .event(run_id, &EventKind::Status, &message, None)
+        .await?;
     Ok(json!({
         "status": "moving",
         "nodeId": selected["nodeId"],
@@ -509,8 +512,7 @@ pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
         return Err(error);
     }
     s.store.event(
-        run_id,
-        "status",
+        run_id, &EventKind::Status,
         "The current node has no capacity. Saving the full environment before resuming on another authorized node.",
         None,
     ).await?;
@@ -695,7 +697,12 @@ async fn fail_transfer(s: &Service, current: &Value, error: &Error) -> Result<()
             db.change_run(&owner, patch)?;
             // A run waiting for an automatic retry shows the stop in its conversation.
             if cancelled && current["retry"]["nextAttemptAt"].is_number() {
-                db.event(&owner, "status", RunStatus::Cancelled.as_str(), None)?;
+                db.event(
+                    &owner,
+                    &EventKind::Status,
+                    RunStatus::Cancelled.as_str(),
+                    None,
+                )?;
             }
             Ok(())
         })
@@ -703,7 +710,7 @@ async fn fail_transfer(s: &Service, current: &Value, error: &Error) -> Result<()
     s.store
         .event(
             run_id,
-            "status",
+            &EventKind::Status,
             "Environment transfer failed. The original disk is retained.",
             None,
         )
@@ -768,9 +775,8 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
     let owner = run_id.clone();
     s.store
         .transaction(move |db| {
-            let key = super::checkpoint_key(&owner);
             let mut checkpoint = db
-                .kv(&key)?
+                .checkpoint_boundary(&owner)?
                 .ok_or_else(|| Error::conflict("Missing resume checkpoint."))?;
             let current = db
                 .run(&owner)?
@@ -782,11 +788,10 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
             checkpoint["process"] = Value::Null;
             checkpoint["settled"] = Value::Null;
             checkpoint["controllerRecoveries"] = 0.into();
-            db.set(&key, &checkpoint, None)?;
+            db.save_checkpoint_boundary(&owner, &checkpoint)?;
             db.change_run(&owner, patch)?;
             db.event(
-                &owner,
-                "status",
+                &owner, &EventKind::Status,
                 "Restoring conversation from a dated recovery point; newer chat remains visible. Verify external effects before repeating actions.",
                 Some(&json!({ "capturedAt": captured_at })),
             )?;

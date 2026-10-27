@@ -725,7 +725,17 @@ pub(crate) fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
             break;
         }
         bytes += size;
-        events.push(event);
+        let page = if event["truncated"] == true {
+            cairn_contracts::RunEventPage::Truncated {
+                total_bytes: event["totalBytes"].as_u64().unwrap(),
+                preview: serde_json::from_value(event)?,
+            }
+        } else {
+            cairn_contracts::RunEventPage::Complete {
+                event: serde_json::from_value(event)?,
+            }
+        };
+        events.push(page);
         next = event_id;
     }
     let more: bool = db.0.query_row(

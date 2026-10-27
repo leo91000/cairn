@@ -58,24 +58,21 @@ class CacheMissReproductionTest {
                 val releaseOlder = CountDownLatch(1)
                 val output = "x".repeat(if (large) 2200 * 1024 else 100)
                 fun message(n: Int) =
-                    RunEvent(
-                        n.toLong(),
-                        n.toLong(),
-                        "chat.user",
-                        if (n == 40) "Message témoin" else "Message %03d".format(n),
-                        runId = "fixture",
-                    )
+                    RunEvent(id = n.toLong(),
+createdAt = n.toLong(),
+type = "chat.user",
+text = if (n == 40) "Message témoin" else "Message %03d".format(n),
+runId = "fixture")
                 val accepted = if (paged) 40 else 2
                 val events =
                     if (paged) (21..40).map(::message)
                     else
                         listOf(
-                            RunEvent(
-                                1,
-                                1,
-                                "item.completed",
-                                output,
-                                mapOf(
+                            RunEvent(id = 1,
+createdAt = 1,
+type = "item.completed",
+text = output,
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                                     "item" to
                                         buildJsonObject {
                                             put("id", "tool")
@@ -85,10 +82,13 @@ class CacheMissReproductionTest {
                                             put("aggregated_output", output)
                                             put("exit_code", 0)
                                         }
-                                ),
-                                runId = "fixture",
-                            ),
-                            RunEvent(2, 2, "chat.user", "Message témoin", runId = "fixture"),
+                                )),
+runId = "fixture"),
+                            RunEvent(id = 2,
+createdAt = 2,
+type = "chat.user",
+text = "Message témoin",
+runId = "fixture"),
                         )
                 val batch =
                     wireJson.encodeToString(

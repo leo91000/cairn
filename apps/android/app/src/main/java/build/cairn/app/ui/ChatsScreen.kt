@@ -1358,20 +1358,18 @@ internal fun ChatPage(
                                         Column {
                                             EventRow(
                                                 vm,
-                                                RunEvent(
-                                                    -1,
-                                                    sending.message.createdAt,
-                                                    "chat.user",
-                                                    sending.message.text,
-                                                    mapOf(
+                                                RunEvent(id = -1,
+createdAt = sending.message.createdAt,
+type = "chat.user",
+text = sending.message.text,
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                                                         "text" to
                                                             JsonPrimitive(sending.message.text),
                                                         "attachments" to
                                                             wireJson.encodeToJsonElement(
                                                                 sending.message.attachments
                                                             ),
-                                                    ),
-                                                ),
+                                                    ))),
                                                 chat?.agentName ?: "Cairn",
                                             )
                                             Text(

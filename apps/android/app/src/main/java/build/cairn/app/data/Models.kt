@@ -102,18 +102,7 @@ val Run.active
 val Run.title
     get() = taskName.ifBlank { snapshot?.task?.name.orEmpty() }.ifBlank { "Exécution" }
 
-@Serializable
-data class RunEvent(
-    val id: Long,
-    val createdAt: Long,
-    val type: String,
-    val text: String,
-    val payload: Map<String, JsonElement>? = null,
-    // Presentation identity survives newer wire event IDs and encrypted cache restores.
-    val displayId: Long? = null,
-    // A conversation streams several runs; item IDs such as a subagent's are scoped to their run.
-    val runId: String = "",
-)
+typealias RunEvent = build.cairn.contracts.RunEvent
 
 @Serializable
 data class Overview(

@@ -35,20 +35,18 @@ class AgentStepsTest {
         started: Boolean = false,
         body: JsonObjectBuilder.() -> Unit,
     ) =
-        RunEvent(
-            id,
-            1000 + id,
-            if (started) "item.started" else "item.completed",
-            "",
-            mapOf(
+        RunEvent(id = id,
+createdAt = 1000 + id,
+type = if (started) "item.started" else "item.completed",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                 "item" to
                     buildJsonObject {
                         put("type", type)
                         put("id", "i$id")
                         body()
                     }
-            ),
-        )
+            )))
 
     private fun command(id: Long, command: String, exit: Int = 0, output: String = "") =
         item(id, "command_execution") {
@@ -116,7 +114,10 @@ class AgentStepsTest {
             actionSentence(finished),
         )
         assertEquals("A réfléchi", actionSentence(presentations.take(1)))
-        val notice = presentActivity(RunEvent(1, 1, "run.started", "Le worker démarre"))
+        val notice = presentActivity(RunEvent(id = 1,
+createdAt = 1,
+type = "run.started",
+text = "Le worker démarre"))
         assertEquals("Suivi de l’exécution", actionSentence(listOf(notice)))
     }
 

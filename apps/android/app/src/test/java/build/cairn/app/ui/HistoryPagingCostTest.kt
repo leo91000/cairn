@@ -25,24 +25,24 @@ class HistoryPagingCostTest {
         fun next() = id++
         val events = mutableListOf<RunEvent>()
         events +=
-            RunEvent(
-                next(),
-                first,
-                "chat.user",
-                "Question $first",
-                mapOf("text" to JsonPrimitive("Question $first")),
-            )
-        events += RunEvent(next(), first, "turn.started", "")
+            RunEvent(id = next(),
+createdAt = first,
+type = "chat.user",
+text = "Question $first",
+payload = kotlinx.serialization.json.JsonObject(mapOf("text" to JsonPrimitive("Question $first"))))
+        events += RunEvent(id = next(),
+createdAt = first,
+type = "turn.started",
+text = "")
         repeat(8) { tool ->
             for (status in listOf("in_progress", "completed")) {
                 val event = next()
                 events +=
-                    RunEvent(
-                        event,
-                        event,
-                        if (status == "completed") "item.completed" else "item.started",
-                        "",
-                        mapOf(
+                    RunEvent(id = event,
+createdAt = event,
+type = if (status == "completed") "item.completed" else "item.started",
+text = "",
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                             "item" to
                                 buildJsonObject {
                                     put("id", "tool-$first-$tool")
@@ -54,27 +54,27 @@ class HistoryPagingCostTest {
                                         put("exit_code", 0)
                                     }
                                 }
-                        ),
-                    )
+                        )))
             }
         }
         val answer = next()
         events +=
-            RunEvent(
-                answer,
-                answer,
-                "item.completed",
-                reply,
-                mapOf(
+            RunEvent(id = answer,
+createdAt = answer,
+type = "item.completed",
+text = reply,
+payload = kotlinx.serialization.json.JsonObject(mapOf(
                     "item" to
                         buildJsonObject {
                             put("id", "answer-$first")
                             put("type", "agent_message")
                             put("text", reply)
                         }
-                ),
-            )
-        events += RunEvent(next(), answer, "status", "succeeded")
+                )))
+        events += RunEvent(id = next(),
+createdAt = answer,
+type = "status",
+text = "succeeded")
         return events
     }
 
