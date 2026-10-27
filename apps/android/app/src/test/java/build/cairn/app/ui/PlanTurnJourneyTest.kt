@@ -62,10 +62,21 @@ class PlanTurnJourneyTest {
                     runId = "run",
                     run =
                         Run(
-                            "run",
+                            id = "run",
+                            taskId = "chat",
                             status = "succeeded",
                             trigger = "chat",
-                            snapshot = Snapshot(agent = newAgent().copy(provider = "claude")),
+                            snapshot =
+                                Snapshot(
+                                    task =
+                                        build.cairn.contracts.RunTaskSnapshot(
+                                            agentId = MAIN_AGENT_ID,
+                                            id = "00000000-0000-4000-8000-000000000000",
+                                            name = "Composeur",
+                                            prompt = "",
+                                        ),
+                                    agent = newAgent().copy(provider = "claude"),
+                                ),
                             chatExecution = ChatExecution("plan-request", plan = true),
                         ),
                 )
