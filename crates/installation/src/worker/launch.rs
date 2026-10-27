@@ -213,9 +213,6 @@ impl Execution<'_> {
 
     async fn mark_running(&mut self) -> Result<()> {
         let s = self.s;
-        self.checkpoint
-            .update(|state| state.capacity_retry_at = None)
-            .await?;
         let account_name = match self.account.as_ref() {
             Some(account) => s.accounts.get(s, &account.account_id).await?["name"].clone(),
             None => Value::Null,
@@ -238,20 +235,26 @@ impl Execution<'_> {
             retry.next_attempt_at = None;
             patch.retry = Some(Some(retry));
         }
-        s.store.change_run(&self.id, patch).await?;
-        if let Some(name) = account_name.as_str() {
-            let message = format!("Using {} account: {name}", self.provider.label());
-            s.store
-                .event(&self.id, &EventKind::Status, &message, None)
-                .await?;
-        }
-        // Marks where an attempt begins, for labels that last one attempt.
-        s.store
-            .event(
-                &self.id,
-                &EventKind::Status,
-                "Preparing workspace",
-                Some(json!({ "attempt": true })),
+        let id = self.id.clone();
+        let account_message = account_name
+            .as_str()
+            .map(|name| format!("Using {} account: {name}", self.provider.label()));
+        self.checkpoint
+            .update_and_publish(
+                |state| state.capacity_retry_at = None,
+                move |db| {
+                    db.change_run(&id, patch)?;
+                    if let Some(message) = account_message {
+                        db.event(&id, &EventKind::Status, &message, None)?;
+                    }
+                    // Marks where an attempt begins, for labels that last one attempt.
+                    db.event(
+                        &id,
+                        &EventKind::Status,
+                        "Preparing workspace",
+                        Some(&json!({ "attempt": true })),
+                    )
+                },
             )
             .await?;
         private_dir(&self.directory).await
@@ -436,19 +439,18 @@ impl Execution<'_> {
                 // Preserve its specific transient failure instead of the previous cause.
                 if let Some(failure) = crate::run_retry::startup_failure(&error) {
                     let cause = crate::run_retry::Cause::classify(&failure["error"]);
+                    let id = self.id.clone();
+                    let message = error.message.clone();
                     self.checkpoint
-                        .update(|saved| {
-                            saved.completed = Some(false);
-                            saved.last_error = Some(Some(error.message.clone()));
-                            saved.retry_cause = Some(cause);
-                        })
-                        .await?;
-                    s.store
-                        .event(
-                            &self.id,
-                            &EventKind::TurnFailed,
-                            &error.message,
-                            Some(failure),
+                        .update_and_publish(
+                            |saved| {
+                                saved.completed = Some(false);
+                                saved.last_error = Some(Some(error.message.clone()));
+                                saved.retry_cause = Some(cause);
+                            },
+                            move |db| {
+                                db.event(&id, &EventKind::TurnFailed, &message, Some(&failure))
+                            },
                         )
                         .await?;
                 }
@@ -469,14 +471,17 @@ impl Execution<'_> {
             resume_available: Some(true),
             ..Default::default()
         };
-        s.store.change_run(&self.id, patch).await?;
+        let id = self.id.clone();
         s.store
-            .event(
-                &self.id,
-                &EventKind::Status,
-                "Resuming saved conversation and workspace",
-                None,
-            )
+            .transaction(move |db| {
+                db.change_run(&id, patch)?;
+                db.event(
+                    &id,
+                    &EventKind::Status,
+                    "Resuming saved conversation and workspace",
+                    None,
+                )
+            })
             .await?;
         Ok(Some(session))
     }
@@ -1039,14 +1044,11 @@ impl Execution<'_> {
             account_name: Some(None),
             ..Default::default()
         };
-        s.store.change_run(&self.id, patch).await?;
-        s.store
-            .event(
-                &self.id, &EventKind::Status,
-                "Usage exhausted. Saving this session and restoring capacity or switching accounts.",
-                None,
-            )
-            .await?;
+        let id = self.id.clone();
+        s.store.transaction(move |db| {
+            db.change_run(&id, patch)?;
+            db.event(&id, &EventKind::Status, "Usage exhausted. Saving this session and restoring capacity or switching accounts.", None)
+        }).await?;
         s.accounts.refresh(s, &previous.account_id).await?;
         self.wait_for_account(&model).await?;
         let Some(account) = self.account.as_mut() else {
@@ -1065,13 +1067,16 @@ impl Execution<'_> {
             account_name: Some(name.as_str().map(str::to_owned)),
             ..Default::default()
         };
-        s.store.change_run(&self.id, patch).await?;
         let message = format!(
             "Resuming saved session with {label} account: {}",
             name.as_str().unwrap_or("")
         );
+        let id = self.id.clone();
         s.store
-            .event(&self.id, &EventKind::Status, &message, None)
+            .transaction(move |db| {
+                db.change_run(&id, patch)?;
+                db.event(&id, &EventKind::Status, &message, None)
+            })
             .await
     }
 

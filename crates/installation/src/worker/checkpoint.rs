@@ -317,19 +317,40 @@ impl Checkpoint {
         read(&*self.state.lock().await)
     }
 
-    /// Applies `change`, refreshes the remaining budget and persists the checkpoint.
+    /// Applies a checkpoint change only after its durable write succeeds.
     pub async fn update(&self, change: impl FnOnce(&mut RunCheckpoint)) -> Result<()> {
+        self.update_and_publish(change, |_| Ok(())).await
+    }
+
+    /// Publishes a launcher checkpoint and its corresponding run changes/events
+    /// together. Neither live readers nor this worker see a partial transition.
+    pub async fn update_and_publish(
+        &self,
+        change: impl FnOnce(&mut RunCheckpoint),
+        publish: impl FnOnce(&mut Db<'_>) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
         let mut state = self.state.lock().await;
-        change(&mut state);
+        let mut saved = state.clone();
+        change(&mut saved);
         {
             let previous = self.pause_observation.lock().unwrap();
-            state.administrative_pause_observation = Some(AdministrativePauseObservation {
+            saved.administrative_pause_observation = Some(AdministrativePauseObservation {
                 attempt: previous.0.clone(),
                 total_ms: previous.1,
             });
-            state.remaining_ms = Some(self.deadline().map(|deadline| (deadline - now()).max(0)));
+            saved.remaining_ms = Some(self.deadline().map(|deadline| (deadline - now()).max(0)));
         }
-        state.store(&self.store, &self.id).await
+        let id = self.id.clone();
+        let saved = self
+            .store
+            .transaction(move |db| {
+                saved.store_in(db, &id)?;
+                publish(db)?;
+                Ok(saved)
+            })
+            .await?;
+        *state = saved;
+        Ok(())
     }
 
     /// Publishes engine state, its checkpoint and the event in one commit. A
@@ -544,6 +565,89 @@ mod tests {
             recovered.deadline(),
             before.map(|deadline| deadline + 2_000)
         );
+    }
+
+    #[tokio::test]
+    async fn launcher_publication_rolls_back_checkpoint_state_and_event_together() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({ "id": "run", "taskId": "task", "status": "queued" }),
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut saved = RunCheckpoint::fresh(None);
+        saved.capacity_retry_at = Some(123);
+        saved.store(&store, "run").await.unwrap();
+        let checkpoint = Checkpoint::new(store.clone(), "run".into(), saved);
+        let mut changes = store.subscribe();
+        for reject in [true, false] {
+            store.write(move |db| {
+                db.0.execute_batch(if reject {
+                    "CREATE TRIGGER reject_launch_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'event rejected'); END;"
+                } else {
+                    "DROP TRIGGER reject_launch_event;"
+                })?;
+                Ok(())
+            }).await.unwrap();
+            let result = checkpoint
+                .update_and_publish(
+                    |saved| saved.capacity_retry_at = None,
+                    |db| {
+                        db.change_run(
+                            "run",
+                            crate::runs::RunChanges {
+                                status: Some(RunStatus::Running),
+                                ..Default::default()
+                            },
+                        )?;
+                        db.event(
+                            "run",
+                            &cairn_contracts::EventKind::Status,
+                            "Preparing workspace",
+                            Some(&json!({ "attempt": true })),
+                        )
+                    },
+                )
+                .await;
+            assert_eq!(result.is_err(), reject);
+            assert_eq!(changes.has_changed().unwrap(), !reject);
+            let expected_retry = reject.then_some(123);
+            assert_eq!(
+                checkpoint.read(|saved| saved.capacity_retry_at).await,
+                expected_retry
+            );
+            assert_eq!(
+                RunCheckpoint::load(&store, "run")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .capacity_retry_at,
+                expected_retry
+            );
+            assert_eq!(
+                store.run_state("run").await.unwrap().status,
+                if reject {
+                    RunStatus::Queued
+                } else {
+                    RunStatus::Running
+                }
+            );
+            assert_eq!(
+                store
+                    .read(|db| db.event_page("run", 0, 100))
+                    .await
+                    .unwrap()
+                    .len(),
+                usize::from(!reject)
+            );
+            changes.borrow_and_update();
+        }
     }
 
     #[test]
