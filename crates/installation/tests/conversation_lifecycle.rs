@@ -1,4 +1,5 @@
 use crate::common::run_fixture::DbRunFixture;
+use cairn_contracts::EventKind;
 
 mod common;
 
@@ -86,7 +87,7 @@ impl App {
             .store
             .transaction(move |db| {
                 db.add_run_fixture(&record, None)?;
-                db.event(&run, "chat.user", &context, None)?;
+                db.event(&run, &EventKind::ChatUser, &context, None)?;
                 Ok(())
             })
             .await
@@ -550,11 +551,7 @@ async fn permanent_revocation_does_not_block_requested_conversation_erasure() {
         }
         app.service
             .store
-            .set(
-                &format!("run-checkpoint:{run}"),
-                json!({ "nodeId": node }),
-                None,
-            )
+            .save_checkpoint_boundary(&run, json!({ "nodeId": node }))
             .await
             .unwrap();
         app.service
@@ -805,11 +802,7 @@ async fn empty_and_converted_chats_start_their_inactivity_clock_at_creation() {
             .await;
             app.service
                 .store
-                .set(
-                    &format!("run-checkpoint:{run}"),
-                    json!({ "prepared": {}, "completed": true }),
-                    None,
-                )
+                .save_checkpoint_boundary(&run, json!({ "prepared": {}, "completed": true }))
                 .await
                 .unwrap();
             let (status, chat) = app

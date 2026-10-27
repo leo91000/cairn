@@ -11,6 +11,7 @@ use crate::{
     store::Db,
     validation::{parse, text},
 };
+use cairn_contracts::EventKind;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -559,7 +560,6 @@ impl Service {
             if !allowed(db, &proposed, &destination)? {
                 return Err(Error::forbidden("Destination permission was revoked during migration."));
             }
-            let key = nodes::checkpoint_key(&run_id);
             let mut checkpoint = nodes::db_checkpoint(db, &run_id)?;
             checkpoint["prepared"]["backend"] = args["backend"].clone();
             checkpoint["nodeId"] = node["id"].clone();
@@ -570,7 +570,7 @@ impl Service {
             checkpoint["freshSession"] = true.into();
             checkpoint["completed"] = true.into();
             for key in ["process", "settled", "controllerRecoveries"] { checkpoint[key] = Value::Null; }
-            db.set(&key, &checkpoint, None)?;
+            db.save_checkpoint_boundary(&run_id, &checkpoint)?;
             let mut patch = crate::runs::RunChanges {
                 snapshot: Some(serde_json::from_value(proposed["snapshot"].clone())?),
                 session_id : Some(None),
@@ -601,7 +601,7 @@ impl Service {
             chat["sessionRestartRequested"] = true.into();
             chat["wakeup"] = Value::Null;
             db.put("chats", &chat)?;
-            db.event(&run_id, "status", "Execution backend migrated. Conversation history and files preserved; the next message starts a fresh engine session.", None)?;
+            db.event(&run_id, &EventKind::Status, "Execution backend migrated. Conversation history and files preserved; the next message starts a fresh engine session.", None)?;
             db.audit("chat.backend-migration.completed", &json!({
                 "chatId": chat_id,
                 "backend": args["backend"],

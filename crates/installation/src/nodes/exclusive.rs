@@ -8,6 +8,7 @@ use crate::{
     store::Db,
     validation::{text, uuid},
 };
+use cairn_contracts::EventKind;
 use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc, time::Duration};
@@ -307,8 +308,7 @@ pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
             });
             db.put(KIND, &request)?;
             db.event(
-                text(&run, "id"),
-                "node.exclusive",
+                text(&run, "id"), &EventKind::from_adapter("node.exclusive"),
                 "Exclusive reservation queued.",
                 Some(&public(&request)),
             )?;

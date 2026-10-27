@@ -7,24 +7,17 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Event {
-    pub id: i64,
-    run_id: String,
-    created_at: i64,
-    #[serde(rename = "type")]
-    kind: String,
-    text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    payload: Option<Box<serde_json::value::RawValue>>,
-}
+use cairn_contracts::EventKind;
+pub use cairn_contracts::RunEvent as Event;
 
 #[derive(Clone)]
 pub struct Store(Arc<Pool>);
@@ -33,13 +26,14 @@ struct Pool {
     writer: mpsc::Sender<Job>,
     readers: mpsc::Sender<Job>,
     changes: watch::Sender<u64>,
+    discarded_changes: Arc<AtomicU64>,
 }
 
 /// Read connections. WAL readers do not block each other or the writer; a few
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-const DATABASE_VERSION: i64 = 9;
+const DATABASE_VERSION: i64 = 10;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -86,9 +80,10 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS records_kind ON records(kind,updated_at DESC);
 CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
-CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL,type TEXT NOT NULL,text TEXT NOT NULL,payload TEXT);
+CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),type TEXT NOT NULL CHECK(length(type)>0),text TEXT NOT NULL,payload TEXT CHECK(payload IS NULL OR json_valid(payload)));
+CREATE TABLE run_checkpoints(run_id TEXT PRIMARY KEY NOT NULL REFERENCES runs(id) ON DELETE CASCADE,state TEXT NOT NULL CHECK(json_valid(state) AND json_type(state)='object'));
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id,id);
-CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY,data TEXT NOT NULL,expires INTEGER);
+CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%'),data TEXT NOT NULL,expires INTEGER);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at INTEGER NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL);",
         )?;
             tx.execute_batch(
@@ -115,6 +110,20 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS records_chat_slug ON records(json_extract(data,'$.slug')) WHERE kind='chats';")?;
             tx.commit()?;
         }
+        // total_changes also counts rows undone by a transition savepoint. Keep
+        // their count on this writer connection so committed work alone wakes readers.
+        let discarded_changes = Arc::new(AtomicU64::new(0));
+        let discarded = discarded_changes.clone();
+        writer.create_scalar_function(
+            "cairn_discarded_changes",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            move |context| {
+                let rows = context.get::<i64>(0)?;
+                discarded.fetch_add(rows as u64, Ordering::Relaxed);
+                Ok(0_i64)
+            },
+        )?;
         let mut readers = Vec::new();
         for _ in 0..READERS {
             let connection = Connection::open(&file)?;
@@ -127,6 +136,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             writer: actors(vec![writer]),
             readers: actors(readers),
             changes: watch::channel(0).0,
+            discarded_changes,
         })))
     }
 
@@ -157,16 +167,22 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let changes = self.0.changes.clone();
+        let discarded = self.0.discarded_changes.clone();
         let preparation = crate::plugins::operations::publication_cancellation();
         self.call(&self.0.writer, move |db| {
             if preparation.is_some_and(|token| token.is_cancelled()) {
                 return Err(Error::conflict("Preparation was cancelled."));
             }
             let before = db.0.total_changes();
+            let discarded_before = discarded.load(Ordering::Relaxed);
             let result = f(db);
             // Notify on the database actor, after commit, even if the caller was cancelled.
             // Empty scheduler transactions must not wake every live UI subscriber.
-            if db.0.total_changes() != before {
+            if db.0.total_changes() - before
+                > discarded
+                    .load(Ordering::Relaxed)
+                    .wrapping_sub(discarded_before)
+            {
                 changes.send_modify(|revision| *revision = revision.wrapping_add(1));
             }
             result
@@ -187,13 +203,29 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         &self,
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        self.write(move |db| {
+        let changes = self.0.changes.clone();
+        let discarded = self.0.discarded_changes.clone();
+        let preparation = crate::plugins::operations::publication_cancellation();
+        self.call(&self.0.writer, move |db| {
+            if preparation.is_some_and(|token| token.is_cancelled()) {
+                return Err(Error::conflict("Preparation was cancelled."));
+            }
+            let before = db.0.total_changes();
+            let discarded_before = discarded.load(Ordering::Relaxed);
             let tx = rusqlite::Transaction::new_unchecked(
                 db.0,
                 rusqlite::TransactionBehavior::Immediate,
             )?;
             let value = f(&mut Db(&tx))?;
             tx.commit()?;
+            // Notify only after commit, excluding rows undone at run savepoints.
+            if db.0.total_changes() - before
+                > discarded
+                    .load(Ordering::Relaxed)
+                    .wrapping_sub(discarded_before)
+            {
+                changes.send_modify(|revision| *revision = revision.wrapping_add(1));
+            }
             Ok(value)
         })
         .await
@@ -289,7 +321,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
     pub async fn event(
         &self,
         id: &str,
-        kind: &str,
+        kind: &EventKind,
         text: &str,
         payload: Option<Value>,
     ) -> Result<()> {
@@ -641,7 +673,13 @@ impl Db<'_> {
         Ok(counts.into())
     }
 
-    pub fn event(&self, run: &str, kind: &str, text: &str, payload: Option<&Value>) -> Result<()> {
+    pub fn event(
+        &self,
+        run: &str,
+        kind: &EventKind,
+        text: &str,
+        payload: Option<&Value>,
+    ) -> Result<()> {
         let text = text.chars().take(16000).collect::<String>();
         self.0
             .prepare_cached(
@@ -650,7 +688,7 @@ impl Db<'_> {
             .execute(params![
                 run,
                 now(),
-                kind,
+                kind.as_str(),
                 text,
                 payload.map(Value::to_string)
             ])?;
@@ -678,27 +716,34 @@ impl Db<'_> {
             summary: String,
             finished_at: Option<i64>,
         }
-        let summaries: Vec<Summary> = self.json_rows_as(
-            "SELECT json_object('id',r.id,'summary',json_extract(r.data,'$.summary'),
-                'finishedAt',json_extract(r.data,'$.finishedAt')) FROM runs r
-             WHERE r.status='succeeded' AND json_extract(r.data,'$.trigger')='chat'
+        let mut query = self.0.prepare_cached(
+            "SELECT r.id,r.summary,r.finished_at FROM runs r
+             WHERE r.status='succeeded' AND r.trigger='chat'
                AND (?1 IS NULL OR r.id=?1)
                AND NOT EXISTS (
                  SELECT 1 FROM records c
                  WHERE c.kind='chats' AND json_extract(c.data,'$.runId')=r.id
                    AND COALESCE(json_extract(c.data,'$.lifecycle'),'active')!='active'
                )
-               AND length(trim(COALESCE(json_extract(r.data,'$.summary'),''),char(9)||char(10)||char(13)||' '))>0
+               AND length(trim(COALESCE(r.summary,''),char(9)||char(10)||char(13)||' '))>0
                AND NOT EXISTS (
                  SELECT 1 FROM events e WHERE e.run_id=r.id
                    AND e.id>COALESCE((SELECT MAX(u.id) FROM events u WHERE u.run_id=r.id AND u.type='chat.user'),0)
                    AND (json_extract(e.payload,'$.item.type')='agent_message'
                      OR (e.type='item.completed' AND json_extract(e.payload,'$.item.type') IS NULL))
                    AND trim(substr(COALESCE(json_extract(e.payload,'$.item.text'),e.text),1,100000),char(9)||char(10)||char(13)||' ')
-                     =trim(json_extract(r.data,'$.summary'),char(9)||char(10)||char(13)||' ')
+                     =trim(r.summary,char(9)||char(10)||char(13)||' ')
                )",
-            [run],
         )?;
+        let summaries = query
+            .query_map([run], |row| {
+                Ok(Summary {
+                    id: row.get(0)?,
+                    summary: row.get(1)?,
+                    finished_at: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         for Summary {
             id,
             summary,
@@ -716,20 +761,13 @@ impl Db<'_> {
                     "recovered": true,
                 },
             });
-            self.event(&id, "item.completed", &summary, Some(&payload))?;
+            self.event(&id, &EventKind::ItemCompleted, &summary, Some(&payload))?;
             self.0.execute(
                 "UPDATE events SET created_at=? WHERE id=?",
                 params![finished, self.0.last_insert_rowid()],
             )?;
         }
         Ok(())
-    }
-
-    pub fn events(&self, run: &str, after: i64, limit: i64) -> Result<Vec<Value>> {
-        self.event_page(run, after, limit)?
-            .into_iter()
-            .map(|event| serde_json::to_value(event).map_err(Error::from))
-            .collect()
     }
 
     // Stored payloads are already JSON. Validate their bytes without allocating
@@ -859,8 +897,9 @@ fn within_budget(
             id,
             run_id: run,
             created_at: created,
-            kind,
+            kind: EventKind::from_adapter(&kind),
             text,
+            display_id: None,
             payload: payload
                 .map(serde_json::value::RawValue::from_string)
                 .transpose()?,

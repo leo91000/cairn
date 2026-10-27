@@ -64,9 +64,27 @@ abstract class BackgroundWaitCases {
             history = { _, now ->
                 quotaEvents(now) +
                     listOf(
-                        RunEvent(7, now, "turn.started", "", runId = SAVED_RUN_ID),
-                        RunEvent(8, now, "turn.completed", "", runId = SAVED_RUN_ID),
-                        RunEvent(9, now, "status", "succeeded", runId = SAVED_RUN_ID),
+                        RunEvent(
+                            id = 7,
+                            createdAt = now,
+                            type = "turn.started",
+                            text = "",
+                            runId = SAVED_RUN_ID,
+                        ),
+                        RunEvent(
+                            id = 8,
+                            createdAt = now,
+                            type = "turn.completed",
+                            text = "",
+                            runId = SAVED_RUN_ID,
+                        ),
+                        RunEvent(
+                            id = 9,
+                            createdAt = now,
+                            type = "status",
+                            text = "succeeded",
+                            runId = SAVED_RUN_ID,
+                        ),
                     )
             },
         ) {
@@ -250,31 +268,49 @@ abstract class BackgroundWaitCases {
             history = { wakeup, now ->
                 fun message(id: Long, text: String) =
                     RunEvent(
-                        id,
-                        now - 20_000 + id,
-                        "item.completed",
-                        "",
-                        mapOf(
-                            "item" to
-                                buildJsonObject {
-                                    put("id", "message-$id")
-                                    put("type", "agent_message")
-                                    put("text", text)
-                                }
-                        ),
+                        id = id,
+                        createdAt = now - 20_000 + id,
+                        type = "item.completed",
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "item" to
+                                        buildJsonObject {
+                                            put("id", "message-$id")
+                                            put("type", "agent_message")
+                                            put("text", text)
+                                        }
+                                )
+                            ),
                     )
                 listOf(
-                    RunEvent(1, now - 30_000, "turn.started", "", emptyMap()),
+                    RunEvent(
+                        id = 1,
+                        createdAt = now - 30_000,
+                        type = "turn.started",
+                        text = "",
+                        payload = kotlinx.serialization.json.JsonObject(emptyMap()),
+                    ),
                     message(2, "Lot poussé dans la PR."),
                     RunEvent(
-                        3,
-                        now - 15_000,
-                        "chat.wait",
-                        reason,
-                        wireJson.encodeToJsonElement(wakeup!!).jsonObject,
+                        id = 3,
+                        createdAt = now - 15_000,
+                        type = "chat.wait",
+                        text = reason,
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                wireJson.encodeToJsonElement(wakeup!!).jsonObject
+                            ),
                     ),
                     message(4, "CI en cours, reprise programmée pour la vérifier."),
-                    RunEvent(5, now - 5_000, "turn.completed", "", emptyMap()),
+                    RunEvent(
+                        id = 5,
+                        createdAt = now - 5_000,
+                        type = "turn.completed",
+                        text = "",
+                        payload = kotlinx.serialization.json.JsonObject(emptyMap()),
+                    ),
                 )
             },
         ) {
@@ -423,13 +459,22 @@ abstract class BackgroundWaitCases {
             timelineEntries(
                     listOf(
                         RunEvent(
-                            1,
-                            1,
-                            "chat.wait",
-                            "",
-                            wireJson.encodeToJsonElement(wakeup).jsonObject,
+                            id = 1,
+                            createdAt = 1,
+                            type = "chat.wait",
+                            text = "",
+                            payload =
+                                kotlinx.serialization.json.JsonObject(
+                                    wireJson.encodeToJsonElement(wakeup).jsonObject
+                                ),
                         ),
-                        RunEvent(2, 2, "chat.wait_ready", "Result available", observation),
+                        RunEvent(
+                            id = 2,
+                            createdAt = 2,
+                            type = "chat.wait_ready",
+                            text = "Result available",
+                            payload = kotlinx.serialization.json.JsonObject(observation),
+                        ),
                     ),
                     chat = true,
                 )
@@ -533,16 +578,19 @@ abstract class BackgroundWaitCases {
                 )
             val waiting =
                 RunEvent(
-                    1,
-                    now - 30_000,
-                    "turn.waiting",
-                    "",
-                    mapOf(
-                        "tasks" to
-                            buildJsonArray {
-                                addJsonObject { put("description", "Vérifier la CI") }
-                            }
-                    ),
+                    id = 1,
+                    createdAt = now - 30_000,
+                    type = "turn.waiting",
+                    text = "",
+                    payload =
+                        kotlinx.serialization.json.JsonObject(
+                            mapOf(
+                                "tasks" to
+                                    buildJsonArray {
+                                        addJsonObject { put("description", "Vérifier la CI") }
+                                    }
+                            )
+                        ),
                 )
             val batch =
                 wireJson.encodeToString(
@@ -702,7 +750,15 @@ private fun quotaEvents(now: Long): List<RunEvent> {
         type: String,
         text: String = "",
         payload: Map<String, JsonElement>? = null,
-    ) = RunEvent(id, now - 30_000 + id * 1000, type, text, payload, runId = SAVED_RUN_ID)
+    ) =
+        RunEvent(
+            id = id,
+            createdAt = now - 30_000 + id * 1000,
+            type = type,
+            text = text,
+            payload = (payload)?.let { kotlinx.serialization.json.JsonObject(it) },
+            runId = SAVED_RUN_ID,
+        )
     fun message(id: Long, text: String) =
         event(
             id,

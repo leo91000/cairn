@@ -95,7 +95,14 @@ abstract class SubagentCases {
                 )
             var serial = 0L
             fun event(type: String, at: Long, payload: JsonObject) =
-                RunEvent(++serial, now - at, type, "", payload, runId = "run")
+                RunEvent(
+                    id = ++serial,
+                    createdAt = now - at,
+                    type = type,
+                    text = "",
+                    payload = (payload)?.let { kotlinx.serialization.json.JsonObject(it) },
+                    runId = "run",
+                )
             fun item(type: String, at: Long, body: JsonObjectBuilder.() -> Unit) =
                 event(type, at, buildJsonObject { put("item", buildJsonObject(body)) })
             fun subagent(name: String, at: Long, prompt: String) =

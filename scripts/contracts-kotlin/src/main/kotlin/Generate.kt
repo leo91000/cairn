@@ -5,7 +5,8 @@ import net.pwall.json.schema.codegen.CodeGenerator
 
 fun main(args: Array<String>) {
     val generator = CodeGenerator()
-    // Only manifest-defined JSON objects use this scalar mapping; business unions stay generated.
+    // Only opaque adapter or manifest JSON uses this scalar mapping; business unions stay
+    // generated.
     generator.addCustomClassByExtension(
         "x-cairn-json-object",
         true,

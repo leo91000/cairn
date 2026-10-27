@@ -488,11 +488,7 @@ async fn converting_a_mission_retains_native_authority_and_rejects_unauthorized_
         .store
         .transaction(move |db| {
             db.add_run_fixture(&saved, None)?;
-            db.set(
-                &format!("run-checkpoint:{}", saved["id"].as_str().unwrap()),
-                &json!({ "prepared": {} }),
-                None,
-            )
+            db.save_checkpoint_boundary(saved["id"].as_str().unwrap(), &json!({ "prepared": {} }))
         })
         .await
         .unwrap();
@@ -2856,7 +2852,7 @@ async fn native_mode_transition_keeps_automatic_recovery_and_capacity_moves_on_t
         assert_eq!(
             f.service
                 .store
-                .kv(&format!("run-checkpoint:{run_id}"))
+                .checkpoint_boundary(&run_id)
                 .await
                 .unwrap()
                 .unwrap()["nodeId"],

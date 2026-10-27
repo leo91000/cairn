@@ -21,9 +21,4 @@ export interface LiveBatch {
   more: boolean
 }
 
-export interface HistoryPage {
-  events: RunEvent[]
-  history: string
-  oldest: number
-  hasOlder: boolean
-}
+export type { HistoryPage } from './generated/typescript/HistoryPage'

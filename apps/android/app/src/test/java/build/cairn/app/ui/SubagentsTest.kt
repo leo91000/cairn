@@ -15,7 +15,14 @@ class SubagentsTest {
 
     private fun event(type: String, payload: JsonObject, runId: String = "run"): RunEvent {
         val id = ++serial
-        return RunEvent(id, id * 1000, type, "", payload, runId = runId)
+        return RunEvent(
+            id = id,
+            createdAt = id * 1000,
+            type = type,
+            text = "",
+            payload = (payload)?.let { kotlinx.serialization.json.JsonObject(it) },
+            runId = runId,
+        )
     }
 
     private fun item(type: String, runId: String = "run", body: JsonObjectBuilder.() -> Unit) =

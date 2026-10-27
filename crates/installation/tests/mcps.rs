@@ -1,3 +1,4 @@
+use cairn_contracts::EventKind;
 use common::McpFixture;
 use common::MissionFixture;
 
@@ -121,7 +122,9 @@ async fn read_every_page(mcp: &Mcp, run: &str, output: &str) -> i64 {
             .await;
         assert_ne!(response["result"]["isError"], true);
         let page = result(&response);
-        for event in page["events"].as_array().unwrap() {
+        assert!(serde_json::to_vec(&page["events"]).unwrap().len() <= 256 * 1024);
+        for record in page["events"].as_array().unwrap() {
+            let event = &record["event"];
             if event["type"] == "item.completed" {
                 assert_eq!(event["payload"]["item"]["aggregated_output"], output);
                 seen.push(event["payload"]["item"]["id"].as_i64().unwrap());
@@ -238,7 +241,12 @@ async fn run_history_includes_the_engine_retries_limits_and_notices() {
     for report in &reports {
         let kind = report["type"].as_str().unwrap();
         s.store
-            .event(run_id, kind, kind, Some(report.clone()))
+            .event(
+                run_id,
+                &EventKind::from_adapter(kind),
+                kind,
+                Some(report.clone()),
+            )
             .await
             .unwrap();
     }
@@ -252,10 +260,32 @@ async fn run_history_includes_the_engine_retries_limits_and_notices() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|event| event["type"] != "status")
-        .map(|event| event["payload"].clone())
+        .filter(|record| record["event"]["type"] != "status")
+        .map(|record| record["event"]["payload"].clone())
         .collect();
     assert_eq!(payloads, reports);
+    let first = result(&response)["events"][0]["event"]["id"]
+        .as_i64()
+        .unwrap();
+    let revision = result(&response)["history"].as_str().unwrap().to_owned();
+    assert_eq!(revision, format!("v1:{run_id}:{first}"));
+    let window = mcp
+        .call(
+            "read_run_history",
+            json!({"runId":run_id,"history":revision}),
+        )
+        .await;
+    assert_ne!(window["result"]["isError"], true);
+    let page = result(&window);
+    assert_eq!(page["history"], revision);
+    assert_eq!(page["events"].as_array().unwrap().len(), 4);
+    let stale = mcp
+        .call(
+            "read_run_history",
+            json!({"runId":run_id,"history":"stale"}),
+        )
+        .await;
+    assert_eq!(stale["result"]["isError"], true);
     server.abort();
 }
 
@@ -273,7 +303,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
             "item": { "id": index, "type": "command_execution", "aggregated_output": output },
         });
         s.store
-            .event(run_id, "item.completed", "tool output", Some(item))
+            .event(run_id, &EventKind::ItemCompleted, "tool output", Some(item))
             .await
             .unwrap();
     }
@@ -291,14 +321,14 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     s.store
         .event(
             run_id,
-            "item.completed",
+            &EventKind::ItemCompleted,
             "Large answer",
             Some(payload.clone()),
         )
         .await
         .unwrap();
     s.store
-        .event(run_id, "turn.completed", "Done", None)
+        .event(run_id, &EventKind::TurnCompleted, "Done", None)
         .await
         .unwrap();
     let response = mcp
@@ -306,8 +336,54 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
         .await;
     let page = result(&response);
     let event = &page["events"][0];
-    assert_eq!(event["truncated"], true);
-    let event_id = event["id"].as_i64().unwrap();
+    assert_eq!(event["kind"], "truncated");
+    let event_id = event["preview"]["id"].as_i64().unwrap();
+    let expected_run = run_id.to_owned();
+    let expected = s
+        .store
+        .read(move |db| {
+            Ok(db
+                .event_page(&expected_run, 0, 1000)?
+                .into_iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>())
+        })
+        .await
+        .unwrap();
+    let revision = page["history"].as_str().unwrap().to_owned();
+    assert_eq!(revision, format!("v1:{run_id}:{}", expected[0]));
+    let mut before = 9_007_199_254_740_991_i64;
+    let mut backwards = Vec::new();
+    let mut saw_preview = false;
+    loop {
+        let response = mcp
+            .bounded(
+                "read_run_history",
+                json!({"runId":run_id,"before":before,"history":revision}),
+            )
+            .await;
+        assert_ne!(response["result"]["isError"], true);
+        let page = result(&response);
+        assert!(serde_json::to_vec(&page["events"]).unwrap().len() <= 256 * 1024);
+        for record in page["events"].as_array().unwrap() {
+            let event = if record["kind"] == "truncated" {
+                saw_preview = true;
+                &record["preview"]
+            } else {
+                &record["event"]
+            };
+            backwards.push(event["id"].as_i64().unwrap());
+        }
+        let next = page["oldest"].as_i64().unwrap();
+        assert!(next < before);
+        before = next;
+        if page["hasOlder"] == false {
+            break;
+        }
+    }
+    assert!(saw_preview);
+    backwards.sort_unstable();
+    assert_eq!(backwards, expected);
     let (original, digest) = read_whole_event(&mcp, run_id, event_id).await;
     assert_eq!(
         serde_json::from_str::<Value>(&original).unwrap()["payload"],
@@ -331,7 +407,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
         )
         .await;
     let last = result(&response);
-    assert_eq!(last["events"][0]["type"], "turn.completed");
+    assert_eq!(last["events"][0]["event"]["type"], "turn.completed");
     assert_eq!(last["hasMore"], false);
 
     let other_run = manual_run(&s, "Other history", "Other run").await;

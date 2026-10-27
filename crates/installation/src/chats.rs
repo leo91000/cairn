@@ -1,4 +1,8 @@
 pub(crate) mod continuation;
+
+use crate::worker::checkpoint::RunCheckpoint;
+use cairn_contracts::EventKind;
+
 mod handoff;
 pub(crate) mod questions;
 
@@ -290,9 +294,8 @@ fn compaction_blocker(db: &Db<'_>, chat: &Value, run: Option<&Value>) -> Result<
         ));
     }
     let fresh_session = chat["sessionRestartRequested"] == true
-        || db
-            .kv(&format!("run-checkpoint:{}", text(run, "id")))?
-            .is_some_and(|checkpoint| checkpoint["freshSession"] == true);
+        || RunCheckpoint::load_in(db, text(run, "id"))?
+            .is_some_and(|checkpoint| checkpoint.fresh_session == Some(true));
     if !run["sessionId"].is_string() || fresh_session {
         return Ok(Some(
             "This conversation has no saved native session to compact.".into(),
@@ -351,7 +354,7 @@ fn compact(db: &Db<'_>, chat_id: &str, origin: &crate::native::policy::Origin) -
     continue_run(db, &chat, &run, &run, execution)?;
     db.event(
         text(&run, "id"),
-        "status",
+        &EventKind::Status,
         "Compacting the conversation context",
         None,
     )?;
@@ -712,7 +715,7 @@ fn acknowledge(db: &Db<'_>, run_id: &str, message_id: &str) -> Result<()> {
         attachments: &message["attachments"],
         created_at: &message["createdAt"],
     })?;
-    db.event(run_id, "chat.user", text, Some(&payload))?;
+    db.event(run_id, &EventKind::ChatUser, text, Some(&payload))?;
     touch(&mut chat);
     db.put("chats", &chat)?;
     Ok(())
@@ -879,25 +882,24 @@ fn continue_run(
         ));
     }
     let run_id = text(run, "id");
-    let key = format!("run-checkpoint:{run_id}");
-    let mut checkpoint = match db.kv(&key)? {
+    let mut checkpoint = match RunCheckpoint::load_in(db, run_id)? {
         Some(value) => value,
-        None if chat["cancelledByDeletion"] == true => json!({}),
+        None if chat["cancelledByDeletion"] == true => RunCheckpoint::default(),
         None => return Err(Error::conflict("Run checkpoint not found")),
     };
     let provider = Provider::of_run(snapshot)?;
     let restart_requested =
-        chat["sessionRestartRequested"] == true || checkpoint["freshSession"] == true;
+        chat["sessionRestartRequested"] == true || checkpoint.fresh_session == Some(true);
     if provider != Provider::of_run(run)? || restart_requested {
         if run["sessionId"].is_string() {
-            checkpoint["workspaceInitialized"] = true.into();
+            checkpoint.workspace_initialized = Some(true);
         }
         // The next provider cannot resolve requests from the session being replaced.
         questions::release(db, run_id, None)?;
-        checkpoint["freshSession"] = false.into();
+        checkpoint.fresh_session = Some(false);
         execution.context = Some(handoff_context(db, run_id)?);
-        checkpoint["launched"] = false.into();
-        remove_keys(&mut checkpoint, &["controllerRecoveries"]);
+        checkpoint.launched = Some(false);
+        checkpoint.controller_recoveries = None;
         db.change_run(
             run_id,
             crate::runs::RunChanges {
@@ -912,7 +914,7 @@ fn continue_run(
             "Continuing with {} · conversation context and workspace preserved",
             provider.label()
         );
-        db.event(run_id, "status", &status, None)?;
+        db.event(run_id, &EventKind::Status, &status, None)?;
     } else if provider == Provider::Codex && resumes_mission_thread(run) {
         // Codex keeps the developer instructions a thread started with, so the
         // mission's thread would stay unattended. Every turn repeats the rule
@@ -923,10 +925,11 @@ fn continue_run(
             execution.text
         );
     }
-    checkpoint["completed"] = false.into();
-    checkpoint["remainingMs"] = crate::run_limits::budget_ms(agent).into();
-    remove_keys(&mut checkpoint, &["lastMessage", "settled"]);
-    db.set(&key, &checkpoint, None)?;
+    checkpoint.completed = Some(false);
+    checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(agent));
+    checkpoint.last_message = None;
+    checkpoint.settled = None;
+    checkpoint.store_in(db, run_id)?;
     let compaction = execution.operation == Some(COMPACT);
     let mut patch = crate::runs::RunChanges {
         snapshot: Some(serde_json::from_value(snapshot["snapshot"].clone())?),
@@ -950,14 +953,6 @@ fn continue_run(
 /// A mission continued in chat that still resumes the thread its mission started.
 fn resumes_mission_thread(run: &Value) -> bool {
     run["sessionId"].is_string() && run["sessionId"] == run["sourceSessionId"]
-}
-
-fn remove_keys(value: &mut Value, keys: &[&str]) {
-    if let Some(object) = value.as_object_mut() {
-        for key in keys {
-            object.remove(*key);
-        }
-    }
 }
 
 /// Starts the agent turn for `message` unless the chat or message changed meanwhile.
@@ -1021,7 +1016,7 @@ fn launch_turn(
         }
         db.event(
             text(&chat, "runId"),
-            "chat.wakeup",
+            &EventKind::ChatWakeup,
             "Resuming after scheduled wait",
             Some(&observed_wakeup),
         )?;
@@ -1051,10 +1046,10 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
         ));
     }
     let checkpoint = required(
-        db.kv(&format!("run-checkpoint:{run_id}"))?,
+        RunCheckpoint::load_in(db, run_id)?,
         "Run checkpoint not found",
     )?;
-    if !checkpoint["prepared"].is_object() || text(&run, "sessionId").is_empty() {
+    if checkpoint.prepared().is_none() || text(&run, "sessionId").is_empty() {
         return Err(Error::conflict(
             "This mission has no saved conversation available to continue.",
         ));
@@ -1583,7 +1578,7 @@ mod tests {
                     "snapshot": { "agent": { "provider": "codex" } },
                 });
                 db.add_run_fixture(&run, None)?;
-                db.set("run-checkpoint:run", &json!({ "completed": true, "launched": true }), None)?;
+                db.save_checkpoint_boundary("run", &json!({ "completed": true, "launched": true }))?;
                 db.put(
                     "chats",
                     &json!({
@@ -1741,7 +1736,7 @@ mod tests {
                             "snapshot": { "agent": { "provider": "codex" } },
                         });
                         let run = db.add_run_fixture(&run, None)?;
-                        db.event("run", "chat.user", "Context to preserve", None)?;
+                        db.event("run", &EventKind::ChatUser, "Context to preserve", None)?;
                         let chat = json!({
                             "id": "chat",
                             "runId": "run",
@@ -1766,8 +1761,8 @@ mod tests {
                         if native {
                             prepared["backend"] = "native".into();
                         }
-                        db.set(
-                            "run-checkpoint:run",
+                        db.save_checkpoint_boundary(
+                            "run",
                             &json!({
                                 "freshSession": checkpoint_restart,
                                 "completed": true,
@@ -1775,7 +1770,6 @@ mod tests {
                                 "prepared": prepared,
                                 "controllerRecoveries": 2,
                             }),
-                            None,
                         )?;
                         let message = json!({
                             "id": "next",
@@ -1794,7 +1788,7 @@ mod tests {
                             text(&queued["chatExecution"], "context")
                                 .contains("Context to preserve")
                         );
-                        let checkpoint = db.kv("run-checkpoint:run")?.unwrap();
+                        let checkpoint = db.checkpoint_boundary("run")?.unwrap();
                         assert_eq!(checkpoint["prepared"], prepared);
                         assert_eq!(checkpoint["launched"], false);
                         assert_eq!(checkpoint["workspaceInitialized"], true);
@@ -1868,7 +1862,7 @@ mod tests {
                         run["sourceSessionId"] = source.into();
                     }
                     let run = db.add_run_fixture(&run, None)?;
-                    db.set("run-checkpoint:run", &json!({ "completed": true }), None)?;
+                    db.save_checkpoint_boundary("run", &json!({ "completed": true }))?;
                     let chat = json!({ "id": "chat", "runId": "run" });
                     db.put("chats", &chat)?;
                     // Compaction can drop earlier messages, so every turn repeats it.

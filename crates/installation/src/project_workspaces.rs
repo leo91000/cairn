@@ -7,6 +7,7 @@ use crate::{
     service::{Service, covers, run_projects},
     validation::{text, uuid},
 };
+use cairn_contracts::EventKind;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -94,7 +95,7 @@ impl Projects {
         }
         let checkpoint = s
             .store
-            .kv(&format!("run-checkpoint:{run_id}"))
+            .checkpoint_boundary(run_id)
             .await?
             .unwrap_or_default();
         let prepared = &checkpoint["prepared"];
@@ -109,7 +110,9 @@ impl Projects {
         let attempt = text(&checkpoint, "runnerId");
         uuid(attempt)?;
         let status = format!("Opening {}", text(&project, "name"));
-        s.store.event(run_id, "status", &status, None).await?;
+        s.store
+            .event(run_id, &EventKind::Status, &status, None)
+            .await?;
         let agent_id = text(&run["snapshot"]["agent"], "id");
         let access = crate::plugins::run_credentials::fetch(
             s,

@@ -1,3 +1,4 @@
+use crate::common::run_fixture::DbRunFixture;
 use crate::common::run_fixture::RunFixture;
 use common::AgentFixture;
 use common::MissionFixture;
@@ -370,7 +371,7 @@ async fn delivered_message_retains_its_original_submission_timestamp() {
     let run_id = text(&run, "id").to_owned();
     let events = s
         .store
-        .read(move |db| db.events(&run_id, 0, 100))
+        .read(move |db| db.events_fixture(&run_id, 0, 100))
         .await
         .unwrap();
     let event = events.iter().find(|e| e["type"] == "chat.user").unwrap();

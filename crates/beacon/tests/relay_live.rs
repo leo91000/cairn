@@ -122,7 +122,12 @@ async fn relay_disconnect_replays_activity_and_does_not_stop_the_run() {
                     ..Default::default()
                 },
             )?;
-            db.event(&active, "output", "before disconnect", None)?;
+            db.event(
+                &active,
+                &cairn_contracts::EventKind::Output,
+                "before disconnect",
+                None,
+            )?;
             Ok(())
         })
         .await
@@ -149,7 +154,12 @@ async fn relay_disconnect_replays_activity_and_does_not_stop_the_run() {
         .installation
         .store
         .transaction(move |db| {
-            db.event(&active, "output", "during disconnect", None)?;
+            db.event(
+                &active,
+                &cairn_contracts::EventKind::Output,
+                "during disconnect",
+                None,
+            )?;
             Ok(())
         })
         .await

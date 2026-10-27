@@ -147,54 +147,69 @@ class WorkspaceJourneyTest {
                                                     LiveBatch(
                                                         listOf(
                                                             RunEvent(
-                                                                1,
-                                                                1789315200000,
-                                                                "run.started",
-                                                                "Le worker démarre la mission",
+                                                                id = 1,
+                                                                createdAt = 1789315200000,
+                                                                type = "run.started",
+                                                                text =
+                                                                    "Le worker démarre la mission",
                                                             ),
                                                             RunEvent(
-                                                                2,
-                                                                1789315201000,
-                                                                "item.started",
-                                                                "",
-                                                                mapOf(
-                                                                    "item" to
-                                                                        buildJsonObject {
-                                                                            put("id", "check")
-                                                                            put(
-                                                                                "type",
-                                                                                "command_execution",
+                                                                id = 2,
+                                                                createdAt = 1789315201000,
+                                                                type = "item.started",
+                                                                text = "",
+                                                                payload =
+                                                                    kotlinx.serialization.json
+                                                                        .JsonObject(
+                                                                            mapOf(
+                                                                                "item" to
+                                                                                    buildJsonObject {
+                                                                                        put(
+                                                                                            "id",
+                                                                                            "check",
+                                                                                        )
+                                                                                        put(
+                                                                                            "type",
+                                                                                            "command_execution",
+                                                                                        )
+                                                                                        put(
+                                                                                            "command",
+                                                                                            "./gradlew testDebugUnitTest",
+                                                                                        )
+                                                                                        put(
+                                                                                            "status",
+                                                                                            "in_progress",
+                                                                                        )
+                                                                                    }
                                                                             )
-                                                                            put(
-                                                                                "command",
-                                                                                "./gradlew testDebugUnitTest",
-                                                                            )
-                                                                            put(
-                                                                                "status",
-                                                                                "in_progress",
-                                                                            )
-                                                                        }
-                                                                ),
+                                                                        ),
                                                             ),
                                                             RunEvent(
-                                                                3,
-                                                                1789315202000,
-                                                                "item.completed",
-                                                                "",
-                                                                mapOf(
-                                                                    "item" to
-                                                                        buildJsonObject {
-                                                                            put("id", "progress")
-                                                                            put(
-                                                                                "type",
-                                                                                "agent_message",
+                                                                id = 3,
+                                                                createdAt = 1789315202000,
+                                                                type = "item.completed",
+                                                                text = "",
+                                                                payload =
+                                                                    kotlinx.serialization.json
+                                                                        .JsonObject(
+                                                                            mapOf(
+                                                                                "item" to
+                                                                                    buildJsonObject {
+                                                                                        put(
+                                                                                            "id",
+                                                                                            "progress",
+                                                                                        )
+                                                                                        put(
+                                                                                            "type",
+                                                                                            "agent_message",
+                                                                                        )
+                                                                                        put(
+                                                                                            "text",
+                                                                                            "J’ai parcouru les changements. La structure du projet est cohérente.\n\nJe vérifie maintenant **les parcours principaux** :\n- Connexion et navigation\n- Envoi des messages\n- Lecture et partage des fichiers\n\nLe compte rendu suivra dès la fin des vérifications.",
+                                                                                        )
+                                                                                    }
                                                                             )
-                                                                            put(
-                                                                                "text",
-                                                                                "J’ai parcouru les changements. La structure du projet est cohérente.\n\nJe vérifie maintenant **les parcours principaux** :\n- Connexion et navigation\n- Envoi des messages\n- Lecture et partage des fichiers\n\nLe compte rendu suivra dès la fin des vérifications.",
-                                                                            )
-                                                                        }
-                                                                ),
+                                                                        ),
                                                             ),
                                                         ),
                                                         LiveState(

@@ -5,6 +5,7 @@ use crate::{
     run_status::RunStatus,
     store::{Db, Store},
 };
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{
@@ -16,11 +17,7 @@ use tokio::sync::Mutex;
 /// Absent (`None`), explicitly `null` (`Some(None)`) or set (`Some(Some(_))`).
 type Nullable<T> = Option<Option<T>>;
 
-pub fn key(run_id: &str) -> String {
-    format!("run-checkpoint:{run_id}")
-}
-
-/// Restart state persisted under `run-checkpoint:{id}`.
+/// Restart state persisted once in `run_checkpoints`, serialized from this type.
 ///
 /// Unconverted chat/node boundaries still serialize these named fields. Nullable
 /// assignments retain null versus absent; no untyped decision fields round-trip.
@@ -153,23 +150,30 @@ impl RunCheckpoint {
     }
 
     pub async fn load(store: &Store, run_id: &str) -> Result<Option<Self>> {
-        store
-            .kv(&key(run_id))
-            .await?
-            .map(Self::from_value)
-            .transpose()
+        let run_id = run_id.to_owned();
+        store.read(move |db| Self::load_in(db, &run_id)).await
     }
 
     pub fn load_in(db: &Db<'_>, run_id: &str) -> Result<Option<Self>> {
-        db.kv(&key(run_id))?.map(Self::from_value).transpose()
+        let encoded: Option<String> =
+            db.0.prepare_cached("SELECT state FROM run_checkpoints WHERE run_id=?")?
+                .query_row([run_id], |row| row.get(0))
+                .optional()?;
+        encoded
+            .map(|data| serde_json::from_str(&data).map_err(Into::into))
+            .transpose()
     }
 
     pub async fn store(&self, store: &Store, run_id: &str) -> Result<()> {
-        store.set(&key(run_id), self.to_value()?, None).await
+        let (state, run_id) = (self.clone(), run_id.to_owned());
+        store.write(move |db| state.store_in(db, &run_id)).await
     }
 
     pub fn store_in(&self, db: &Db<'_>, run_id: &str) -> Result<()> {
-        db.set(&key(run_id), &self.to_value()?, None)
+        db.0.prepare_cached(
+            "INSERT INTO run_checkpoints(run_id,state) VALUES(?,?) ON CONFLICT(run_id) DO UPDATE SET state=excluded.state"
+        )?.execute(params![run_id, serde_json::to_string(self)?])?;
+        Ok(())
     }
 
     pub fn launched(&self) -> bool {
@@ -229,6 +233,15 @@ impl RunCheckpoint {
             None => Some(now()),
         }
     }
+}
+
+/// Effects of one redacted engine frame. A streamed message changes only its
+/// last-message field; it never clones the prepared workspace per token.
+pub struct EventChanges {
+    pub run: Option<crate::runs::RunChanges>,
+    pub failure: Option<(String, Option<crate::run_retry::Cause>, bool)>,
+    pub completed: bool,
+    pub last_message: Option<String>,
 }
 
 /// Live checkpoint of the run this worker is executing.
@@ -304,28 +317,102 @@ impl Checkpoint {
         read(&*self.state.lock().await)
     }
 
-    /// Applies `change`, refreshes the remaining budget and persists the checkpoint.
+    /// Applies a checkpoint change only after its durable write succeeds.
     pub async fn update(&self, change: impl FnOnce(&mut RunCheckpoint)) -> Result<()> {
+        self.update_and_publish(change, |_| Ok(())).await
+    }
+
+    /// Publishes a launcher checkpoint and its corresponding run changes/events
+    /// together. Neither live readers nor this worker see a partial transition.
+    pub async fn update_and_publish(
+        &self,
+        change: impl FnOnce(&mut RunCheckpoint),
+        publish: impl FnOnce(&mut Db<'_>) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
         let mut state = self.state.lock().await;
-        change(&mut state);
+        let mut saved = state.clone();
+        change(&mut saved);
         {
             let previous = self.pause_observation.lock().unwrap();
-            state.administrative_pause_observation = Some(AdministrativePauseObservation {
+            saved.administrative_pause_observation = Some(AdministrativePauseObservation {
                 attempt: previous.0.clone(),
                 total_ms: previous.1,
             });
-            state.remaining_ms = Some(self.deadline().map(|deadline| (deadline - now()).max(0)));
+            saved.remaining_ms = Some(self.deadline().map(|deadline| (deadline - now()).max(0)));
         }
-        state.store(&self.store, &self.id).await
+        let id = self.id.clone();
+        let saved = self
+            .store
+            .transaction(move |db| {
+                saved.store_in(db, &id)?;
+                publish(db)?;
+                Ok(saved)
+            })
+            .await?;
+        *state = saved;
+        Ok(())
+    }
+
+    /// Publishes engine state, its checkpoint and the event in one commit. A
+    /// streamed text snapshot only changes memory; it does not rewrite the
+    /// checkpoint per token. Memory advances only after successful publication.
+    pub async fn record_event(
+        &self,
+        kind: cairn_contracts::EventKind,
+        text: String,
+        payload: Value,
+        changes: EventChanges,
+    ) -> Result<()> {
+        let mut state = self.state.lock().await;
+        let failure = changes.failure.filter(|_| state.last_error().is_empty());
+        let persist = changes.completed || failure.is_some();
+        let mut last_message = changes.last_message;
+        let mut saved = persist.then(|| state.clone());
+        if let Some(saved) = &mut saved {
+            if let Some((message, cause, provider_failure)) = failure {
+                saved.last_error = Some(Some(message));
+                saved.retry_cause = Some(cause);
+                if provider_failure {
+                    saved.completed = Some(false);
+                }
+            }
+            if let Some(message) = last_message.take() {
+                saved.last_message = Some(message);
+            }
+            if changes.completed {
+                saved.completed = Some(true);
+            }
+            let previous = self.pause_observation.lock().unwrap();
+            saved.administrative_pause_observation = Some(AdministrativePauseObservation {
+                attempt: previous.0.clone(),
+                total_ms: previous.1,
+            });
+            saved.remaining_ms = Some(self.deadline().map(|deadline| (deadline - now()).max(0)));
+        }
+        let id = self.id.clone();
+        let saved = self
+            .store
+            .transaction(move |db| {
+                if let Some(changes) = changes.run {
+                    db.change_run(&id, changes)?;
+                }
+                if let Some(saved) = &saved {
+                    saved.store_in(db, &id)?;
+                }
+                db.event(&id, &kind, &text, Some(&payload))?;
+                Ok(saved)
+            })
+            .await?;
+        if let Some(saved) = saved {
+            *state = saved;
+        } else if let Some(message) = last_message {
+            state.last_message = Some(message);
+        }
+        Ok(())
     }
 
     pub async fn persist(&self) -> Result<()> {
         self.update(|_| {}).await
-    }
-
-    /// Changes the in-memory state only; the next update persists it.
-    pub async fn remember(&self, change: impl FnOnce(&mut RunCheckpoint)) {
-        change(&mut *self.state.lock().await);
     }
 }
 
@@ -358,9 +445,46 @@ mod nullable {
     }
 }
 
+// Temporary JSON adapters are owned by the unconverted node/chat domains. They
+// cannot persist arbitrary checkpoint fields or create a second source of truth.
+impl Db<'_> {
+    pub fn checkpoint_boundary(&self, run_id: &str) -> Result<Option<Value>> {
+        RunCheckpoint::load_in(self, run_id)?
+            .map(|state| state.to_value())
+            .transpose()
+    }
+
+    pub fn save_checkpoint_boundary(&self, run_id: &str, value: &Value) -> Result<()> {
+        RunCheckpoint::from_value(value.clone())?.store_in(self, run_id)
+    }
+
+    pub fn delete_checkpoint(&self, run_id: &str) -> Result<()> {
+        self.0
+            .execute("DELETE FROM run_checkpoints WHERE run_id=?", [run_id])?;
+        Ok(())
+    }
+}
+
+impl Store {
+    pub async fn checkpoint_boundary(&self, run_id: &str) -> Result<Option<Value>> {
+        let run_id = run_id.to_owned();
+        self.read(move |db| db.checkpoint_boundary(&run_id)).await
+    }
+
+    pub async fn save_checkpoint_boundary(&self, run_id: &str, value: Value) -> Result<()> {
+        RunCheckpoint::from_value(value)?.store(self, run_id).await
+    }
+
+    pub async fn delete_checkpoint(&self, run_id: &str) -> Result<()> {
+        let run_id = run_id.to_owned();
+        self.write(move |db| db.delete_checkpoint(&run_id)).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::run_fixture::DbRunFixture;
     use serde_json::json;
 
     #[test]
@@ -401,6 +525,16 @@ mod tests {
     async fn pause_credit_is_monotonic_per_attempt_and_survives_checkpoint_recovery() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({ "id": "budget-fixture", "taskId": "budget", "status": "running" }),
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
         let checkpoint = Checkpoint::new(
             store.clone(),
             "budget-fixture".into(),
@@ -431,6 +565,89 @@ mod tests {
             recovered.deadline(),
             before.map(|deadline| deadline + 2_000)
         );
+    }
+
+    #[tokio::test]
+    async fn launcher_publication_rolls_back_checkpoint_state_and_event_together() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({ "id": "run", "taskId": "task", "status": "queued" }),
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut saved = RunCheckpoint::fresh(None);
+        saved.capacity_retry_at = Some(123);
+        saved.store(&store, "run").await.unwrap();
+        let checkpoint = Checkpoint::new(store.clone(), "run".into(), saved);
+        let mut changes = store.subscribe();
+        for reject in [true, false] {
+            store.write(move |db| {
+                db.0.execute_batch(if reject {
+                    "CREATE TRIGGER reject_launch_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'event rejected'); END;"
+                } else {
+                    "DROP TRIGGER reject_launch_event;"
+                })?;
+                Ok(())
+            }).await.unwrap();
+            let result = checkpoint
+                .update_and_publish(
+                    |saved| saved.capacity_retry_at = None,
+                    |db| {
+                        db.change_run(
+                            "run",
+                            crate::runs::RunChanges {
+                                status: Some(RunStatus::Running),
+                                ..Default::default()
+                            },
+                        )?;
+                        db.event(
+                            "run",
+                            &cairn_contracts::EventKind::Status,
+                            "Preparing workspace",
+                            Some(&json!({ "attempt": true })),
+                        )
+                    },
+                )
+                .await;
+            assert_eq!(result.is_err(), reject);
+            assert_eq!(changes.has_changed().unwrap(), !reject);
+            let expected_retry = reject.then_some(123);
+            assert_eq!(
+                checkpoint.read(|saved| saved.capacity_retry_at).await,
+                expected_retry
+            );
+            assert_eq!(
+                RunCheckpoint::load(&store, "run")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .capacity_retry_at,
+                expected_retry
+            );
+            assert_eq!(
+                store.run_state("run").await.unwrap().status,
+                if reject {
+                    RunStatus::Queued
+                } else {
+                    RunStatus::Running
+                }
+            );
+            assert_eq!(
+                store
+                    .read(|db| db.event_page("run", 0, 100))
+                    .await
+                    .unwrap()
+                    .len(),
+                usize::from(!reject)
+            );
+            changes.borrow_and_update();
+        }
     }
 
     #[test]

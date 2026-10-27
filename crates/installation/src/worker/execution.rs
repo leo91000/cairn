@@ -13,6 +13,7 @@ use crate::{
     service::Service,
     validation::text,
 };
+use cairn_contracts::EventKind;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -137,13 +138,18 @@ async fn record_failure(
     if status != RunStatus::Queued {
         patch.boundary = Some(json!({ "wakeup": null }));
     }
-    s.store.change_run(run_id, patch).await?;
     let kind = if s.shutdown.is_cancelled() {
-        "status"
+        EventKind::Status
     } else {
-        "error"
+        EventKind::Error
     };
-    s.store.event(run_id, kind, &summary, None).await
+    let run_id = run_id.to_owned();
+    s.store
+        .transaction(move |db| {
+            db.change_run(&run_id, patch)?;
+            db.event(&run_id, &kind, &summary, None)
+        })
+        .await
 }
 
 /// Controller recovery is bounded on both local and remote nodes. An explicit

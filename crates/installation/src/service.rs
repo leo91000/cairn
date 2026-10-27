@@ -7,6 +7,7 @@ use crate::{
     validation::text,
     vault::Vault,
 };
+use cairn_contracts::EventKind;
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 use tokio_util::sync::CancellationToken;
@@ -563,7 +564,7 @@ impl Service {
                     run["requestedBy"] = requester(&caller);
                 }
                 let run = crate::runs::admit_prepared(db, &run, dedupe.as_deref())?;
-                db.event(text(&run, "id"), "status", "Queued", None)?;
+                db.event(text(&run, "id"), &EventKind::Status, "Queued", None)?;
                 let detail = json!({
                     "id": run["id"],
                     "taskId": run["taskId"],

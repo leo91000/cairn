@@ -8,6 +8,7 @@ use crate::{
     store::Db,
     validation::text,
 };
+use cairn_contracts::EventKind;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -224,7 +225,7 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
             .as_ref()
             .is_some_and(|r| r.next_attempt_at.is_some())
         {
-            db.event(id, "status", RunStatus::Cancelled.as_str(), None)?;
+            db.event(id, &EventKind::Status, RunStatus::Cancelled.as_str(), None)?;
         }
     }
     db.audit("run.cancelled", &json!({ "id": id }))
@@ -316,7 +317,7 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
     }
     db.change_run(id, patch)?;
     let result = required(db.run(id)?, "Run not found")?;
-    db.event(id, "status", "Resume requested", None)?;
+    db.event(id, &EventKind::Status, "Resume requested", None)?;
     Ok(result)
 }
 
@@ -497,9 +498,9 @@ mod tests {
                     "resumeAvailable": true, "missionTurnId": "previous-turn",
                     "waitContinuation": { "observation": { "state": "completed" } },
                 }), None)?;
-                    db.set("run-checkpoint:mission", &json!({
+                    db.save_checkpoint_boundary("mission", &json!({
                     "completed": completed, "launched": true, "prepared": { "cwd": "/workspace" },
-                }), None)?;
+                }))?;
                     let resumed = requeue(db, "mission")?;
                     assert_eq!(resumed["status"], "queued");
                     if completed {

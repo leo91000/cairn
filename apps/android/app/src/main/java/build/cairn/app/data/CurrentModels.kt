@@ -164,13 +164,7 @@ data class LiveBatch(
     val hasOlder: Boolean = false,
 )
 
-@Serializable
-data class HistoryPage(
-    val events: List<RunEvent>,
-    val history: String,
-    val oldest: Long,
-    val hasOlder: Boolean,
-)
+typealias HistoryPage = build.cairn.contracts.HistoryPage
 
 @Serializable data class ReasoningOption(val reasoningEffort: String, val description: String = "")
 

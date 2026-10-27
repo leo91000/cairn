@@ -8,6 +8,7 @@ use crate::{
     service::Service,
     store::Db,
 };
+use cairn_contracts::EventKind;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -64,7 +65,7 @@ pub(super) async fn schedule(
             db.change_run(&id, patch)?;
             db.event(
                 &id,
-                "retry.scheduled",
+                &EventKind::RetryScheduled,
                 &reason,
                 Some(&json!({ "retry": retry })),
             )?;
@@ -115,6 +116,6 @@ pub(super) fn expire_in(db: &Db<'_>, id: &str) -> Result<bool> {
             ..Default::default()
         },
     )?;
-    db.event(id, "status", RunStatus::Failed.as_str(), None)?;
+    db.event(id, &EventKind::Status, RunStatus::Failed.as_str(), None)?;
     Ok(true)
 }

@@ -14,6 +14,7 @@ use crate::{
     store::{Db, Store},
     validation::text,
 };
+use cairn_contracts::EventKind;
 use cairn_contracts::RunState;
 use serde_json::{Value, json};
 use std::{
@@ -369,8 +370,13 @@ async fn report_account_wait(
         account_required: Some(serde_json::from_value(serde_json::json!(required))?),
         ..Default::default()
     };
-    s.store.change_run(run_id, patch).await?;
-    s.store.event(run_id, "status", &error.message, None).await
+    let (run_id, message) = (run_id.to_owned(), error.message.clone());
+    s.store
+        .transaction(move |db| {
+            db.change_run(&run_id, patch)?;
+            db.event(&run_id, &EventKind::Status, &message, None)
+        })
+        .await
 }
 
 /// Shows why `run` waits for a node. Updated figures replace the reason
@@ -387,11 +393,17 @@ pub(super) async fn report_capacity_wait(s: &Service, run: &RunState, detail: &s
         account_required: Some(None),
         ..Default::default()
     };
-    s.store.change_run(run_id, patch).await?;
-    if previous.starts_with(CAPACITY_WAIT_REASON) {
-        return Ok(());
-    }
-    s.store.event(run_id, "status", &reason, None).await
+    let changed_figures = previous.starts_with(CAPACITY_WAIT_REASON);
+    let run_id = run_id.to_owned();
+    s.store
+        .transaction(move |db| {
+            db.change_run(&run_id, patch)?;
+            if !changed_figures {
+                db.event(&run_id, &EventKind::Status, &reason, None)?;
+            }
+            Ok(())
+        })
+        .await
 }
 
 /// Returns whether a recovering run may launch again now.
@@ -533,7 +545,7 @@ fn cancel_recovery(db: &Db<'_>, id: &str, run: &RunState) -> Result<()> {
         .and_then(|retry| retry.next_attempt_at)
         .is_some()
     {
-        db.event(id, "status", RunStatus::Cancelled.as_str(), None)?;
+        db.event(id, &EventKind::Status, RunStatus::Cancelled.as_str(), None)?;
     }
     Ok(())
 }
@@ -982,7 +994,7 @@ mod tests {
         assert!(
             service
                 .store
-                .kv(&format!("run-checkpoint:{run_id}"))
+                .checkpoint_boundary(&run_id)
                 .await
                 .unwrap()
                 .is_none()
@@ -1125,7 +1137,7 @@ mod tests {
         assert!(
             service
                 .store
-                .kv(&format!("run-checkpoint:{run_id}"))
+                .checkpoint_boundary(&run_id)
                 .await
                 .unwrap()
                 .is_none()

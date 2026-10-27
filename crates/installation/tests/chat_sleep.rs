@@ -1,3 +1,4 @@
+use crate::common::run_fixture::DbRunFixture;
 use common::MissionFixture;
 use common::StoreAgentFixture;
 
@@ -65,11 +66,7 @@ impl Fixture {
         let token = text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
         service
             .store
-            .set(
-                &format!("run-checkpoint:{run_id}"),
-                json!({ "completed": true, "launched": true }),
-                None,
-            )
+            .save_checkpoint_boundary(&run_id, json!({ "completed": true, "launched": true }))
             .await
             .unwrap();
         Self {
@@ -172,7 +169,7 @@ async fn delay_is_idempotent_durable_and_resumes_same_workspace_once_without_use
         .store
         .read(move |db| {
             Ok(db
-                .events(&run, 0, 100)?
+                .events_fixture(&run, 0, 100)?
                 .iter()
                 .filter(|event| event["type"] == "chat.wakeup")
                 .count())
@@ -381,14 +378,13 @@ async fn failed_paused_turn_cannot_replay_its_wakeup_after_manual_resume() {
             .unwrap();
         f.service
             .store
-            .set(
-                &format!("run-checkpoint:{}", f.run),
+            .save_checkpoint_boundary(
+                &f.run,
                 json!({
                     "completed": true,
                     "launched": true,
                     "prepared": { "backend": "fixture" },
                 }),
-                None,
             )
             .await
             .unwrap();
@@ -591,10 +587,9 @@ async fn replacing_a_native_session_retires_its_pending_questions_before_startup
         if fresh_session {
             f.service
                 .store
-                .set(
-                    &format!("run-checkpoint:{}", f.run),
+                .save_checkpoint_boundary(
+                    &f.run,
                     json!({ "completed": true, "launched": true, "freshSession": true }),
-                    None,
                 )
                 .await
                 .unwrap();
@@ -813,7 +808,7 @@ async fn timer_completion_is_a_result_and_existing_timer_records_still_resume() 
     let run = f.run.clone();
     let events = restarted
         .store
-        .read(move |db| db.events(&run, 0, 100))
+        .read(move |db| db.events_fixture(&run, 0, 100))
         .await
         .unwrap();
     let event = events

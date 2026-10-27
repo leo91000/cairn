@@ -8,6 +8,7 @@ import {
   ref,
   watch,
 } from 'vue'
+import { readRunHistory } from '../../../packages/contracts/generated/readRunHistory'
 import { api, ApiError, state } from './api'
 import {
   cacheScope,
@@ -159,7 +160,10 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
       loadingOlder.value = true
       olderError.value = ''
       try {
-        const page = await api<HistoryPage>(`${value.replace(/\/stream$/, '')}/history?before=${before}&history=${encodeURIComponent(expected)}`)
+        const runId = /^\/runs\/([^/]+)\/stream$/.exec(value)?.[1]
+        const page = runId
+          ? await readRunHistory(api, { runId, before, history: expected })
+          : await api<HistoryPage>(`${value.replace(/\/stream$/, '')}/history?before=${before}&history=${encodeURIComponent(expected)}`)
         if (disposed || current !== generation || history !== expected || page.history !== expected || replacements !== baseline)
           return
         if (page.hasOlder && page.oldest >= before)

@@ -479,27 +479,36 @@ class SignalJourneyTest {
             liveEvents =
                 listOf(
                     RunEvent(
-                        1,
-                        now - 20 * 60_000,
-                        "chat.user",
-                        "Surveille la CI de la PR 77",
-                        mapOf("text" to JsonPrimitive("Surveille la CI de la PR 77")),
+                        id = 1,
+                        createdAt = now - 20 * 60_000,
+                        type = "chat.user",
+                        text = "Surveille la CI de la PR 77",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf("text" to JsonPrimitive("Surveille la CI de la PR 77"))
+                            ),
                     ),
                     RunEvent(
-                        2,
-                        now - 13 * 60_000,
-                        "turn.waiting",
-                        "",
-                        mapOf(
-                            "type" to JsonPrimitive("turn.waiting"),
-                            "tasks" to
-                                buildJsonArray {
-                                    addJsonObject {
-                                        put("id", "ci")
-                                        put("description", "Wait for PR 77 update and completed CI")
-                                    }
-                                },
-                        ),
+                        id = 2,
+                        createdAt = now - 13 * 60_000,
+                        type = "turn.waiting",
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "type" to JsonPrimitive("turn.waiting"),
+                                    "tasks" to
+                                        buildJsonArray {
+                                            addJsonObject {
+                                                put("id", "ci")
+                                                put(
+                                                    "description",
+                                                    "Wait for PR 77 update and completed CI",
+                                                )
+                                            }
+                                        },
+                                )
+                            ),
                     ),
                 )
         ) {

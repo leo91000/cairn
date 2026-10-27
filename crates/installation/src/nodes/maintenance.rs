@@ -11,6 +11,7 @@ use axum::{
     extract::{Request, State},
     response::Response,
 };
+use cairn_contracts::EventKind;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -240,7 +241,7 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
         s.store
             .event(
                 run_id,
-                "status",
+                &EventKind::Status,
                 "Node maintenance: pausing and saving the environment before restart.",
                 None,
             )

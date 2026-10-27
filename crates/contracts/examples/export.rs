@@ -24,7 +24,33 @@ fn main() {
     let root = Path::new(&root);
     fs::create_dir_all(root).unwrap();
     let mut generator = SchemaSettings::draft07().for_serialize().into_generator();
-    fs::write(root.join("run-clients.json"), serde_json::to_string_pretty(&serde_json::json!([{"name": "runMission", "input": "RunMissionInput", "output": "Run", "method": "POST", "path": "/tasks/{taskId}/run"}, {"name": "retryRun", "input": "RunInput", "output": "Run", "method": "POST", "path": "/runs/{runId}/retry"}, {"name": "cancelRun", "input": "RunInput", "output": "CancelRunOutput", "method": "POST", "path": "/runs/{runId}/cancel"}, {"name": "cleanupRun", "input": "RunInput", "output": "CleanupRunOutput", "method": "POST", "path": "/runs/{runId}/cleanup"}])).unwrap() + "\n").unwrap();
+    let run_clients = serde_json::json!([
+        {
+            "name": "readRunHistory", "input": "ReadRunHistoryInput", "output": "HistoryPage",
+            "method": "GET", "path": "/runs/{runId}/history", "query": ["before", "history"],
+        },
+        {
+            "name": "runMission", "input": "RunMissionInput", "output": "Run",
+            "method": "POST", "path": "/tasks/{taskId}/run",
+        },
+        {
+            "name": "retryRun", "input": "RunInput", "output": "Run",
+            "method": "POST", "path": "/runs/{runId}/retry",
+        },
+        {
+            "name": "cancelRun", "input": "RunInput", "output": "CancelRunOutput",
+            "method": "POST", "path": "/runs/{runId}/cancel",
+        },
+        {
+            "name": "cleanupRun", "input": "RunInput", "output": "CleanupRunOutput",
+            "method": "POST", "path": "/runs/{runId}/cleanup",
+        },
+    ]);
+    fs::write(
+        root.join("run-clients.json"),
+        serde_json::to_string_pretty(&run_clients).unwrap() + "\n",
+    )
+    .unwrap();
     let corpus: serde_json::Value =
         serde_json::from_str(include_str!("../../../tests/fixtures/run-contracts.json")).unwrap();
     let states: Vec<RunState> = serde_json::from_value(corpus["states"].clone()).unwrap();
@@ -43,6 +69,10 @@ fn main() {
     export::<GetRunInput>(root, &mut generator, Contract::Deserialize);
     export::<ReadRunContentInput>(root, &mut generator, Contract::Deserialize);
     export::<RunContentOutput>(root, &mut generator, Contract::Serialize);
+    export::<RunEvent>(root, &mut generator, Contract::Deserialize);
+    export::<RunHistoryWindowOutput>(root, &mut generator, Contract::Serialize);
+    export::<ReadRunHistoryInput>(root, &mut generator, Contract::Deserialize);
+    export::<HistoryPage>(root, &mut generator, Contract::Deserialize);
     export::<RunHistoryOutput>(root, &mut generator, Contract::Serialize);
     export::<Run>(root, &mut generator, Contract::Serialize);
     export::<RunState>(root, &mut generator, Contract::Serialize);

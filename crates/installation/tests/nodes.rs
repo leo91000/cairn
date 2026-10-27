@@ -1,5 +1,6 @@
 use common::McpFixture;
 use common::StoreAgentFixture;
+use common::run_fixture::DbRunFixture;
 
 #[path = "nodes/backend_migration.rs"]
 mod backend_migration;
@@ -2134,6 +2135,9 @@ async fn current_components_resume_a_backend_converted_environment_after_an_appl
         .await;
     owner.grant_nodes(&agent, json!([node])).await;
     owner
+        .add_run_fixture(&run_record(&run, RunStatus::Running))
+        .await;
+    owner
         .set_checkpoint(
             &run,
             json!({
@@ -3732,6 +3736,9 @@ async fn abandoned_return_to_a_node_releases_only_the_unmaterialized_disk_reserv
         .put("nodes", schedulable_node(&node, &limits(4, 8192, 65536)))
         .await;
     owner.grant_nodes(&agent, json!([node])).await;
+    owner
+        .add_run_fixture(&run_record(&run, RunStatus::Running))
+        .await;
     let original = agent_run(&run, &agent);
     let attempt = id();
     placement::reserve(&owner.service, &original, &attempt)
@@ -4534,7 +4541,7 @@ async fn node_alerts_reach_the_conversation_and_clients_without_repeating() {
     let events = owner
         .service
         .store
-        .read(move |db| db.events(&run, 0, 100))
+        .read(move |db| db.events_fixture(&run, 0, 100))
         .await
         .unwrap();
     assert!(

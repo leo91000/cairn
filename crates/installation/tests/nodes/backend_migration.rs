@@ -377,7 +377,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let checkpoint_before = owner
         .service
         .store
-        .kv(&format!("run-checkpoint:{run}"))
+        .checkpoint_boundary(&run)
         .await
         .unwrap()
         .unwrap();

@@ -14,6 +14,7 @@ use crate::{
     store::Db,
     validation::{parse, text, uuid},
 };
+use cairn_contracts::EventKind;
 use serde_json::{Value, json};
 
 /// Delegated conversations of one requester that may work at the same time.
@@ -297,7 +298,7 @@ fn create(db: &Db<'_>, bearer: &str, input: &Value) -> Result<Value> {
     // conversation for the current state.
     db.event(
         text(&run, "id"),
-        "chat.delegated",
+        &EventKind::ChatDelegated,
         text(&delegated, "title"),
         Some(&json!({
             "chatId": chat_id,

@@ -41,6 +41,7 @@ serde_yaml_ng = "0.10"
 jsonschema = { version = "0.56", default-features = false }
 rusqlite = { version = "0.40", features = [
   "bundled",
+  "functions",
   "serde_json"
 ] }
 rustls = { version = "0.23", default-features = false, features = [ "aws_lc_rs" ] }

@@ -1,3 +1,5 @@
+use crate::common::run_fixture::DbRunFixture;
+use cairn_contracts::EventKind;
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
@@ -1059,6 +1061,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "cleanup_run",
         "list_runs",
         "get_run",
+        "read_run_history",
         "read_run_content",
     ]);
     public_names.insert(cairn_contracts::RESUME_RUN_ID);
@@ -1169,7 +1172,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     s.store
         .event(
             run["id"].as_str().unwrap(),
-            "engine.retry",
+            &EventKind::EngineRetry,
             "retry",
             Some(engine.clone()),
         )
@@ -1178,10 +1181,29 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     let history = call(&s, &configuration, "get_run", json!({ "runId": run["id"] })).await;
     assert_eq!(result(&history)["run"]["run"]["id"], run["id"]);
     let events = result(&history)["events"].as_array().unwrap().clone();
+    let window = call(
+        &s,
+        &configuration,
+        "read_run_history",
+        json!({
+            "runId": run["id"], "history": result(&history)["history"],
+        }),
+    )
+    .await;
+    assert_ne!(window["result"]["isError"], true);
+    assert!(
+        result(&window)["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|record| record["event"]["type"] == "engine.retry")
+    );
+
     assert!(
         events
             .iter()
-            .any(|event| event["type"] == "engine.retry" && event["payload"] == engine)
+            .any(|record| record["event"]["type"] == "engine.retry"
+                && record["event"]["payload"] == engine)
     );
     let chunk = call(
         &s,
@@ -2129,12 +2151,11 @@ async fn mission_conversion_matches_public_mcp_and_installation_tools() {
             .unwrap();
         let original = s.store.run(run_id).await.unwrap();
         s.store
-            .set(
-                &format!("run-checkpoint:{run_id}"),
+            .save_checkpoint_boundary(
+                run_id,
                 json!({
                     "prepared": {}, "completed": true,
                 }),
-                None,
             )
             .await
             .unwrap();
@@ -2829,11 +2850,7 @@ async fn chat_recovery_tools_preserve_confirmation_and_retention_rules() {
         .await
         .unwrap();
     s.store
-        .set(
-            &format!("run-checkpoint:{run_id}"),
-            json!({ "launched": true }),
-            None,
-        )
+        .save_checkpoint_boundary(run_id, json!({ "launched": true }))
         .await
         .unwrap();
     let mut chat = s.chat_create(json!({})).await.unwrap();
@@ -3416,11 +3433,7 @@ async fn chat_compaction_matches_public_mcp_and_installation_tools() {
             .await
             .unwrap();
         s.store
-            .set(
-                &format!("run-checkpoint:{run_id}"),
-                json!({ "launched": true, "completed": true }),
-                None,
-            )
+            .save_checkpoint_boundary(run_id, json!({ "launched": true, "completed": true }))
             .await
             .unwrap();
         let mut chat = s.chat_create(json!({})).await.unwrap();
@@ -3572,12 +3585,7 @@ async fn resume_run_is_one_capability_on_http_public_and_installation() {
         }
         assert_eq!(after["status"], "queued");
         assert!(after["retry"].is_null());
-        let checkpoint = s
-            .store
-            .kv(&format!("run-checkpoint:{id}"))
-            .await
-            .unwrap()
-            .unwrap();
+        let checkpoint = s.store.checkpoint_boundary(id).await.unwrap().unwrap();
         assert_eq!(
             checkpoint["prepared"],
             json!({ "cwd": "/saved/workspace", "marker": "retained" })
@@ -3651,7 +3659,7 @@ async fn concurrent_resume_run_publishes_once_and_a_revoked_grant_cannot_resume(
     let run_id = id.to_owned();
     let events = s
         .store
-        .read(move |db| db.events(&run_id, 0, 100))
+        .read(move |db| db.events_fixture(&run_id, 0, 100))
         .await
         .unwrap();
     assert_eq!(

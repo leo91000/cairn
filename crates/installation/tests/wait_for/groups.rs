@@ -1,4 +1,5 @@
 use super::*;
+use crate::common::run_fixture::DbRunFixture;
 
 impl Fixture {
     async fn group(&self, mode: &str, conditions: Vec<Value>) -> Result<Value, u16> {
@@ -45,7 +46,7 @@ impl Fixture {
             .store
             .read(move |db| {
                 Ok(db
-                    .events(&run, 0, 100)?
+                    .events_fixture(&run, 0, 100)?
                     .into_iter()
                     .filter(|event| event["type"] == "chat.wait_ready")
                     .map(|event| event["payload"].clone())

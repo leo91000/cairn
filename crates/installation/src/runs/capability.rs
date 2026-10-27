@@ -43,7 +43,12 @@ pub(crate) const RUN_OPERATIONS: &[RunOperation] = &[
     RunOperation {
         name: "get_run",
         scope: "read",
-        description: "Read byte-bounded run metadata and an event page. Follow nextAfter while hasMore is true. Read records marked truncated with read_run_content.",
+        description: "Read byte-bounded run metadata and an event page. Follow nextAfter while hasMore is true. Pass history to read_run_history for backwards windows. Read records marked truncated with read_run_content.",
+    },
+    RunOperation {
+        name: "read_run_history",
+        scope: "read",
+        description: "Read the previous byte-bounded window of a run's history. Pass history from get_run and use oldest as the next before cursor while hasOlder is true. Reconnect when the history revision changes.",
     },
     RunOperation {
         name: "read_run_content",
@@ -66,6 +71,7 @@ impl RunOperation {
             "run_task" => schema_for::<RunMissionInput>(Contract::Deserialize),
             "list_runs" => schema_for::<ListRunsInput>(Contract::Deserialize),
             "get_run" => schema_for::<GetRunInput>(Contract::Deserialize),
+            "read_run_history" => schema_for::<ReadRunHistoryInput>(Contract::Deserialize),
             "read_run_content" => schema_for::<ReadRunContentInput>(Contract::Deserialize),
             _ => schema_for::<RunInput>(Contract::Deserialize),
         };
@@ -74,6 +80,7 @@ impl RunOperation {
             "cleanup_run" => schema_for::<CleanupRunOutput>(Contract::Serialize),
             "list_runs" => schema_for::<Vec<Run>>(Contract::Serialize),
             "get_run" => schema_for::<RunHistoryOutput>(Contract::Serialize),
+            "read_run_history" => schema_for::<RunHistoryWindowOutput>(Contract::Serialize),
             "read_run_content" => schema_for::<RunContentOutput>(Contract::Serialize),
             _ => schema_for::<Run>(Contract::Serialize),
         };
@@ -191,6 +198,28 @@ impl RunOperation {
                     })
                     .await
             }
+            "read_run_history" => {
+                let input: ReadRunHistoryInput = decode(input)?;
+                input.validate().map_err(Error::bad)?;
+                s.store
+                    .read(move |db| {
+                        let tx = rusqlite::Transaction::new_unchecked(
+                            db.0,
+                            rusqlite::TransactionBehavior::Deferred,
+                        )?;
+                        let db = Db(&tx);
+                        authorize(&db)?;
+                        let run = input.run_id.to_string();
+                        db.require_run(&run)?;
+                        crate::conversation_lifecycle::require_active_run(&db, &run)?;
+                        let page =
+                            crate::live::history_page(&db, &run, input.before, &input.history)?;
+                        Ok(serde_json::to_value(
+                            crate::mcp_server::bounded_history_window(page)?,
+                        )?)
+                    })
+                    .await
+            }
             "read_run_content" => {
                 let input: ReadRunContentInput = decode(input)?;
                 if input.offset < 0
@@ -214,7 +243,7 @@ impl RunOperation {
                         )?;
                         let db = Db(&tx);
                         authorize(&db)?;
-                        crate::mcp_server::read_run_content(&db, &serde_json::to_value(input)?)
+                        crate::mcp_server::read_run_content(&db, &input)
                     })
                     .await
             }

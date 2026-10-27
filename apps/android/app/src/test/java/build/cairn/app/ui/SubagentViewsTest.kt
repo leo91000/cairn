@@ -36,11 +36,11 @@ class SubagentViewsTest {
     private fun item(type: String, body: JsonObjectBuilder.() -> Unit): RunEvent {
         val id = ++serial
         return RunEvent(
-            id,
-            System.currentTimeMillis() - 60_000 + id * 1000,
-            type,
-            "",
-            mapOf("item" to buildJsonObject(body)),
+            id = id,
+            createdAt = System.currentTimeMillis() - 60_000 + id * 1000,
+            type = type,
+            text = "",
+            payload = kotlinx.serialization.json.JsonObject(mapOf("item" to buildJsonObject(body))),
             runId = "run",
         )
     }
