@@ -1762,46 +1762,15 @@ private fun NodesSection(
     Note(
         "Premier node autorisé disponible, puis les suivants. Une priorité ne donne aucun droit d’accès."
     )
-    agent.nodePriorities.forEachIndexed { index, id ->
-        val name = choices.find { it.id == id }?.name ?: nodes.find { it.id == id }?.name ?: id
-        Column {
-            Text("${index + 1}. $name")
-            Row {
-                TextButton(
-                    enabled = editable && index > 0,
-                    onClick = {
-                        change { current ->
-                            val order = current.nodePriorities.toMutableList()
-                            java.util.Collections.swap(order, index, index - 1)
-                            current.copy(nodePriorities = order)
-                        }
-                    },
-                    modifier = Modifier.semantics { contentDescription = "Monter $name" },
-                ) {
-                    Text("Monter")
-                }
-                TextButton(
-                    enabled = editable && index < agent.nodePriorities.lastIndex,
-                    onClick = {
-                        change { current ->
-                            val order = current.nodePriorities.toMutableList()
-                            java.util.Collections.swap(order, index, index + 1)
-                            current.copy(nodePriorities = order)
-                        }
-                    },
-                    modifier = Modifier.semantics { contentDescription = "Descendre $name" },
-                ) {
-                    Text("Descendre")
-                }
-                TextButton(
-                    enabled = editable,
-                    onClick = { change { it.copy(nodePriorities = it.nodePriorities - id) } },
-                ) {
-                    Text("Retirer la priorité")
-                }
-            }
-        }
-    }
+    NodePriorityList(
+        ids = agent.nodePriorities,
+        name = { id ->
+            choices.find { it.id == id }?.name ?: nodes.find { it.id == id }?.name ?: id
+        },
+        enabled = editable,
+        reorder = { order -> change { it.copy(nodePriorities = order) } },
+        remove = { id -> change { it.copy(nodePriorities = it.nodePriorities - id) } },
+    )
     choices
         .filter { it.id !in agent.nodePriorities }
         .forEach { node ->

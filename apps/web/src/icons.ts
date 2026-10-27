@@ -32,6 +32,7 @@ export const GitBranch = 'i-lucide-git-branch' as const
 export const GitFork = 'i-lucide-git-fork' as const
 export const CornerDownRight = 'i-lucide-corner-down-right' as const
 export const Globe = 'i-lucide-globe' as const
+export const GripVertical = 'i-lucide-grip-vertical' as const
 export const HardDrive = 'i-lucide-hard-drive' as const
 export const Hourglass = 'i-lucide-hourglass' as const
 export const Shield = 'i-lucide-shield' as const
