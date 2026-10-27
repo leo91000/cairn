@@ -12,6 +12,6 @@ data class UpdateMcpInput(
 ) {
     init {
         java.util.UUID.fromString(id)
-        require(revision <= 9007199254740991L)
+        require(revision in 0L..9007199254740991L)
     }
 }

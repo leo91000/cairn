@@ -8,13 +8,31 @@ import kotlinx.serialization.Serializable
 data class RunTaskSnapshot(
     val agentId: String,
     val archived: Boolean = false,
+    val authorAccessId: String? = null,
+    val authorId: String? = null,
+    val authorRemoved: Boolean = false,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val createdAt: Long? = null,
     val cron: String? = null,
     val enabled: Boolean = true,
     val id: String,
     val name: String,
+    val nativeAuthorityNodes: List<String> = listOf(),
+    val nativeParentAccess: String? = null,
+    val nativeParentRunId: String? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val nativePluginGrants: List<MissionPluginGrant>? = null,
+    val nativePrincipals: List<String> = listOf(),
+    val nativeProvenanceUnknown: Boolean = false,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val nextRun: Long? = null,
     val projectId: String? = null,
     val prompt: String,
-    val skills: List<String>?,
+    val revision: String? = null,
+    val scheduleFailure: ScheduleFailure? = null,
+    val scheduleWaitReason: String? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val skills: List<String>? = null,
     val tags: List<String> = listOf(),
     val timezone: String = "Europe/Paris",
     val worktree: Boolean = true,

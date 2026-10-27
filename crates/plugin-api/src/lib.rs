@@ -113,6 +113,39 @@ pub struct Program {
     pub installer: String,
     #[serde(default)]
     pub description: String,
+    /// Optional foreground cache daemon, isolated to a saved instance and revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<ProgramCache>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProgramCache {
+    /// Static arguments to the same executable. It must remain in the foreground.
+    pub daemon_args: Vec<String>,
+    /// Cairn supplies a private Unix socket path to the daemon and its clients.
+    pub socket_env: String,
+}
+
+impl ProgramCache {
+    fn valid(&self) -> bool {
+        let name = &self.socket_env;
+        !self.daemon_args.is_empty()
+            && self.daemon_args.len() <= 64
+            && self
+                .daemon_args
+                .iter()
+                .all(|arg| arg.len() <= 8192 && !arg.contains('\0'))
+            && !name.is_empty()
+            && name.len() <= 64
+            && name.starts_with(|c: char| c.is_ascii_uppercase())
+            && name
+                .bytes()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+            && !name.starts_with("LD_")
+            && !name.starts_with("DYLD_")
+            && !matches!(name.as_str(), "HOME" | "TMPDIR" | "PATH")
+    }
 }
 
 /// Where a command's result goes.
@@ -435,6 +468,7 @@ impl Manifest {
                 || names.contains(&program.name.as_str())
                 || !valid_source
                 || !short(&program.description, 200)
+                || program.cache.as_ref().is_some_and(|cache| !cache.valid())
             {
                 return Err("Plugin manifest has an invalid program.");
             }
@@ -601,6 +635,36 @@ mod tests {
         serde_json::from_value::<Manifest>(value)
             .map_err(|_| "parse")?
             .validate()
+    }
+
+    #[test]
+    fn program_caches_require_a_bounded_daemon_and_a_private_socket_variable() {
+        let mut value = json!({
+            "id":"probe", "name":"Probe", "version":"1.0.0", "apiVersion":2,
+            "capabilities":["exec"],
+            "programs":[{"name":"probe", "path":"/usr/bin/probe", "cache":{
+                "daemonArgs":["daemon","--timeout","0"], "socketEnv":"OP_SOCK"
+            }}]
+        });
+        assert!(manifest(value.clone()).is_ok());
+        for name in [
+            "HOME",
+            "TMPDIR",
+            "PATH",
+            "LD_PRELOAD",
+            "DYLD_FOO",
+            "lower",
+            "",
+            "1_SOCKET",
+        ] {
+            value["programs"][0]["cache"]["socketEnv"] = name.into();
+            assert!(manifest(value.clone()).is_err(), "{name}");
+        }
+        value["programs"][0]["cache"]["socketEnv"] = "OP_SOCK".into();
+        value["programs"][0]["cache"]["daemonArgs"] = json!([]);
+        assert!(manifest(value.clone()).is_err());
+        value["programs"][0]["cache"]["daemonArgs"] = json!(["daemon\u{0000}bad"]);
+        assert!(manifest(value).is_err());
     }
 
     #[test]

@@ -31,7 +31,14 @@ async fn mission_commands_preserve_revisions_retries_relations_and_frozen_runs()
     let s = Service::new(common::config(root.path())).await.unwrap();
     std::fs::create_dir_all(&s.config.home).unwrap();
     let creation = id();
-    let settings = json!({"name":"  Mission  ","prompt":"  Inspect  ","agentId":MAIN_AGENT_ID,"cron":"0 9 * * *","skills":[],"tags":["review","review"]});
+    let settings = json!({
+        "name":"  Mission  ",
+        "prompt":"  Inspect  ",
+        "agentId":MAIN_AGENT_ID,
+        "cron":"0 9 * * *",
+        "skills":[],
+        "tags":["review","review"],
+    });
     let command = json!({"creationId":creation,"settings":settings});
     let (status, first) = request(&s, "POST", "/api/tasks", command.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
@@ -42,7 +49,11 @@ async fn mission_commands_preserve_revisions_retries_relations_and_frozen_runs()
     assert_eq!(first["skills"], json!([]));
     assert_eq!(first["tags"], json!(["review", "review"]));
     let path = format!("/api/tasks/{creation}");
-    let replacement = json!({"taskId":creation,"revision":first["revision"],"settings":{ "name":"Updated","prompt":"New work","agentId":MAIN_AGENT_ID,"skills":null }});
+    let replacement = json!({
+        "taskId":creation,
+        "revision":first["revision"],
+        "settings":{ "name":"Updated","prompt":"New work","agentId":MAIN_AGENT_ID,"skills":null },
+    });
     let (left, right) = tokio::join!(
         request(&s, "PUT", &path, replacement.clone()),
         request(&s, "PUT", &path, replacement)
@@ -91,7 +102,13 @@ async fn mission_commands_preserve_revisions_retries_relations_and_frozen_runs()
         StatusCode::CONFLICT
     );
     s.store
-        .patch_run(run["id"].as_str().unwrap(), json!({"status":"failed"}))
+        .change_run(
+            run["id"].as_str().unwrap(),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Failed),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -214,7 +231,13 @@ async fn installation_token(s: &Arc<Service>) -> String {
         .await
         .unwrap();
     s.store
-        .patch_run(run["id"].as_str().unwrap(), json!({"status":"running"}))
+        .change_run(
+            run["id"].as_str().unwrap(),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let run = s.store.run(run["id"].as_str().unwrap()).await.unwrap();

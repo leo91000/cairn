@@ -1393,7 +1393,14 @@ async fn rate_limits_and_changed_agent_access_stop_admission() {
         let result = common::save_plugin(
             &s,
             "discord",
-            &json!({ "name": "Bad", "settings": settings, "userIds": ["300"], "agentId": connection.agent_id, "enabled": false, "token": "t" }),
+            &json!({
+                "name": "Bad",
+                "settings": settings,
+                "userIds": ["300"],
+                "agentId": connection.agent_id,
+                "enabled": false,
+                "token": "t",
+            }),
             None,
         )
         .await;
@@ -1617,7 +1624,13 @@ async fn replies_answer_a_retried_turn_stopped_by_cairn_with_its_last_attempt() 
     // Cairn stops the retried attempt at its time limit: no turn end, only the status.
     event("status", "failed", None).await;
     s.store
-        .patch_run(run_id, json!({ "status": "failed" }))
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Failed),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
 
@@ -1675,9 +1688,14 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     assert!(reply().await.is_none(), "The attempt has not settled yet");
     // An account wait that just started continues the message.
     s.store
-        .patch_run(
+        .change_run(
             run_id,
-            json!({ "accountWaitReason": "Usage exhausted. Waiting for an available Codex account to resume." }),
+            cairn_installation::runs::RunChanges {
+                account_wait_reason: Some(Some(
+                    "Usage exhausted. Waiting for an available Codex account to resume.".into(),
+                )),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -1707,21 +1725,36 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     assert!(reply().await.is_none());
     // Recovering the controller continues the message.
     s.store
-        .patch_run(
+        .change_run(
             run_id,
-            json!({ "accountWaitReason": "Recovering after worker restart." }),
+            cairn_installation::runs::RunChanges {
+                account_wait_reason: Some(Some("Recovering after worker restart.".into())),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
     assert!(reply().await.is_none());
     s.store
-        .patch_run(run_id, json!({ "accountWaitReason": null }))
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                account_wait_reason: Some(None),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert!(reply().await.is_none());
 
     s.store
-        .patch_run(run_id, json!({ "status": "failed" }))
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Failed),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let failed = reply().await.unwrap();
@@ -1729,7 +1762,13 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
 
     // Cairn retries the same message: the failure was not the final answer.
     s.store
-        .patch_run(run_id, json!({ "status": "queued" }))
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Queued),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let retry = json!({ "retry": { "attempt": 1, "limit": 3 } });
@@ -1746,7 +1785,13 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     // The retry then waits for an account: once it lasts, the failure answers meanwhile.
     let wait = "Waiting for a Codex account with available usage.";
     s.store
-        .patch_run(run_id, json!({ "accountWaitReason": wait }))
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                account_wait_reason: Some(Some((wait).to_owned())),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     s.store.event(run_id, "status", wait, None).await.unwrap();
@@ -1754,7 +1799,13 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     age_last_event(&s, run_id, 3 * 60_000).await;
     assert_eq!(reply().await.unwrap().status, "failed");
     s.store
-        .patch_run(run_id, json!({ "accountWaitReason": null }))
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                account_wait_reason: Some(None),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert!(reply().await.is_none());
@@ -1779,9 +1830,13 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
 
     // The run moves on to the next message before the reply is sent: the retry still answered.
     s.store
-        .patch_run(
+        .change_run(
             run_id,
-            json!({ "status": "running", "chatExecution": { "messageId": "next" } }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                boundary: Some(serde_json::json!({"chatExecution": { "messageId": "next" }})),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -1844,9 +1899,13 @@ async fn replies_do_not_follow_a_retry_stopped_before_it_ran() {
     event("item.completed", "the other answer", Some(answer)).await;
     event("turn.completed", "", None).await;
     s.store
-        .patch_run(
+        .change_run(
             run_id,
-            json!({ "status": "succeeded", "chatExecution": { "messageId": "next" } }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Succeeded),
+                boundary: Some(serde_json::json!({"chatExecution": { "messageId": "next" }})),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -1911,9 +1970,13 @@ async fn replies_to_a_stopped_turn_do_not_carry_the_next_answer() {
         event("item.completed", "the other answer", Some(answer)).await;
         event("turn.completed", "", None).await;
         s.store
-            .patch_run(
+            .change_run(
                 run_id,
-                json!({ "status": "succeeded", "chatExecution": { "messageId": "next" } }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Succeeded),
+                    boundary: Some(serde_json::json!({"chatExecution": { "messageId": "next" }})),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -2099,7 +2162,14 @@ async fn failures_before_acknowledgement_finish_and_followups_resume_stopped_run
         let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
         let run = text(&chat, "runId");
         s.store
-            .patch_run(run, json!({ "status": status, "recoveryPending": false }))
+            .change_run(
+                run,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::parse(status).unwrap()),
+                    recovery_pending: Some(false),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
@@ -2293,7 +2363,16 @@ async fn optional_questions_are_not_republished_on_later_turns() {
         .await
         .unwrap();
     let question = "d".repeat(64);
-    s.question_receive(run, json!({ "id": question, "blocking": false, "fields": [{ "id": "0", "title": "Optional?", "secret": false, "options": [] }] })).await.unwrap();
+    s.question_receive(
+        run,
+        json!({
+            "id": question,
+            "blocking": false,
+            "fields": [{ "id": "0", "title": "Optional?", "secret": false, "options": [] }],
+        }),
+    )
+    .await
+    .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     s.question_release(run, Some(&question)).await.unwrap();
     s.store
@@ -2313,7 +2392,7 @@ async fn optional_questions_are_not_republished_on_later_turns() {
     let event = json!({ "name": "message", "revision": connection.revision, "authorId": "300", "payload": { "id": "551" } });
     let receipt = work::submit(&s, &context(&connection, &event), &json!({ "text": "Another thing", "thread": "550", "shared": true, "reply": first["reply"] })).await.unwrap();
     s.store
-        .patch_run(
+        .update_run_boundary(
             run,
             json!({ "chatExecution": { "messageId": receipt["messageId"] } }),
         )
@@ -2438,8 +2517,14 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     let (mock, server) = mock(&s).await;
     for invalid in [
         json!({ "manifest": pinger("1.0.0", &["onepassword.read"])["manifest"], "source": "return {}" }),
-        json!({ "manifest": { "id": "discord", "name": "Fake", "version": "1", "apiVersion": 2, "capabilities": [] }, "source": "return {}" }),
-        json!({ "manifest": { "id": "broken", "name": "Broken", "version": "1", "apiVersion": 2, "capabilities": [] }, "source": "return function() end" }),
+        json!({
+            "manifest": { "id": "discord", "name": "Fake", "version": "1", "apiVersion": 2, "capabilities": [] },
+            "source": "return {}",
+        }),
+        json!({
+            "manifest": { "id": "broken", "name": "Broken", "version": "1", "apiVersion": 2, "capabilities": [] },
+            "source": "return function() end",
+        }),
     ] {
         assert!(registry::install(&s, &invalid).await.is_err());
     }
@@ -2454,7 +2539,12 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
         .unwrap()
         .clone();
     assert_eq!(entry["status"], "needs_approval");
-    let input = json!({ "name": "Core status", "settings": { "team": "configured-team" }, "token": "secret-key", "enabled": true });
+    let input = json!({
+        "name": "Core status",
+        "settings": { "team": "configured-team" },
+        "token": "secret-key",
+        "enabled": true,
+    });
     assert_eq!(
         common::save_plugin(&s, "pinger", &input, None)
             .await
@@ -2630,14 +2720,18 @@ async fn plugin_management_is_owner_only_and_mcp_never_returns_secret_reads() {
         .await
         .unwrap();
     let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
-    let run = s
-        .store
-        .patch_run(
+    s.store
+        .change_run(
             text(&run, "id"),
-            json!({ "status": "running", "isolated": true }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                boundary: Some(serde_json::json!({"isolated": true})),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
+    let run = s.store.run(text(&run, "id")).await.unwrap();
     let config = s.mcps.run_configuration(&s, &run).await.unwrap();
     let token = text(&config["env"], "CAIRN_MCP_RUN_TOKEN");
     let response = common::send(
@@ -2840,7 +2934,19 @@ async fn deleting_a_shared_source_during_setup_does_not_commit_its_draft_or_secr
     registry::approve(&s, "shared-fenced", "1", text(&installed, "digest"))
         .await
         .unwrap();
-    let source = common::save_plugin(&s,"shared-fenced",&json!({ "name": "Source", "enabled": false, "settings": { "clientId": "app" }, "secrets": { "clientSecret": "synthetic-secret" } }),None).await.unwrap();
+    let source = common::save_plugin(
+        &s,
+        "shared-fenced",
+        &json!({
+            "name": "Source",
+            "enabled": false,
+            "settings": { "clientId": "app" },
+            "secrets": { "clientSecret": "synthetic-secret" },
+        }),
+        None,
+    )
+    .await
+    .unwrap();
     let source_id = text(&source, "id");
     let input = json!({ "name": "Stale draft", "enabled": false, "settings": { "check": true }, "sharedFrom": source_id });
     let remove = async {

@@ -681,6 +681,7 @@ where
         .await?;
     s.plugins.changed.notify_one();
     s.plugins.files.forget(instance);
+    s.plugins.program_caches.forget(instance);
     let mut revoked = None;
     if let (Some(endpoint), Some(saved)) = (&oauth.revocation_url, saved) {
         let token = saved["oauth"]["refreshToken"]

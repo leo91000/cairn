@@ -998,6 +998,7 @@ where
             let _ = s.plugins.device_flows.token(plugin_id, flow, true);
         }
     }
+    s.plugins.program_caches.forget(&result.id);
     s.plugins.changed.notify_one();
     Ok(result)
 }
@@ -1187,6 +1188,7 @@ where
         })
         .await?;
     s.plugins.files.forget(&forgotten_instance);
+    s.plugins.program_caches.forget(&forgotten_instance);
     s.plugins.changed.notify_one();
     Ok(json!({ "deleted": true }))
 }
@@ -1310,6 +1312,7 @@ where
             public_view(&connection)
         })
         .await?;
+    s.plugins.program_caches.forget(&value.id);
     s.plugins.changed.notify_one();
     Ok(value)
 }

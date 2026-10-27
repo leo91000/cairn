@@ -8,6 +8,64 @@ class ContractsTest {
     private val json = Json { encodeDefaults = true }
 
     @Test
+    fun runDefaultsStatesAndRetryMatchRust() {
+        val root = File(System.getProperty("cairn.contractWire")).parentFile
+        val corpus =
+            json
+                .parseToJsonElement(
+                    File(root, "../../../tests/fixtures/run-contracts.json").readText()
+                )
+                .jsonObject
+        val wire = json.parseToJsonElement(File(root, "run-wire.json").readText()).jsonObject
+        val decoder = Json { explicitNulls = false }
+        corpus.getValue("commands").jsonArray.forEach { value ->
+            assertEquals(
+                value,
+                json.encodeToJsonElement(decoder.decodeFromJsonElement<RunInput>(value)),
+            )
+        }
+        corpus.getValue("invalidCommands").jsonArray.forEach { value ->
+            assertFails(value.toString()) { json.decodeFromJsonElement<RunInput>(value) }
+        }
+        corpus.getValue("lists").jsonArray.forEachIndexed { index, value ->
+            assertEquals(
+                wire.getValue("lists").jsonArray[index],
+                json.encodeToJsonElement(decoder.decodeFromJsonElement<ListRunsInput>(value)),
+            )
+        }
+        corpus.getValue("invalidLists").jsonArray.forEach { value ->
+            // kotlinx accepts numeric strings; Rust remains authoritative, as in B1.
+            if (value.jsonObject["offset"]?.toString() != "\"1\"") {
+                assertFails(value.toString()) { json.decodeFromJsonElement<ListRunsInput>(value) }
+            }
+        }
+        for (field in listOf("states", "retries")) {
+            corpus.getValue(field).jsonArray.forEachIndexed { index, value ->
+                val encoded =
+                    if (field == "states")
+                        json.encodeToJsonElement(decoder.decodeFromJsonElement<RunState>(value))
+                    else json.encodeToJsonElement(decoder.decodeFromJsonElement<Retry>(value))
+                // Nullable timestamp defaults are omitted by the generated decoder contract.
+                // Decode the Rust wire and require the same value rather than key presence.
+                val expected =
+                    if (field == "states")
+                        json.encodeToJsonElement(
+                            decoder.decodeFromJsonElement<RunState>(
+                                wire.getValue(field).jsonArray[index]
+                            )
+                        )
+                    else
+                        json.encodeToJsonElement(
+                            decoder.decodeFromJsonElement<Retry>(
+                                wire.getValue(field).jsonArray[index]
+                            )
+                        )
+                assertEquals(expected, encoded)
+            }
+        }
+    }
+
+    @Test
     fun missionsMatchRustWireAndKeepNullSeparateFromEmptySkills() {
         val root = File(System.getProperty("cairn.contractWire")).parentFile
         val corpus =

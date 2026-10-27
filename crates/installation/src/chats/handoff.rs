@@ -196,8 +196,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const EVENTS: &str = "CREATE TABLE events(id INTEGER PRIMARY KEY,run_id TEXT,created_at INTEGER,type TEXT,text TEXT,payload TEXT);
-        CREATE TABLE runs(id TEXT,data TEXT);";
+    const EVENTS: &str = "CREATE TABLE events(id INTEGER PRIMARY KEY,run_id TEXT,created_at INTEGER,type TEXT,text TEXT,payload TEXT);";
 
     fn agent_message(id: &str, text: &str) -> Value {
         json!({
@@ -213,6 +212,7 @@ mod tests {
     fn transcript_keeps_visible_history_and_omits_tool_secrets_and_stream_duplicates() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection.execute_batch(EVENTS).unwrap();
+        connection.execute_batch(crate::runs::SCHEMA).unwrap();
         let db = Db(&connection);
         let attachment = json!({ "attachments": [{ "id": "file", "name": "brief.pdf" }] });
         db.event(
@@ -290,6 +290,7 @@ mod tests {
     fn long_history_retains_original_scope_and_recent_unicode_without_unbounded_context() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection.execute_batch(EVENTS).unwrap();
+        connection.execute_batch(crate::runs::SCHEMA).unwrap();
         let db = Db(&connection);
         db.event("run", "chat.user", "Original scope", None)
             .unwrap();

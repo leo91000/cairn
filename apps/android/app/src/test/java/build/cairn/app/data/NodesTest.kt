@@ -44,6 +44,17 @@ class NodesTest {
     }
 
     @Test
+    fun readsDiskAccountingWithoutRequiringItFromOlderNodes() {
+        val decoded =
+            wireJson.decodeFromString<ExecutionNode>(
+                """{"id":"n","name":"Desktop","status":"online","diskAccounting":{"capturedAt":10,"localBytes":4096,"unusedGrantedBytes":8192,"hostFreeBytes":16384,"hostReserveBytes":1024,"poolReserveBytes":512,"reclaimableBytes":2048,"unsynchronizedBytes":1024}}"""
+            )
+        assertEquals(2048L, decoded.diskAccounting?.reclaimableBytes)
+        assertEquals(1024L, decoded.diskAccounting?.unsynchronizedBytes)
+        assertNull(node.diskAccounting)
+    }
+
+    @Test
     fun diagnosticsExplainWhyANodeTakesNoWork() {
         assertEquals(emptyList<String>(), nodeDiagnostics(node))
         assertTrue(
@@ -122,7 +133,13 @@ class NodesTest {
             reservation,
             wireJson.decodeFromString<ExecutionNode>(encodedNode).exclusiveReservation,
         )
-        val run = Run("neighbor", status = "running", suspendedByExclusive = reservation)
+        val run =
+            Run(
+                id = "neighbor",
+                status = "running",
+                suspendedByExclusive = reservation,
+                taskId = "",
+            )
         assertEquals(
             reservation,
             wireJson

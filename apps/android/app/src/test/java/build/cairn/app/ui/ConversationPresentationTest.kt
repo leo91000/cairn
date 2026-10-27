@@ -28,7 +28,7 @@ class ConversationPresentationTest {
                 )
         val admission =
             Run(
-                "run",
+                id = "run",
                 status = "queued",
                 accountWaitReason = "Waiting for a Codex account with available usage.",
                 snapshot =
@@ -49,8 +49,16 @@ class ConversationPresentationTest {
                                         mcps = null,
                                     ),
                                 provider = "codex",
-                            )
+                            ),
+                        task =
+                            build.cairn.contracts.RunTaskSnapshot(
+                                agentId = build.cairn.app.data.MAIN_AGENT_ID,
+                                id = "00000000-0000-4000-8000-000000000003",
+                                name = "Fixture",
+                                prompt = "Fixture",
+                            ),
                     ),
+                taskId = "",
             )
         val quota = chatQuota(admission, recovered)!!
         assertEquals("Codex", quota.provider)
@@ -100,7 +108,13 @@ class ConversationPresentationTest {
             }
             val history = listOf(event(1, "turn.started"), reply, event(3, "error", failure))
             assertEquals(setOf(2L, 3L), quotaHiddenEvents(history))
-            val waiting = Run("run", status = "running", accountWaitReason = "Usage exhausted.")
+            val waiting =
+                Run(
+                    id = "run",
+                    status = "running",
+                    accountWaitReason = "Usage exhausted.",
+                    taskId = "",
+                )
             assertEquals(text, chatQuota(waiting, history)!!.message)
             val retrying =
                 history.dropLast(1) +
@@ -149,10 +163,11 @@ class ConversationPresentationTest {
         val message = "You've hit your individual spend limit · your weekly limit resets 3pm (UTC)"
         val run =
             Run(
-                "run",
+                id = "run",
                 status = "running",
                 accountWaitReason =
                     "Usage exhausted. Waiting for an available Claude Code account to resume.",
+                taskId = "",
             )
         val chat = Chat("chat", run = run)
         assertEquals(
@@ -187,7 +202,17 @@ class ConversationPresentationTest {
                 },
                 runId = "run",
             )
-        val chat = Chat("chat", run = Run("run", status = "failed", error = capacity))
+        val chat =
+            Chat(
+                "chat",
+                run =
+                    Run(
+                        id = "run",
+                        status = "failed",
+                        error = capacity,
+                        taskId = "",
+                    ),
+            )
         assertTrue(failureShown(chat, listOf(failure)))
         assertFalse(failureShown(chat, emptyList()))
         assertFalse(failureShown(chat, listOf(failure.copy(runId = "other"))))
@@ -239,17 +264,28 @@ class ConversationPresentationTest {
 
     private val retryRun =
         Run(
-            "retry",
+            id = "retry",
             status = "queued",
-            accountWaitReason = "Temporary agent error. Retrying in 30 seconds (attempt 1/3).",
-            retry = RunRetry(1, 3, 31_000, RunRetryCause("timeout", "Temporary timeout")),
+            accountWaitReason = "Temporary agent error. Retrying in 30 seconds (attempt 1/5).",
+            retry =
+                RunRetry(
+                    attempt = 1,
+                    limit = 5,
+                    nextAttemptAt = 31_000,
+                    cause =
+                        RunRetryCause(
+                            kind = "timeout",
+                            message = "Temporary timeout",
+                        ),
+                ),
+            taskId = "",
         )
 
     @Test
     fun `retry counts down locally with ceiling and never shows negative seconds`() {
         assertEquals(retryRun.accountWaitReason, retryNotice(retryRun, 1000))
         assertEquals(
-            "Temporary agent error. Retrying in 20 seconds (attempt 1/3).",
+            "Temporary agent error. Retrying in 20 seconds (attempt 1/5).",
             chatWaitNotice(retryRun, 11_100)!!.message,
         )
         assertTrue(retryNotice(retryRun, 30_999)!!.contains("in 1 seconds"))
@@ -290,21 +326,30 @@ class ConversationPresentationTest {
     fun `retry shared contract decodes nullable and absent records and deadlines`() {
         val decoded =
             wireJson.decodeFromString<Run>(
-                """{"id":"retry","status":"queued","retry":{"attempt":2,"limit":3,"nextAttemptAt":31000,"cause":{"kind":"timeout","message":"Temporary timeout"}}}"""
+                """{"id":"retry","status":"queued","retry":{"attempt":2,"limit":5,"nextAttemptAt":31000,"cause":{"kind":"timeout","message":"Temporary timeout"}},"taskId":"fixture-task"}"""
             )
         assertEquals(31_000L, decoded.retry!!.nextAttemptAt)
         assertEquals("timeout", decoded.retry.cause.kind)
-        assertTrue(retryNotice(decoded, 1000)!!.contains("attempt 2/3"))
-        assertEquals(null, wireJson.decodeFromString<Run>("""{"id":"r","status":"queued"}""").retry)
+        assertTrue(retryNotice(decoded, 1000)!!.contains("attempt 2/5"))
         assertEquals(
             null,
-            wireJson.decodeFromString<Run>("""{"id":"r","status":"queued","retry":null}""").retry,
+            wireJson
+                .decodeFromString<Run>("""{"id":"r","status":"queued","taskId":"fixture-task"}""")
+                .retry,
         )
         assertEquals(
             null,
             wireJson
                 .decodeFromString<Run>(
-                    """{"id":"r","status":"queued","retry":{"attempt":1,"limit":3,"nextAttemptAt":null,"cause":{"kind":"server","message":"Busy"}}}"""
+                    """{"id":"r","status":"queued","retry":null,"taskId":"fixture-task"}"""
+                )
+                .retry,
+        )
+        assertEquals(
+            null,
+            wireJson
+                .decodeFromString<Run>(
+                    """{"id":"r","status":"queued","retry":{"attempt":1,"limit":5,"nextAttemptAt":null,"cause":{"kind":"server","message":"Busy"}},"taskId":"fixture-task"}"""
                 )
                 .retry!!
                 .nextAttemptAt,
@@ -314,7 +359,13 @@ class ConversationPresentationTest {
     @Test
     fun `exclusive suspension stops working presentation without replacing failures or a user pause`() {
         val reservation = ExclusiveReservation("reservation", "node", "owner", "Build", "acquired")
-        val running = Run("run", status = "running", suspendedByExclusive = reservation)
+        val running =
+            Run(
+                id = "run",
+                status = "running",
+                suspendedByExclusive = reservation,
+                taskId = "",
+            )
         val chat = Chat("chat", status = "running", run = running)
         assertEquals(
             ConversationState("Suspendue (exclusivité)", null),
@@ -350,7 +401,12 @@ class ConversationPresentationTest {
         val chat =
             Chat(
                 "chat",
-                run = Run("run", status = "succeeded"),
+                run =
+                    Run(
+                        id = "run",
+                        status = "succeeded",
+                        taskId = "",
+                    ),
                 wakeup =
                     ChatWakeup(
                         "wake",
@@ -376,7 +432,12 @@ class ConversationPresentationTest {
         val chat =
             Chat(
                 "chat",
-                run = Run("run", status = "succeeded"),
+                run =
+                    Run(
+                        id = "run",
+                        status = "succeeded",
+                        taskId = "",
+                    ),
                 wakeup = ChatWakeup("wake", "one", "Attendre la CI", 420, 1, 420001),
             )
         assertEquals(chat.wakeup, scheduledWakeup(chat))
@@ -388,7 +449,18 @@ class ConversationPresentationTest {
         assertTrue(chatDelivery(chat, emptyList()).sending.isEmpty())
         assertNull(scheduledWakeup(chat.copy(paused = true)))
         assertNull(scheduledWakeup(chat.copy(lifecycle = "trash")))
-        assertNull(scheduledWakeup(chat.copy(run = Run("run", status = "running"))))
+        assertNull(
+            scheduledWakeup(
+                chat.copy(
+                    run =
+                        Run(
+                            id = "run",
+                            status = "running",
+                            taskId = "",
+                        )
+                )
+            )
+        )
         assertNull(scheduledWakeup(chat.copy(wakeup = null)))
     }
 
@@ -397,7 +469,12 @@ class ConversationPresentationTest {
         val chat =
             Chat(
                 "chat",
-                run = Run("run", status = "succeeded"),
+                run =
+                    Run(
+                        id = "run",
+                        status = "succeeded",
+                        taskId = "",
+                    ),
                 messages = listOf(second),
                 wakeup = ChatWakeup("wake", "one", "Attendre la CI", 420, 1, 420001),
             )
@@ -412,12 +489,13 @@ class ConversationPresentationTest {
     fun `queued Claude message explains the missing account and clears notice when running`() {
         val run =
             Run(
-                "run",
+                id = "run",
                 status = "queued",
                 chatExecution = ChatExecution("one"),
                 accountWaitReason =
                     "Reconnect your Claude Code account in Connections to continue.",
                 accountRequired = "claude",
+                taskId = "",
             )
         val chat = Chat("chat", run = run, messages = listOf(first))
         assertEquals("Claude Code", chatWaitNotice(run)!!.account)
@@ -440,10 +518,11 @@ class ConversationPresentationTest {
         val reason = "Waiting for the previous execution to stop before recovery."
         val run =
             Run(
-                "run",
+                id = "run",
                 status = "queued",
                 accountWaitReason = reason,
                 chatExecution = ChatExecution("one"),
+                taskId = "",
             )
         assertEquals(ChatWaitNotice(reason), chatWaitNotice(run))
         assertEquals(
@@ -466,7 +545,13 @@ class ConversationPresentationTest {
 
     @Test
     fun `dispatch of the first message does not turn it into a queued followup`() {
-        val run = Run("run", status = "running", chatExecution = ChatExecution("one"))
+        val run =
+            Run(
+                id = "run",
+                status = "running",
+                chatExecution = ChatExecution("one"),
+                taskId = "",
+            )
         val delivery =
             chatDelivery(Chat("chat", run = run, messages = listOf(first, second)), emptyList())
         assertEquals("Démarrage de l’agent…", delivery.sending.single().label)
@@ -475,7 +560,18 @@ class ConversationPresentationTest {
 
     @Test
     fun `paused and failed runs keep messages waiting`() {
-        listOf(Chat("chat", paused = true), Chat("chat", run = Run("r", status = "failed")))
+        listOf(
+                Chat("chat", paused = true),
+                Chat(
+                    "chat",
+                    run =
+                        Run(
+                            id = "r",
+                            status = "failed",
+                            taskId = "",
+                        ),
+                ),
+            )
             .forEach {
                 val result = chatDelivery(it.copy(messages = listOf(first)), emptyList())
                 assertTrue(result.sending.isEmpty())
@@ -485,7 +581,12 @@ class ConversationPresentationTest {
 
     @Test
     fun `steering and acknowledgements do not duplicate or expose private replies`() {
-        val run = Run("run", status = "running")
+        val run =
+            Run(
+                id = "run",
+                status = "running",
+                taskId = "",
+            )
         val privateAnswer =
             first.copy(id = "private", questionId = "question", mode = "steer", text = "secret")
         val chat =
@@ -505,7 +606,7 @@ class ConversationPresentationTest {
     fun `run outcomes and project revisions survive decoding and task attention grouping`() {
         val run =
             wireJson.decodeFromString<Run>(
-                """{"id":"r","status":"succeeded","outcome":{"status":"blocked","reason":"Missing access","evidence":["403"],"reportedAt":10},"workspaces":[{"projectId":"p","path":"/p","revision":"abcdef"}]}"""
+                """{"id":"r","status":"succeeded","outcome":{"status":"blocked","reason":"Missing access","evidence":["403"],"reportedAt":10},"workspaces":[{"projectId":"p","path":"/p","revision":"abcdef","kind":"worktree"}],"taskId":"fixture-task"}"""
             )
         assertEquals("À examiner", taskGroup(Task(), run))
         assertEquals("abcdef", run.workspaces.single().revision)
@@ -524,7 +625,13 @@ class ConversationPresentationTest {
     @Test
     fun `the header names a background wait, a failure or an interruption`() {
         // The subtitle names the agent and its installation; the project moved to the sheet.
-        val run = Run("run", status = "running", startedAt = 1)
+        val run =
+            Run(
+                id = "run",
+                status = "running",
+                startedAt = 1,
+                taskId = "",
+            )
         val chat = Chat("chat", agentName = "Cairn", projectName = "Site", run = run)
         assertEquals(
             ConversationState("Cairn · Maison", "Cairn travaille"),
@@ -578,7 +685,19 @@ class ConversationPresentationTest {
         assertEquals(ConversationState("Cairn", null), conversationState(chat, "Cairn", null, null))
         assertEquals(
             "Échec · Cairn",
-            conversationState(chat.copy(run = Run("run", status = "failed")), "Cairn", null).status,
+            conversationState(
+                    chat.copy(
+                        run =
+                            Run(
+                                id = "run",
+                                status = "failed",
+                                taskId = "",
+                            )
+                    ),
+                    "Cairn",
+                    null,
+                )
+                .status,
         )
         assertEquals(
             ConversationState("Cairn", null),
@@ -588,7 +707,12 @@ class ConversationPresentationTest {
 
     @Test
     fun `a failed run explains why the response stopped`() {
-        val run = Run("run", status = "failed")
+        val run =
+            Run(
+                id = "run",
+                status = "failed",
+                taskId = "",
+            )
         assertEquals(
             "La réponse s’est arrêtée avant la fin. Reprenez la conversation pour continuer.",
             conversationError(Chat("chat", run = run)),

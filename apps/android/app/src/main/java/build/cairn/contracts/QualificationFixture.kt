@@ -17,8 +17,7 @@ data class QualificationFixture(
     val result: QualificationResult,
 ) {
     init {
-        require(count >= -9007199254740991L)
-        require(count <= 9007199254740991L)
+        require(count in -9007199254740991L..9007199254740991L)
         java.util.UUID.fromString(id)
     }
 }

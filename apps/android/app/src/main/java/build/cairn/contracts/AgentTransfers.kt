@@ -10,5 +10,9 @@ data class AgentTransfers(
     val runs: Long,
     val tasks: Long,
 ) {
-    init {}
+    init {
+        require(chats >= 0L)
+        require(runs >= 0L)
+        require(tasks >= 0L)
+    }
 }

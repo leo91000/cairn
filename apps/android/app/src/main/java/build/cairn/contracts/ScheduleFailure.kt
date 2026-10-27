@@ -11,7 +11,7 @@ data class ScheduleFailure(
     val scheduledFor: Long,
 ) {
     init {
-        require(at <= 9007199254740991L)
-        require(scheduledFor <= 9007199254740991L)
+        require(at in 0L..9007199254740991L)
+        require(scheduledFor in 0L..9007199254740991L)
     }
 }

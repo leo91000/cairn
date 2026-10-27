@@ -239,7 +239,15 @@ class ChatWaitTest {
             waitProgress(ActivityWait(scheduled), LiveWait(scheduled, false, canPause = false))
         assertTrue(state.pending)
         assertFalse(state.pausable)
-        assertTrue(build.cairn.app.data.Run("mission", status = "waiting").active)
+        assertTrue(
+            build.cairn.app.data
+                .Run(
+                    id = "mission",
+                    status = "waiting",
+                    taskId = "",
+                )
+                .active
+        )
     }
 
     @Test
@@ -610,11 +618,27 @@ class ChatWaitTest {
             Chat(
                 "chat",
                 status = "succeeded",
-                run = Run("run", status = "succeeded"),
+                run =
+                    Run(
+                        id = "run",
+                        status = "succeeded",
+                        taskId = "",
+                    ),
                 wakeup = wakeup(),
             )
         assertEquals(wakeup(), liveWakeup(waiting))
-        assertNull(liveWakeup(waiting.copy(run = Run("run", status = "failed"))))
+        assertNull(
+            liveWakeup(
+                waiting.copy(
+                    run =
+                        Run(
+                            id = "run",
+                            status = "failed",
+                            taskId = "",
+                        )
+                )
+            )
+        )
         assertNull(liveWakeup(waiting.copy(lifecycle = "trash")))
     }
 
@@ -643,7 +667,12 @@ class ChatWaitTest {
                 chat = true,
             )
         assertEquals("cancelled", failed.first().wait?.ended)
-        val done = Run("run", status = "succeeded")
+        val done =
+            Run(
+                id = "run",
+                status = "succeeded",
+                taskId = "",
+            )
         val answered =
             wakeup(checks, 9000).copy(observation = buildJsonObject { put("state", "completed") })
         val feed =
@@ -738,7 +767,12 @@ class ChatWaitTest {
 
     @Test
     fun `lists waiting conversations apart, soonest first, unless paused`() {
-        val done = Run("run", status = "succeeded")
+        val done =
+            Run(
+                id = "run",
+                status = "succeeded",
+                taskId = "",
+            )
         val feed =
             buildFeed(
                 listOf(
@@ -779,7 +813,12 @@ class ChatWaitTest {
 
     @Test
     fun `lists a mission that scheduled its continuation with waiting conversations`() {
-        val done = Run("run", status = "succeeded")
+        val done =
+            Run(
+                id = "run",
+                status = "succeeded",
+                taskId = "",
+            )
         val feed =
             buildFeed(
                 listOf(
@@ -792,7 +831,7 @@ class ChatWaitTest {
                 ),
                 listOf(
                     Run(
-                        "watch-1",
+                        id = "watch-1",
                         taskId = "77bb521a-0c2b-572d-b168-a7ad40ba98eb",
                         status = "waiting",
                         trigger = "manual",

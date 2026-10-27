@@ -9,5 +9,8 @@ data class AgentPreviewRuns(
     val queued: Long,
     val running: Long,
 ) {
-    init {}
+    init {
+        require(queued >= 0L)
+        require(running >= 0L)
+    }
 }

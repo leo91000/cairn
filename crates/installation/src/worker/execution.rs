@@ -101,12 +101,13 @@ async fn record_failure(
         checkpoint
             .update(|state| state.capacity_retry_at = Some(now() + CONTROLLER_CAPACITY_RETRY_MS))
             .await?;
-        let patch = json!({
-            "status": RunStatus::Queued,
-            "recoveryPending": true,
-            "finishedAt": null,
-        });
-        let run = s.store.patch_run(run_id, patch).await?;
+        let patch = crate::runs::RunChanges {
+            status: Some(RunStatus::Queued),
+            recovery_pending: Some(true),
+            finished_at: Some(None),
+            ..Default::default()
+        };
+        let run = s.store.change_run(run_id, patch).await?;
         return super::schedule::report_capacity_wait(s, &run, &error.message).await;
     }
     let saved = checkpoint.snapshot().await;
@@ -132,11 +133,11 @@ async fn record_failure(
             .update(|c| c.settled = Some(Some(settled)))
             .await?;
     }
-    let mut patch = failure_patch(status, needs_fence, &summary);
+    let mut patch = failure_changes(status, needs_fence, &summary);
     if status != RunStatus::Queued {
-        patch["wakeup"] = Value::Null;
+        patch.boundary = Some(json!({ "wakeup": null }));
     }
-    s.store.patch_run(run_id, patch).await?;
+    s.store.change_run(run_id, patch).await?;
     let kind = if s.shutdown.is_cancelled() {
         "status"
     } else {
@@ -154,16 +155,16 @@ async fn recovers_controller(
     cancel: &CancellationToken,
     error: &Error,
 ) -> Result<bool> {
-    let run = s.store.run(&checkpoint.id).await?;
-    let mode_change = run["nativeModeInterruption"].is_string();
+    let run = s.store.run_record(&checkpoint.id).await?;
+    let mode_change = run.boundary["nativeModeInterruption"].is_string();
     if !error.is_unavailable() || !saved.managed() {
         return Ok(false);
     }
     let may_retry = mode_change
         || saved.controller_recoveries() < MAX_CONTROLLER_RECOVERIES
-        || run["moveRequest"].is_object();
+        || run.boundary["moveRequest"].is_object();
     Ok(may_retry
-        && (mode_change || run["sessionId"].is_string())
+        && (mode_change || run.state.session_id.is_some())
         && !checkpoint.expired()
         && !cancel.is_cancelled()
         && !s.shutdown.is_cancelled())
@@ -171,7 +172,7 @@ async fn recovers_controller(
 
 /// A run whose VM may still be running stays queued for recovery; its final
 /// fields are settled from the checkpoint once the VM is fenced.
-fn failure_patch(status: RunStatus, needs_fence: bool, summary: &str) -> Value {
+fn failure_changes(status: RunStatus, needs_fence: bool, summary: &str) -> crate::runs::RunChanges {
     let recovery_pending = needs_fence || status == RunStatus::Queued;
     let finished_at = (!recovery_pending).then(now);
     let error = (status == RunStatus::Failed).then_some(summary);
@@ -187,14 +188,15 @@ fn failure_patch(status: RunStatus, needs_fence: bool, summary: &str) -> Value {
     } else {
         status
     };
-    json!({
-        "status": status,
-        "recoveryPending": recovery_pending,
-        "finishedAt": finished_at,
-        "summary": summary,
-        "error": error,
-        "accountWaitReason": wait_reason,
-    })
+    crate::runs::RunChanges {
+        status: Some(status),
+        recovery_pending: Some(recovery_pending),
+        finished_at: Some(finished_at),
+        summary: Some(summary.to_owned()),
+        error: Some(error.map(str::to_owned)),
+        account_wait_reason: Some(wait_reason.map(str::to_owned)),
+        ..Default::default()
+    }
 }
 
 /// Returns whether the execution is confirmed stopped. Otherwise the run is
@@ -211,25 +213,33 @@ async fn fence(s: &Service, checkpoint: &Checkpoint) -> Result<bool> {
     {
         return Ok(true);
     }
-    let current = s.store.run(run_id).await?;
-    if current["status"] != RunStatus::Queued
-        && let Some(settled) = Settled::from_run(&current)
-    {
+    let current = s.store.run_state(run_id).await?;
+    if current.status != RunStatus::Queued {
+        let settled = Settled::from_state(&current);
         checkpoint
             .update(|c| c.settled = Some(Some(settled)))
             .await?;
     }
-    let patch = json!({
-        "status": RunStatus::Queued,
-        "recoveryPending": true,
-        "finishedAt": null,
-        "accountWaitReason": if text(&current, "accountWaitReason").starts_with(super::schedule::CAPACITY_WAIT_REASON) {
-            text(&current, "accountWaitReason")
-        } else {
-            VM_STOP_WAIT_REASON
-        },
-    });
-    s.store.patch_run(run_id, patch).await?;
+    let patch = crate::runs::RunChanges {
+        status: Some(RunStatus::Queued),
+        recovery_pending: Some(true),
+        finished_at: Some(None),
+        account_wait_reason: Some(Some(
+            (if current
+                .account_wait_reason
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with(super::schedule::CAPACITY_WAIT_REASON)
+            {
+                current.account_wait_reason.as_deref().unwrap_or_default()
+            } else {
+                VM_STOP_WAIT_REASON
+            })
+            .to_owned(),
+        )),
+        ..Default::default()
+    };
+    s.store.change_run(run_id, patch).await?;
     Ok(false)
 }
 
@@ -242,7 +252,7 @@ async fn release(
     let run_id = checkpoint.id.as_str();
     let saved = checkpoint.snapshot().await;
     if fenced && let Some(settled) = saved.settled() {
-        s.store.patch_run(run_id, settled.run_patch()?).await?;
+        s.store.change_run(run_id, settled.run_changes()).await?;
     }
     if fenced
         && let Some(account) = account
@@ -254,16 +264,13 @@ async fn release(
     s.mcps.revoke_run(s, run_id).await?;
     requeue_pending_move(s, checkpoint).await?;
     if fenced && saved.managed() {
-        let run = s.store.run(run_id).await?;
+        let run = s.store.run_record(run_id).await?;
         let native = saved
             .prepared()
             .is_some_and(|prepared| prepared["backend"] == "native");
-        if crate::nodes::publication::protected(&run)
-            && (native
-                || matches!(
-                    RunStatus::of(&run),
-                    Some(RunStatus::Succeeded | RunStatus::Waiting)
-                ))
+        let status = run.state.status;
+        if crate::nodes::publication::protected(&run.wire()?)
+            && (native || matches!(status, RunStatus::Succeeded | RunStatus::Waiting))
         {
             // Native work can only be captured after fencing, including failed,
             // cancelled and paused turns. Durable demand survives upload errors.
@@ -288,8 +295,8 @@ async fn release(
 /// A move requested during execution relaunches the run on its new node.
 async fn requeue_pending_move(s: &Service, checkpoint: &Checkpoint) -> Result<()> {
     let run_id = checkpoint.id.as_str();
-    let run = s.store.run(run_id).await?;
-    if !run["moveRequest"].is_object() || !run["cancelRequestedAt"].is_null() {
+    let run = s.store.run_record(run_id).await?;
+    if !run.boundary["moveRequest"].is_object() || run.state.cancel_requested_at.is_some() {
         return Ok(());
     }
     checkpoint
@@ -298,12 +305,13 @@ async fn requeue_pending_move(s: &Service, checkpoint: &Checkpoint) -> Result<()
             c.settled = Some(None);
         })
         .await?;
-    let patch = json!({
-        "status": RunStatus::Queued,
-        "recoveryPending": true,
-        "finishedAt": null,
-    });
-    s.store.patch_run(run_id, patch).await?;
+    let patch = crate::runs::RunChanges {
+        status: Some(RunStatus::Queued),
+        recovery_pending: Some(true),
+        finished_at: Some(None),
+        ..Default::default()
+    };
+    s.store.change_run(run_id, patch).await?;
     Ok(())
 }
 
@@ -316,6 +324,9 @@ async fn clear_credentials(s: &Service, run_id: &str) {
     let directory = s.config.data_dir.join("runs").join(run_id);
     crate::execution::clear_run_credentials(&directory).await;
 }
+
+#[cfg(test)]
+use crate::run_fixture::DbRunFixture;
 
 #[cfg(test)]
 mod tests {
@@ -343,18 +354,23 @@ mod tests {
         .await
         .unwrap();
         let run = crate::config::id();
-        service.store.transaction({
-            let run = run.clone();
-            move |db| {
-                let record = json!({
-                    "id": run,
-                    "status": "running",
-                    "sessionId": "saved-session",
-                });
-                db.0.execute("INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'','running',0,?2)", rusqlite::params![run,record.to_string()])?;
-                Ok(())
-            }
-        }).await.unwrap();
+        service
+            .store
+            .transaction({
+                let run = run.clone();
+                move |db| {
+                    let record = json!({
+                        "id": run,
+                        "taskId": run,
+                        "status": "running",
+                        "sessionId": "saved-session",
+                    });
+                    db.add_run_fixture(&record, None)?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
         let checkpoint = Checkpoint::new(
             service.store.clone(),
             run.clone(),
@@ -388,9 +404,9 @@ mod tests {
                 .await
                 .settled()
                 .unwrap()
-                .run_patch()
-                .unwrap()["status"],
-            "failed"
+                .run_changes()
+                .status,
+            Some(RunStatus::Failed)
         );
         assert_eq!(
             checkpoint.snapshot().await.controller_recoveries(),
@@ -427,7 +443,7 @@ mod tests {
         });
         service
             .store
-            .transaction(move |db| db.add_run(&record, None).map(|_| ()))
+            .transaction(move |db| db.add_run_fixture(&record, None).map(|_| ()))
             .await
             .unwrap();
         let saved = RunCheckpoint::from_value(json!({
@@ -513,14 +529,12 @@ mod tests {
                     move |db| {
                         let record = json!({
                             "id": run,
+                            "taskId": run,
                             "status": status,
                             "isolated": true,
                             "storage": { "mode": "on-demand" },
                         });
-                        db.0.execute(
-                            "INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'',?2,0,?3)",
-                            rusqlite::params![run, status, record.to_string()],
-                        )?;
+                        db.add_run_fixture(&record, None)?;
                         Ok(())
                     }
                 })
@@ -579,8 +593,8 @@ mod tests {
         service.store.transaction({
             let run = run.clone();
             move |db| {
-                let record = json!({ "id": run, "status": "succeeded", "isolated": true });
-                db.0.execute("INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'','succeeded',0,?2)", rusqlite::params![run, record.to_string()])?;
+                let record = json!({ "id": run, "taskId": run, "status": "succeeded", "isolated": true });
+                db.add_run_fixture(&record, None)?;
                 Ok(())
             }
         }).await.unwrap();

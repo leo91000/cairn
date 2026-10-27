@@ -29,7 +29,13 @@ abstract class SavedConversationCases {
 
     private fun select(fromCache: Boolean = false, wasSelected: Boolean = false) {
         MockWebServer().use { server ->
-            val run = Run("run", status = "succeeded", finishedAt = 20)
+            val run =
+                Run(
+                    id = "run",
+                    status = "succeeded",
+                    finishedAt = 20,
+                    taskId = "",
+                )
             val chat = Chat("saved", runId = run.id, updatedAt = 10, status = run.status)
             val oldState = LiveState(chat = chat, run = run)
             val event = RunEvent(1, 1, "chat.user", "Saved output", runId = run.id)

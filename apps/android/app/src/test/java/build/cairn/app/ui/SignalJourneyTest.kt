@@ -89,7 +89,7 @@ class SignalJourneyTest {
         )
     private val failed =
         Run(
-            "failed-run",
+            id = "failed-run",
             taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
             status = "failed",
             trigger = "schedule",
@@ -114,7 +114,13 @@ class SignalJourneyTest {
                 projectName = "Cairn",
                 status = "running",
                 runId = "live-run",
-                run = Run("live-run", status = "running", startedAt = now - 14 * 60_000),
+                run =
+                    Run(
+                        id = "live-run",
+                        status = "running",
+                        startedAt = now - 14 * 60_000,
+                        taskId = "",
+                    ),
                 updatedAt = now - 120_000,
             ),
             Chat(
@@ -200,7 +206,7 @@ class SignalJourneyTest {
                                 json(
                                     wireJson.encodeToString(
                                         Run(
-                                            "new-run",
+                                            id = "new-run",
                                             taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
                                             status = "running",
                                             snapshot =
@@ -268,11 +274,12 @@ class SignalJourneyTest {
                                     LiveState(
                                         run =
                                             Run(
-                                                path
-                                                    .removePrefix(
-                                                        "/api/installations/fixture/api/runs/"
-                                                    )
-                                                    .removeSuffix("/stream"),
+                                                id =
+                                                    path
+                                                        .removePrefix(
+                                                            "/api/installations/fixture/api/runs/"
+                                                        )
+                                                        .removeSuffix("/stream"),
                                                 taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
                                                 status = "running",
                                                 trigger = "schedule",

@@ -1,3 +1,5 @@
+use crate::common::run_fixture::DbRunFixture;
+use crate::common::run_fixture::RunFixture;
 use common::MissionFixture;
 
 mod common;
@@ -98,14 +100,10 @@ impl App {
             "finishedAt": now(),
             "summary": "## Release ready\n\nI **shipped** the `0.53` notes.",
         });
-        let (run_id, task) = (run.clone(), task.to_owned());
         self.service
             .store
             .transaction(move |db| {
-                db.0.execute(
-                    "INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?2,'',?3,?4,?5)",
-                    rusqlite::params![run_id, task, status.as_str(), now(), record.to_string()],
-                )?;
+                db.add_run_fixture(&record, None)?;
                 Ok(())
             })
             .await
@@ -630,7 +628,7 @@ async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_agai
     let stored = app
         .service
         .store
-        .patch_run(&run, blocked("blocked"))
+        .change_run_fixture(&run, blocked("blocked"))
         .await
         .unwrap();
     let finished_at = stored["finishedAt"].as_i64().unwrap();
@@ -650,7 +648,7 @@ async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_agai
     // Input the agent asked for can only be snoozed.
     app.service
         .store
-        .patch_run(&run, blocked("needs_input"))
+        .change_run_fixture(&run, blocked("needs_input"))
         .await
         .unwrap();
     assert!(app.dismissal(&app.owner, &run).await.is_null());
@@ -672,7 +670,7 @@ async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_agai
     let next = app.finished_run(task_id, "mcp", RunStatus::Succeeded).await;
     app.service
         .store
-        .patch_run(&next, blocked("blocked"))
+        .change_run_fixture(&next, blocked("blocked"))
         .await
         .unwrap();
     let runs = app.get(&app.owner, "/api/tasks/activity").await;

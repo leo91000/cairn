@@ -1,3 +1,5 @@
+use crate::common::run_fixture::{DbRunFixture, RunFixture};
+
 mod common;
 
 use common::relay_fixture::router;
@@ -70,6 +72,8 @@ impl App {
         let (run, context) = (run.to_owned(), context.to_owned());
         let mut record = json!({
             "id": run,
+            "taskId": run,
+            "createdAt": 0,
             "status": status,
             "nativeProvenanceUnknown": true,
             "nativePrincipals": [],
@@ -81,10 +85,7 @@ impl App {
         self.service
             .store
             .transaction(move |db| {
-                db.0.execute(
-                    "INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'',?2,0,?3)",
-                    rusqlite::params![run, status.as_str(), record.to_string()],
-                )?;
+                db.add_run_fixture(&record, None)?;
                 db.event(&run, "chat.user", &context, None)?;
                 Ok(())
             })
@@ -278,7 +279,13 @@ async fn deletion_waits_for_running_agents_before_removing_their_files() {
     );
     app.service
         .store
-        .patch_run(&run, json!({ "status": RunStatus::Succeeded }))
+        .change_run(
+            &run,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Succeeded),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     app.service.cleanup_conversations().await.unwrap();
@@ -359,7 +366,7 @@ async fn fresh_session_availability_uses_restored_runs_and_keeps_its_lifetime() 
         if historical_chat {
             app.service
                 .store
-                .patch_run(&run, json!({ "restoredAt": 10 }))
+                .update_run_boundary(&run, json!({ "restoredAt": 10 }))
                 .await
                 .unwrap();
         }
@@ -381,7 +388,7 @@ async fn fresh_session_availability_uses_restored_runs_and_keeps_its_lifetime() 
             );
             app.service
                 .store
-                .patch_run(&run, json!({ "restoredAt": 10 }))
+                .update_run_boundary(&run, json!({ "restoredAt": 10 }))
                 .await
                 .unwrap();
         }
@@ -394,7 +401,13 @@ async fn fresh_session_availability_uses_restored_runs_and_keeps_its_lifetime() 
         ] {
             app.service
                 .store
-                .patch_run(&run, json!({ "status": status }))
+                .change_run(
+                    &run,
+                    cairn_installation::runs::RunChanges {
+                        status: Some(RunStatus::parse(status).unwrap()),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .unwrap();
             assert_eq!(app.get(&path).await.1["canRequestNewSession"], available);
@@ -1023,7 +1036,14 @@ async fn retention_protects_pending_work_recent_completion_and_worker_finalizati
                 .store
                 .set(
                     &format!("chat-question:{chat_id}:question"),
-                    json!({ "id": "question", "chatId": chat_id, "runId": run, "blocking": false, "fields": [], "status": "pending" }),
+                    json!({
+                        "id": "question",
+                        "chatId": chat_id,
+                        "runId": run,
+                        "blocking": false,
+                        "fields": [],
+                        "status": "pending",
+                    }),
                     None,
                 )
                 .await
@@ -1229,7 +1249,7 @@ async fn a_plan_request_admitted_while_idle_never_joins_a_turn_that_can_change_f
     let run_id = run["id"].as_str().unwrap().to_owned();
     app.service
         .store
-        .patch_run(&run_id, json!({ "status": "running" }))
+        .change_run_fixture(&run_id, json!({ "status": "running" }))
         .await
         .unwrap();
     app.service
@@ -1262,7 +1282,7 @@ async fn a_plan_request_admitted_while_idle_never_joins_a_turn_that_can_change_f
     // After the turn boundary it runs as its own plan turn.
     app.service
         .store
-        .patch_run(
+        .change_run_fixture(
             &run_id,
             json!({ "status": "succeeded", "sessionId": "saved-session", "workspace": "/saved/workspace" }),
         )

@@ -49,7 +49,13 @@ abstract class UnifiedHeaderCases {
             agentName = "Agent principal",
             projectName = "Cairn",
             runId = "run",
-            run = Run("run", status = "succeeded", startedAt = now - 60_000),
+            run =
+                Run(
+                    id = "run",
+                    status = "succeeded",
+                    startedAt = now - 60_000,
+                    taskId = "",
+                ),
             updatedAt = now,
             provider = "claude",
         )

@@ -66,7 +66,7 @@ class ContextCompactionJourneyTest {
                     status = "succeeded",
                     provider = "claude",
                     runId = "run",
-                    run = Run("run", status = "succeeded", trigger = "chat"),
+                    run = Run(id = "run", taskId = chatId, status = "succeeded", trigger = "chat"),
                     contextUsage = ContextUsage(150_000, 200_000, 120_000, false),
                     compaction = ChatCompaction(supported = true, available = true),
                 )

@@ -38,6 +38,41 @@ fn observation(node: &Value) -> Option<Observation> {
     (value.protocol == 1 && (0..=30_000).contains(&age)).then_some(value)
 }
 
+/// Current physical capacity and separately reported unpublished append history.
+/// These are overlapping measurements, not pieces of an additive pie chart.
+pub(super) fn accounting(db: &Db<'_>, node: &Value, attempts: &[Value]) -> Result<Value> {
+    let Some(sample) = observation(node) else {
+        return Ok(Value::Null);
+    };
+    let runs = db.json_rows(
+        "SELECT data FROM runs WHERE json_extract(data,'$.nodeId')=? AND json_extract(data,'$.storage.mode')='on-demand'",
+        [text(node, "id")],
+    )?;
+    let unsynchronized = runs.iter().fold(0u64, |total, run| {
+        total.saturating_add(run["storage"]["dirtyBytes"].as_u64().unwrap_or(0))
+    });
+    let limit = node["limits"]["diskMiB"]
+        .as_u64()
+        .unwrap_or(0)
+        .saturating_mul(MIB);
+    let reserve = crate::storage::policy::Policy::for_node(&node["storage"])?.reserve(
+        node["capabilities"]["diskTotalMiB"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_mul(MIB),
+    );
+    Ok(json!({
+        "capturedAt": sample.captured_at,
+        "localBytes": sample.used_bytes,
+        "unusedGrantedBytes": unused(attempts, node, &sample).0,
+        "hostFreeBytes": sample.free_bytes,
+        "hostReserveBytes": reserve,
+        "poolReserveBytes": pool_reserve(limit),
+        "reclaimableBytes": super::eviction::reclaimable_bytes(db, node)?.min(sample.used_bytes),
+        "unsynchronizedBytes": unsynchronized
+    }))
+}
+
 /// Attribution includes only exclusively owned payloads, on the same accounting
 /// basis as total usage, capped by live consumption and allocated backing.
 /// Shared prepared-base inodes receive no double credit.
@@ -99,6 +134,20 @@ pub(crate) fn admission_fits(
     allowance: u64,
     reuse: bool,
 ) -> bool {
+    fits(
+        node,
+        attempts,
+        admission_bytes(node, attempts, run, allowance, reuse),
+    )
+}
+
+pub(super) fn admission_bytes(
+    node: &Value,
+    attempts: &[Value],
+    run: &str,
+    allowance: u64,
+    reuse: bool,
+) -> u64 {
     let credit = if reuse {
         observation(node).map_or(0, |sample| {
             sample
@@ -112,7 +161,7 @@ pub(crate) fn admission_fits(
     } else {
         0
     };
-    fits(node, attempts, allowance.saturating_sub(credit))
+    allowance.saturating_sub(credit)
 }
 
 /// Called only inside the authenticated heartbeat transaction. A durable grant
@@ -147,6 +196,7 @@ pub(crate) fn report(db: &Db<'_>, node: &mut Value, body: &Value) -> Result<Valu
     node["diskGrowthProtocol"] = 1.into();
     node["diskCapacity"] = serde_json::to_value(&sample)?;
     let mut attempts = db.list("node-attempts")?;
+    let waiting = super::placement::waiting_disk_bytes(db, node, &attempts)?;
     let mut grants = Vec::new();
     for request in requests {
         let Some(index) = attempts.iter().position(|a| a["id"] == request.attempt_id) else {
@@ -182,7 +232,7 @@ pub(crate) fn report(db: &Db<'_>, node: &mut Value, body: &Value) -> Result<Valu
             current
         } else if request.current_mi_b == current
             && next.is_some()
-            && fits(node, &attempts, STEP_MIB * MIB)
+            && fits(node, &attempts, (STEP_MIB * MIB).saturating_add(waiting))
         {
             let next = next.unwrap();
             persist_grant(db, &mut attempts[index], next)?;
@@ -195,7 +245,13 @@ pub(crate) fn report(db: &Db<'_>, node: &mut Value, body: &Value) -> Result<Valu
         }
         grants.push(json!({
             "attemptId": request.attempt_id, "allowanceMiB": allowance,
-            "reason": if allowance > request.current_mi_b { "granted" } else { "shared-capacity" },
+            "reason": if allowance > request.current_mi_b {
+                "granted"
+            } else if waiting > 0 {
+                "waiting-conversation"
+            } else {
+                "shared-capacity"
+            },
         }));
     }
     Ok(json!({ "protocol": 1, "grants": grants }))
@@ -207,7 +263,7 @@ fn persist_grant(db: &Db<'_>, attempt: &mut Value, allowance: u64) -> Result<()>
     let run_id = text(attempt, "runId");
     let mut run = db.run(run_id)?.unwrap();
     run["resources"]["diskMiB"] = allowance.into();
-    db.patch_run(run_id, &json!({ "resources": run["resources"] }))?;
+    db.update_run_boundary(run_id, &json!({ "resources": run["resources"] }))?;
     Ok(())
 }
 

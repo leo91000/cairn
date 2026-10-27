@@ -96,7 +96,7 @@ abstract class NodePlacementCases {
                                         failed.set(true)
                                         "{}"
                                     } else
-                                        """{"previewId":"review","preview":{"mode":"administrator","trustedAccounts":["trusted"],"agents":[{"id":"builder","name":"Builder"}],"conversations":[{"id":"one","name":"Première conversation","status":"running"},{"id":"two","name":"Deuxième conversation","status":"running"}],"tasks":[{"id":"night","name":"Tâche nocturne"}]}}"""
+                                        """{"previewId":"review","preview":{"mode":"administrator","trustedAccounts":["trusted"],"agents":[{"id":"builder","name":"Builder"}],"conversations":[{"id":"one","name":"Première conversation","status":"running","taskId":"fixture-task"},{"id":"two","name":"Deuxième conversation","status":"running","taskId":"fixture-task"}],"tasks":[{"id":"night","name":"Tâche nocturne"}]}}"""
                                 }
                                 "/api/installations/fixture/api/nodes" -> {
                                     val status = if (failed.get()) "failed" else "applied"
@@ -456,10 +456,11 @@ abstract class NodePlacementCases {
                 )
             val run =
                 Run(
-                    "neighbor",
+                    id = "neighbor",
                     status = "running",
                     taskName = "Exécution voisine",
                     suspendedByExclusive = reservation,
+                    taskId = "",
                 )
             val chat =
                 Chat(
@@ -723,6 +724,7 @@ abstract class NodePlacementCases {
                                 state = "acquired",
                                 expiresAt = 4102444800000,
                             ),
+                        taskId = "",
                     )
                 )
             compose.setContent {
@@ -819,6 +821,7 @@ abstract class NodePlacementCases {
                         executionBackend = "native",
                         storage = RunStorage(mode = "native", dirtyBytes = 0),
                         backup = NodeBackup(capturedAt = System.currentTimeMillis() - 120_000),
+                        taskId = "",
                     )
                 )
             compose.setContent {
@@ -988,6 +991,7 @@ abstract class NodePlacementCases {
                                             capturedAt = System.currentTimeMillis() - 120000,
                                             status = "ready",
                                         ),
+                                    taskId = "",
                                 ),
                             )
                         }

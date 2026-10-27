@@ -80,6 +80,12 @@ function run(id: string, taskId: string, values: Partial<RunListItem> = {}): Run
     usage: null,
     taskName: taskId,
     agentName: 'Ops',
+    isolated: false,
+    workspaces: [],
+    unread: false,
+    recoveryPending: false,
+    resumeAvailable: false,
+    resumeCount: 0,
     ...values,
   }
 }

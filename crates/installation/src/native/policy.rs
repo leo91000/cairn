@@ -572,7 +572,7 @@ pub(crate) fn authorize_chat(db: &Db<'_>, chat: &mut Value, source: &Origin) -> 
     let grant = chat_grant(db, chat, source)?;
     apply(chat, &grant);
     if db.run(text(chat, "runId"))?.is_some() {
-        db.patch_run(text(chat, "runId"), &grant)?;
+        db.update_run_boundary(text(chat, "runId"), &grant)?;
     }
     Ok(())
 }
@@ -614,10 +614,10 @@ pub(crate) fn authorize_run_in(db: &Db<'_>, id: &str, source: &Origin) -> Result
             && current != id
             && db.run(current)?.is_some()
         {
-            db.patch_run(current, &grant)?;
+            db.update_run_boundary(current, &grant)?;
         }
     }
-    db.patch_run(id, &grant)?;
+    db.update_run_boundary(id, &grant)?;
     Ok(())
 }
 

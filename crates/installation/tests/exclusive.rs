@@ -107,9 +107,13 @@ impl Fixture {
         let run_id = text(&run, "id").to_owned();
         self.s
             .store
-            .patch_run(
+            .change_run(
                 &run_id,
-                json!({ "status": "running", "nodeId": LOCAL_NODE_ID }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    boundary: Some(serde_json::json!({"nodeId": LOCAL_NODE_ID})),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();

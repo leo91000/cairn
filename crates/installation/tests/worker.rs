@@ -239,7 +239,15 @@ async fn transient_agent_failure_resumes_same_session_and_workspace_after_restar
     fixture
         .service
         .store
-        .patch_run(&run_id, json!({ "retry": waiting["retry"] }))
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                retry: Some(Some(
+                    serde_json::from_value(waiting["retry"].clone()).unwrap(),
+                )),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     fixture.stop(false).await;
@@ -253,7 +261,13 @@ async fn transient_agent_failure_resumes_same_session_and_workspace_after_restar
     fixture
         .service
         .store
-        .patch_run(&run_id, json!({ "retry": retry }))
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let completed = fixture.until_finished(&run_id).await;
@@ -303,7 +317,13 @@ async fn startup_disconnect_before_first_turn_retries_without_losing_the_pending
     fixture
         .service
         .store
-        .patch_run(&run_id, json!({ "retry": retry }))
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let completed = fixture.until_finished(&run_id).await;
@@ -369,7 +389,13 @@ async fn first_start_recovery_remains_manually_resumable_after_stop_or_exhaustio
                 fixture
                     .service
                     .store
-                    .patch_run(&run_id, json!({ "retry": retry }))
+                    .change_run(
+                        &run_id,
+                        cairn_installation::runs::RunChanges {
+                            retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
+                            ..Default::default()
+                        },
+                    )
                     .await
                     .unwrap();
                 waiting = fixture
@@ -436,7 +462,13 @@ async fn native_recovery_preflight_disconnect_consumes_the_same_retry_budget() {
     fixture
         .service
         .store
-        .patch_run(&run_id, json!({ "retry": retry }))
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     fixture.start().await;
@@ -456,7 +488,13 @@ async fn native_recovery_preflight_disconnect_consumes_the_same_retry_budget() {
     fixture
         .service
         .store
-        .patch_run(&run_id, json!({ "retry": retry }))
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let completed = fixture.until_finished(&run_id).await;
@@ -485,7 +523,13 @@ async fn an_expired_retry_window_does_not_admit_another_agent() {
     fixture
         .service
         .store
-        .patch_run(&run_id, json!({ "retry": retry }))
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let stopped = fixture.until_finished(&run_id).await;
@@ -564,7 +608,13 @@ async fn agent_retries_stop_after_five_attempts_or_when_the_error_becomes_termin
             fixture
                 .service
                 .store
-                .patch_run(&run_id, json!({ "retry": retry }))
+                .change_run(
+                    &run_id,
+                    cairn_installation::runs::RunChanges {
+                        retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .unwrap();
         }
@@ -685,7 +735,13 @@ async fn managed_task_retry_releases_its_account_during_backoff() {
     let mut retry = waiting["retry"].clone();
     retry["nextAttemptAt"] = (now() + 120_000).into();
     s.store
-        .patch_run(run_id, json!({ "retry": retry }))
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let other = fixture
@@ -700,7 +756,13 @@ async fn managed_task_retry_releases_its_account_during_backoff() {
     );
     retry["nextAttemptAt"] = now().into();
     s.store
-        .patch_run(run_id, json!({ "retry": retry }))
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                retry: Some(Some(serde_json::from_value(retry.clone()).unwrap())),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let completed = fixture.until_finished(run_id).await;
@@ -1890,7 +1952,7 @@ async fn node_slots_exceed_manager_concurrency_without_overpreparing_the_queue()
         "queued work must never enter recovery: {}",
         queued[0]
     );
-    assert_eq!(queued[0]["recoveryPending"], Value::Null);
+    assert_eq!(queued[0]["recoveryPending"], false);
     assert_eq!(controller.plans.lock().await.len(), 12);
     let attempts = fixture.service.store.list("node-attempts").await.unwrap();
     assert_eq!(attempts.len(), 12);
@@ -2845,7 +2907,13 @@ async fn quiet_chat_protocol_keeps_a_finite_checkpoint_deadline() {
     let mut snapshot = run["snapshot"].clone();
     snapshot["agent"]["timeoutMinutes"] = 1.into();
     s.store
-        .patch_run(id, json!({ "snapshot": snapshot }))
+        .change_run(
+            id,
+            cairn_installation::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(snapshot).unwrap()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     // Resume the final second of an existing one-minute budget.
@@ -2955,7 +3023,7 @@ async fn queued_work_waits_for_node_capacity_without_failing() {
     let run_id = text(&run, "id");
     let resources = json!({"cpu": 2, "memoryMiB": 4096, "diskMiB": 32768});
     s.store
-        .patch_run(run_id, json!({"requestedResources": resources}))
+        .update_run_boundary(run_id, json!({"requestedResources": resources}))
         .await
         .unwrap();
     fixture.start().await;

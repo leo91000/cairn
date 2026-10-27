@@ -52,7 +52,11 @@ async fn project_http_replacements_are_complete_revision_checked_and_owner_only(
     assert!(first["revision"].is_string());
     let id = first["id"].as_str().unwrap();
     let path = format!("/api/projects/{id}");
-    let replacement = json!({ "projectId": id, "revision": first["revision"], "settings": { "name": "Updated", "path": root.path(), "sourceMode": "local" } });
+    let replacement = json!({
+        "projectId": id,
+        "revision": first["revision"],
+        "settings": { "name": "Updated", "path": root.path(), "sourceMode": "local" },
+    });
     let (left, right) = tokio::join!(
         http(
             &s,
@@ -216,13 +220,22 @@ async fn project_deletion_keeps_current_reference_rules_and_historical_snapshots
     s.remove_mission_fixture(task["id"].as_str().unwrap())
         .await
         .unwrap();
-    let run = json!({ "id": cairn_installation::config::id(), "taskId": "snapshot", "status": "running", "createdAt": 0, "snapshot": { "projects": [project] } });
+    let run = json!({
+        "id": cairn_installation::config::id(),
+        "taskId": "snapshot",
+        "status": "running",
+        "createdAt": 0,
+        "snapshot": { "projects": [project] },
+    });
     common::add_run(&s.store, &run).await;
     assert!(s.delete_project(project.id, |_| Ok(())).await.is_err());
     s.store
-        .patch_run(
+        .change_run(
             run["id"].as_str().unwrap(),
-            json!({ "status": "succeeded" }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Succeeded),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();

@@ -375,7 +375,7 @@ class CairnApiTest {
     fun `models accept list and detail wire formats and preserve task controls`() {
         val run =
             wireJson.decodeFromString<Run>(
-                """{"id":"r","status":"running","taskName":"Review","agentName":"Agent","usage":null,"startedAt":null}"""
+                """{"id":"r","taskId":"task","status":"running","taskName":"Review","agentName":"Agent","usage":null,"startedAt":null}"""
             )
         assertEquals("Review", run.title)
         assertTrue(run.active)
@@ -409,10 +409,10 @@ class CairnApiTest {
         assertEquals(task, wireJson.decodeFromString<Task>(wireJson.encodeToString(task)))
         val run =
             wireJson.decodeFromString<Run>(
-                """{"id":"run","status":"interrupted","projectId":null,"snapshot":{"project":null,"projects":[{"id":"46d045dd-9bce-51e3-8a99-65aa9384efc9","name":"Cairn","path":"/workspace/cairn","origin":"","revision":"fixture","createdAt":0}]},"resumeAvailable":true}"""
+                """{"id":"run","taskId":"task","status":"interrupted","projectId":null,"snapshot":{"task":{"id":"00000000-0000-4000-8000-000000000003","agentId":"00000000-0000-4000-8000-000000000001","name":"Fixture","prompt":"Fixture"},"agent":{"id":"00000000-0000-4000-8000-000000000001","name":"Fixture","createdAt":0,"revision":"fixture","access":{"mcpTools":{}},"exclusiveNodes":[],"plugins":[]},"project":null,"projects":[{"id":"46d045dd-9bce-51e3-8a99-65aa9384efc9","name":"Cairn","path":"/workspace/cairn","origin":"","revision":"fixture","createdAt":0}]},"resumeAvailable":true}"""
             )
-        assertNull(run.snapshot.project)
-        assertEquals("Cairn", run.snapshot.projects.single().name)
+        assertNull(requireNotNull(run.snapshot).project)
+        assertEquals("Cairn", requireNotNull(run.snapshot).projects.single().name)
         assertTrue(run.resumeAvailable)
         val agent =
             wireJson.decodeFromString<Agent>(

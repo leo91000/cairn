@@ -486,12 +486,23 @@ pub async fn inventory(s: &Service) -> Result<Vec<Value>> {
         agents: &agents,
         stale: &stale,
     };
-    s.store
+    let mut nodes = s
+        .store
         .list("nodes")
         .await?
         .into_iter()
         .map(|node| usage.describe(node))
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    s.store
+        .read(move |db| {
+            for node in &mut nodes {
+                if crate::native::policy::node_native(node) && node["diskGrowthProtocol"] == 1 {
+                    node["diskAccounting"] = disk_capacity::accounting(db, node, &attempts)?;
+                }
+            }
+            Ok(nodes)
+        })
+        .await
 }
 
 pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
@@ -1082,7 +1093,7 @@ fn release_placements(db: &Db<'_>, node: &str) -> Result<u64> {
                 patch[field] = Value::Null;
             }
         }
-        db.patch_run(text(&run, "id"), &patch)?;
+        db.update_run_boundary(text(&run, "id"), &patch)?;
         released += 1;
     }
     Ok(released)

@@ -224,7 +224,7 @@ impl Owner {
         self.service.store.run(id).await.unwrap()
     }
 
-    async fn add_run(&self, record: &Value) {
+    async fn add_run_fixture(&self, record: &Value) {
         common::add_run(&self.service.store, record).await;
     }
 
@@ -579,7 +579,7 @@ async fn component_version_mismatches_are_explicitly_rejected() {
         run["isolated"] = true.into();
         run["resources"] = limits(1, 512, 1024);
         run["placementTransition"] = true.into();
-        owner.add_run(&run).await;
+        owner.add_run_fixture(&run).await;
         placement::reserve(&owner.service, &run, &reservation)
             .await
             .unwrap();
@@ -588,7 +588,7 @@ async fn component_version_mismatches_are_explicitly_rejected() {
         owner
             .service
             .store
-            .patch_run(
+            .update_run_boundary(
                 &run_id,
                 json!({
                     "placementTransition": false, "moveReservation": reservation,
@@ -1195,7 +1195,7 @@ async fn revoking_a_replaced_node_can_release_its_conversation_placements() {
         let mut record = run_record(run, RunStatus::Succeeded);
         record["pinnedNodeId"] = pin.into();
         record["preferredNodeId"] = prefer.into();
-        owner.add_run(&record).await;
+        owner.add_run_fixture(&record).await;
     }
 
     // A plain revocation keeps explicit placements: the owner chose to wait for that machine.
@@ -1264,7 +1264,7 @@ async fn workspace_seed_omits_projects_only_for_an_explicit_vm_resume() {
         let mut record = run_record(&run, RunStatus::Running);
         record["taskId"] = run.clone().into();
         record["snapshot"] = json!({"agent":{"id":MAIN_AGENT_ID}});
-        owner.add_run(&record).await;
+        owner.add_run_fixture(&record).await;
         owner
             .put(
                 "node-attempts",
@@ -1398,13 +1398,16 @@ async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_gran
     })).await;
 
     let mut record = run_record(&run, RunStatus::Running);
-    record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID, "provider": "codex", "access": { "backend": "native" } }, "projects": [project_record] });
+    record["snapshot"] = json!({
+        "agent": { "id": MAIN_AGENT_ID, "provider": "codex", "access": { "backend": "native" } },
+        "projects": [project_record],
+    });
     record["workspaces"] =
         json!([{ "projectId": project, "revision": "a".repeat(40), "path": project_path }]);
     record["nativePrincipals"] = json!([person]);
     record["nativeAuthorityNodes"] = json!([node]);
     record["nativeProvenanceUnknown"] = false.into();
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     owner
         .put(
             "node-attempts",
@@ -1497,7 +1500,7 @@ async fn node_preparations_isolate_conversations_and_coalesce_duplicate_attempts
         let mut record = run_record(&run, RunStatus::Running);
         record["taskId"] = run.clone().into();
         record["snapshot"] = json!({"agent":{"id":MAIN_AGENT_ID}});
-        owner.add_run(&record).await;
+        owner.add_run_fixture(&record).await;
         owner
             .put(
                 "node-attempts",
@@ -1671,7 +1674,7 @@ async fn prepared_node_disks_use_the_enrolled_manager_origin() {
         .await;
     let mut record = run_record(&run, RunStatus::Running);
     record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID } });
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     owner
         .set_checkpoint(&run, json!({ "nodeId": node_id, "runnerId": attempt }))
         .await;
@@ -2215,7 +2218,7 @@ async fn queued_capacity_moves_preserve_the_source_and_unfinished_mission_waits(
                 "id": "wait", "seconds": 3600, "wakeAt": now() + 3_600_000,
             });
         }
-        owner.add_run(&record).await;
+        owner.add_run_fixture(&record).await;
         owner
             .set_checkpoint(
                 &run,
@@ -2279,7 +2282,7 @@ async fn capacity_moves_keep_pinned_unauthorized_and_running_conversations_in_pl
     let mut record = run_record(&run, RunStatus::Queued);
     record["snapshot"] = json!({ "agent": { "id": agent } });
     record["resources"] = limits(4, 12288, 65536);
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     owner
         .set_checkpoint(&run, json!({ "nodeId": source }))
         .await;
@@ -2529,7 +2532,7 @@ async fn owner_placement_obeys_agent_grants_and_preserves_last_good_selection() 
     let run = id();
     let mut record = run_record(&run, RunStatus::Succeeded);
     record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID } });
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     let path = format!("/api/nodes/placement/{run}");
     let pin = |node: Value| json!({ "pinnedNodeId": node, "preferredNodeId": null });
     let (status, value) = owner.send("PUT", &path, pin(LOCAL_NODE_ID.into())).await;
@@ -2601,7 +2604,7 @@ async fn native_auth_relays_refresh_all_providers_and_stop_after_grant_revocatio
             .await;
         let mut record = run_record(&run, RunStatus::Running);
         record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID } });
-        owner.add_run(&record).await;
+        owner.add_run_fixture(&record).await;
         owner
             .set_checkpoint(&run, json!({ "nodeId": node, "runnerId": attempt }))
             .await;
@@ -2703,7 +2706,7 @@ async fn remote_inbox_preserves_empty_invalid_and_oversized_change_detection() {
         .await;
     let mut record = run_record(&run, RunStatus::Running);
     record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID } });
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     owner
         .set_checkpoint(&run, json!({ "nodeId": node, "runnerId": attempt }))
         .await;
@@ -2763,7 +2766,7 @@ async fn remote_vm_agents_reach_workspace_tools_only_through_their_node_session(
     let snapshot = json!({ "agent": { "id": MAIN_AGENT_ID, "provider": "codex", "access": { "nodes": [node] } } });
     let mut record = run_record(&run, RunStatus::Running);
     record["snapshot"] = snapshot.clone();
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     owner
         .set_checkpoint(&run, json!({ "nodeId": node, "runnerId": attempt }))
         .await;
@@ -2832,7 +2835,7 @@ async fn remote_vm_agents_reach_workspace_tools_only_through_their_node_session(
     let mut other_run = run_record(&id(), RunStatus::Running);
     other_run["taskId"] = "other".into();
     other_run["snapshot"] = snapshot;
-    owner.add_run(&other_run).await;
+    owner.add_run_fixture(&other_run).await;
     let other = owner
         .service
         .mcps
@@ -2942,7 +2945,7 @@ async fn retained_completed_disk_monitor_discovers_late_writes() {
     record["storage"] = json!({ "mode": "on-demand", "dirtyBytes": 0 });
     record["backup"] =
         json!({ "status": "ready", "requestedRevision": 1, "acknowledgedRevision": 1 });
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     owner
         .put(
             "nodes",
@@ -2981,7 +2984,7 @@ async fn completed_run_storage_refresh_clears_stale_dirty_counts() {
     let mut record = run_record(&run, RunStatus::Succeeded);
     record["nodeId"] = LOCAL_NODE_ID.into();
     record["storage"] = json!({ "mode": "on-demand", "dirtyBytes": 1_048_576, "dirtySince": 1 });
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     owner
         .put(
             "node-volumes",
@@ -3001,7 +3004,7 @@ async fn completed_run_storage_refresh_clears_stale_dirty_counts() {
     owner
         .service
         .store
-        .patch_run(
+        .update_run_boundary(
             &run,
             json!({ "nodeId": id(), "storage": { "dirtyBytes": 42 } }),
         )
@@ -3046,7 +3049,7 @@ async fn starting_vm_defers_publication_without_a_sync_failure() {
     let mut record = run_record(&run, RunStatus::Running);
     record["isolated"] = true.into();
     record["backup"] = json!({ "snapshotId": previous_snapshot });
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     owner
         .set_checkpoint(&run, json!({ "runnerId": id() }))
         .await;
@@ -3066,12 +3069,15 @@ async fn starting_vm_defers_publication_without_a_sync_failure() {
     owner
         .service
         .store
-        .patch_run(
+        .change_run(
             &run,
-            json!({
-                "status": RunStatus::Succeeded,
-                "storage": { "mode": "on-demand", "dirtyBytes": 0 },
-            }),
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Succeeded),
+                boundary: Some(
+                    serde_json::json!({"storage": { "mode": "on-demand", "dirtyBytes": 0 }}),
+                ),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -3102,7 +3108,7 @@ async fn retired_audit_errors_do_not_force_full_download_before_demand_resume() 
     let (run, point) = (id(), id());
     let mut record = run_record(&run, RunStatus::Queued);
     record["storage"] = json!({ "mode": "on-demand" });
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     owner
         .service
         .store
@@ -3139,7 +3145,7 @@ async fn retired_audit_errors_do_not_force_full_download_before_demand_resume() 
     owner
         .service
         .store
-        .patch_run(&run, json!({ "backup": { "id": point } }))
+        .update_run_boundary(&run, json!({ "backup": { "id": point } }))
         .await
         .unwrap();
     let selected = moves::latest(&owner.service, &run)
@@ -3335,7 +3341,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
     owner.register_node(&node, &token).await;
     let mut record = run_record(&run, RunStatus::Running);
     record["sessionId"] = "synthetic-native-session".into();
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     owner
         .set_checkpoint(&run, json!({ "nodeId": node, "runnerId": attempt }))
         .await;
@@ -3671,7 +3677,7 @@ async fn an_unreachable_owner_is_fenced_only_after_its_last_lease_and_cannot_ren
         let mut record = run_record(&run, RunStatus::Running);
         record["isolated"] = true.into();
         record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID } });
-        owner.add_run(&record).await;
+        owner.add_run_fixture(&record).await;
         owner
             .set_checkpoint(
                 &run,
@@ -3855,9 +3861,13 @@ fn movement_controller(
                 if faults.cancel_during_capture.load(Ordering::SeqCst) {
                     service
                         .store
-                        .patch_run(
+                        .change_run(
                             &run,
-                            json!({ "cancelRequestedAt": now(), "status": RunStatus::Cancelled }),
+                            cairn_installation::runs::RunChanges {
+                                cancel_requested_at: Some(Some(now())),
+                                status: Some(RunStatus::Cancelled),
+                                ..Default::default()
+                            },
                         )
                         .await
                         .unwrap();
@@ -4060,7 +4070,7 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
     record["nodeId"] = source.clone().into();
     record["resources"] = resources.clone();
     record["snapshot"] = json!({ "agent": { "id": agent } });
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     owner
         .set_checkpoint(
             &run,
@@ -4136,7 +4146,7 @@ async fn pending_movement_retries_a_lost_stop_without_stopping_a_later_execution
     let run = id();
     let mut record = run_record(&run, RunStatus::Running);
     record["moveRequest"] = json!({ "requestedAt": now() - 3000 });
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     owner
         .set_checkpoint(&run, json!({ "runnerId": id() }))
         .await;
@@ -4146,7 +4156,7 @@ async fn pending_movement_retries_a_lost_stop_without_stopping_a_later_execution
     owner
         .service
         .store
-        .patch_run(&run, json!({ "moveRequest": null }))
+        .update_run_boundary(&run, json!({ "moveRequest": null }))
         .await
         .unwrap();
     moves::pause_pending(&owner.service, &run).await.unwrap();
@@ -4169,7 +4179,7 @@ async fn queued_capacity_transfer_carries_unpublished_writes_and_keeps_the_sourc
     record["nodeId"] = source.clone().into();
     record["resources"] = limits(2, 512, 128);
     record["snapshot"] = json!({ "agent": { "id": agent } });
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     owner
         .set_checkpoint(
             &run,
@@ -4399,7 +4409,7 @@ async fn mission_wait_and_node_move_exclude_each_other_without_leaking_destinati
         let mut record = run_record(&run_id, RunStatus::Running);
         record["trigger"] = "manual".into();
         record["snapshot"] = agent_run(&run_id, MAIN_AGENT_ID)["snapshot"].clone();
-        owner.add_run(&record).await;
+        owner.add_run_fixture(&record).await;
         let token = "synthetic-mission-move-wait";
         owner
             .service
@@ -4497,7 +4507,7 @@ async fn node_alerts_reach_the_conversation_and_clients_without_repeating() {
     let (run, chat) = (id(), id());
     let mut record = run_record(&run, RunStatus::Running);
     record["trigger"] = "chat".into();
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     owner
         .put(
             "chats",
@@ -4571,7 +4581,9 @@ async fn stale_node_disks_are_reported_and_freed_on_request() {
         (&moved, other.as_str(), 1024),
         (&current, LOCAL_NODE_ID, 3072),
     ] {
-        owner.add_run(&run_record(run, RunStatus::Succeeded)).await;
+        owner
+            .add_run_fixture(&run_record(run, RunStatus::Succeeded))
+            .await;
         owner.set_checkpoint(run, json!({ "nodeId": node })).await;
         owner
             .put(
@@ -4630,7 +4642,7 @@ async fn isolated_conversations_synchronize_on_local_and_remote_nodes() {
     let mut states = Vec::new();
     for node in [LOCAL_NODE_ID.to_owned(), id()] {
         let run = id();
-        owner.add_run(&isolated_run(&run, &node)).await;
+        owner.add_run_fixture(&isolated_run(&run, &node)).await;
         publication::attempt(&owner.service, &owner.run(&run).await).await;
         states.push(owner.run(&run).await["backup"].clone());
     }
@@ -4660,8 +4672,17 @@ async fn coalesced_final_publication_survives_a_new_attempt_and_preserves_later_
     let disk_owner = cairn_installation::storage::environment::ownership(&state, &run, "busy")
         .await
         .unwrap();
-    let manifest = json!({ "version": 1, "size": 4096, "blockSize": snapshots::BLOCK, "blocks": [{ "offset": 0, "size": 4096, "hash": null }] });
-    let source = json!({ "master": "http://localhost:4310/", "grant": "synthetic-publication", "policy": { "reserveMiB": 64, "reservePercent": 1 } });
+    let manifest = json!({
+        "version": 1,
+        "size": 4096,
+        "blockSize": snapshots::BLOCK,
+        "blocks": [{ "offset": 0, "size": 4096, "hash": null }],
+    });
+    let source = json!({
+        "master": "http://localhost:4310/",
+        "grant": "synthetic-publication",
+        "policy": { "reserveMiB": 64, "reservePercent": 1 },
+    });
     let remote = RemoteSource::new(
         &source,
         tokio::runtime::Handle::current(),
@@ -4914,7 +4935,13 @@ async fn coalesced_final_publication_survives_a_new_attempt_and_preserves_later_
     owner
         .service
         .store
-        .patch_run(&run, json!({ "status": RunStatus::Cancelled }))
+        .change_run(
+            &run,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Cancelled),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     owner
@@ -5019,7 +5046,7 @@ async fn assert_lost_acknowledgement_keeps_the_new_pointer(
     owner
         .service
         .store
-        .patch_run(run, json!({ "storage": { "mode": "on-demand" } }))
+        .update_run_boundary(run, json!({ "storage": { "mode": "on-demand" } }))
         .await
         .unwrap();
     log.lost_ack.store(true, Ordering::SeqCst);
@@ -5072,7 +5099,9 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
     let (url, _runner) = common::serve_locally(runner).await;
     let owner = Owner::with_runner(common::HOST.into(), url).await;
     let (run, attempt) = (id(), id());
-    owner.add_run(&isolated_run(&run, LOCAL_NODE_ID)).await;
+    owner
+        .add_run_fixture(&isolated_run(&run, LOCAL_NODE_ID))
+        .await;
     owner
         .set_checkpoint(
             &run,
@@ -5277,7 +5306,7 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
     let mut record = run_record(&run, RunStatus::Succeeded);
     record["nodeId"] = node.clone().into();
     record["snapshot"] = json!({ "agent": { "id": agent } });
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     let points = publish_s3_points(&owner, &run, &node).await;
     let credential = disk_grants::issue(&owner.service, &record, &node, &points[0])
         .await
@@ -5335,7 +5364,7 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
     owner
         .service
         .store
-        .patch_run(&run, json!({ "nodeId": next }))
+        .update_run_boundary(&run, json!({ "nodeId": next }))
         .await
         .unwrap();
     assert!(!permits(&owner, &credential, &points[1]).await);
@@ -5396,7 +5425,9 @@ async fn publish_points(
 async fn publication_cleanup_preserves_current_and_in_use_points_then_retires_idle_generations() {
     let owner = Owner::new().await;
     let run = id();
-    owner.add_run(&run_record(&run, RunStatus::Succeeded)).await;
+    owner
+        .add_run_fixture(&run_record(&run, RunStatus::Succeeded))
+        .await;
     let shared = cairn_installation::storage::digest::block(b"shared");
     let old = cairn_installation::storage::digest::block(b"old");
     let new = cairn_installation::storage::digest::block(b"new");
@@ -5404,7 +5435,7 @@ async fn publication_cleanup_preserves_current_and_in_use_points_then_retires_id
     owner
         .service
         .store
-        .patch_run(&run, json!({ "backup": { "id": ids[1] } }))
+        .update_run_boundary(&run, json!({ "backup": { "id": ids[1] } }))
         .await
         .unwrap();
     let grant = id();
@@ -5591,7 +5622,7 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
             "sessionId": "session",
             "nodeId": LOCAL_NODE_ID,
         });
-        owner.add_run(&record).await;
+        owner.add_run_fixture(&record).await;
         owner
             .set_checkpoint(
                 &run,
@@ -5680,7 +5711,7 @@ fn local_run(run: &str) -> Value {
 
 /// Stores `record` with a checkpoint that places it on the local node.
 async fn add_local_run(owner: &Owner, record: &Value) {
-    owner.add_run(record).await;
+    owner.add_run_fixture(record).await;
     owner
         .set_checkpoint(
             record["id"].as_str().unwrap(),

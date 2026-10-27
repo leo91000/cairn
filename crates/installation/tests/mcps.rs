@@ -172,7 +172,13 @@ async fn assert_large_metadata_is_chunked_consistently(
     cursor: &Value,
 ) {
     s.store
-        .patch_run(run, json!({ "summary": "\0".repeat(800_000) }))
+        .change_run(
+            run,
+            cairn_installation::runs::RunChanges {
+                summary: Some(("\0".repeat(800_000)).to_owned()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let response = mcp
@@ -182,14 +188,20 @@ async fn assert_large_metadata_is_chunked_consistently(
     assert_eq!(empty["events"], json!([]));
     assert_eq!(empty["nextAfter"], *cursor);
     assert_eq!(empty["hasMore"], false);
-    assert_eq!(empty["run"]["truncated"], true);
+    assert_eq!(empty["run"]["kind"], "truncated");
     let response = mcp
         .call("read_run_content", json!({ "runId": run, "offset": 0 }))
         .await;
     let chunk = result(&response);
     assert!(chunk["nextOffset"].as_u64().unwrap() > 0);
     s.store
-        .patch_run(run, json!({ "summary": "Updated result" }))
+        .change_run(
+            run,
+            cairn_installation::runs::RunChanges {
+                summary: Some(("Updated result").to_owned()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let continuation = json!({
@@ -214,7 +226,13 @@ async fn run_history_includes_the_engine_retries_limits_and_notices() {
     let run_id = run["id"].as_str().unwrap();
     let reports = [
         json!({ "type": "engine.retry", "attempt": 1, "maxRetries": 10, "delayMs": 500, "reason": "overloaded" }),
-        json!({ "type": "provider.limit", "status": "allowed_warning", "window": "five_hour", "resetsAt": 1_893_499_200_000_i64, "blocked": false }),
+        json!({
+            "type": "provider.limit",
+            "status": "allowed_warning",
+            "window": "five_hour",
+            "resetsAt": 1_893_499_200_000_i64,
+            "blocked": false,
+        }),
         json!({ "type": "engine.notice", "level": "warning", "message": "Context is almost full." }),
     ];
     for report in &reports {
@@ -478,7 +496,13 @@ async fn agents_manage_connections_through_the_self_gateway_without_deadlocks_or
     let run = manual_run(&s, "Manage", "Manage connections").await;
     let run_id = run["id"].as_str().unwrap();
     s.store
-        .patch_run(run_id, json!({ "status": RunStatus::Running }))
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Running),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();

@@ -3,6 +3,7 @@ import type { MissionSettings } from '../../../packages/contracts/generated/type
 import { ref } from 'vue'
 import { createMission } from '../../../packages/contracts/generated/createMission'
 import { deleteMission } from '../../../packages/contracts/generated/deleteMission'
+import { runMission as queueMission } from '../../../packages/contracts/generated/runMission'
 import { setMissionState } from '../../../packages/contracts/generated/setMissionState'
 import { api, notify, refresh } from './api'
 import { refreshMissionRuns } from './mission-runs'
@@ -20,7 +21,7 @@ export function useMissionActions({ started, removed }: { started: (run: RunList
     busy.value = task.id
     error.value = ''
     try {
-      const queued = await api<RunListItem>(`/tasks/${task.id}/run`, { method: 'POST' })
+      const queued = await queueMission(api, { taskId: task.id })
       notify('Mission added to the queue')
       void refreshMissionRuns()
       await started(queued)

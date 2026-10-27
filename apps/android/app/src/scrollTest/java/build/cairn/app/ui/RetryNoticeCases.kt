@@ -29,10 +29,21 @@ abstract class RetryNoticeCases {
 
     private fun run(deadline: Long) =
         Run(
-            "retry",
+            id = "retry",
             status = "queued",
             accountWaitReason = "Temporary agent error. Retrying in 30 seconds (attempt 1/3).",
-            retry = RunRetry(1, 5, deadline, RunRetryCause("timeout", "Temporary timeout")),
+            retry =
+                RunRetry(
+                    attempt = 1,
+                    limit = 5,
+                    nextAttemptAt = deadline,
+                    cause =
+                        RunRetryCause(
+                            kind = "timeout",
+                            message = "Temporary timeout",
+                        ),
+                ),
+            taskId = "",
         )
 
     /** Like CairnApp, the background surface gives the run text its theme colours. */

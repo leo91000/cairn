@@ -96,11 +96,14 @@ async fn serve(
 }
 
 fn archive(name: &str, version: &str) -> Vec<u8> {
+    archive_program(name, &format!("#!/bin/sh\nprintf '{version}'\n"))
+}
+
+fn archive_program(name: &str, program: &str) -> Vec<u8> {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     zip.start_file(name, zip::write::SimpleFileOptions::default())
         .unwrap();
-    zip.write_all(format!("#!/bin/sh\nprintf '{version}'\n").as_bytes())
-        .unwrap();
+    zip.write_all(program.as_bytes()).unwrap();
     zip.finish().unwrap().into_inner()
 }
 
@@ -526,9 +529,23 @@ async fn first_use_can_finish_a_download_longer_than_the_normal_handler_deadline
     } else {
         "amd64"
     };
+    // This first-use path exercises the bundled package, including its foreground
+    // cache declaration. The downloaded fixture must implement both CLI roles.
+    let program = r#"#!/usr/bin/python3
+import os,socket,sys
+if sys.argv[1:2] == ['daemon']:
+    server=socket.socket(socket.AF_UNIX)
+    server.bind(os.environ['OP_SOCK'])
+    server.listen(128)
+    while True:
+        client,_=server.accept()
+        client.close()
+else:
+    print('[]')
+"#;
     f.publisher.files.lock().await.insert(
         format!("/dist/1P/op2/pkg/v2.41.0/op_linux_{arch}_v2.41.0.zip"),
-        archive("op", "[]"),
+        archive_program("op", program),
     );
     let account = common::save_plugin(
         &f.service,

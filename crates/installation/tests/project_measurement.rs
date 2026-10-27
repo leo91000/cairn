@@ -51,6 +51,14 @@ trait StorageEntity:
 
     const SAVE: &'static str;
 
+    fn encoded_bytes(_db: &Db<'_>) -> Option<i64> {
+        None
+    }
+
+    fn admission_state(_db: &Db<'_>, _id: &str, _reference: bool) -> Option<String> {
+        None
+    }
+
     fn id(&self) -> String;
 
     fn setup(_db: &Connection) {}
@@ -212,11 +220,23 @@ impl StorageEntity for PluginInstance {
             rusqlite::Transaction::new_unchecked(db.0, rusqlite::TransactionBehavior::Immediate)
                 .unwrap();
         for n in 0..1000 {
-            Db(&tx).save_agent(&Agent {
-                id: AgentId(uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | (n+10000))),
-                settings: serde_json::from_value(json!({ "name": format!("Agent {n}"), "access": cairn_contracts::AccessPolicy::default(), "exclusiveNodes": [], "plugins": [] })).unwrap(),
-                revision: "fixture".into(), created_at: 1700000000000, avatar: None,
-            }).unwrap();
+            Db(&tx)
+                .save_agent(&Agent {
+                    id: AgentId(uuid::Uuid::from_u128(
+                        (4_u128 << 76) | (2_u128 << 62) | (n + 10000),
+                    )),
+                    settings: serde_json::from_value(json!({
+                        "name": format!("Agent {n}"),
+                        "access": cairn_contracts::AccessPolicy::default(),
+                        "exclusiveNodes": [],
+                        "plugins": [],
+                    }))
+                    .unwrap(),
+                    revision: "fixture".into(),
+                    created_at: 1700000000000,
+                    avatar: None,
+                })
+                .unwrap();
         }
         tx.commit().unwrap();
     }
@@ -349,31 +369,69 @@ CREATE INDEX agent_plugins_resource ON agent_plugins(instance_id,agent_id);").un
 #[tokio::test]
 #[ignore = "local measurement; run alone with --ignored --nocapture --test-threads=1"]
 async fn plugin_storage_layouts() {
-    let instances: Vec<_> = (0..1000).map(|n| {
-        let instance_id = uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | n).to_string();
-        let agent_id = uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | (n+10000)).to_string();
-        let mut instance = PluginInstance::draft(&instance_id,"fixture",json!({ "channel": format!("channel-{n}"), "description": "Deterministic instance storage qualification. ".repeat(8), "scope": true, "audiences": ["engineering","support"] }),vec!["clientSecret".into()]);
-        instance.name = format!("Instance {n:04}"); instance.revision = "revision".into(); instance.enabled = n % 3 != 0;
-        instance.updated_at = 1700000000000; instance.max_messages_per_hour = 20;
-        instance.agent_ids = vec![agent_id.clone()];
-        if n % 3 != 0 {
-            instance.agent_id = agent_id;
-            instance.owner_access_id = Some("owner-access".into());
-            let mut access = cairn_contracts::AccessPolicy::default();
-            if n % 5 == 1 {
-                access.backend = "native".into();
-                instance.native_authority = Some(cairn_installation::plugins::connections::NativeAuthority {
-                    native_principals: vec!["owner-account".into()], native_authority_nodes: vec!["00000000-0000-4000-8000-000000000002".into()],
-                    native_provenance_unknown: false, native_parent_run_id: None, native_parent_access: None, native_plugin_grants: None, plugin_owner_account_id: "owner-account".into(),
-                });
+    let instances: Vec<_> = (0..1000)
+        .map(|n| {
+            let instance_id =
+                uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | n).to_string();
+            let agent_id =
+                uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | (n + 10000)).to_string();
+            let mut instance = PluginInstance::draft(
+                &instance_id,
+                "fixture",
+                json!({
+                    "channel": format!("channel-{n}"),
+                    "description": "Deterministic instance storage qualification. ".repeat(8),
+                    "scope": true,
+                    "audiences": ["engineering","support"],
+                }),
+                vec!["clientSecret".into()],
+            );
+            instance.name = format!("Instance {n:04}");
+            instance.revision = "revision".into();
+            instance.enabled = n % 3 != 0;
+            instance.updated_at = 1700000000000;
+            instance.max_messages_per_hour = 20;
+            instance.agent_ids = vec![agent_id.clone()];
+            if n % 3 != 0 {
+                instance.agent_id = agent_id;
+                instance.owner_access_id = Some("owner-access".into());
+                let mut access = cairn_contracts::AccessPolicy::default();
+                if n % 5 == 1 {
+                    access.backend = "native".into();
+                    instance.native_authority =
+                        Some(cairn_installation::plugins::connections::NativeAuthority {
+                            native_principals: vec!["owner-account".into()],
+                            native_authority_nodes: vec![
+                                "00000000-0000-4000-8000-000000000002".into(),
+                            ],
+                            native_provenance_unknown: false,
+                            native_parent_run_id: None,
+                            native_parent_access: None,
+                            native_plugin_grants: None,
+                            plugin_owner_account_id: "owner-account".into(),
+                        });
+                }
+                instance.granted_access = Some(access);
+                instance.access_mode = if n % 2 == 0 {
+                    cairn_contracts::PluginAccessMode::Everyone
+                } else {
+                    cairn_contracts::PluginAccessMode::Requests
+                };
+                instance.user_ids = vec!["person1".into(), "person2".into()];
+                instance.people = vec![
+                    cairn_contracts::PluginLabel {
+                        id: "person1".into(),
+                        name: "First person".into(),
+                    },
+                    cairn_contracts::PluginLabel {
+                        id: "person2".into(),
+                        name: "Second person".into(),
+                    },
+                ];
             }
-            instance.granted_access = Some(access);
-            instance.access_mode = if n % 2 == 0 { cairn_contracts::PluginAccessMode::Everyone } else { cairn_contracts::PluginAccessMode::Requests };
-            instance.user_ids = vec!["person1".into(),"person2".into()];
-            instance.people = vec![cairn_contracts::PluginLabel { id: "person1".into(),name: "First person".into() },cairn_contracts::PluginLabel { id: "person2".into(),name: "Second person".into() }];
-        }
-        instance
-    }).collect();
+            instance
+        })
+        .collect();
     measure(&instances);
 }
 
@@ -476,7 +534,10 @@ fn write<E: StorageEntity>(db: &Connection, reference: bool, entity: &E, replace
 fn distribution(samples: &[u128]) -> Value {
     let mut sorted = samples.to_vec();
     sorted.sort_unstable();
-    json!({ "p50Us": sorted[sorted.len()/2] as f64 / 1000.0, "p95Us": sorted[(sorted.len()*95/100).min(sorted.len()-1)] as f64 / 1000.0 })
+    json!({
+        "p50Us": sorted[sorted.len()/2] as f64 / 1000.0,
+        "p95Us": sorted[(sorted.len()*95/100).min(sorted.len()-1)] as f64 / 1000.0,
+    })
 }
 
 fn measured<T>(samples: &mut Vec<u128>, f: impl FnOnce() -> T) -> T {
@@ -585,6 +646,16 @@ fn measure<E: StorageEntity>(entities: &[E]) {
                 assert_eq!(result, *p);
             }
             let warm_cpu = cpu() - cpu_start;
+            let mut admission = Vec::new();
+            let cpu_start = cpu();
+            if E::admission_state(&Db(&db), &entities[0].id(), reference).is_some() {
+                for entity in entities {
+                    measured(&mut admission, || {
+                        E::admission_state(&Db(&db), &entity.id(), reference).unwrap()
+                    });
+                }
+            }
+            let admission_cpu = cpu() - cpu_start;
             let mut list = Vec::new();
             let cpu_start = cpu();
             for _ in 0..50 {
@@ -618,6 +689,7 @@ fn measure<E: StorageEntity>(entities: &[E]) {
             db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
                 .unwrap();
             let db_bytes = std::fs::metadata(&path).unwrap().len();
+            let encoded_bytes = E::encoded_bytes(&Db(&db));
             let pages: Vec<(String, i64)> = db
                 .prepare("SELECT name,sum(pgsize) FROM dbstat GROUP BY name ORDER BY name")
                 .unwrap()
@@ -663,11 +735,13 @@ fn measure<E: StorageEntity>(entities: &[E]) {
                     "rows": entities.len(),
                     "wireBytes": entities.iter().map(|p| serde_json::to_vec(p).unwrap().len()).sum::<usize>(),
                     "dbBytes": db_bytes,
+                    "encodedBytes": encoded_bytes,
                     "walBeforeCheckpointBytes": wal,
                     "pages": pages,
                     "insert": distribution(&insert),
                     "replace": distribution(&replace),
                     "warmRead": distribution(&warm),
+                    "admissionRead": if admission.is_empty() { None } else { Some(distribution(&admission)) },
                     "connectionColdRead": distribution(&cold),
                     "list1000": distribution(&list),
                     "due500": if due.is_empty(){None}else{Some(distribution(&due))},
@@ -676,6 +750,7 @@ fn measure<E: StorageEntity>(entities: &[E]) {
                         "insert": insert_cpu,
                         "replace": replace_cpu,
                         "warmRead": warm_cpu,
+                        "admissionRead": admission_cpu,
                         "coldReadIncludingOpen": cold_cpu,
                         "list": list_cpu,
                         "due": due_cpu,
@@ -762,7 +837,172 @@ fn mcp_storage_layouts() {
         auth:if index%3==0{AuthKind::None}else{AuthKind::OAuth},client_id:format!("client-{index}"),scopes:"read write".into(),
         enabled:index%5!=0,enabled_tools:match index%3{0=>None,1=>Some(vec![]),_=>Some(vec!["echo".into(),"search".into()])},
         created_at:1_700_000_000_000,revision:1,state:ConnectionState::Connected,checked_at:Some(1_700_000_001_000),error:String::new(),allow_private_network:false,
-        tools:(0..8).map(|tool|json!({"name":format!("tool_{tool}"),"description":"External tool description. ".repeat(12),"inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}})).collect(),
+        tools:(0..8).map(|tool|json!({
+            "name":format!("tool_{tool}"),
+            "description":"External tool description. ".repeat(12),
+            "inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]},
+        })).collect(),
     }).collect();
     measure(&servers);
+}
+
+// A5 reuses the A1/A2 qualification loop, changing only the domain mapping.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+struct MeasuredRun(Value);
+
+impl MeasuredRun {
+    fn state(&self) -> cairn_contracts::RunState {
+        serde_json::from_value(self.0.clone()).unwrap()
+    }
+}
+
+impl StorageEntity for MeasuredRun {
+    const KIND: &'static str = "runs";
+    const SAVE: &'static str = "run.saved";
+
+    fn encoded_bytes(db: &Db<'_>) -> Option<i64> {
+        Some(db.0.query_row("SELECT sum(payload) FROM dbstat WHERE name='runs' OR name LIKE 'runs_%' OR name LIKE 'sqlite_autoindex_runs_%'", [], |row| row.get(0)).unwrap())
+    }
+
+    fn admission_state(db: &Db<'_>, id: &str, reference: bool) -> Option<String> {
+        Some(if reference {
+            Self::reference_read(db, id).0["status"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        } else {
+            db.run_state(id)
+                .unwrap()
+                .unwrap()
+                .status
+                .as_str()
+                .to_owned()
+        })
+    }
+
+    fn id(&self) -> String {
+        self.0["id"].as_str().unwrap().to_owned()
+    }
+
+    fn read(db: &Db<'_>, id: &str) -> Self {
+        Self(db.run(id).unwrap().unwrap())
+    }
+
+    fn list(db: &Db<'_>) -> usize {
+        db.runs(None, None, 1000, 0, false).unwrap().len()
+    }
+
+    fn write(&self, db: &Db<'_>, replacement: bool) {
+        let id = self.id();
+        if replacement {
+            db.change_run(
+                &id,
+                cairn_installation::runs::RunChanges {
+                    status: Some(
+                        cairn_contracts::RunStatus::parse(self.0["status"].as_str().unwrap())
+                            .unwrap(),
+                    ),
+                    summary: Some(self.0["summary"].as_str().unwrap().to_owned()),
+                    finished_at: Some(self.0["finishedAt"].as_i64()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        } else {
+            let state = self.state();
+            let snapshot: cairn_contracts::RunSnapshot =
+                serde_json::from_value(self.0["snapshot"].clone()).unwrap();
+            let mut boundary = self.0.clone();
+            for field in cairn_installation::runs::RUN_FIELDS {
+                boundary.as_object_mut().unwrap().remove(*field);
+            }
+            db.admit_run(&state, Some(&snapshot), &boundary, None)
+                .unwrap();
+        }
+        db.audit(Self::SAVE, &json!({"id": id})).unwrap();
+    }
+
+    fn reference_schema(db: &Connection) {
+        // Exact pre-A5 seven-column runs layout and indexes at 7fecc082.
+        db.execute_batch("DROP TABLE runs;
+CREATE TABLE runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,project_id TEXT NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,data TEXT NOT NULL,dedupe TEXT UNIQUE);
+CREATE INDEX runs_status ON runs(status,created_at);
+CREATE INDEX runs_task ON runs(task_id,created_at DESC);
+CREATE INDEX runs_created ON runs(created_at DESC,id DESC);
+CREATE UNIQUE INDEX runs_active_task ON runs(task_id) WHERE status IN ('queued','running','waiting');").unwrap();
+    }
+
+    fn reference_read(db: &Db<'_>, id: &str) -> Self {
+        let data: String =
+            db.0.prepare_cached("SELECT data FROM runs WHERE id=?")
+                .unwrap()
+                .query_row([id], |r| r.get(0))
+                .unwrap();
+        Self(serde_json::from_str(&data).unwrap())
+    }
+
+    fn reference_list(db: &Db<'_>) -> usize {
+        let mut query = db.0.prepare_cached("SELECT json_set(json_remove(data,'$.snapshot','$.summary'),'$.taskName',json_extract(data,'$.snapshot.task.name'),'$.agentName',json_extract(data,'$.snapshot.agent.name'),'$.provider',json_extract(data,'$.snapshot.agent.provider')) FROM runs ORDER BY created_at DESC,id DESC LIMIT 1000 OFFSET 0").unwrap();
+        let rows: Vec<Value> = query
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| serde_json::from_str(&r.unwrap()).unwrap())
+            .collect();
+        rows.len()
+    }
+
+    fn reference_write(&self, db: &Db<'_>, replacement: bool) {
+        let id = self.id();
+        if replacement {
+            let mut current = Self::reference_read(db, &id).0;
+            for field in ["status", "summary", "finishedAt"] {
+                current[field] = self.0[field].clone();
+            }
+            db.0.prepare_cached("UPDATE runs SET status=?,data=? WHERE id=?")
+                .unwrap()
+                .execute(params![self.0["status"].as_str(), current.to_string(), id])
+                .unwrap();
+        } else {
+            db.0.prepare_cached("INSERT INTO runs(id,task_id,project_id,status,created_at,data,dedupe) VALUES(?,?,?,?,?,?,NULL)").unwrap().execute(params![id,self.0["taskId"].as_str(),self.0["projectId"].as_str().unwrap_or_default(),self.0["status"].as_str(),self.0["createdAt"].as_i64(),self.0.to_string()]).unwrap();
+            // The original add_run returned the caller's full document clone.
+            std::hint::black_box(self.0.clone());
+        }
+    }
+
+    fn reference_delete(db: &Db<'_>, id: &str) {
+        db.0.prepare_cached("DELETE FROM runs WHERE id=?")
+            .unwrap()
+            .execute([id])
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "local measurement; run alone with --ignored --nocapture --test-threads=1"]
+async fn run_storage_layouts() {
+    let corpus: Vec<_> = (0..1000).map(|n| {
+        let id = uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | n).to_string();
+        let state: cairn_contracts::RunState = serde_json::from_value(json!({
+            "id": id, "taskId": id, "status": if n % 3 == 0 { "failed" } else { "succeeded" },
+            "projectId": "00000000-0000-4000-8000-000000000005", "trigger": "manual",
+            "createdAt": 1700000000000_i64 + n as i64, "startedAt": 1700000000001_i64 + n as i64,
+            "finishedAt": 1700000000100_i64 + n as i64, "sessionId": format!("session-{n}"),
+            "summary": "Completed local task with preserved conversation context. ".repeat(12),
+            "resumeAvailable": true,
+            "requestedBy": if n % 2 == 0 { json!({"runId":"parent","chatId":"chat"}) } else { Value::Null },
+        })).unwrap();
+        let snapshot: cairn_contracts::RunSnapshot = serde_json::from_value(json!({
+            "task": {"id":id,"agentId":"00000000-0000-4000-8000-000000000001", "name":format!("Mission {n}"), "prompt":"Inspect the repository and preserve authorization. ".repeat(20)},
+            "agent": {"id":"00000000-0000-4000-8000-000000000001", "name":"Agent", "revision":"fixture", "createdAt":0, "instructions":"Inspect callers and validate behavior. ".repeat(20),"access":cairn_contracts::AccessPolicy::default(),"exclusiveNodes":[],"plugins":[]},
+            "project":null, "skills":[{"name":"review","path":"global/review","content":"Review changes independently. ".repeat(30)}],
+        })).unwrap();
+        let mut document = serde_json::to_value(state).unwrap();
+        document["snapshot"] = serde_json::to_value(snapshot).unwrap();
+        document["isolated"] = true.into();
+        document["nodeId"] = format!("node-{}",n%3).into();
+        document["executionBackend"] = "native".into();
+        MeasuredRun(document)
+    }).collect();
+    measure(&corpus);
 }

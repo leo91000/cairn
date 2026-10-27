@@ -334,6 +334,27 @@ More capabilities:
   set. Returns `{ status, stdout, stderr }`. Programs run outside the Luau sandbox with
   whatever files and network they can reach: the review screen names each path or
   installer.
+- A program may opt into a managed foreground cache daemon with
+  `cache = { daemonArgs = ["daemon", "--timeout", "0"], socketEnv = "OP_SOCK" }`.
+  Cairn starts the same approved executable with those static arguments, an empty
+  environment and a private home/socket. No instance secrets enter the daemon's
+  environment. Clients receive the socket through the reserved `socketEnv` variable,
+  which scripts cannot override. The socket must belong to the foreground child;
+  background-only daemons are rejected. Other programs keep their per-call home.
+  Saved, enabled instances reuse a daemon across authorized calls to the same program,
+  revision, package, executable and environment digest. Draft/disabled instance tests
+  use a transient daemon. Cache reuse never replaces the caller's authorization or
+  the post-I/O grant check. Changes, disabling, deletion, disconnection and installation
+  shutdown invalidate caches and interrupt their active calls. The supervisor also
+  reconciles enabled instances/package approvals every two seconds.
+  Acquisition and reconciliation reject snapshots superseded by configuration
+  invalidation, so a delayed old call cannot replace a current revision's cache.
+  A different environment/executable waits for active leases to finish rather than
+  interrupting their reads.
+  Unused daemons expire after ten minutes; at most 64 reside in an installation,
+  evicting the least recently used idle entry first. When all are busy, new instances
+  receive a retryable capacity error. Cache contents and freshness are the declared
+  program's responsibility: Cairn does not store command output in a cache or database.
 - `cairn.http.request{ …, auth = { secret = "<setting key>", header?, prefix? } }`
   adds a secret field to one header of a declared host.
 - `cairn.json.decode(text)` and `cairn.json.encode(value)` convert JSON.
@@ -832,10 +853,20 @@ For related credentials, `read-fields --account ACCOUNT_ID --vault VAULT_ID
 --item ITEM_ID --fields '["username","credential"]'` fetches the item once and
 writes a secret JSON object keyed by the requested field IDs or labels. Pipe it
 into the consuming script, then reuse the values in memory for that bounded
-script's API calls. No server-side secret cache is introduced. Ambiguous labels
+script's API calls. Cairn does not retain the plaintext values. Ambiguous labels
 require unique field IDs; TOTP fields use `read` instead, so the grouped command
 cannot accidentally return their seeds. Metadata tools never expose either
 secret command.
+
+The official CLI runs with `OP_CACHE=true` and an installation-managed encrypted
+in-memory cache daemon per service-account connection. Conversations and agents with
+access to that connection reuse it; different connections and installations do not
+share a home or socket. It starts lazily, expires after ten idle minutes and is
+discarded on token/settings changes, disabling/deletion or manager restart. Item and
+vault refresh behavior remains the official CLI's responsibility; Cairn adds no
+plaintext secret TTL. This reduces repeated CLI work but does not raise the upstream
+quota or guarantee that a warm read makes no API calls. See the
+[official CLI cache reference](https://www.1password.dev/cli/reference).
 
 `limits` is also available through the metadata tool. It reports the CLI's
 hourly token and daily account limits, usage, remaining requests and `reset` in

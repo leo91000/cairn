@@ -98,7 +98,7 @@ pub(crate) fn acknowledge_plan(
             "No authorized node privilege generation is confirmed. The existing environment is preserved.",
         ));
     }
-    db.patch_run(
+    db.update_run_boundary(
         run_id,
         &json!({ "nativeMode": placement["nativeMode"], "nativeModeInterruption": null }),
     )?;
@@ -290,7 +290,11 @@ pub async fn change(
         if change.mode == Mode::Administrator && owner.is_none() {
             node["nativeModeProposal"] = json!({ "previewId": preview, "mode": change.mode, "status": "awaiting-owner" });
             db.put("nodes", &node)?;
-            return Ok(json!({ "status": "awaiting-owner", "node": super::public(node), "message": "The installation owner must review and confirm native administrator in this node's details. An agent cannot elevate its host." }));
+            return Ok(json!({
+                "status": "awaiting-owner",
+                "node": super::public(node),
+                "message": "The installation owner must review and confirm native administrator in this node's details. An agent cannot elevate its host.",
+            }));
         }
         node["nativeModeProposal"] = Value::Null;
         let generation = id();
@@ -305,7 +309,7 @@ pub async fn change(
             if attempt["nodeId"] == node_id && super::is_active_attempt(&attempt)
                 && db.run(text(&attempt, "runId"))?.is_some()
             {
-                db.patch_run(text(&attempt, "runId"), &json!({
+                db.update_run_boundary(text(&attempt, "runId"), &json!({
                     "nativeModeInterruption": generation, "nodeState": "updating",
                 }))?;
             }
@@ -316,6 +320,9 @@ pub async fn change(
         Ok(super::public(node))
     }).await
 }
+
+#[cfg(test)]
+use crate::run_fixture::DbRunFixture;
 
 #[cfg(test)]
 mod tests {
@@ -369,7 +376,7 @@ mod tests {
             .unwrap();
         let saved = run.clone();
         store
-            .transaction(move |db| db.add_run(&saved, None).map(|_| ()))
+            .transaction(move |db| db.add_run_fixture(&saved, None).map(|_| ()))
             .await
             .unwrap();
         let placement = json!({ "nodeId": node_id, "nativeMode": mode });
@@ -387,7 +394,7 @@ mod tests {
         changed["nativeModeRequest"]["generation"] = newer.clone().into();
         store.put("nodes", changed).await.unwrap();
         store
-            .patch_run(&run_id, json!({ "nativeModeInterruption": newer }))
+            .update_run_boundary(&run_id, json!({ "nativeModeInterruption": newer }))
             .await
             .unwrap();
         let placement = json!({ "nodeId": node_id, "nativeMode": mode });

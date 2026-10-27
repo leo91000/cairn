@@ -1,3 +1,4 @@
+use crate::common::run_fixture::DbRunFixture;
 use common::MissionFixture;
 
 mod common;
@@ -221,7 +222,13 @@ async fn cached_resume_drains_backlog_without_waiting_between_live_batches() {
     let f = Fixture::new().await;
     f.service
         .store
-        .patch_run(&f.run, json!({ "trigger": "chat" }))
+        .change_run(
+            &f.run,
+            cairn_installation::runs::RunChanges {
+                trigger: Some(("chat").to_owned()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let mut chat = f.service.chat_create(json!({})).await.unwrap();
@@ -290,7 +297,13 @@ async fn following_viewer_resumes_a_long_backlog_on_the_recent_window() {
     let f = Fixture::new().await;
     f.service
         .store
-        .patch_run(&f.run, json!({ "trigger": "chat" }))
+        .change_run(
+            &f.run,
+            cairn_installation::runs::RunChanges {
+                trigger: Some(("chat").to_owned()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let mut chat = f.service.chat_create(json!({})).await.unwrap();
@@ -387,7 +400,13 @@ async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
     let f = Fixture::new().await;
     f.service
         .store
-        .patch_run(&f.run, json!({ "trigger": "chat" }))
+        .change_run(
+            &f.run,
+            cairn_installation::runs::RunChanges {
+                trigger: Some(("chat").to_owned()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let mut chat = f.service.chat_create(json!({})).await.unwrap();
@@ -652,9 +671,13 @@ async fn metadata_shutdown_and_invalid_requests() {
     stream.batch().await;
     f.service
         .store
-        .patch_run(
+        .change_run(
             &f.run,
-            json!({ "status": RunStatus::Succeeded, "result": "Done" }),
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Succeeded),
+                boundary: Some(serde_json::json!({"result": "Done"})),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -720,7 +743,14 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
         .store
         .set(
             &format!("chat-question:{chat_id}:question"),
-            json!({ "id": "question", "chatId": chat_id, "runId": f.run, "blocking": false, "fields": [], "status": "pending" }),
+            json!({
+                "id": "question",
+                "chatId": chat_id,
+                "runId": f.run,
+                "blocking": false,
+                "fields": [],
+                "status": "pending",
+            }),
             None,
         )
         .await
@@ -1162,7 +1192,7 @@ async fn profile_conversation_opening() {
                     run["trigger"] = "chat".into();
                     run["summary"] = summary.clone().into();
                     run["finishedAt"] = 1.into();
-                    db.add_run(&run, None)?;
+                    db.add_run_fixture(&run, None)?;
                     id
                 };
                 let mut chat = chat;
@@ -1179,9 +1209,13 @@ async fn profile_conversation_opening() {
                 db.event(&heavy_run, "chat.user", &format!("Question {turn}"), None)?;
                 for call in 0..25 {
                     let item = format!("tool-{turn}-{call}");
-                    let started = json!({ "item": { "id": item, "type": "command_execution", "command": "pnpm test", "status": "in_progress" } });
+                    let started = json!({
+                        "item": { "id": item, "type": "command_execution", "command": "pnpm test", "status": "in_progress" },
+                    });
                     db.event(&heavy_run, "item.started", "pnpm test", Some(&started))?;
-                    let completed = json!({ "item": { "id": item, "type": "command_execution", "command": "pnpm test", "aggregated_output": output, "exit_code": 0, "status": "completed" } });
+                    let completed = json!({
+                        "item": { "id": item, "type": "command_execution", "command": "pnpm test", "aggregated_output": output, "exit_code": 0, "status": "completed" },
+                    });
                     db.event(&heavy_run, "item.completed", "pnpm test", Some(&completed))?;
                 }
                 // The last answer streams as many small snapshots, as a long reply does.

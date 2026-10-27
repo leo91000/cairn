@@ -22,6 +22,6 @@ data class AgentSettings(
         require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
         require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(reasoning))
         require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(speed))
-        require(timeoutMinutes <= 720)
+        require(timeoutMinutes in 0..720)
     }
 }

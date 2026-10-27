@@ -174,7 +174,7 @@ async fn pressure(s: &Service) -> Result<()> {
 }
 
 fn candidate(
-    db: &mut Db<'_>,
+    db: &Db<'_>,
     run: &str,
     cutoff: i64,
     expected_node: Option<&str>,
@@ -260,6 +260,27 @@ fn candidate(
         "generation": point["diskGeneration"], "grantId": current["storage"]["grantId"],
     });
     Ok(Some((node, point, expected)))
+}
+
+/// A conservative lower bound: fresh exclusive backing of inactive disks whose
+/// current generation is acknowledged. The controller rechecks before deletion.
+pub(super) fn reclaimable_bytes(db: &Db<'_>, node: &Value) -> Result<u64> {
+    let Some(retained) = node["diskCapacity"]["retainedBytes"].as_object() else {
+        return Ok(0);
+    };
+    let mut bytes = 0u64;
+    for (run, backing) in retained {
+        if db
+            .run(run)?
+            .is_none_or(|run| run["storage"]["dirtyBytes"] != 0)
+        {
+            continue;
+        }
+        if candidate(db, run, now(), Some(text(node, "id")))?.is_some() {
+            bytes = bytes.saturating_add(backing.as_u64().unwrap_or(0));
+        }
+    }
+    Ok(bytes)
 }
 
 pub(crate) async fn evict_idle(s: &Service, run: &str, time: i64) -> Result<bool> {
@@ -365,12 +386,15 @@ async fn evict_clean(
                     .into();
                 db.put("node-volumes", &volume)?;
             }
-            db.patch_run(&run, &json!({ "storage": status }))?;
+            db.update_run_boundary(&run, &json!({ "storage": status }))?;
             Ok(())
         })
         .await?;
     Ok(true)
 }
+
+#[cfg(test)]
+use crate::run_fixture::DbRunFixture;
 
 #[cfg(test)]
 mod tests {
@@ -387,7 +411,7 @@ mod tests {
         db.put("nodes", &json!({
             "id": node, "lastSeen": now(), "capabilities": { "backend": "native", "ublk": true },
         }))?;
-        db.add_run(&json!({
+        db.add_run_fixture(&json!({
             "id": run, "taskId": id(), "createdAt": time - IDLE_MS, "finishedAt": time - IDLE_MS,
             "status": "succeeded", "executionBackend": "native", "recoveryPending": false,
             "nodeState": null, "moveRequest": null,
@@ -451,15 +475,20 @@ mod tests {
             .transaction(|db| {
                 let (run, time) = (id(), now());
                 records(db, &run, time)?;
-                db.patch_run(
+                db.change_run(
                     &run,
-                    &json!({ "status": "queued", "finishedAt": null, "recoveryPending": true }),
+                    crate::runs::RunChanges {
+                        status: Some(cairn_contracts::RunStatus::Queued),
+                        finished_at: Some(None),
+                        recovery_pending: Some(true),
+                        ..Default::default()
+                    },
                 )?;
                 let node = super::super::LOCAL_NODE_ID;
                 assert_eq!(pressure_page(db, node)?[0]["id"], run);
                 assert!(candidate(db, &run, time, None)?.is_none());
                 assert!(candidate(db, &run, time, Some(node))?.is_some());
-                db.patch_run(&run, &json!({ "backup": { "status": "saving" } }))?;
+                db.update_run_boundary(&run, &json!({ "backup": { "status": "saving" } }))?;
                 assert!(candidate(db, &run, time, Some(node))?.is_none());
                 Ok(())
             })
@@ -502,11 +531,17 @@ mod tests {
                 for index in 0..33 {
                     let run = id();
                     records(db, &run, time)?;
-                    db.patch_run(&run, &json!({ "finishedAt": time - IDLE_MS + index }))?;
+                    db.change_run(
+                        &run,
+                        crate::runs::RunChanges {
+                            finished_at: Some(Some(time - IDLE_MS + index)),
+                            ..Default::default()
+                        },
+                    )?;
                     if index < 32 {
                         let mut backup = db.run(&run)?.unwrap()["backup"].clone();
                         backup["status"] = "error".into();
-                        db.patch_run(&run, &json!({ "backup": backup }))?;
+                        db.update_run_boundary(&run, &json!({ "backup": backup }))?;
                     } else {
                         final_run = run;
                     }
@@ -546,6 +581,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn storage_pressure_accounting_distinguishes_reclaimable_and_unpublished_data() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let run = id();
+                let time = now();
+                records(db, &run, time)?;
+                let node_id = super::super::LOCAL_NODE_ID;
+                let mut storage = db.run(&run)?.unwrap()["storage"].clone();
+                storage["dirtyBytes"] = 0.into();
+                db.update_run_boundary(&run, &json!({ "nodeId": node_id, "storage": storage }))?;
+                let mut node = db.get("nodes", node_id)?.unwrap();
+                node["limits"] = json!({ "diskMiB": 102400 });
+                node["diskCapacity"] = json!({
+                    "protocol": 1, "capturedAt": time, "usedBytes": 10000,
+                    "freeBytes": 100000, "ownedBytes": {}, "requests": [],
+                    "retainedBytes": { &run: 2048 }
+                });
+                let accounting = super::super::disk_capacity::accounting(db, &node, &[])?;
+                assert_eq!(accounting["reclaimableBytes"], 2048);
+                assert_eq!(accounting["unsynchronizedBytes"], 0);
+                let mut storage = db.run(&run)?.unwrap()["storage"].clone();
+                storage["dirtyBytes"] = 4096.into();
+                db.update_run_boundary(&run, &json!({ "storage": storage }))?;
+                let accounting = super::super::disk_capacity::accounting(db, &node, &[])?;
+                assert_eq!(accounting["reclaimableBytes"], 0);
+                assert_eq!(accounting["unsynchronizedBytes"], 4096);
+                node["diskCapacity"]["capturedAt"] = (time - 31_000).into();
+                assert!(super::super::disk_capacity::accounting(db, &node, &[])?.is_null());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn pressure_can_reclaim_recent_clean_cache_but_never_unpublished_or_owned_work() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
@@ -553,7 +625,13 @@ mod tests {
             .transaction(|db| {
                 let (run, time) = (id(), now());
                 records(db, &run, time)?;
-                db.patch_run(&run, &json!({ "finishedAt": time }))?;
+                db.change_run(
+                    &run,
+                    crate::runs::RunChanges {
+                        finished_at: Some(Some(time)),
+                        ..Default::default()
+                    },
+                )?;
                 let saved = db.kv(&checkpoint::key(&run))?.unwrap();
                 let mut attempt = db.get("node-attempts", text(&saved, "runnerId"))?.unwrap();
                 attempt["releasedAt"] = time.into();
@@ -565,7 +643,7 @@ mod tests {
                 assert!(candidate(db, &run, time, None)?.is_none());
                 attempt["released"] = true.into();
                 db.put("node-attempts", &attempt)?;
-                db.patch_run(&run, &json!({ "backup": { "requestedRevision": 3 } }))?;
+                db.update_run_boundary(&run, &json!({ "backup": { "requestedRevision": 3 } }))?;
                 assert!(candidate(db, &run, time, None)?.is_none());
                 Ok(())
             })
@@ -583,15 +661,48 @@ mod tests {
             assert!(candidate(db, &run, time - IDLE_MS - 1, None)?.is_none());
             assert!(candidate(db, &run, time - IDLE_MS, None)?.is_some());
             let original = db.run(&run)?.unwrap();
-            for patch in [
-                json!({ "status": "queued" }), json!({ "status": "running" }),
-                json!({ "recoveryPending": true }), json!({ "moveRequest": {} }), json!({ "nodeState": "restoring" }),
-                json!({ "backup": { "status": "error" } }), json!({ "backup": { "status": "saving" } }),
-                json!({ "backup": { "status": "ready", "requestedRevision": 3, "acknowledgedRevision": 2 } }),
+            for change in [
+                crate::runs::RunChanges {
+                    status: Some(RunStatus::Queued),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    status: Some(RunStatus::Running),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    recovery_pending: Some(true),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    boundary: Some(json!({ "moveRequest": {} })),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    boundary: Some(json!({ "nodeState": "restoring" })),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    boundary: Some(json!({ "backup": { "status": "error" } })),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    boundary: Some(json!({ "backup": { "status": "saving" } })),
+                    ..Default::default()
+                },
+                crate::runs::RunChanges {
+                    boundary: Some(json!({ "backup": { "status": "ready", "requestedRevision": 3, "acknowledgedRevision": 2 } })),
+                    ..Default::default()
+                },
             ] {
-                db.patch_run(&run, &patch)?;
-                assert!(candidate(db, &run, time - IDLE_MS, None)?.is_none(), "{patch}");
-                db.patch_run(&run, &original)?;
+                db.change_run(&run, change)?;
+                assert!(candidate(db, &run, time - IDLE_MS, None)?.is_none());
+                db.change_run(&run, crate::runs::RunChanges {
+                    status: Some(RunStatus::Succeeded),
+                    recovery_pending: Some(false),
+                    ..Default::default()
+                })?;
+                db.update_run_boundary(&run, &json!({ "moveRequest": null, "nodeState": null, "backup": original["backup"] }))?;
             }
             let saved = db.kv(&checkpoint::key(&run))?.unwrap();
             let mut execution = db.get("node-attempts", text(&saved, "runnerId"))?.unwrap();

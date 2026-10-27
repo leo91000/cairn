@@ -63,7 +63,7 @@ describe('missions', () => {
 
   it('filters and orders missions: running, then review, then the next scheduled, then by name', () => {
     const tasks = [task('zeta'), task('later', { cron: '0 9 * * 1', nextRun: 2000 }), task('sooner', { cron: '0 9 * * 1', nextRun: 1000 }), task('broken'), task('busy'), task('old', { archived: true, enabled: false })]
-    const latest = new Map<string, Pick<RunListItem, 'status' | 'outcome'>>([['busy', { status: 'running' }], ['broken', { status: 'failed' }]])
+    const latest = new Map<string, Pick<RunListItem, 'status' | 'outcome'>>([['busy', { status: 'running', outcome: null }], ['broken', { status: 'failed', outcome: null }]])
     expect(missionOrder(tasks.filter(item => missionFilter(item, 'all')), latest).map(item => item.id)).toEqual(['busy', 'broken', 'sooner', 'later', 'zeta'])
     expect(tasks.filter(item => missionFilter(item, 'scheduled')).map(item => item.id)).toEqual(['later', 'sooner'])
     expect(tasks.filter(item => missionFilter(item, 'archived')).map(item => item.id)).toEqual(['old'])
@@ -75,8 +75,8 @@ describe('missions', () => {
 it('keeps waiting missions active and out of the finished success rate', () => {
   const missions = [task('done'), task('waiting')]
   const latest = new Map<string, Pick<RunListItem, 'status' | 'outcome'>>([
-    ['done', { status: 'succeeded' }],
-    ['waiting', { status: 'waiting' }],
+    ['done', { status: 'succeeded', outcome: null }],
+    ['waiting', { status: 'waiting', outcome: null }],
   ])
   expect(missionOrder(missions, latest).map(task => task.id)).toEqual(['waiting', 'done'])
   expect(successRate([{ status: 'waiting' }])).toBeNull()

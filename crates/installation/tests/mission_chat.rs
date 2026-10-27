@@ -1,3 +1,5 @@
+use crate::common::run_fixture::DbRunFixture;
+use crate::common::run_fixture::RunFixture;
 use common::MissionFixture;
 
 mod common;
@@ -36,7 +38,7 @@ async fn fixture() -> (tempfile::TempDir, std::sync::Arc<Service>, Value, Value)
     run["workspace"] = "/saved/workspace".into();
     let saved = run.clone();
     service.store.transaction(move |db| {
-        db.add_run(&saved, None)?;
+        db.add_run_fixture(&saved, None)?;
         db.event(text(&saved, "id"), "item.completed", "Deployment reviewed", Some(&json!({
             "item": { "id": "original-answer", "type": "agent_message", "text": "Deployment reviewed" },
         })))?;
@@ -148,13 +150,15 @@ async fn mission_conversion_keeps_delegated_work_attached_to_its_requester() {
     service
         .store
         .transaction(move |db| {
-            db.add_run(&saved_child, None)?;
-            db.add_run(&saved_unrelated, None)?;
+            db.add_run_fixture(&saved_child, None)?;
+            db.add_run_fixture(&saved_unrelated, None)?;
             Ok(())
         })
         .await
         .unwrap();
 
+    child = service.store.run(text(&child, "id")).await.unwrap();
+    unrelated = service.store.run(text(&unrelated, "id")).await.unwrap();
     let chat = service.chat_from_run(run_id).await.unwrap();
     service.chat_from_run(run_id).await.unwrap();
     let delegated = service.store.run(text(&child, "id")).await.unwrap();
@@ -240,7 +244,11 @@ async fn mission_conversion_rejects_unavailable_and_unfinished_conversations_ato
     ] {
         let (_root, service, _task, run) = fixture().await;
         let run_id = text(&run, "id");
-        let original = service.store.patch_run(run_id, patch).await.unwrap();
+        let original = service
+            .store
+            .change_run_fixture(run_id, patch)
+            .await
+            .unwrap();
         assert!(service.chat_from_run(run_id).await.is_err());
         assert!(service.chat_list().await.unwrap().is_empty());
         assert_eq!(service.store.run(run_id).await.unwrap(), original);

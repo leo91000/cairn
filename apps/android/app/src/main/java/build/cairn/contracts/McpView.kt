@@ -31,8 +31,8 @@ data class McpView(
 ) {
     init {
         require(Regex("^(none|bearer|oauth)\$").containsMatchIn(auth))
-        require(createdAt <= 9007199254740991L)
-        require(revision <= 9007199254740991L)
+        require(createdAt in 0L..9007199254740991L)
+        require(revision in 0L..9007199254740991L)
         require(Regex("^(untested|connected|needs-auth|error)\$").containsMatchIn(state))
         require(Regex("^(http|stdio)\$").containsMatchIn(transport))
     }

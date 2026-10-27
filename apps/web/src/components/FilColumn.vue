@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { ChatView } from '../../../../packages/contracts/chats'
+
 import type { FilItem } from '../signal'
 import {
   computed,
@@ -9,6 +10,7 @@ import {
   watch,
 } from 'vue'
 import { useRouter } from 'vue-router'
+import { runMission as queueMission } from '../../../../packages/contracts/generated/runMission'
 import { setMissionState } from '../../../../packages/contracts/generated/setMissionState'
 import {
   api,
@@ -174,7 +176,7 @@ function open(item: FilItem) {
 
 async function runAgain(item: FilItem) {
   try {
-    await api(`/tasks/${item.taskId}/run`, { method: 'POST' })
+    await queueMission(api, { taskId: item.taskId! })
     notify(`${item.title} started`)
     await refreshMissionRuns()
   }

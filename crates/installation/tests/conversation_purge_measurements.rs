@@ -1,4 +1,6 @@
 //! Opt-in local C5 experiment; no production cleanup policy or latency gate.
+use crate::common::run_fixture::DbRunFixture;
+
 mod common;
 
 use cairn_installation::{config::id, service::Service, store::Store};
@@ -70,7 +72,7 @@ async fn populate(service: &Service, count: usize) -> Value {
                 let artifact = chat.as_object_mut().unwrap().remove("artifactId").unwrap();
                 let cid = chat["id"].as_str().unwrap();
                 let run = chat["runId"].as_str().unwrap();
-                db.add_run(
+                db.add_run_fixture(
                     &json!({
                         "id": run,
                         "taskId": cid,

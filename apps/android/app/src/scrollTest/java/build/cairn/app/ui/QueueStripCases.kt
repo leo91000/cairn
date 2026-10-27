@@ -54,7 +54,13 @@ abstract class QueueStripCases {
                     agentName = "Agent principal",
                     status = "running",
                     runId = "run",
-                    run = Run("run", status = "running", trigger = "chat"),
+                    run =
+                        Run(
+                            id = "run",
+                            status = "running",
+                            trigger = "chat",
+                            taskId = "",
+                        ),
                     messages = messages,
                     updatedAt = System.currentTimeMillis(),
                 )

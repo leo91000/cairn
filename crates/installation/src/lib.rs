@@ -62,6 +62,7 @@ pub mod run_output;
 pub mod run_retry;
 pub mod run_status;
 pub mod runner;
+pub mod runs;
 pub mod service;
 pub mod skills;
 pub mod storage;
@@ -86,3 +87,7 @@ pub(crate) mod agent_fixture;
 #[cfg(test)]
 #[path = "../tests/common/mission_fixture.rs"]
 pub(crate) mod mission_fixture;
+
+#[cfg(test)]
+#[path = "../tests/common/run_fixture.rs"]
+pub(crate) mod run_fixture;

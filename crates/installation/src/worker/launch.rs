@@ -17,7 +17,6 @@ use crate::{
     service::{Service, covers, policy},
     skills::{atomic_write, private_dir},
     storage::policy::Policy,
-    store::merge,
     supervisor::Supervised,
     validation::text,
 };
@@ -220,21 +219,25 @@ impl Execution<'_> {
             Some(account) => s.accounts.get(s, &account.account_id).await?["name"].clone(),
             None => Value::Null,
         };
-        let mut patch = json!({
-            "status": RunStatus::Running,
-            "startedAt": self.run["startedAt"].as_i64().unwrap_or_else(now),
-            "finishedAt": null,
-            "accountWaitReason": null,
-            "accountRequired": null,
-            "accountId": self.account.as_ref().map(|account| &account.account_id),
-            "accountName": account_name,
-        });
-        if self.run["retry"].is_object() {
-            let mut retry = self.run["retry"].clone();
-            retry["nextAttemptAt"] = Value::Null;
-            patch["retry"] = retry;
+        let mut patch = crate::runs::RunChanges {
+            status: Some(RunStatus::Running),
+            started_at: Some(Some(self.run["startedAt"].as_i64().unwrap_or_else(now))),
+            finished_at: Some(None),
+            account_wait_reason: Some(None),
+            account_required: Some(None),
+            account_id: Some(
+                self.account
+                    .as_ref()
+                    .map(|account| account.account_id.clone()),
+            ),
+            account_name: Some(account_name.as_str().map(str::to_owned)),
+            ..Default::default()
+        };
+        if let Some(mut retry) = s.store.run_state(&self.id).await?.retry {
+            retry.next_attempt_at = None;
+            patch.retry = Some(Some(retry));
         }
-        s.store.patch_run(&self.id, patch).await?;
+        s.store.change_run(&self.id, patch).await?;
         if let Some(name) = account_name.as_str() {
             let message = format!("Using {} account: {name}", self.provider.label());
             s.store.event(&self.id, "status", &message, None).await?;
@@ -267,8 +270,16 @@ impl Execution<'_> {
         }
         let current_policy = policy(&current);
         self.run["snapshot"]["agent"]["access"]["nodes"] = current_policy["nodes"].clone();
-        let patch = json!({ "snapshot": self.run["snapshot"] });
-        s.store.patch_run(&self.id, patch).await?;
+        let snapshot = serde_json::from_value(self.run["snapshot"].clone())?;
+        s.store
+            .change_run(
+                &self.id,
+                crate::runs::RunChanges {
+                    snapshot: Some(snapshot),
+                    ..Default::default()
+                },
+            )
+            .await?;
         Ok(())
     }
 
@@ -284,14 +295,17 @@ impl Execution<'_> {
         }
         timing.next("account_home");
         let state_home = self.prepare_state_home(&prepared).await?;
-        let patch = json!({
-            "workspace": prepared["cwd"],
-            "workspaces": prepared["workspaces"],
-            "isolated": prepared["isolated"],
-            "executionBackend": prepared["backend"],
-        });
-        merge(self.run, &patch);
-        s.store.patch_run(&self.id, patch).await?;
+        let patch = crate::runs::RunChanges {
+            workspace: Some(serde_json::from_value(prepared["cwd"].clone())?),
+            boundary: Some(serde_json::json!({
+                "workspaces": prepared["workspaces"],
+                "isolated": prepared["isolated"],
+                "executionBackend": prepared["backend"],
+            })),
+            ..Default::default()
+        };
+        s.store.change_run(&self.id, patch).await?;
+        *self.run = s.store.run(&self.id).await?;
         timing.next("environment");
         let mut env = self
             .environment(prepared["isolated"] == true, &state_home)
@@ -442,12 +456,13 @@ impl Execution<'_> {
             ).await?;
             return Ok(None);
         };
-        let patch = json!({
-            "sessionId": session,
-            "resumeCount": self.run["resumeCount"].as_u64().unwrap_or(0) + 1,
-            "resumeAvailable": true,
-        });
-        s.store.patch_run(&self.id, patch).await?;
+        let patch = crate::runs::RunChanges {
+            session_id: Some(Some((session).to_owned())),
+            resume_count: Some((self.run["resumeCount"].as_u64().unwrap_or(0) + 1) as u32),
+            resume_available: Some(true),
+            ..Default::default()
+        };
+        s.store.change_run(&self.id, patch).await?;
         s.store
             .event(
                 &self.id,
@@ -710,7 +725,7 @@ impl Execution<'_> {
             "nodeState": null,
             "movementError": null,
         });
-        s.store.patch_run(&self.id, patch).await?;
+        s.store.update_run_boundary(&self.id, patch).await?;
         let runner_token = execution::secret(&s.config.data_dir, "runner-secret").await?;
         workspace.env.insert("RUNNER_URL".into(), runner_url);
         workspace.env.insert("RUNNER_TOKEN".into(), runner_token);
@@ -776,7 +791,7 @@ impl Execution<'_> {
         let storage_policy = Policy::for_node(&node_storage)?;
         let grant = nodes::disk_grants::new_disk(s, self.run, storage_node).await?;
         s.store
-            .patch_run(&self.id, json!({ "storage": { "mode": "on-demand" } }))
+            .update_run_boundary(&self.id, json!({ "storage": { "mode": "on-demand" } }))
             .await?;
         placement::renew_local(s, &self.id).await?;
         let resume_workspace = resume.is_some()
@@ -863,7 +878,7 @@ impl Execution<'_> {
         if self.run["chatExecution"].is_object() {
             self.run["chatExecution"]["recovery"] = true.into();
             let patch = json!({ "chatExecution": self.run["chatExecution"] });
-            s.store.patch_run(&self.id, patch).await?;
+            s.store.update_run_boundary(&self.id, patch).await?;
         }
         self.checkpoint
             .update(|c| {
@@ -1006,12 +1021,16 @@ impl Execution<'_> {
             .exhausted(s, &previous.account_id, &model)
             .await?;
         s.accounts.release(&previous).await?;
-        let patch = json!({
-            "accountWaitReason": format!("Usage exhausted. Waiting for an available {label} account to resume."),
-            "accountId": null,
-            "accountName": null,
-        });
-        s.store.patch_run(&self.id, patch).await?;
+        let patch = crate::runs::RunChanges {
+            account_wait_reason: Some(Some(
+                (format!("Usage exhausted. Waiting for an available {label} account to resume."))
+                    .to_owned(),
+            )),
+            account_id: Some(None),
+            account_name: Some(None),
+            ..Default::default()
+        };
+        s.store.change_run(&self.id, patch).await?;
         s.store
             .event(
                 &self.id,
@@ -1032,12 +1051,13 @@ impl Execution<'_> {
         self.sensitive
             .extend(s.accounts.redactions(s, account).await?);
         let name = s.accounts.get(s, &account.account_id).await?["name"].clone();
-        let patch = json!({
-            "accountWaitReason": null,
-            "accountId": account.account_id,
-            "accountName": name,
-        });
-        s.store.patch_run(&self.id, patch).await?;
+        let patch = crate::runs::RunChanges {
+            account_wait_reason: Some(None),
+            account_id: Some(Some((account.account_id).to_owned())),
+            account_name: Some(name.as_str().map(str::to_owned)),
+            ..Default::default()
+        };
+        s.store.change_run(&self.id, patch).await?;
         let message = format!(
             "Resuming saved session with {label} account: {}",
             name.as_str().unwrap_or("")
@@ -1118,15 +1138,17 @@ impl Execution<'_> {
         let details = error
             .as_ref()
             .map(|message| json!({ "error": { "message": message } }));
-        let mut patch = json!({
-            "status": status,
-            "finishedAt": now(),
-            "resumeAvailable": resume_available,
-            "summary": summary,
-            "error": error,
-        });
+        let mut patch = crate::runs::RunChanges {
+            status: Some(status),
+            finished_at: Some(Some(now())),
+            resume_available: Some(resume_available),
+            summary: Some((summary).to_owned()),
+            error: Some(error.clone()),
+            boundary: Some(serde_json::json!({})),
+            ..Default::default()
+        };
         if status == RunStatus::Succeeded {
-            patch["retry"] = Value::Null;
+            patch.retry = Some(None);
         }
         let id = self.id.clone();
         let status = s.store.transaction(move |db| {
@@ -1139,18 +1161,18 @@ impl Execution<'_> {
                 }
                 RunStatus::Waiting
             } else { status };
-            patch["status"] = status.into();
+            patch.status = Some(status);
             if status == RunStatus::Succeeded {
-                crate::chats::keep_reply_after_compaction(&current, &mut patch);
+                crate::chats::keep_reply_after_compaction(&current, &mut patch)?;
             }
             if status == RunStatus::Waiting {
-                patch["finishedAt"] = Value::Null;
-                patch["resumeAvailable"] = true.into();
-                patch["outcome"] = Value::Null;
+                patch.finished_at = Some(None);
+                patch.resume_available = Some(true);
+                patch.boundary.as_mut().unwrap()["outcome"] = Value::Null;
             } else if current["trigger"] != "chat" {
-                patch["wakeup"] = Value::Null;
+                patch.boundary.as_mut().unwrap()["wakeup"] = Value::Null;
             }
-            db.patch_run(&id, &patch)?;
+            db.change_run(&id, patch)?;
             Ok(status)
         }).await?;
         let details = details.filter(|_| status == RunStatus::Failed);
