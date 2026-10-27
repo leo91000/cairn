@@ -55,8 +55,7 @@ pub fn summary(connection: &Connection) -> Value {
 /// it enabled and still granting the agent.
 async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection> {
     let scope = if let Scope::Managed(inner, authority) = scope {
-        let authority = authority.clone();
-        s.store.read(move |db| authority.authorize(db)).await?;
+        authority.recheck(s).await?;
         inner.as_ref()
     } else {
         scope
@@ -153,7 +152,7 @@ pub async fn call(
     {
         current(s, scope, args).await?;
         if let Some(authority) = management {
-            s.store.read(move |db| authority.authorize(db)).await?;
+            authority.recheck(s).await?;
         }
     }
     Ok(result)

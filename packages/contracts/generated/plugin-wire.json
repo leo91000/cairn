@@ -123,11 +123,14 @@
       "kind": "setup",
       "managementUrl": null,
       "manifest": {
-        "id": "fixture"
+        "apiVersion": 2,
+        "capabilities": [],
+        "description": "",
+        "id": "fixture",
+        "name": "Fixture",
+        "version": "1.0.0"
       },
-      "setup": {
-        "steps": []
-      }
+      "setup": {}
     },
     {
       "instance": {

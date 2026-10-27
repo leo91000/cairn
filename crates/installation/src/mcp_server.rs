@@ -318,7 +318,7 @@ async fn respond(s: &Arc<Service>, request: Request) -> Result<Response> {
                 s,
                 &endpoint,
                 &bearer,
-                scopes.as_deref(),
+                input.identity.as_ref(),
                 method,
                 &body["params"],
                 modern,
@@ -380,7 +380,7 @@ async fn dispatch(
     s: &Arc<Service>,
     endpoint: &Endpoint,
     bearer: &str,
-    scopes: Option<&[String]>,
+    identity: Option<&crate::auth::InstallationIdentity>,
     method: &str,
     params: &Value,
     modern: bool,
@@ -427,7 +427,7 @@ async fn dispatch(
         _ => match endpoint {
             Endpoint::Workspace => crate::project_workspaces::rpc(s, bearer, method, params).await,
             Endpoint::Gateway(id) => proxy(s, id, bearer, method, params.clone()).await,
-            Endpoint::Management => management(s, scopes, method, params).await,
+            Endpoint::Management => management(s, identity, method, params).await,
             Endpoint::Installation => crate::installation_mcp::rpc(s, bearer, method, params).await,
         },
     }
@@ -435,7 +435,7 @@ async fn dispatch(
 
 async fn management(
     s: &Arc<Service>,
-    scopes: Option<&[String]>,
+    identity: Option<&crate::auth::InstallationIdentity>,
     method: &str,
     params: &Value,
 ) -> Result<Value> {
@@ -449,7 +449,7 @@ async fn management(
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            call(s, scopes, text(params, "name"), args).await
+            call(s, identity, text(params, "name"), args).await
         }
         _ => Err(Error::not_found("Method not found")),
     }
@@ -518,6 +518,11 @@ pub(crate) fn operations() -> Vec<Value> {
             .map(crate::capabilities::RunOperation::descriptor),
     );
     operations.extend(
+        crate::capabilities::PLUGIN_PACKAGE_OPERATIONS
+            .iter()
+            .map(crate::capabilities::plugin_packages::PluginPackageOperation::descriptor),
+    );
+    operations.extend(
         crate::capabilities::PROJECT_OPERATIONS
             .iter()
             .map(crate::capabilities::ProjectOperation::descriptor),
@@ -536,15 +541,19 @@ pub(crate) fn catalog() -> Vec<Value> {
 
 async fn call(
     s: &Arc<Service>,
-    scopes: Option<&[String]>,
+    identity: Option<&crate::auth::InstallationIdentity>,
     name: &str,
     args: Value,
 ) -> Result<Value> {
-    let scopes =
-        scopes.ok_or_else(|| Error::unauthorized("A verified beacon MCP grant is required."))?;
+    let scopes = identity
+        .and_then(|identity| identity.mcp_scopes.as_ref())
+        .ok_or_else(|| Error::unauthorized("A verified beacon MCP grant is required."))?;
     code_mode::call(
         s,
-        code_mode::Authorization::Public(scopes.to_vec()),
+        code_mode::Authorization::Public(
+            scopes.to_vec(),
+            identity.and_then(|identity| identity.mcp_credential_digest.clone()),
+        ),
         name,
         args,
     )
@@ -554,15 +563,31 @@ async fn call(
 pub(crate) async fn operation(
     s: &Arc<Service>,
     scopes: &[String],
+    credential: Option<&str>,
     name: &str,
     args: Value,
 ) -> Result<Value> {
+    if let Some(operation) = crate::capabilities::plugin_package_operation(name) {
+        return operation
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
     if name == "manage_plugin" {
         return crate::capabilities::MANAGE_PLUGIN
             .invoke(
                 s,
                 args,
-                crate::capabilities::ResumeContext::Public(scopes.to_vec()),
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
             )
             .await;
     }
@@ -571,7 +596,10 @@ pub(crate) async fn operation(
             .invoke(
                 s,
                 args,
-                crate::capabilities::ResumeContext::Public(scopes.to_vec()),
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
             )
             .await;
     }
@@ -580,7 +608,10 @@ pub(crate) async fn operation(
             .invoke(
                 s,
                 args,
-                crate::capabilities::ResumeContext::Public(scopes.to_vec()),
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
                 None,
             )
             .await;
@@ -590,7 +621,10 @@ pub(crate) async fn operation(
             .invoke(
                 s,
                 args,
-                crate::capabilities::ResumeContext::Public(scopes.to_vec()),
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
             )
             .await;
     }
@@ -599,7 +633,10 @@ pub(crate) async fn operation(
             .invoke(
                 s,
                 args,
-                crate::capabilities::ResumeContext::Public(scopes.to_vec()),
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
             )
             .await;
     }
@@ -608,13 +645,16 @@ pub(crate) async fn operation(
             .invoke(
                 s,
                 args,
-                crate::capabilities::ResumeContext::Public(scopes.to_vec()),
+                crate::capabilities::ResumeContext::Public(scopes.to_vec(), credential.map(str::to_owned)),
             )
             .await;
     }
     if name == cairn_contracts::RESUME_RUN_ID {
         let input = crate::capabilities::RESUME_RUN.decode(args)?;
-        let context = crate::capabilities::ResumeContext::Public(scopes.to_vec());
+        let context = crate::capabilities::ResumeContext::Public(
+            scopes.to_vec(),
+            credential.map(str::to_owned),
+        );
         let output = crate::capabilities::RESUME_RUN
             .invoke(s, input, context)
             .await?;
@@ -817,12 +857,6 @@ pub(crate) async fn invoke(
         }
         "list_skills" | "read_skill" | "save_skill" | "edit_skill_files" => {
             skills_tool(s, name, &args, bearer).await
-        }
-        "list_plugins" => {
-            if let Some(bearer) = bearer {
-                crate::installation_mcp::authorize(s, bearer).await?;
-            }
-            crate::plugins::management::catalog(s).await
         }
 
         _ => Err(Error::not_found("Unknown tool")),

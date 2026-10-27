@@ -40,33 +40,49 @@ class PluginProjectPickerTest {
             packages =
                 listOf(
                     PluginEntry(
-                        "forge",
+                        id = "forge",
                         active = "1.0.0",
                         manifest =
                             PluginManifest(
                                 id = "forge",
                                 name = "Forge",
-                                instances = PluginInstances("Account", "Accounts"),
+                                instances =
+                                    PluginInstances(singular = "Account", plural = "Accounts"),
                                 projectSources =
                                     listOf(
                                         PluginProjectSource(
-                                            "repositories",
-                                            "Repositories",
-                                            "Repositories this account can read.",
+                                            name = "repositories",
+                                            title = "Repositories",
+                                            description = "Repositories this account can read.",
                                         )
                                     ),
+                                version = "1.0.0",
+                                apiVersion = 2,
+                                capabilities = emptyList(),
                             ),
+                        builtin = false,
+                        status = "active",
+                        setup = null,
+                        versions = emptyList(),
                     ),
                     // Not approved: its sources are not offered.
                     PluginEntry(
-                        "pending",
+                        id = "pending",
                         status = "needs_approval",
                         manifest =
                             PluginManifest(
                                 id = "pending",
                                 name = "Pending",
-                                projectSources = listOf(PluginProjectSource("all", "All")),
+                                projectSources =
+                                    listOf(PluginProjectSource(name = "all", title = "All")),
+                                version = "1.0.0",
+                                apiVersion = 2,
+                                capabilities = emptyList(),
                             ),
+                        builtin = false,
+                        active = null,
+                        setup = null,
+                        versions = emptyList(),
                     ),
                 ),
             connections =
@@ -91,6 +107,7 @@ class PluginProjectPickerTest {
                         enabled = true,
                     ),
                 ),
+            capabilities = emptyList(),
         )
 
     @Test

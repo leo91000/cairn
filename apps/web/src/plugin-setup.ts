@@ -1,57 +1,22 @@
+import type { SetupEffort } from '../../../packages/contracts/generated/typescript/SetupEffort'
+import type { SetupPreset } from '../../../packages/contracts/generated/typescript/SetupPreset'
+import type { SetupRisk } from '../../../packages/contracts/generated/typescript/SetupRisk'
+import type { SetupStep } from '../../../packages/contracts/generated/typescript/SetupStep'
 import type {
   PluginConnection,
   PluginEntry,
   SettingField,
 } from './plugins'
 
-/** What connecting an instance takes: a sign-in, a pasted token, or an app registered first. */
-export type SetupEffort = 'signin' | 'token' | 'app'
-export type SetupRisk = 'low' | 'medium' | 'high'
-
-/** Something the owner does on the service's site, ticked off in the assistant. */
-export interface SetupTask {
-  title: string
-  text?: string
-  url?: string
-  link?: string
-  /** A value Cairn shows for the owner to copy into the service. */
-  copy?: 'callbackUrl'
-}
-
-/** A named combination of a step's switches, e.g. "Read only". */
-export interface SetupPreset {
-  id: string
-  title: string
-  description?: string
-  risk?: SetupRisk
-  /** Switches turned on; the step's other switches are turned off. */
-  values?: Record<string, boolean>
-}
-
-export interface SetupStep {
-  id: string
-  kind: 'settings' | 'credential' | 'people' | 'agents'
-  title: string
-  description?: string
-  settings?: string[]
-  /** The same values serve every instance; a new one can reuse them from another. */
-  shared?: boolean
-  checklist?: SetupTask[]
-  presets?: SetupPreset[]
-  warning?: string
-}
-
-export interface PluginSetup {
-  effort?: SetupEffort | null
-  summary?: string
-  /** A string setting naming a new instance once known, e.g. the verified mailbox. */
-  nameFrom?: string | null
-  steps: SetupStep[]
-}
-
+export type { PluginSetup } from '../../../packages/contracts/generated/typescript/PluginSetup'
+export type { SetupEffort } from '../../../packages/contracts/generated/typescript/SetupEffort'
+export type { SetupPreset } from '../../../packages/contracts/generated/typescript/SetupPreset'
+export type { SetupRisk } from '../../../packages/contracts/generated/typescript/SetupRisk'
+export type { SetupStep } from '../../../packages/contracts/generated/typescript/SetupStep'
+export type { SetupTask } from '../../../packages/contracts/generated/typescript/SetupTask'
 /** The setup resolved by the installation; invalid packages have no setup. */
-export function pluginSetup(entry: Pick<PluginEntry, 'setup'>): PluginSetup {
-  return entry.setup ?? { steps: [] }
+export function pluginSetup(entry: Pick<PluginEntry, 'setup'>) {
+  return { ...entry.setup, steps: entry.setup?.steps ?? [] }
 }
 
 /** The catalogue's words for what connecting takes. */

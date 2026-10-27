@@ -13,7 +13,7 @@ use std::sync::Arc;
 /// Constructed by authenticated transport adapters, never from command JSON.
 pub(crate) enum ResumeContext {
     Human(String),
-    Public(Vec<String>),
+    Public(Vec<String>, Option<String>),
     Installation(String),
 }
 
@@ -24,7 +24,10 @@ impl ResumeContext {
             .as_ref()
             .ok_or_else(|| Error::unauthorized("A verified identity is required."))?;
         if let Some(scopes) = &identity.mcp_scopes {
-            return Ok(Self::Public(scopes.clone()));
+            return Ok(Self::Public(
+                scopes.clone(),
+                identity.mcp_credential_digest.clone(),
+            ));
         }
         Ok(Self::Human(identity.account_id.clone()))
     }
@@ -49,7 +52,7 @@ impl ResumeRun {
         let id = input.run_id.to_string();
         let (origin, bearer) = match context {
             ResumeContext::Human(account) => (Origin::Human(account), None),
-            ResumeContext::Public(scopes) => {
+            ResumeContext::Public(scopes, _) => {
                 if !scopes
                     .iter()
                     .any(|scope| scope == cairn_contracts::RESUME_RUN_SCOPE)
@@ -200,7 +203,7 @@ impl ProjectOperation {
         use cairn_contracts::*;
         let bearer = match context {
             ResumeContext::Human(_) => None, // HTTP enforces owner writes before dispatch.
-            ResumeContext::Public(scopes) => {
+            ResumeContext::Public(scopes, _) => {
                 if !scopes.iter().any(|scope| scope == self.scope) {
                     return Err(Error::forbidden(format!(
                         "The {} scope is required.",
@@ -395,7 +398,7 @@ impl AgentOperation {
         use cairn_contracts::*;
         let (editor, bearer) = match context {
             ResumeContext::Human(_) => (crate::service::AgentEditor::Owner, None),
-            ResumeContext::Public(scopes) => {
+            ResumeContext::Public(scopes, _) => {
                 if !scopes.iter().any(|scope| scope == self.scope) {
                     return Err(Error::forbidden(format!(
                         "The {} scope is required.",
@@ -537,7 +540,7 @@ impl ManagePlugin {
     ) -> Result<Value> {
         let bearer = match context {
             ResumeContext::Human(_) => None,
-            ResumeContext::Public(scopes) => {
+            ResumeContext::Public(scopes, _) => {
                 if !scopes.iter().any(|scope| scope == "manage") {
                     return Err(Error::forbidden("The manage scope is required."));
                 }
@@ -552,6 +555,7 @@ impl ManagePlugin {
                 input,
                 bearer.as_deref(),
                 false,
+                None,
             ))
             .await?,
         )?)
@@ -559,3 +563,6 @@ impl ManagePlugin {
 }
 
 pub(crate) use crate::runs::{RUN_OPERATIONS, RunOperation, run_operation};
+pub(crate) mod plugin_packages;
+
+pub(crate) use plugin_packages::{PLUGIN_PACKAGE_OPERATIONS, plugin_package_operation};

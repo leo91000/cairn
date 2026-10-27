@@ -124,40 +124,29 @@ fn key(args: &Value) -> Result<String> {
 
 /// Small connection-scoped values. Removed with the connection.
 async fn storage(s: &Service, context: &Context, method: &str, args: &Value) -> Result<Value> {
-    const KIND: &str = "plugin-storage";
     let connection = context.connection.id.clone();
     let management = context.management.clone();
     let method = method.to_owned();
     let args = args.clone();
     s.store
         .transaction(move |db| {
-            if let Some(authority) = management { authority.authorize(db)?; }
-            let owned = || {
-                db.list(KIND).map(|values| {
-                    values
-                        .into_iter()
-                        .filter(|value| value["connectionId"] == connection)
-                        .collect::<Vec<_>>()
-                })
-            };
+            if let Some(authority) = management {
+                authority.authorize(db)?;
+            }
             if method == "storage.list" {
                 let prefix = text(&args, "prefix");
-                let mut keys = owned()?
-                    .iter()
-                    .map(|value| text(value, "key").to_owned())
+                let keys = db
+                    .plugin_storage_keys(&connection)?
+                    .into_iter()
                     .filter(|key| key.starts_with(prefix))
                     .collect::<Vec<_>>();
-                keys.sort();
                 return Ok(json!(keys));
             }
             let key = key(&args)?;
-            let record_id = format!("storage:{connection}:{}", crate::auth::hex_digest(&key));
             match method.as_str() {
-                "storage.get" => Ok(db
-                    .get(KIND, &record_id)?
-                    .map_or(Value::Null, |value| value["value"].clone())),
+                "storage.get" => Ok(db.plugin_storage(&connection, &key)?.unwrap_or(Value::Null)),
                 "storage.delete" => {
-                    db.remove(KIND, &record_id)?;
+                    db.remove_plugin_storage(&connection, &key)?;
                     Ok(Value::Null)
                 }
                 _ => {
@@ -165,13 +154,14 @@ async fn storage(s: &Service, context: &Context, method: &str, args: &Value) -> 
                     if serde_json::to_string(&value)?.len() > 65_536 {
                         return Err(Error::too_large("Stored values are limited to 64 KB."));
                     }
-                    if db.get(KIND, &record_id)?.is_none() && owned()?.len() >= 1000 {
-                        return Err(Error::too_large("A connection can keep at most 1000 values."));
+                    if db.plugin_storage(&connection, &key)?.is_none()
+                        && db.plugin_storage_keys(&connection)?.len() >= 1000
+                    {
+                        return Err(Error::too_large(
+                            "A connection can keep at most 1000 values.",
+                        ));
                     }
-                    db.put(
-                        KIND,
-                        &json!({ "id": record_id, "connectionId": connection, "key": key, "value": value, "updatedAt": now() }),
-                    )?;
+                    db.save_plugin_storage(&connection, &key, &value)?;
                     Ok(Value::Null)
                 }
             }
@@ -511,7 +501,6 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
 
 /// Durable timers delivered later as `timer` events.
 async fn timers(s: &Service, context: &Context, method: &str, args: &Value) -> Result<Value> {
-    const KIND: &str = "plugin-timers";
     let connection = context.connection.clone();
     let management = context.management.clone();
     let method = method.to_owned();
@@ -521,14 +510,13 @@ async fn timers(s: &Service, context: &Context, method: &str, args: &Value) -> R
             if let Some(authority) = management {
                 authority.authorize(db)?;
             }
-            let owned = db
-                .list(KIND)?
-                .into_iter()
-                .filter(|value| value["connectionId"] == connection.id)
-                .collect::<Vec<_>>();
+            let owned = db.plugin_timers(&connection.id, i64::MAX)?;
             if method == "timers.cancel" {
-                if let Some(timer) = owned.iter().find(|value| value["id"] == args["id"]) {
-                    db.remove(KIND, text(timer, "id"))?;
+                if let Some(timer) = owned
+                    .iter()
+                    .find(|timer| Some(timer.id.as_str()) == args["id"].as_str())
+                {
+                    db.remove_plugin_timer(&timer.id)?;
                 }
                 return Ok(Value::Null);
             }
@@ -553,17 +541,14 @@ async fn timers(s: &Service, context: &Context, method: &str, args: &Value) -> R
                 ));
             }
             let timer = id();
-            db.put(
-                KIND,
-                &json!({
-                    "id": timer,
-                    "connectionId": connection.id,
-                    "revision": connection.revision,
-                    "name": name,
-                    "payload": payload,
-                    "at": now() + (seconds * 1000.0) as i64,
-                }),
-            )?;
+            db.save_plugin_timer(&super::state::Timer {
+                id: timer.clone(),
+                instance_id: connection.id.clone(),
+                revision: connection.revision.clone(),
+                name: name.into(),
+                payload,
+                at: now() + (seconds * 1000.0) as i64,
+            })?;
             Ok(json!(timer))
         })
         .await
@@ -571,8 +556,7 @@ async fn timers(s: &Service, context: &Context, method: &str, args: &Value) -> R
 
 pub(crate) async fn authorize_management(s: &Service, context: &Context) -> Result<()> {
     if let Some(authority) = &context.management {
-        let authority = authority.clone();
-        s.store.read(move |db| authority.authorize(db)).await?;
+        authority.recheck(s).await?;
     }
     Ok(())
 }

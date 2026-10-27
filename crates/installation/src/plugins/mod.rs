@@ -20,11 +20,13 @@ mod program_cache;
 pub mod program_installation;
 pub mod programs;
 pub mod projects;
+pub mod queues;
 pub mod registry;
 pub mod run_credentials;
 pub mod runtime;
 pub mod scope;
 pub mod socket;
+pub mod state;
 pub mod work;
 
 use crate::{
@@ -58,6 +60,7 @@ pub struct Plugins {
     programs: Mutex<HashMap<(String, String), PathBuf>>,
     pub(crate) program_installation: tokio::sync::Mutex<()>,
     pub(crate) program_caches: program_cache::Caches,
+    pub(crate) package_publication: tokio::sync::Mutex<()>,
     pub(crate) installer_host: Host,
     pub operations: operations::Operations,
     pub device_flows: device_flow::Flows,
@@ -84,6 +87,7 @@ impl Default for Plugins {
             programs: Mutex::new(HashMap::new()),
             program_installation: tokio::sync::Mutex::new(()),
             program_caches: program_cache::Caches::default(),
+            package_publication: tokio::sync::Mutex::new(()),
             installer_host: Host::with_limits(4, std::time::Duration::from_secs(120)),
             operations: operations::Operations::default(),
             device_flows: device_flow::Flows::default(),
@@ -192,10 +196,9 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         .collect::<Vec<_>>();
     if input.method == "POST" && parts.as_slice() == ["plugins", "manage"] {
         let command = management::decode(input.body.clone())?;
-        return manage_http(s, command, true).await;
+        return manage_http(s, input, command, true).await;
     }
     let body = &input.body;
-    let version = || crate::validation::text(body, "version").to_owned();
     // Each route is an authenticated transport adapter to the same typed command.
     let command = match (input.method.as_str(), parts.as_slice()) {
         ("POST", ["plugins", plugin, "form"]) => Some(
@@ -242,7 +245,46 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         _ => None,
     };
     if let Some(command) = command {
-        return manage_http(s, management::decode(command)?, false).await;
+        return manage_http(s, input, management::decode(command)?, false).await;
+    }
+    let package_command = match (input.method.as_str(), parts.as_slice()) {
+        ("GET", ["plugins"]) => Some(("list_plugins", json!({}))),
+        ("POST", ["plugins", "packages"]) => Some(("install_plugin_package", body.clone())),
+        ("GET", ["plugins", "packages", "operations", id]) => {
+            Some(("get_plugin_operation", json!({ "operationId": id })))
+        }
+        ("DELETE", ["plugins", "packages", "operations", id]) => {
+            Some(("cancel_plugin_operation", json!({ "operationId": id })))
+        }
+        ("POST", ["plugins", "packages", id, "approve"]) => {
+            Some(("approve_plugin_package", package_path_input(body, id)?))
+        }
+        ("POST", ["plugins", "packages", id, "activate"]) => {
+            Some(("activate_plugin_package", package_path_input(body, id)?))
+        }
+        ("DELETE", ["plugins", "packages", id]) => {
+            Some(("delete_plugin_package", json!({ "pluginId": id })))
+        }
+        ("GET", ["plugins", id, "programs"]) => {
+            Some(("list_plugin_programs", json!({ "pluginId": id })))
+        }
+        ("POST", ["plugins", "programs", "prepare"]) => {
+            Some(("prepare_plugin_program", body.clone()))
+        }
+        ("POST", ["plugins", id, "programs", name, action]) => {
+            let mut command = json!({ "kind": action, "pluginId": id, "program": name });
+            if *action == "install" {
+                command["digest"] = body["digest"].clone();
+            }
+            Some(("prepare_plugin_program", command))
+        }
+        _ => None,
+    };
+    if let Some((name, command)) = package_command {
+        return crate::capabilities::plugin_package_operation(name)
+            .unwrap()
+            .invoke(s, command, crate::capabilities::ResumeContext::http(input)?)
+            .await;
     }
     match (input.method.as_str(), parts.as_slice()) {
         ("POST", ["plugins", "oauth", "callback"]) => {
@@ -281,45 +323,26 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 .oauth_flows
                 .cancel(id, flow, identity.oauth_binding())
         }
-        ("GET", ["plugins"]) => management::catalog(s).await,
-        ("POST", ["plugins", "packages"]) => registry::install(s, body).await,
-        ("GET", ["plugins", "packages", "operations", id]) => s.plugins.operations.get(id),
-        ("POST", ["plugins", "packages", id, "approve"]) => {
-            registry::activate_request(
-                s,
-                id,
-                &version(),
-                Some(crate::validation::text(body, "digest")),
-            )
-            .await
-        }
-        ("POST", ["plugins", "packages", id, "activate"]) => {
-            registry::activate_request(s, id, &version(), None).await
-        }
-        ("DELETE", ["plugins", "packages", id]) => registry::uninstall(s, id).await,
         ("POST", ["plugins", id, "device-flow"]) => device_flow::start(s, id).await,
         ("GET", ["plugins", id, "device-flow", flow]) => device_flow::status(s, id, flow),
         ("DELETE", ["plugins", id, "device-flow", flow]) => Ok(device_flow::cancel(s, id, flow)),
         ("GET", ["plugins", id, "projects"]) => projects::list(s, id, input).await,
-        ("GET", ["plugins", id, "programs"]) => program_installation::list(s, id).await,
-        ("POST", ["plugins", id, "programs", name, action]) => {
-            let (service, id, name, action, body) = (
-                s.clone(),
-                id.to_string(),
-                name.to_string(),
-                action.to_string(),
-                body.clone(),
-            );
-            s.plugins.operations.start(s.clone(), async move {
-                program_installation::action(&service, &id, &name, &action, &body).await
-            })
-        }
         _ => Err(Error::not_found("Not found.")),
     }
 }
 
+fn package_path_input(body: &Value, id: &str) -> Result<Value> {
+    let mut command = body
+        .as_object()
+        .cloned()
+        .ok_or_else(|| Error::bad("Supply a package command object."))?;
+    command.insert("pluginId".into(), json!(id));
+    Ok(Value::Object(command))
+}
+
 async fn manage_http(
     s: &Arc<Service>,
+    input: &Input,
     command: cairn_contracts::ManagePluginInput,
     wrapped: bool,
 ) -> Result<Value> {
@@ -335,22 +358,42 @@ async fn manage_http(
     if let Some(plugin) = preparation {
         let package = registry::active(s, plugin).await?;
         if program_installation::needs_preparation(s, &package) {
+            let crate::capabilities::ResumeContext::Human(account) =
+                crate::capabilities::ResumeContext::http(input)?
+            else {
+                return Err(Error::forbidden(
+                    "Owner preparation requires a signed-in owner.",
+                ));
+            };
+            let authority =
+                crate::capabilities::plugin_packages::Authority::human(s, &account).await?;
             let origin = crate::native::policy::origin();
             let service = s.clone();
-            return s.plugins.operations.start(s.clone(), async move {
-                crate::native::policy::DELEGATION
-                    .scope(origin, async move {
-                        present(
-                            Box::pin(management::invoke(&service, command, None, true)).await?,
-                            wrapped,
-                        )
-                    })
-                    .await
-            });
+            return s.plugins.operations.start(
+                s.clone(),
+                operations::Audience::Owner,
+                async move {
+                    crate::native::policy::DELEGATION
+                        .scope(origin, async move {
+                            Ok(cairn_contracts::PluginOperationResult::Management {
+                                output: Box::pin(management::invoke(
+                                    &service,
+                                    command,
+                                    None,
+                                    true,
+                                    Some(authority),
+                                ))
+                                .await?,
+                                wrapped,
+                            })
+                        })
+                        .await
+                },
+            );
         }
     }
     present(
-        Box::pin(management::invoke(s, command, None, true)).await?,
+        Box::pin(management::invoke(s, command, None, true, None)).await?,
         wrapped,
     )
 }

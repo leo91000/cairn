@@ -7,6 +7,7 @@ import {
   ref,
   watch,
 } from 'vue'
+import { listPluginPackages } from '../../../../packages/contracts/generated/listPluginPackages'
 import { api, ApiError, state } from '../api'
 import {
   BookOpen,
@@ -82,7 +83,7 @@ const ready = computed(() => source.value === 'archive' ? !!archive.value : !!pl
 onMounted(async () => {
   // Members do not see plugins: they import archives.
   if (state.installationRole === 'owner')
-    catalog.value = await api<Catalog>('/plugins').catch(() => catalog.value)
+    catalog.value = await listPluginPackages(api, {}).catch(() => catalog.value)
 })
 
 watch(source, () => {

@@ -83,6 +83,47 @@ pub(crate) async fn task_author_policy(
         .map_err(|_| Error::unavailable("Task-author check unavailable."))
 }
 
+/// Recheck the originating public grant before a pending plugin command publishes.
+pub(crate) async fn authorize_plugin_mcp(
+    service: &crate::service::Service,
+    credential_digest: &str,
+) -> Result<()> {
+    let identity = read_identity(&service.config.data_dir.join("installation-relay"))
+        .await?
+        .ok_or_else(|| Error::unauthorized("A claimed installation is required."))?;
+    let response = service
+        .http
+        .post(
+            origin(&identity.origin)?
+                .join(&format!(
+                    "api/relay/{}/plugin-mcp-authorization",
+                    identity.installation_id
+                ))
+                .map_err(Error::internal)?,
+        )
+        .bearer_auth(&identity.token)
+        .json(&serde_json::json!({ "credentialDigest": credential_digest }))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|_| Error::unavailable("MCP authorization check unavailable."))?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(Error::unauthorized("Installation identity revoked."));
+    }
+    let authorized = response
+        .error_for_status()
+        .map_err(|_| Error::unavailable("MCP authorization check unavailable."))?
+        .json::<bool>()
+        .await
+        .map_err(|_| Error::unavailable("MCP authorization check unavailable."))?;
+    if !authorized {
+        return Err(Error::forbidden(
+            "Public MCP authorization expired or was revoked.",
+        ));
+    }
+    Ok(())
+}
+
 /// Fresh membership evidence for explicit native grants, separate from scheduling policy.
 pub(crate) async fn native_authority(
     service: &crate::service::Service,
@@ -999,6 +1040,7 @@ async fn dispatch(
         .insert(ConnectInfo("127.0.0.1:0".parse::<SocketAddr>().unwrap()));
     let mut identity = InstallationIdentity::trusted(role, &input.account_id);
     identity.mcp_scopes = input.mcp_scopes;
+    identity.mcp_credential_digest = input.mcp_credential_digest;
     identity.public_artifact = input.public_artifact;
     request.extensions_mut().insert(identity);
 

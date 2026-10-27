@@ -35,17 +35,37 @@ class AgentEditingTest {
             packages =
                 listOf(
                     PluginEntry(
-                        "onepassword",
+                        id = "onepassword",
                         manifest =
                             PluginManifest(
                                 id = "onepassword",
                                 name = "1Password",
-                                agentAccess = PluginAgentAccess("Lecture seule"),
+                                agentAccess = PluginAgentAccess(description = "Lecture seule"),
+                                version = "1.0.0",
+                                apiVersion = 2,
+                                capabilities = emptyList(),
                             ),
+                        builtin = false,
+                        status = "active",
+                        active = null,
+                        setup = null,
+                        versions = emptyList(),
                     ),
                     PluginEntry(
-                        "discord",
-                        manifest = PluginManifest(id = "discord", name = "Discord"),
+                        id = "discord",
+                        manifest =
+                            PluginManifest(
+                                id = "discord",
+                                name = "Discord",
+                                version = "1.0.0",
+                                apiVersion = 2,
+                                capabilities = emptyList(),
+                            ),
+                        builtin = false,
+                        status = "active",
+                        active = null,
+                        setup = null,
+                        versions = emptyList(),
                     ),
                 ),
             connections =
@@ -79,6 +99,7 @@ class AgentEditingTest {
                         enabled = true,
                     ),
                 ),
+            capabilities = emptyList(),
         )
     private val agent =
         Agent(
@@ -1053,16 +1074,31 @@ class AgentEditingTest {
                         listOf(
                             // Uploaded, never approved: no version runs.
                             PluginEntry(
-                                "vault",
+                                id = "vault",
                                 status = "needs_approval",
                                 manifest =
                                     PluginManifest(
                                         id = "vault",
                                         name = "Vault",
-                                        agentAccess = PluginAgentAccess("Lecture"),
+                                        agentAccess = PluginAgentAccess(description = "Lecture"),
+                                        version = "1.0.0",
+                                        apiVersion = 2,
+                                        capabilities = emptyList(),
                                     ),
+                                builtin = false,
+                                active = null,
+                                setup = null,
+                                versions = emptyList(),
                             ),
-                            PluginEntry("broken", status = "invalid"),
+                            PluginEntry(
+                                id = "broken",
+                                status = "invalid",
+                                builtin = false,
+                                active = null,
+                                manifest = null,
+                                setup = null,
+                                versions = emptyList(),
+                            ),
                         ),
                 connections =
                     catalog.connections +

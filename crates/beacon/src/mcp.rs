@@ -201,6 +201,54 @@ pub(super) async fn still_authorized(
     Ok(access(service, credential_digest).await?.is_some())
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct PluginAuthorizationCheck {
+    credential_digest: String,
+}
+
+/// An authenticated installation may revalidate its own pending plugin publications.
+pub(super) async fn plugin_authorization(
+    State(service): State<Service>,
+    Path(installation): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<PluginAuthorizationCheck>,
+) -> Result<
+    (
+        [(axum::http::header::HeaderName, &'static str); 1],
+        Json<bool>,
+    ),
+    ApiError,
+> {
+    let token = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let valid: Option<(String,)> = query_as(
+        "SELECT id FROM installations WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL",
+    )
+    .bind(&installation)
+    .bind(digest(token))
+    .fetch_optional(&service.pool)
+    .await?;
+    if valid.is_none() {
+        return Err(ApiError::Http(
+            StatusCode::UNAUTHORIZED,
+            "Invalid installation identity",
+        ));
+    }
+    let authorized = access(&service, &input.credential_digest)
+        .await?
+        .is_some_and(|grant| {
+            grant.installation == installation && grant.scopes.iter().any(|scope| scope == "manage")
+        });
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(authorized),
+    ))
+}
+
 pub(super) fn unauthorized(service: &Service) -> Response {
     let mut response = (
         StatusCode::UNAUTHORIZED,

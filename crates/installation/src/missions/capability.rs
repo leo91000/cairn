@@ -101,7 +101,7 @@ impl MissionOperation {
                 InstallationRole::Owner,
                 &account,
             )),
-            ResumeContext::Public(scopes) => {
+            ResumeContext::Public(scopes, _) => {
                 if !scopes.iter().any(|scope| scope == self.scope) {
                     return Err(Error::forbidden(format!(
                         "The {} scope is required.",

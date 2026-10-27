@@ -118,32 +118,50 @@ abstract class SkillWorkbenchCases {
             packages =
                 listOf(
                     PluginEntry(
-                        "github",
+                        id = "github",
                         builtin = true,
                         active = "1.0.0",
                         manifest =
                             PluginManifest(
                                 id = "github",
                                 name = "GitHub",
-                                instances = PluginInstances("Account", "Accounts"),
+                                instances =
+                                    PluginInstances(singular = "Account", plural = "Accounts"),
                                 skillSources =
                                     listOf(
                                         PluginSkillSource(
-                                            "repository",
-                                            "GitHub repository",
-                                            "A public or private repository this account can read.",
-                                            listOf(
-                                                PluginSetting(
-                                                    "repository",
-                                                    "Repository",
-                                                    required = true,
-                                                    placeholder = "owner/name",
-                                                ),
-                                                PluginSetting("ref", "Branch, tag or commit"),
-                                            ),
+                                            name = "repository",
+                                            title = "GitHub repository",
+                                            description =
+                                                "A public or private repository this account can read.",
+                                            fields =
+                                                (listOf(
+                                                        PluginSetting(
+                                                            "repository",
+                                                            "Repository",
+                                                            required = true,
+                                                            placeholder = "owner/name",
+                                                        ),
+                                                        PluginSetting(
+                                                            "ref",
+                                                            "Branch, tag or commit",
+                                                        ),
+                                                    ))
+                                                    .map {
+                                                        wireJson.encodeToJsonElement(
+                                                            PluginSetting.serializer(),
+                                                            it,
+                                                        )
+                                                    },
                                         )
                                     ),
+                                version = "1.0.0",
+                                apiVersion = 2,
+                                capabilities = emptyList(),
                             ),
+                        status = "active",
+                        setup = null,
+                        versions = emptyList(),
                     )
                 ),
             connections =
@@ -158,6 +176,7 @@ abstract class SkillWorkbenchCases {
                         enabled = true,
                     )
                 ),
+            capabilities = emptyList(),
         )
 
     private val pdfBundle =

@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
+import { relayProtocolVersion } from './relay-protocol'
 
 test('claims, detaches and reclaims the same private installation through the app', async ({ page }) => {
   test.setTimeout(90000)
@@ -126,7 +127,7 @@ test('claims, detaches and reclaims the same private installation through the ap
     await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
     const otherCode = await page.getByLabel('Installation claim code').inputValue()
     const other = await page.request.post(`${url}/api/relay/claim`, {
-      data: { code: otherCode, name: 'Other machine', protocol: 5 },
+      data: { code: otherCode, name: 'Other machine', protocol: relayProtocolVersion },
     })
     expect(other.status()).toBe(201)
     const unclaimed = start('target/debug/cairn', [], managerEnv)

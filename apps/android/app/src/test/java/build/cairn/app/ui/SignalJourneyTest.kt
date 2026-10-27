@@ -312,9 +312,21 @@ class SignalJourneyTest {
                                                         id = "onepassword",
                                                         builtin = true,
                                                         manifest =
-                                                            PluginManifest(name = "1Password"),
+                                                            PluginManifest(
+                                                                name = "1Password",
+                                                                id = "fixture",
+                                                                version = "1.0.0",
+                                                                apiVersion = 2,
+                                                                capabilities = emptyList(),
+                                                            ),
+                                                        status = "active",
+                                                        active = null,
+                                                        setup = null,
+                                                        versions = emptyList(),
                                                     )
-                                                )
+                                                ),
+                                            capabilities = emptyList(),
+                                            connections = emptyList(),
                                         )
                                     )
                                 )

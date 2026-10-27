@@ -7,19 +7,23 @@ use crate::{
     validation::text,
 };
 use cairn_contracts::{ManagePluginInput, ManagePluginOutput};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Authority {
-    bearer: String,
+    bearer: Option<String>,
+    pub(crate) preparation: Option<crate::capabilities::plugin_packages::Authority>,
     instance: Option<Box<connections::Connection>>,
     shared: Option<Box<connections::Connection>>,
 }
 
 impl Authority {
     pub(crate) fn authorize(&self, db: &crate::store::Db<'_>) -> Result<()> {
-        let run = crate::installation_mcp::authorize_in(db, &self.bearer)?;
+        let Some(bearer) = &self.bearer else {
+            return Ok(());
+        };
+        let run = crate::installation_mcp::authorize_in(db, bearer)?;
         let agent = text(&run["snapshot"]["agent"], "id");
         for expected in [&self.instance, &self.shared].into_iter().flatten() {
             let current = db
@@ -33,6 +37,14 @@ impl Authority {
         }
         Ok(())
     }
+
+    pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        if let Some(preparation) = &self.preparation {
+            preparation.recheck(s).await?;
+        }
+        let authority = self.clone();
+        s.store.read(move |db| authority.authorize(db)).await
+    }
 }
 
 pub(crate) fn decode(input: Value) -> Result<ManagePluginInput> {
@@ -44,6 +56,7 @@ pub(crate) async fn invoke(
     input: ManagePluginInput,
     bearer: Option<&str>,
     owner: bool,
+    preparation: Option<crate::capabilities::plugin_packages::Authority>,
 ) -> Result<ManagePluginOutput> {
     use ManagePluginInput as Command;
     use ManagePluginOutput as Output;
@@ -141,11 +154,18 @@ pub(crate) async fn invoke(
         )),
         None => None,
     };
-    let authority = bearer.map(|bearer| Authority {
-        bearer: bearer.into(),
+    let authority = (bearer.is_some() || preparation.is_some()).then(|| Authority {
+        bearer: bearer.map(str::to_owned),
+        preparation,
         instance: saved_instance,
         shared: shared_instance,
     });
+    if let Some(preparation) = authority
+        .as_ref()
+        .and_then(|authority| authority.preparation.as_ref())
+    {
+        preparation.recheck(s).await?;
+    }
     let authorize = {
         let authority = authority.clone();
         move |db: &crate::store::Db<'_>| match &authority {
@@ -228,8 +248,8 @@ pub(crate) async fn invoke(
                             format!("{origin}/installations/{installation}/plugins/{plugin}")
                         });
                     Output::Setup {
-                        setup: serde_json::to_value(package.manifest.setup())?,
-                        manifest: serde_json::to_value(package.manifest)?,
+                        setup: package.manifest.setup(),
+                        manifest: Box::new(package.manifest),
                         callback_url,
                         management_url,
                     }
@@ -361,25 +381,25 @@ pub(crate) async fn invoke(
     ) {
         s.store.read(move |db| authorize(db)).await?;
     }
+    if let Some(preparation) = authority
+        .as_ref()
+        .and_then(|authority| authority.preparation.as_ref())
+    {
+        preparation.recheck(s).await?;
+    }
     Ok(result)
 }
 
-pub(crate) async fn catalog(s: &Service) -> Result<Value> {
+pub(crate) async fn catalog(s: &Service) -> Result<cairn_contracts::PluginCatalog> {
     let mut catalog = registry::catalog(s).await?;
     let mut instances = connections::overview(s).await?;
     for instance in &mut instances {
-        let worker = catalog["packages"]
-            .as_array()
-            .and_then(|packages| {
-                packages
-                    .iter()
-                    .find(|package| package["id"] == instance.plugin_id)
-            })
-            .and_then(|package| {
-                serde_json::from_value::<cairn_plugin_api::Manifest>(package["manifest"].clone())
-                    .ok()
-            })
-            .map(|manifest| manifest.needs_worker());
+        let worker = catalog
+            .packages
+            .iter()
+            .find(|package| package.id == instance.plugin_id)
+            .and_then(|package| package.manifest.as_ref())
+            .map(cairn_contracts::PluginManifest::needs_worker);
         if worker == Some(false) && instance.enabled {
             instance.status = cairn_contracts::PluginStatus {
                 state: cairn_contracts::PluginState::Ready,
@@ -387,6 +407,6 @@ pub(crate) async fn catalog(s: &Service) -> Result<Value> {
             };
         }
     }
-    catalog["connections"] = json!(instances);
+    catalog.connections = instances;
     Ok(catalog)
 }

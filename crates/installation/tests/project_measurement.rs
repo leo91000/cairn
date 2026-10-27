@@ -166,6 +166,8 @@ impl StorageEntity for Agent {
         );
         instance.name = "Qualification".into();
         instance.revision = "r1".into();
+        db.save_plugin_version(&instance.plugin_id, "fixture", &"0".repeat(64))
+            .unwrap();
         db.save_plugin_instance(&instance).unwrap();
     }
 
@@ -219,6 +221,9 @@ impl StorageEntity for PluginInstance {
         let tx =
             rusqlite::Transaction::new_unchecked(db.0, rusqlite::TransactionBehavior::Immediate)
                 .unwrap();
+        Db(&tx)
+            .save_plugin_version("fixture", "fixture", &"0".repeat(64))
+            .unwrap();
         for n in 0..1000 {
             Db(&tx)
                 .save_agent(&Agent {
@@ -690,6 +695,13 @@ fn measure<E: StorageEntity>(entities: &[E]) {
                 .unwrap();
             let db_bytes = std::fs::metadata(&path).unwrap().len();
             let encoded_bytes = E::encoded_bytes(&Db(&db));
+            let encoded_payload_bytes: i64 = db
+                .query_row(
+                    "SELECT coalesce(sum(payload),0) FROM dbstat WHERE name NOT LIKE 'sqlite_%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
             let pages: Vec<(String, i64)> = db
                 .prepare("SELECT name,sum(pgsize) FROM dbstat GROUP BY name ORDER BY name")
                 .unwrap()
@@ -736,6 +748,7 @@ fn measure<E: StorageEntity>(entities: &[E]) {
                     "wireBytes": entities.iter().map(|p| serde_json::to_vec(p).unwrap().len()).sum::<usize>(),
                     "dbBytes": db_bytes,
                     "encodedBytes": encoded_bytes,
+                    "encodedPayloadBytes": encoded_payload_bytes,
                     "walBeforeCheckpointBytes": wal,
                     "pages": pages,
                     "insert": distribution(&insert),
@@ -1006,3 +1019,5 @@ async fn run_storage_layouts() {
     }).collect();
     measure(&corpus);
 }
+#[path = "project_measurement/plugin_packages.rs"]
+mod plugin_packages;

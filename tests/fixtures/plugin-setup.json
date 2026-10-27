@@ -19,7 +19,9 @@
           "oauth": {
             "authorizationUrl": "https://auth.mail.example/authorize",
             "tokenUrl": "https://auth.mail.example/token",
-            "clientIdSetting": "clientId"
+            "clientIdSetting": "clientId",
+            "authorizationParameters": {},
+            "scopeSettings": {}
           }
         },
         "settings": [

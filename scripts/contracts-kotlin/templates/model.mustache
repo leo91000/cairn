@@ -4,8 +4,8 @@
 {{/constValue}}{{/properties}}{{#additionalPropertiesSchema}}@JvmInline
 value class {{&className}}(val value: Map<String, {{#additionalProperties}}{{>type}}{{/additionalProperties}}>) : Map<String, {{#additionalProperties}}{{>type}}{{/additionalProperties}}> by value
 {{/additionalPropertiesSchema}}{{^additionalPropertiesSchema}}{{#hasProperties}}data {{/hasProperties}}class {{&className}}(
-{{#properties}}{{^constValue}}{{^isRequired}}{{^defaultValue}}{{#nullable}}    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
-{{/nullable}}{{/defaultValue}}{{/isRequired}}    val {{&kotlinName}}: {{>type}}{{#defaultValue}} = {{>default_value}}{{/defaultValue}}{{^defaultValue}}{{^isRequired}} = null{{/isRequired}}{{/defaultValue}},
+{{#properties}}{{^constValue}}{{^isRequired}}    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+{{/isRequired}}    val {{&kotlinName}}: {{>type}}{{#defaultValue}} = {{>default_value}}{{/defaultValue}}{{^defaultValue}}{{^isRequired}} = null{{/isRequired}}{{/defaultValue}},
 {{/constValue}}{{/properties}}){{#interfaces}}{{#first}} : {{/first}}{{^first}}, {{/first}}{{&className}}{{/interfaces}} {
     init {
 {{#properties}}{{^constValue}}{{#validations}}{{#type}}{{#PATTERN}}        {{#nullable}}{{&kotlinName}}?.let { require(Regex({{&value.value.kotlinString}}).containsMatchIn(it)) }{{/nullable}}{{^nullable}}require(Regex({{&value.value.kotlinString}}).containsMatchIn({{&kotlinName}})){{/nullable}}

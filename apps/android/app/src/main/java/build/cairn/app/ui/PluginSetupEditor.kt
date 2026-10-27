@@ -74,14 +74,18 @@ internal fun InstanceEditor(
     saved: suspend () -> Unit,
 ) {
     val creating = initial.id.isBlank()
-    val fields = manifest.settings.filter { !it.hidden }
+    val fields = manifest.settingFields.filter { !it.hidden }
     // Hidden settings are the package's own (e.g. names it derives); editing keeps them.
-    val stored = manifest.settings.filter { it.type != "secret" }
+    val stored = manifest.settingFields.filter { it.type != "secret" }
     val setup = remember(entry) { entry.resolvedSetup() }
     // A package with nothing to enter still gets one step, for its name.
-    val steps = setup.steps.ifEmpty { listOf(SetupStep("details", "settings", "Details")) }
+    val steps =
+        setup.steps.ifEmpty {
+            listOf(SetupStep(id = "details", kind = "settings", title = "Details"))
+        }
     val mine = connections.filter { it.pluginId == pluginId }
-    val sources = sharedSources(steps, manifest.settings, mine, initial.id.takeIf { !creating })
+    val sources =
+        sharedSources(steps, manifest.settingFields, mine, initial.id.takeIf { !creating })
     val sharedKeys = steps.filter { it.shared }.flatMap { it.settings }
     val callbackShown = steps.any { item -> item.checklist.any { it.copy == "callbackUrl" } }
     /** The reused instance's visible shared values; another app starts empty. */
@@ -191,9 +195,9 @@ internal fun InstanceEditor(
     // permissions afterwards needs a new sign-in rather than a save the installation refuses.
     val signInBasis =
         manifest.credential?.oauth?.let { oauth ->
-            val clientId = oauth["clientIdSetting"]?.jsonPrimitive?.contentOrNull
-            val scopeKeys = (oauth["scopeSettings"] as? JsonObject)?.keys.orEmpty()
-            val clientSecret = oauth["clientSecretSetting"]?.jsonPrimitive?.contentOrNull
+            val clientId = oauth.clientIdSetting
+            val scopeKeys = oauth.scopeSettings.keys
+            val clientSecret = oauth.clientSecretSetting
             Triple(
                 reuse,
                 (listOfNotNull(clientId) + scopeKeys).map { values[it] },

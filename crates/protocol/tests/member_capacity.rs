@@ -54,6 +54,7 @@ fn a_busy_member_upload_is_rejected_and_drained_before_its_next_small_frame() {
         account_id: "other".into(),
         role: Role::Member,
         mcp_scopes: None,
+        mcp_credential_digest: None,
         public_artifact: None,
         method: "POST".into(),
         path: "/api/chats".into(),

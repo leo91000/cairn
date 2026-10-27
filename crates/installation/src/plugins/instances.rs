@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE plugin_instances(
  id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=36),
- plugin_id TEXT NOT NULL CHECK(length(plugin_id) BETWEEN 1 AND 80),
+ plugin_id TEXT NOT NULL REFERENCES plugin_packages(id) CHECK(length(plugin_id) BETWEEN 1 AND 80),
  name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 100),
  enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
  revision TEXT NOT NULL CHECK(length(revision)>0),

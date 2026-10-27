@@ -1352,17 +1352,5 @@
       ],
       "additionalProperties": false
     }
-  },
-  {
-    "name": "list_plugins",
-    "description": "List installed plugins, their manifests and configured instances, without credentials.",
-    "scope": "read",
-    "destructive": false,
-    "inputSchema": {
-      "type": "object",
-      "properties": {},
-      "required": [],
-      "additionalProperties": false
-    }
   }
 ]

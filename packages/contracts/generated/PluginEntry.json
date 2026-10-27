@@ -1,0 +1,964 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "PackageVersion": {
+      "additionalProperties": false,
+      "properties": {
+        "approved": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "files": {
+          "items": {
+            "$ref": "#/definitions/PluginFile"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "manifest": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginManifest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "setup": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginSetup"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "type": "object"
+    },
+    "PluginAgentAccess": {
+      "additionalProperties": false,
+      "description": "Agents the owner grants on each instance may run the package's commands and tools.",
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "description"
+      ],
+      "type": "object"
+    },
+    "PluginArgument": {
+      "additionalProperties": false,
+      "description": "One flag (`--vault ID`) or positional value of a command. Values are text.",
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "flag": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maxLength": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "pattern": {
+          "description": "A regular expression the whole value must match.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "positional": {
+          "default": false,
+          "type": "boolean"
+        },
+        "required": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "PluginBrand": {
+      "additionalProperties": false,
+      "description": "The package's mark: a background colour and an SVG path on a 24×24 grid.",
+      "properties": {
+        "color": {
+          "description": "`#rrggbb`.",
+          "type": "string"
+        },
+        "path": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "color"
+      ],
+      "type": "object"
+    },
+    "PluginCommand": {
+      "additionalProperties": false,
+      "description": "A command agents run in their conversation: `cairn plugin <plugin> <name> …`.",
+      "properties": {
+        "arguments": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginArgument"
+          },
+          "type": "array"
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "output": {
+          "default": "json",
+          "pattern": "^(json|text|secret)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "output"
+      ],
+      "type": "object"
+    },
+    "PluginCondition": {
+      "additionalProperties": false,
+      "description": "A condition granted agents can wait for with `wait_for`, observed by the `condition`\nhandler. Its type is `<plugin>_<name>`, like a tool name.",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "inputSchema": {
+          "description": "Properties besides `type` (and `projectId` with `project`)."
+        },
+        "name": {
+          "type": "string"
+        },
+        "project": {
+          "default": false,
+          "description": "Pinned to one of the run's projects: Cairn checks it is authorized and passes it.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "inputSchema"
+      ],
+      "type": "object"
+    },
+    "PluginCredential": {
+      "additionalProperties": false,
+      "description": "How the host injects a connection's secret into authorized HTTP requests.\nPlugin code never receives the secret itself.",
+      "properties": {
+        "deviceFlow": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginDeviceFlow"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The owner may sign in instead of pasting the credential."
+        },
+        "header": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "oauth": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginOAuth"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Authorization-code sign-in with PKCE and host-owned refresh tokens."
+        },
+        "prefix": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "header",
+        "prefix"
+      ],
+      "type": "object"
+    },
+    "PluginDeviceFlow": {
+      "additionalProperties": false,
+      "description": "OAuth 2.0 device authorization grant (RFC 8628), run by the host for the owner.\nThe token obtained becomes the instance's credential; scripts never see it.",
+      "properties": {
+        "authorizationUrl": {
+          "description": "Where the host asks for a device and user code. HTTPS on a declared host.",
+          "type": "string"
+        },
+        "clientId": {
+          "description": "The public client ID of the package publisher's OAuth application.",
+          "type": "string"
+        },
+        "scopes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tokenUrl": {
+          "description": "Where the host polls for the token. HTTPS on a declared host.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "authorizationUrl",
+        "tokenUrl",
+        "clientId"
+      ],
+      "type": "object"
+    },
+    "PluginFile": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "bytes"
+      ],
+      "type": "object"
+    },
+    "PluginGitCredential": {
+      "additionalProperties": false,
+      "description": "Git credentials for one HTTPS remote prefix, kept in a store file Cairn owns.",
+      "properties": {
+        "password": {
+          "type": "string"
+        },
+        "url": {
+          "description": "`https://host` or `https://host/path`, on a declared host.",
+          "type": "string"
+        },
+        "username": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "username",
+        "password"
+      ],
+      "type": "object"
+    },
+    "PluginGitIdentity": {
+      "additionalProperties": false,
+      "description": "The commit author of runs, when the installation has no global Git identity.",
+      "properties": {
+        "email": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "email"
+      ],
+      "type": "object"
+    },
+    "PluginInstances": {
+      "additionalProperties": false,
+      "description": "How the owner's interfaces name one configured instance, e.g. \"Service account\".",
+      "properties": {
+        "plural": {
+          "type": "string"
+        },
+        "singular": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "singular",
+        "plural"
+      ],
+      "type": "object"
+    },
+    "PluginManifest": {
+      "additionalProperties": false,
+      "properties": {
+        "agentAccess": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginAgentAccess"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "apiVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "brand": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginBrand"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "commands": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginCommand"
+          },
+          "type": "array"
+        },
+        "conditions": {
+          "default": [],
+          "description": "Conditions granted agents wait for, observed by the `condition` handler.",
+          "items": {
+            "$ref": "#/definitions/PluginCondition"
+          },
+          "type": "array"
+        },
+        "credential": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginCredential"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "default": "",
+          "description": "One sentence shown in the owner's plugin catalogue.",
+          "type": "string"
+        },
+        "hosts": {
+          "default": [],
+          "description": "Hostnames reachable through `http` (HTTPS) and `socket` (WSS). `*.example.com`\ncovers every subdomain of `example.com`, not the domain itself.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "instanceForm": {
+          "default": false,
+          "description": "The script's `form` handler fills dynamic choices, derived values, errors and\nguidance while the owner edits an instance, and checks it before it is saved.",
+          "type": "boolean"
+        },
+        "instanceTest": {
+          "default": false,
+          "description": "The script's `test` handler checks an instance.",
+          "type": "boolean"
+        },
+        "instanceView": {
+          "default": false,
+          "description": "The script's `view` handler describes each instance's panel.",
+          "type": "boolean"
+        },
+        "instances": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginInstances"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "instructions": {
+          "default": "",
+          "description": "Added to the prompt of runs whose agent is granted on an enabled instance.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "programs": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginProgram"
+          },
+          "type": "array"
+        },
+        "projectSources": {
+          "default": [],
+          "description": "Projects the owner can import through the `projects` handler.",
+          "items": {
+            "$ref": "#/definitions/PluginProjectSource"
+          },
+          "type": "array"
+        },
+        "runCredentials": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginRunCredentials"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Files, Git credentials and identity rendered into granted agents' runs."
+        },
+        "secretPatterns": {
+          "default": [],
+          "description": "Regular expressions of the service's token formats, masked in run output.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "settings": {
+          "default": [],
+          "description": "Instance fields Cairn renders, in order: `[{ key, title, type, ... }]`.",
+          "items": true,
+          "type": "array"
+        },
+        "setup": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginSetup"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What connecting an instance takes and the steps the owner follows."
+        },
+        "skillSources": {
+          "default": [],
+          "description": "Skill sources the owner imports from through the `skills` handler.",
+          "items": {
+            "$ref": "#/definitions/PluginSkillSource"
+          },
+          "type": "array"
+        },
+        "tools": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginTool"
+          },
+          "type": "array"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "version",
+        "description",
+        "apiVersion",
+        "capabilities"
+      ],
+      "type": "object"
+    },
+    "PluginOAuth": {
+      "additionalProperties": false,
+      "description": "A provider-independent authorization-code flow. Client settings and secrets are\ndeclared form fields; credentials and PKCE material never enter package code.",
+      "properties": {
+        "authorizationParameters": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "authorizationUrl": {
+          "type": "string"
+        },
+        "clientIdSetting": {
+          "type": "string"
+        },
+        "clientSecretSetting": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requireRefreshToken": {
+          "default": false,
+          "type": "boolean"
+        },
+        "revocationUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopeSettings": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "Additional scopes for enabled boolean settings, e.g. sending or deletion.",
+          "type": "object"
+        },
+        "scopes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tokenUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "requireRefreshToken",
+        "authorizationUrl",
+        "tokenUrl",
+        "clientIdSetting",
+        "scopes",
+        "scopeSettings",
+        "authorizationParameters"
+      ],
+      "type": "object"
+    },
+    "PluginProgram": {
+      "additionalProperties": false,
+      "description": "A program on the installation the package may run through `exec`.",
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "installer": {
+          "default": "",
+          "description": "Package-relative Luau module exporting `resolve` and `install` handlers.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "default": "",
+          "description": "Absolute path, approved by the owner with the package.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description"
+      ],
+      "type": "object"
+    },
+    "PluginProjectSource": {
+      "additionalProperties": false,
+      "description": "Where the owner imports projects from: the `projects` handler lists and resolves them.",
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "title"
+      ],
+      "type": "object"
+    },
+    "PluginRunCredentials": {
+      "additionalProperties": false,
+      "description": "Rendered by the host for granted agents, when their run is prepared or resumed, and\nfor its own Git fetches of matching remotes. Removed when the run ends or the grant\nis withdrawn.",
+      "properties": {
+        "files": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginRunFile"
+          },
+          "type": "array"
+        },
+        "git": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginGitCredential"
+          },
+          "type": "array"
+        },
+        "gitIdentity": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginGitIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "PluginRunFile": {
+      "additionalProperties": false,
+      "description": "A file Cairn writes in the home of each run whose agent is granted an instance.",
+      "properties": {
+        "content": {
+          "description": "A template: `{{credential}}`, `{{secrets.KEY}}` and `{{settings.KEY}}`.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Relative to the run's home, e.g. `.config/tool/hosts.yml`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ],
+      "type": "object"
+    },
+    "PluginSetup": {
+      "additionalProperties": false,
+      "properties": {
+        "effort": {
+          "pattern": "^(signin|token|app)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nameFrom": {
+          "description": "A string setting naming a new instance once known, e.g. the verified mailbox.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "steps": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/SetupStep"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "default": "",
+          "description": "What the owner needs before connecting, in one or two sentences.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "PluginSkillSource": {
+      "additionalProperties": false,
+      "description": "Where the owner imports skills from: the `skills` handler resolves a location and\nlists its files, which the host downloads.",
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "fields": {
+          "description": "The location form, like instance settings: `string`, `url` or `text` fields.",
+          "items": true,
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "fields"
+      ],
+      "type": "object"
+    },
+    "PluginTool": {
+      "additionalProperties": false,
+      "description": "A tool listed by the run's Cairn MCP server. Input is checked against the schema.",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "inputSchema": true,
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "inputSchema"
+      ],
+      "type": "object"
+    },
+    "SetupPreset": {
+      "additionalProperties": false,
+      "description": "A named combination of the step's boolean settings, e.g. \"Read only\".",
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "risk": {
+          "pattern": "^(low|medium|high)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "values": {
+          "additionalProperties": {
+            "type": "boolean"
+          },
+          "description": "Settings turned on. The step's other boolean settings are turned off.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "title"
+      ],
+      "type": "object"
+    },
+    "SetupStep": {
+      "additionalProperties": false,
+      "properties": {
+        "checklist": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/SetupTask"
+          },
+          "type": "array"
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "default": "settings",
+          "pattern": "^(settings|credential|people|agents)$",
+          "type": "string"
+        },
+        "presets": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/SetupPreset"
+          },
+          "type": "array"
+        },
+        "settings": {
+          "default": [],
+          "description": "Keys of the settings this step shows, in order.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "shared": {
+          "default": false,
+          "description": "The same values serve every instance, e.g. one OAuth client for every mailbox.\nA new instance can reuse them from another one (`sharedFrom`): the host copies\nthem, secrets included, without sending secrets to the client.",
+          "type": "boolean"
+        },
+        "title": {
+          "type": "string"
+        },
+        "warning": {
+          "default": "",
+          "description": "A consequence to know before going on, e.g. a provider's token expiry.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "title"
+      ],
+      "type": "object"
+    },
+    "SetupTask": {
+      "additionalProperties": false,
+      "description": "Something the owner does on the service's site, ticked off in the assistant.",
+      "properties": {
+        "copy": {
+          "pattern": "^callbackUrl$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "link": {
+          "description": "The link's label, e.g. \"Open API Library\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "default": "",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "url": {
+          "description": "The service's page for this task. HTTPS.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "active": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "builtin": {
+      "type": "boolean"
+    },
+    "id": {
+      "type": "string"
+    },
+    "manifest": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/PluginManifest"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "setup": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/PluginSetup"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "pattern": "^(active|update|needs_approval|invalid)$",
+      "type": "string"
+    },
+    "versions": {
+      "items": {
+        "$ref": "#/definitions/PackageVersion"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "id",
+    "builtin",
+    "status",
+    "active",
+    "manifest",
+    "setup",
+    "versions"
+  ],
+  "title": "PluginEntry",
+  "type": "object"
+}

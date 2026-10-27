@@ -12,17 +12,6 @@ use cairn_plugin_api::Manifest;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-/// Records owned by a connection, removed with it.
-pub const OWNED: &[&str] = &[
-    "plugin-events",
-    "plugin-deliveries",
-    "plugin-requests",
-    "plugin-activity",
-    "plugin-storage",
-    "plugin-http-receipts",
-    "plugin-timers",
-];
-
 pub use cairn_contracts::{PluginAccessMode as AccessMode, PluginLabel as Label};
 
 fn per_person() -> u32 {
@@ -819,7 +808,7 @@ where
         };
         let draft = forms::Draft {
             prepared: prepared.clone(),
-            management,
+            management: management.clone(),
             credential,
             secrets: secret_fields.clone(),
         };
@@ -901,6 +890,9 @@ where
     let updating = existing.is_some();
     let one_per_agent = super::run_credentials::one_per_package(&manifest);
     let package_name = manifest.name.clone();
+    if let Some(authority) = &management {
+        authority.recheck(s).await?;
+    }
     let result = s
         .store
         .transaction(move |db| {
@@ -949,9 +941,9 @@ where
                 connection.native_authority = native_authority(db, &connection, &serde_json::to_value(&agent)?, &origin)?;
             }
             if connection.access_mode != AccessMode::Requests {
-                for request in db.list("plugin-requests")? {
-                    if request["connectionId"] == connection.id && request["status"] == "pending" {
-                        db.remove("plugin-requests", text(&request, "id"))?;
+                for request in db.plugin_requests()? {
+                    if request.instance_id == connection.id && request.status == super::state::RequestStatus::Pending {
+                        db.remove_plugin_request(&request.id)?;
                     }
                 }
             }
@@ -1177,13 +1169,6 @@ where
             db.remove_plugin_instance(&connection_id)?;
             db.delete(&format!("mcp-secret:{}", credential_key(&connection_id)))?;
             db.delete(&format!("mcp-secret:{}", secrets_key(&connection_id)))?;
-            for kind in OWNED {
-                for value in db.list(kind)? {
-                    if value["connectionId"] == connection_id {
-                        db.remove(kind, text(&value, "id"))?;
-                    }
-                }
-            }
             db.audit("plugin.connection.deleted", &json!({ "id": connection_id }))
         })
         .await?;
@@ -1198,8 +1183,8 @@ pub async fn overview(s: &Service) -> Result<Vec<cairn_contracts::PluginConnecti
     let hour = now() / 3_600_000;
     s.store
         .read(move |db| {
-            let requests = db.list("plugin-requests")?;
-            let activity = db.list("plugin-activity")?;
+            let requests = db.plugin_requests()?;
+            let activity = db.plugin_activity()?;
             let statuses = db.plugin_statuses()?;
             let mut result = Vec::new();
             for connection in db.plugin_instances()? {
@@ -1213,34 +1198,32 @@ pub async fn overview(s: &Service) -> Result<Vec<cairn_contracts::PluginConnecti
                 view.requests = requests
                     .iter()
                     .filter(|value| {
-                        value["connectionId"] == connection.id && value["status"] == "pending"
+                        value.instance_id == connection.id
+                            && value.status == super::state::RequestStatus::Pending
                     })
                     .map(|value| cairn_contracts::PluginRequest {
-                        id: text(value, "id").into(),
-                        user_id: text(value, "userId").into(),
-                        name: text(value, "name").into(),
-                        mentions: value["mentions"].as_u64().unwrap_or(0).min(u32::MAX.into())
-                            as u32,
-                        updated_at: value["updatedAt"].as_i64().unwrap_or(0),
+                        id: value.id.clone(),
+                        user_id: value.user_id.clone(),
+                        name: value.name.clone(),
+                        mentions: value.mentions,
+                        updated_at: value.updated_at,
                     })
                     .collect();
                 view.requests
                     .sort_by_key(|request| std::cmp::Reverse(request.updated_at));
                 view.activity = activity
                     .iter()
-                    .filter(|value| value["connectionId"] == connection.id)
-                    .map(|value| {
-                        Ok(cairn_contracts::PluginActivity {
-                            id: text(value, "id").into(),
-                            chat_id: text(value, "chatId").into(),
-                            user_id: text(value, "userId").into(),
-                            name: text(value, "name").into(),
-                            preview: text(value, "preview").into(),
-                            status: serde_json::from_value(value["status"].clone())?,
-                            created_at: value["createdAt"].as_i64().unwrap_or(0),
-                        })
+                    .filter(|value| value.instance_id == connection.id)
+                    .map(|value| cairn_contracts::PluginActivity {
+                        id: value.id.clone(),
+                        chat_id: value.chat_id.clone(),
+                        user_id: value.user_id.clone(),
+                        name: value.name.clone(),
+                        preview: value.preview.clone(),
+                        status: value.status,
+                        created_at: value.created_at,
                     })
-                    .collect::<Result<Vec<_>>>()?;
+                    .collect();
                 view.activity
                     .sort_by_key(|activity| std::cmp::Reverse(activity.created_at));
                 view.activity.truncate(8);
@@ -1337,9 +1320,9 @@ pub async fn people(
                 .plugin_instance(&connection_id)?
                 .ok_or_else(|| Error::not_found("Plugin connection not found."))?;
             let request = db
-                .list("plugin-requests")?
+                .plugin_requests()?
                 .into_iter()
-                .find(|value| value["connectionId"] == connection_id && value["userId"] == user_id);
+                .find(|value| value.instance_id == connection_id && value.user_id == user_id);
             match action {
                 cairn_contracts::PluginPersonAction::Approve => {
                     let request =
@@ -1351,24 +1334,24 @@ pub async fn people(
                         connection.user_ids.push(user_id.clone());
                         connection.people.push(Label {
                             id: user_id.clone(),
-                            name: label(text(&request, "name")),
+                            name: label(&request.name),
                         });
                     }
-                    db.remove("plugin-requests", text(&request, "id"))?;
+                    db.remove_plugin_request(&request.id)?;
                 }
                 cairn_contracts::PluginPersonAction::Deny => {
                     // A denied request stays recorded so repeated attempts stay silent.
                     let mut request =
                         request.ok_or_else(|| Error::not_found("Access request not found."))?;
-                    request["status"] = json!("denied");
-                    request["updatedAt"] = json!(now());
-                    db.put("plugin-requests", &request)?;
+                    request.status = super::state::RequestStatus::Denied;
+                    request.updated_at = now();
+                    db.save_plugin_request(&request)?;
                 }
                 cairn_contracts::PluginPersonAction::Remove => {
                     connection.user_ids.retain(|id| *id != user_id);
                     connection.people.retain(|person| person.id != user_id);
                     if let Some(request) = request {
-                        db.remove("plugin-requests", text(&request, "id"))?;
+                        db.remove_plugin_request(&request.id)?;
                     }
                 }
             }

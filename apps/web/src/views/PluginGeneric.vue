@@ -16,6 +16,7 @@ import {
   watch,
 } from 'vue'
 import { useRoute } from 'vue-router'
+import { listPluginPackages } from '../../../../packages/contracts/generated/listPluginPackages'
 import {
   api,
   notify,
@@ -201,7 +202,7 @@ const tones = {
 }
 
 async function load() {
-  catalog.value = await api<Catalog>('/plugins')
+  catalog.value = await listPluginPackages(api, {})
   loaded.value = true
 }
 

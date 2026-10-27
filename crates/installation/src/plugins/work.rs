@@ -15,8 +15,7 @@ use cairn_plugin_api::Manifest;
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 
-pub const EVENTS: &str = "plugin-events";
-pub const DELIVERIES: &str = "plugin-deliveries";
+use super::queues::{Delivery, Event};
 
 /// Event names the host sends itself; packages can't admit messages under them.
 pub const RESERVED: &[&str] = &[
@@ -65,20 +64,17 @@ pub(crate) fn enqueue(
     payload: &Value,
     author: Option<&str>,
 ) -> Result<()> {
-    db.put(
-        EVENTS,
-        &json!({
-            "id": id(),
-            "connectionId": connection.id,
-            "revision": connection.revision,
-            "name": name,
-            "payload": payload,
-            "authorId": author,
-            "attempts": 0,
-            "createdAt": now(),
-            "nextAttemptAt": now(),
-        }),
-    )?;
+    db.save_plugin_event(&Event {
+        id: id(),
+        instance_id: connection.id.clone(),
+        revision: connection.revision.clone(),
+        name: name.into(),
+        payload: payload.clone(),
+        author_id: author.map(str::to_owned),
+        attempts: 0,
+        created_at: now(),
+        next_attempt_at: now(),
+    })?;
     Ok(())
 }
 
@@ -111,11 +107,7 @@ pub async fn accept(s: &Service, connection: &Connection, inbound: Inbound) -> R
             if db.kv(&dedupe)?.is_some() {
                 return Ok(false);
             }
-            let pending = db
-                .list(EVENTS)?
-                .iter()
-                .filter(|value| value["connectionId"] == current.id)
-                .count();
+            let pending = db.plugin_events(&current.id, i64::MAX)?.len();
             if pending >= 50 {
                 return Ok(false);
             }
@@ -139,40 +131,37 @@ fn request(
     author: &super::connections::Label,
     payload: &Value,
 ) -> Result<()> {
-    let requests = db.list("plugin-requests")?;
+    let requests = db.plugin_requests()?;
     if let Some(mut existing) = requests
         .iter()
-        .find(|value| value["connectionId"] == connection.id && value["userId"] == author.id)
+        .find(|value| value.instance_id == connection.id && value.user_id == author.id)
         .cloned()
     {
-        if existing["status"] == "pending" {
-            existing["mentions"] = json!(existing["mentions"].as_u64().unwrap_or(1) + 1);
-            existing["updatedAt"] = json!(now());
-            db.put("plugin-requests", &existing)?;
+        if existing.status == super::state::RequestStatus::Pending {
+            existing.mentions = existing.mentions.saturating_add(1);
+            existing.updated_at = now();
+            db.save_plugin_request(&existing)?;
         }
         return Ok(());
     }
     if requests
         .iter()
-        .filter(|value| value["connectionId"] == connection.id)
+        .filter(|value| value.instance_id == connection.id)
         .count()
         >= 50
     {
         return Ok(());
     }
-    db.put(
-        "plugin-requests",
-        &json!({
-            "id": id(),
-            "connectionId": connection.id,
-            "userId": author.id,
-            "name": label(&author.name),
-            "status": "pending",
-            "mentions": 1,
-            "createdAt": now(),
-            "updatedAt": now(),
-        }),
-    )?;
+    db.save_plugin_request(&super::state::Request {
+        id: id(),
+        instance_id: connection.id.clone(),
+        user_id: author.id.clone(),
+        name: label(&author.name),
+        status: super::state::RequestStatus::Pending,
+        mentions: 1,
+        created_at: now(),
+        updated_at: now(),
+    })?;
     enqueue(db, connection, "access_requested", payload, None)?;
     db.audit(
         "plugin.access.requested",
@@ -309,11 +298,7 @@ fn limits(db: &Db<'_>, connection: &Connection, author: &str) -> Result<Counters
         }
         counters.push((key, personal));
     }
-    let outstanding = db
-        .list(DELIVERIES)?
-        .iter()
-        .filter(|value| value["connectionId"] == connection.id)
-        .count();
+    let outstanding = db.plugin_deliveries(&connection.id, i64::MAX)?.len();
     if outstanding >= 20 {
         return Err(Error::too_many_requests(
             "Connection has too much pending work.",
@@ -525,48 +510,19 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
             counters.increment(db)?;
             let receipt = json!({ "chatId": chat_id, "messageId": queued["id"] });
             db.set(&dedupe, &receipt, Some(now() + 30 * 86_400_000))?;
-            db.put(
-                DELIVERIES,
-                &json!({
-                    "id": message_id,
-                    "connectionId": connection.id,
-                    "revision": connection.revision,
-                    "chatId": chat_id,
-                    "thread": thread,
-                    "userId": author,
-                    "reply": reply,
-                    "asked": [],
-                    "attempts": 0,
-                    "createdAt": now(),
-                    "nextAttemptAt": now(),
-                }),
-            )?;
+            db.save_plugin_delivery(&Delivery {
+                id: message_id.clone(), instance_id: connection.id.clone(), revision: connection.revision.clone(),
+                chat_id: chat_id.clone(), thread, user_id: author.clone(), reply,
+                state: Value::Null, asked: Vec::new(), question_retry_at: std::collections::BTreeMap::new(), progress_at: 0,
+                attempts: 0, created_at: now(), next_attempt_at: now(),
+            })?;
             let preview = if content.is_empty() { "(attachment)".to_owned() } else { content.chars().take(200).collect() };
-            db.put(
-                "plugin-activity",
-                &json!({
-                    // Record IDs are unique across kinds; link to the delivery separately.
-                    "id": id(),
-                    "deliveryId": message_id,
-                    "connectionId": connection.id,
-                    "chatId": chat_id,
-                    "userId": author,
-                    "name": event["payload"]["author"]["name"],
-                    "preview": preview,
-                    "status": "working",
-                    "createdAt": now(),
-                    "updatedAt": now(),
-                }),
-            )?;
-            let mut recent = db
-                .list("plugin-activity")?
-                .into_iter()
-                .filter(|value| value["connectionId"] == connection.id)
-                .collect::<Vec<_>>();
-            recent.sort_by_key(|value| -value["createdAt"].as_i64().unwrap_or(0));
-            for stale in recent.iter().skip(30) {
-                db.remove("plugin-activity", text(stale, "id"))?;
-            }
+            db.save_plugin_activity(&super::state::Activity {
+                id: id(), delivery_id: message_id.clone(), instance_id: connection.id.clone(),
+                chat_id: chat_id.clone(), user_id: author.clone(), name: text(&event["payload"]["author"], "name").into(),
+                preview, status: cairn_contracts::PluginActivityStatus::Working,
+                created_at: now(), updated_at: now(),
+            })?;
             db.audit(
                 "plugin.message.admitted",
                 &json!({ "connectionId": connection.id, "chatId": chat_id, "messageId": message_id }),
@@ -728,12 +684,12 @@ enum Turn {
 /// How long an account wait lasts before a failed turn answers the person.
 const ACCOUNT_WAIT_REPLY_MS: i64 = 2 * 60_000;
 
-fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> {
-    if delivery["revision"] != connection.revision || !connection.allows(text(delivery, "userId")) {
+fn turn(db: &Db<'_>, connection: &Connection, delivery: &Delivery) -> Result<Turn> {
+    if delivery.revision != connection.revision || !connection.allows(&delivery.user_id) {
         return Err(Error::forbidden("Reply authorization was revoked."));
     }
     let chat = db
-        .get("chats", text(delivery, "chatId"))?
+        .get("chats", &delivery.chat_id)?
         .ok_or_else(|| Error::not_found("Conversation no longer exists."))?;
     if !crate::conversation_lifecycle::is_active(&chat) {
         return Err(Error::forbidden("Conversation is no longer active."));
@@ -744,7 +700,7 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
     }
     let delivered: Option<i64> = db.0.query_row(
         "SELECT id FROM events WHERE run_id=?1 AND type='chat.user' AND json_extract(payload,'$.messageId')=?2 ORDER BY id LIMIT 1",
-        rusqlite::params![run_id, delivery["id"].as_str()], |row| row.get(0),
+        rusqlite::params![run_id, delivery.id.as_str()], |row| row.get(0),
     ).optional()?;
     let Some(delivered) = delivered else {
         let run = db.run(&run_id)?;
@@ -771,7 +727,7 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
     // message.
     let current = run
         .as_ref()
-        .is_some_and(|run| run["chatExecution"]["messageId"] == delivery["id"]);
+        .is_some_and(|run| run["chatExecution"]["messageId"] == delivery.id);
     let active = run
         .as_ref()
         .and_then(crate::run_status::RunStatus::of)
@@ -874,7 +830,11 @@ pub struct Reply {
     pub files: Vec<Value>,
 }
 
-pub async fn reply(s: &Service, expected: &Connection, delivery: &Value) -> Result<Option<Reply>> {
+pub async fn reply(
+    s: &Service,
+    expected: &Connection,
+    delivery: &Delivery,
+) -> Result<Option<Reply>> {
     ensure_owner(s, expected).await?;
     let expected = expected.clone();
     let delivery = delivery.clone();
@@ -925,7 +885,7 @@ pub async fn reply(s: &Service, expected: &Connection, delivery: &Value) -> Resu
 pub async fn progress(
     s: &Service,
     expected: &Connection,
-    delivery: &Value,
+    delivery: &Delivery,
 ) -> Result<Option<Value>> {
     let expected = expected.clone();
     let delivery = delivery.clone();
@@ -961,10 +921,14 @@ fn step(item: &Value) -> String {
 }
 
 /// Questions the agent is waiting on in this conversation.
-pub async fn questions(s: &Service, expected: &Connection, delivery: &Value) -> Result<Vec<Value>> {
+pub async fn questions(
+    s: &Service,
+    expected: &Connection,
+    delivery: &Delivery,
+) -> Result<Vec<Value>> {
     let expected = expected.clone();
     let delivery = delivery.clone();
-    let prefix = crate::chats::questions::question_prefix(text(&delivery, "chatId"));
+    let prefix = crate::chats::questions::question_prefix(&delivery.chat_id);
     s.store
         .read(move |db| {
             let connection = authorize(db, &expected)?;
@@ -972,7 +936,7 @@ pub async fn questions(s: &Service, expected: &Connection, delivery: &Value) -> 
                 return Ok(Vec::new());
             };
             let execution = db.run(&run)?.unwrap_or(Value::Null);
-            if execution["chatExecution"]["messageId"] != delivery["id"] {
+            if execution["chatExecution"]["messageId"] != delivery.id {
                 return Ok(Vec::new());
             }
             Ok(db
@@ -1006,18 +970,19 @@ pub async fn questions(s: &Service, expected: &Connection, delivery: &Value) -> 
 }
 
 /// Removes a delivery and records how its exchange ended.
-pub async fn finish(s: &Service, delivery: &Value, status: &'static str) -> Result<()> {
-    let id = text(delivery, "id").to_owned();
+pub async fn finish(s: &Service, delivery: &Delivery, status: &'static str) -> Result<()> {
+    let id = delivery.id.clone();
     s.store
         .transaction(move |db| {
-            db.remove(DELIVERIES, &id)?;
-            for mut value in db.list("plugin-activity")? {
-                if value["deliveryId"] == id {
-                    value["status"] = json!(status);
-                    value["updatedAt"] = json!(now());
-                    db.put("plugin-activity", &value)?;
-                }
-            }
+            db.remove_plugin_delivery(&id)?;
+            db.finish_plugin_activity(
+                &id,
+                match status {
+                    "replied" => cairn_contracts::PluginActivityStatus::Replied,
+                    "stopped" => cairn_contracts::PluginActivityStatus::Stopped,
+                    _ => cairn_contracts::PluginActivityStatus::Failed,
+                },
+            )?;
             Ok(())
         })
         .await

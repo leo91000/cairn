@@ -100,7 +100,7 @@ impl RunOperation {
         let human = matches!(&context, ResumeContext::Human(_));
         let bearer = match context {
             ResumeContext::Human(_) => None,
-            ResumeContext::Public(scopes) => {
+            ResumeContext::Public(scopes, _) => {
                 if !scopes.iter().any(|scope| scope == self.scope) {
                     return Err(Error::forbidden(format!(
                         "The {} scope is required.",

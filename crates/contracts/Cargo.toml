@@ -14,3 +14,4 @@ uuid = { version = "1", features = [
   "serde",
   "v4"
 ] }
+cairn-plugin-api = { path = "../plugin-api" }

@@ -11,7 +11,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 
-pub const KIND: &str = "plugin-http-receipts";
+use super::queues::Receipt;
 
 pub enum Claim {
     Fresh(String),
@@ -40,31 +40,43 @@ pub async fn claim(
     }
     let input = args.get("idempotencyInput").unwrap_or(args);
     let fingerprint = hex_digest(&serde_json::to_string(&json!({
-        "method": args["method"], "url": args["url"], "input": input,
+        "method": args["method"],
+        "url": args["url"],
+        "input": input,
     }))?);
     let id = format!("{}:{}", connection.id, hex_digest(key));
     let connection = connection.clone();
     let management = management.cloned();
-    s.store.transaction(move |db| {
-        if let Some(authority) = &management { authority.authorize(db)?; }
-        connections::authorize(db, &connection)?;
-        if let Some(existing) = db.get(KIND, &id)? {
-            if existing["fingerprint"] != fingerprint { return Err(Error::conflict("This idempotency key was already used for another request.")); }
-            if existing["state"] == "completed" { return Ok(Some(Claim::Cached(existing["response"].clone()))); }
-            return Err(Error::conflict("The earlier request may have succeeded. Check the service before sending again; this key will not repeat it."));
-        }
-        if db.list(KIND)?.iter().filter(|v| v["connectionId"] == connection.id).count() >= 10_000 {
-            return Err(Error::too_large("This account has reached its HTTP receipt limit."));
-        }
-        db.put(KIND, &json!({
-            "id": id,
-            "connectionId": connection.id,
-            "fingerprint": fingerprint,
-            "state": "pending",
-            "createdAt": now(),
-        }))?;
-        Ok(Some(Claim::Fresh(id)))
-    }).await
+    s.store
+        .transaction(move |db| {
+            if let Some(authority) = &management {
+                authority.authorize(db)?;
+            }
+            connections::authorize(db, &connection)?;
+
+            if let Some(existing) = db.plugin_receipt(&id)? {
+                if existing.fingerprint != fingerprint {
+                    return Err(Error::conflict("This idempotency key was already used for another request."));
+                }
+                if let Some(response) = existing.response {
+                    return Ok(Some(Claim::Cached(response)));
+                }
+                return Err(Error::conflict("The earlier request may have succeeded. Check the service before sending again; this key will not repeat it."));
+            }
+
+            if db.plugin_receipt_count(&connection.id)? >= 10_000 {
+                return Err(Error::too_large("This account has reached its HTTP receipt limit."));
+            }
+            db.save_plugin_receipt(&Receipt {
+                id: id.clone(),
+                instance_id: connection.id.clone(),
+                fingerprint,
+                response: None,
+                created_at: now(),
+            })?;
+            Ok(Some(Claim::Fresh(id)))
+        })
+        .await
 }
 
 pub async fn complete(
@@ -78,7 +90,13 @@ pub async fn complete(
     let response = if serde_json::to_vec(response)?.len() <= 65_536 {
         response.clone()
     } else {
-        json!({ "status": response["status"], "headers": {}, "json": null, "text": null, "resultOmitted": true })
+        json!({
+            "status": response["status"],
+            "headers": {},
+            "json": null,
+            "text": null,
+            "resultOmitted": true,
+        })
     };
     let management = management.cloned();
     let connection = connection.clone();
@@ -90,11 +108,10 @@ pub async fn complete(
             }
             connections::authorize(db, &connection)?;
             let mut record = db
-                .get(KIND, &id)?
+                .plugin_receipt(&id)?
                 .ok_or_else(|| Error::conflict("The HTTP receipt was removed."))?;
-            record["state"] = json!("completed");
-            record["response"] = response;
-            db.put(KIND, &record)?;
+            record.response = Some(response);
+            db.save_plugin_receipt(&record)?;
             Ok(())
         })
         .await

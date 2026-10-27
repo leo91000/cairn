@@ -577,6 +577,7 @@ mod tests {
                 instance.name = "Fixture".into();
                 instance.revision = "r1".into();
                 instance.enabled = true;
+                db.save_plugin_version("fixture", "1", &"0".repeat(64))?;
                 db.save_plugin_instance(&instance)?;
                 db.save_agent(&profile)?;
                 let captured_run = json!({

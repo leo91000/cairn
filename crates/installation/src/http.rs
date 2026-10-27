@@ -419,6 +419,8 @@ impl Input {
             );
         let limit = if path.starts_with("/internal/node-workspace/") && large {
             2_000_000
+        } else if path == "/api/plugins/packages" && parts.method == "POST" {
+            cairn_plugin_api::MAX_FRAME_BYTES
         } else if skill_batch
             || path.ends_with("/avatar/upload")
             || matches!(path, "/mcp" | "/api/mcp" | "/mcp-installation")
