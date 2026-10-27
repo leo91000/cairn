@@ -6,7 +6,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// What connecting an instance takes, shown before the owner starts.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema, ts_rs::TS,
+)]
+#[schemars(rename = "SetupEffort")]
+#[ts(rename = "SetupEffort")]
 #[serde(rename_all = "camelCase")]
 pub enum Effort {
     /// A sign-in on the service's own page.
@@ -19,7 +23,20 @@ pub enum Effort {
 
 /// What a step asks for. Settings steps show declared fields; the others are drawn
 /// by Cairn from the credential, the delegation and the agent grants.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Deserialize,
+    Serialize,
+    PartialEq,
+    Eq,
+    schemars::JsonSchema,
+    ts_rs::TS,
+)]
+#[schemars(rename = "SetupStepKind")]
+#[ts(rename = "SetupStepKind")]
 #[serde(rename_all = "camelCase")]
 pub enum StepKind {
     #[default]
@@ -31,13 +48,21 @@ pub enum StepKind {
 
 /// A value Cairn knows and the owner copies into the service, such as the OAuth
 /// callback URL.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema, ts_rs::TS,
+)]
+#[schemars(rename = "SetupCopyValue")]
+#[ts(rename = "SetupCopyValue")]
 #[serde(rename_all = "camelCase")]
 pub enum CopyValue {
     CallbackUrl,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema, ts_rs::TS,
+)]
+#[schemars(rename = "SetupRisk")]
+#[ts(rename = "SetupRisk")]
 #[serde(rename_all = "camelCase")]
 pub enum Risk {
     Low,
@@ -46,11 +71,14 @@ pub enum Risk {
 }
 
 /// Something the owner does on the service's site, ticked off in the assistant.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "SetupTask")]
+#[ts(rename = "SetupTask")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Task {
     pub title: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(transform = crate::client_default::<String>)]
     pub text: String,
     /// The service's page for this task. HTTPS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,62 +87,84 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<String>", pattern("^callbackUrl$"))]
     pub copy: Option<CopyValue>,
 }
 
 /// A named combination of the step's boolean settings, e.g. "Read only".
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "SetupPreset")]
+#[ts(rename = "SetupPreset")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Preset {
     pub id: String,
     pub title: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(transform = crate::client_default::<String>)]
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<String>", pattern("^(low|medium|high)$"))]
     pub risk: Option<Risk>,
     /// Settings turned on. The step's other boolean settings are turned off.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(!default)]
     pub values: BTreeMap<String, bool>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "SetupStep")]
+#[ts(rename = "SetupStep")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Step {
     pub id: String,
     #[serde(default)]
+    #[schemars(with = "String", pattern("^(settings|credential|people|agents)$"))]
     pub kind: StepKind,
     pub title: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(transform = crate::client_default::<String>)]
     pub description: String,
     /// Keys of the settings this step shows, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<String>>)]
     pub settings: Vec<String>,
     /// The same values serve every instance, e.g. one OAuth client for every mailbox.
     /// A new instance can reuse them from another one (`sharedFrom`): the host copies
     /// them, secrets included, without sending secrets to the client.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(transform = crate::client_default::<bool>)]
     pub shared: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<Task>>)]
     pub checklist: Vec<Task>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<Preset>>)]
     pub presets: Vec<Preset>,
     /// A consequence to know before going on, e.g. a provider's token expiry.
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(transform = crate::client_default::<String>)]
     pub warning: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[derive(
+    Clone, Debug, Default, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS,
+)]
+#[schemars(rename = "PluginSetup")]
+#[ts(rename = "PluginSetup")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Setup {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<String>", pattern("^(signin|token|app)$"))]
     pub effort: Option<Effort>,
     /// What the owner needs before connecting, in one or two sentences.
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(transform = crate::client_default::<String>)]
     pub summary: String,
     /// A string setting naming a new instance once known, e.g. the verified mailbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_from: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<Step>>)]
     pub steps: Vec<Step>,
 }
 

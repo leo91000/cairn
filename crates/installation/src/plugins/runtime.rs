@@ -4,8 +4,9 @@
 use super::{
     capabilities::{self, Context},
     connections::{self, Connection, ensure_owner, status, status_with},
+    queues::Delivery,
     registry::{self, Package},
-    work::{self, DELIVERIES, EVENTS},
+    work,
 };
 use crate::{
     config::now,
@@ -19,7 +20,7 @@ use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-const ATTEMPTS: u64 = 5;
+const ATTEMPTS: u32 = 5;
 
 /// Token formats of active packages, masked in run output. Returns whether they loaded.
 pub async fn load_secret_patterns(s: &Service) -> bool {
@@ -223,28 +224,34 @@ pub async fn begin(s: &Service, connection: &Connection, session: &mut Session) 
 /// worker must be replaced; individual handler failures are retried with backoff.
 pub async fn pump(s: &Service, connection: &Connection, session: &mut Session) -> Result<()> {
     release_timers(s, connection).await?;
-    let mut events = owned(s, EVENTS, connection).await?;
-    events.sort_by_key(|value| value["createdAt"].as_i64().unwrap_or(0));
+    let events = s.store.plugin_events(&connection.id, now()).await?;
     for mut event in events {
-        if event["revision"] != connection.revision {
-            remove(s, EVENTS, &event).await?;
+        if event.revision != connection.revision {
+            remove_event(s, &event.id).await?;
             continue;
         }
-        let name = text(&event, "name").to_owned();
+        let name = event.name.clone();
         let result = dispatch(
             s,
             connection,
             session,
-            &event,
+            &serde_json::to_value(&event)?,
             &name,
-            event["payload"].clone(),
+            event.payload.clone(),
         )
         .await;
         match result {
-            Ok(_) => remove(s, EVENTS, &event).await?,
+            Ok(_) => remove_event(s, &event.id).await?,
             Err(_) => {
-                if retry_later(s, EVENTS, &mut event).await? {
+                if event.attempts + 1 >= ATTEMPTS {
+                    remove_event(s, &event.id).await?;
                     audit_failure(s, connection, &name).await?;
+                } else {
+                    event.attempts += 1;
+                    event.next_attempt_at = now() + 5000 * i64::from(event.attempts);
+                    s.store
+                        .transaction(move |db| db.save_plugin_event(&event))
+                        .await?;
                 }
             }
         }
@@ -252,10 +259,8 @@ pub async fn pump(s: &Service, connection: &Connection, session: &mut Session) -
             return Err(Error::bad_gateway("Plugin worker stopped."));
         }
     }
-    for mut delivery in owned(s, DELIVERIES, connection).await? {
-        if delivery["revision"] != connection.revision
-            || now() - delivery["createdAt"].as_i64().unwrap_or(0) > 86_400_000
-        {
+    for mut delivery in s.store.plugin_deliveries(&connection.id, now()).await? {
+        if delivery.revision != connection.revision || now() - delivery.created_at > 86_400_000 {
             work::finish(s, &delivery, "failed").await?;
             continue;
         }
@@ -281,15 +286,15 @@ pub async fn pump(s: &Service, connection: &Connection, session: &mut Session) -
             continue;
         };
         let payload = json!({
-            "deliveryId": delivery["id"],
-            "conversation": delivery["chatId"],
-            "userId": delivery["userId"],
-            "thread": delivery["thread"],
+            "deliveryId": delivery.id,
+            "conversation": delivery.chat_id,
+            "userId": delivery.user_id,
+            "thread": delivery.thread,
             "text": reply.text,
             "status": reply.status,
             "files": reply.files,
-            "reply": delivery["reply"],
-            "state": delivery["state"],
+            "reply": delivery.reply,
+            "state": delivery.state,
         });
         // Uploads are limited to this reply's deliverables.
         let event =
@@ -306,14 +311,14 @@ pub async fn pump(s: &Service, connection: &Connection, session: &mut Session) -
                     .as_f64()
                     .unwrap_or(5.0)
                     .clamp(1.0, 300.0);
-                delivery["nextAttemptAt"] = json!(now() + (seconds * 1000.0) as i64);
-                delivery["state"] = value["state"].clone();
-                s.store.put(DELIVERIES, delivery).await?;
+                delivery.next_attempt_at = now() + (seconds * 1000.0) as i64;
+                delivery.state = value["state"].clone();
+                s.store.save_plugin_delivery(delivery).await?;
                 break;
             }
             Ok(_) => work::finish(s, &delivery, outcome).await?,
             Err(_) => {
-                if retry_later(s, DELIVERIES, &mut delivery).await? {
+                if retry_delivery(s, &mut delivery).await? {
                     work::finish(s, &delivery, "failed").await?;
                 }
             }
@@ -331,28 +336,29 @@ async fn follow(
     s: &Service,
     connection: &Connection,
     session: &mut Session,
-    delivery: &mut Value,
+    delivery: &mut Delivery,
 ) -> Result<()> {
     let mut changed = false;
     for question in work::questions(s, connection, delivery).await? {
-        let asked = delivery["asked"]
-            .as_array()
-            .is_some_and(|asked| asked.contains(&question["id"]));
+        let question_id = text(&question, "id");
+        let asked = delivery.asked.iter().any(|id| id == question_id);
         if asked
-            || delivery["questionRetryAt"][text(&question, "id")]
-                .as_i64()
+            || delivery
+                .question_retry_at
+                .get(question_id)
+                .copied()
                 .unwrap_or(0)
                 > now()
         {
             continue;
         }
         let payload = json!({
-            "deliveryId": delivery["id"],
-            "conversation": delivery["chatId"],
-            "userId": delivery["userId"],
-            "thread": delivery["thread"],
+            "deliveryId": delivery.id,
+            "conversation": delivery.chat_id,
+            "userId": delivery.user_id,
+            "thread": delivery.thread,
             "question": question,
-            "reply": delivery["reply"],
+            "reply": delivery.reply,
         });
         let event = json!({ "name": "question", "revision": connection.revision });
         match dispatch(s, connection, session, &event, "question", payload).await {
@@ -368,10 +374,7 @@ async fn follow(
                         Some(now() + 30 * 86_400_000),
                     )
                     .await?;
-                match delivery["asked"].as_array_mut() {
-                    Some(asked) => asked.push(question["id"].clone()),
-                    None => delivery["asked"] = json!([question["id"]]),
-                }
+                delivery.asked.push(text(&question, "id").into());
             }
             result => {
                 let seconds = result
@@ -379,34 +382,33 @@ async fn follow(
                     .and_then(|value| value["retryAfter"].as_f64())
                     .unwrap_or(5.0)
                     .clamp(1.0, 300.0);
-                if !delivery["questionRetryAt"].is_object() {
-                    delivery["questionRetryAt"] = json!({});
-                }
-                delivery["questionRetryAt"][text(&question, "id")] =
-                    json!(now() + (seconds * 1000.0) as i64);
+                delivery.question_retry_at.insert(
+                    text(&question, "id").into(),
+                    now() + (seconds * 1000.0) as i64,
+                );
             }
         }
         changed = true;
     }
-    if now() - delivery["progressAt"].as_i64().unwrap_or(0) >= 8000
+    if now() - delivery.progress_at >= 8000
         && let Some(progress) = work::progress(s, connection, delivery).await?
     {
         let payload = json!({
-            "deliveryId": delivery["id"],
-            "conversation": delivery["chatId"],
-            "userId": delivery["userId"],
-            "thread": delivery["thread"],
+            "deliveryId": delivery.id,
+            "conversation": delivery.chat_id,
+            "userId": delivery.user_id,
+            "thread": delivery.thread,
             "state": progress["state"],
             "step": progress["step"],
-            "reply": delivery["reply"],
+            "reply": delivery.reply,
         });
         let event = json!({ "name": "progress", "revision": connection.revision });
         let _ = dispatch(s, connection, session, &event, "progress", payload).await;
-        delivery["progressAt"] = json!(now());
+        delivery.progress_at = now();
         changed = true;
     }
     if changed {
-        s.store.put(DELIVERIES, delivery.clone()).await?;
+        s.store.save_plugin_delivery(delivery.clone()).await?;
     }
     Ok(())
 }
@@ -435,35 +437,20 @@ async fn dispatch(
         .await
 }
 
-async fn owned(s: &Service, kind: &str, connection: &Connection) -> Result<Vec<Value>> {
-    let time = now();
-    Ok(s.store
-        .list(kind)
-        .await?
-        .into_iter()
-        .filter(|value| value["connectionId"] == connection.id)
-        .filter(|value| value["nextAttemptAt"].as_i64().unwrap_or(0) <= time)
-        .collect())
+async fn remove_event(s: &Service, id: &str) -> Result<()> {
+    let id = id.to_owned();
+    s.store
+        .transaction(move |db| db.remove_plugin_event(&id))
+        .await
 }
 
-async fn remove(s: &Service, kind: &'static str, value: &Value) -> Result<()> {
-    let id = text(value, "id").to_owned();
-    s.store.transaction(move |db| db.remove(kind, &id)).await
-}
-
-/// Schedules another attempt; returns true when attempts are exhausted and the
-/// record was given up (events are removed; deliveries are finished by the caller).
-async fn retry_later(s: &Service, kind: &'static str, value: &mut Value) -> Result<bool> {
-    let attempts = value["attempts"].as_u64().unwrap_or(0) + 1;
-    if attempts >= ATTEMPTS {
-        if kind == EVENTS {
-            remove(s, kind, value).await?;
-        }
+async fn retry_delivery(s: &Service, delivery: &mut Delivery) -> Result<bool> {
+    delivery.attempts += 1;
+    if delivery.attempts >= ATTEMPTS {
         return Ok(true);
     }
-    value["attempts"] = json!(attempts);
-    value["nextAttemptAt"] = json!(now() + 5000 * attempts as i64);
-    s.store.put(kind, value.clone()).await?;
+    delivery.next_attempt_at = now() + 5000 * i64::from(delivery.attempts);
+    s.store.save_plugin_delivery(delivery.clone()).await?;
     Ok(false)
 }
 
@@ -479,19 +466,14 @@ async fn release_timers(s: &Service, connection: &Connection) -> Result<()> {
     let connection = connection.clone();
     s.store
         .transaction(move |db| {
-            for timer in db.list("plugin-timers")? {
-                if timer["connectionId"] != connection.id
-                    || timer["at"].as_i64().unwrap_or(0) > now()
-                {
-                    continue;
-                }
-                db.remove("plugin-timers", text(&timer, "id"))?;
-                if timer["revision"] == connection.revision {
+            for timer in db.plugin_timers(&connection.id, now())? {
+                db.remove_plugin_timer(&timer.id)?;
+                if timer.revision == connection.revision {
                     work::enqueue(
                         db,
                         &connection,
                         "timer",
-                        &json!({ "id": timer["id"], "name": timer["name"], "payload": timer["payload"] }),
+                        &json!({ "id": timer.id, "name": timer.name, "payload": timer.payload }),
                         None,
                     )?;
                 }

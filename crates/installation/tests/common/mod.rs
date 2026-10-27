@@ -412,6 +412,7 @@ impl PluginStoreFixture for Store {
                     .agent(&instance.agent_id)?
                     .map(|agent| agent.settings.access);
             }
+            db.save_plugin_version(&instance.plugin_id, "fixture", &"0".repeat(64))?;
             db.save_plugin_instance(&instance)?;
             Ok(serde_json::to_value(&instance)?)
         })
@@ -536,3 +537,185 @@ pub fn instance_configuration(
 }
 
 pub mod run_fixture;
+
+// Existing behavioral suites use JSON wire assertions. Inputs decode through the
+// canonical package contract; these helpers own no validation or persistence.
+pub async fn package_install(
+    s: &Service,
+    value: &Value,
+) -> cairn_installation::error::Result<Value> {
+    let mut value = value.clone();
+    if value.get("modules").is_none() {
+        value["modules"] = serde_json::json!({});
+    }
+    let input = serde_json::from_value(value)
+        .map_err(|error| cairn_installation::error::Error::bad(error.to_string()))?;
+    Ok(serde_json::to_value(
+        cairn_installation::plugins::registry::install(s, &input).await?,
+    )?)
+}
+
+pub async fn package_catalog(s: &Service) -> cairn_installation::error::Result<Value> {
+    Ok(serde_json::to_value(
+        cairn_installation::plugins::registry::catalog(s).await?,
+    )?)
+}
+
+pub async fn package_approve(
+    s: &Service,
+    plugin: &str,
+    version: &str,
+    digest: &str,
+) -> cairn_installation::error::Result<Value> {
+    Ok(serde_json::to_value(
+        cairn_installation::plugins::registry::approve(s, plugin, version, digest).await?,
+    )?)
+}
+
+pub async fn plugin_events(store: &Store) -> cairn_installation::error::Result<Vec<Value>> {
+    let mut result = Vec::new();
+    for instance in store.plugin_instances().await? {
+        result.extend(
+            store
+                .plugin_events(&instance.id, i64::MAX)
+                .await?
+                .into_iter()
+                .map(serde_json::to_value)
+                .collect::<serde_json::Result<Vec<_>>>()?,
+        );
+    }
+    Ok(result)
+}
+
+pub async fn plugin_deliveries(store: &Store) -> cairn_installation::error::Result<Vec<Value>> {
+    let mut result = Vec::new();
+    for instance in store.plugin_instances().await? {
+        result.extend(
+            store
+                .plugin_deliveries(&instance.id, i64::MAX)
+                .await?
+                .into_iter()
+                .map(serde_json::to_value)
+                .collect::<serde_json::Result<Vec<_>>>()?,
+        );
+    }
+    Ok(result)
+}
+
+pub async fn put_plugin_delivery(
+    store: &Store,
+    value: Value,
+) -> cairn_installation::error::Result<()> {
+    store
+        .save_plugin_delivery(serde_json::from_value(value)?)
+        .await
+}
+
+pub async fn plugin_requests(store: &Store) -> cairn_installation::error::Result<Vec<Value>> {
+    store
+        .read(|db| {
+            Ok(db
+                .plugin_requests()?
+                .into_iter()
+                .map(serde_json::to_value)
+                .collect::<serde_json::Result<_>>()?)
+        })
+        .await
+}
+
+pub async fn plugin_activity(store: &Store) -> cairn_installation::error::Result<Vec<Value>> {
+    store
+        .read(|db| {
+            Ok(db
+                .plugin_activity()?
+                .into_iter()
+                .map(serde_json::to_value)
+                .collect::<serde_json::Result<_>>()?)
+        })
+        .await
+}
+
+pub async fn plugin_timers(store: &Store) -> cairn_installation::error::Result<Vec<Value>> {
+    store
+        .read(|db| {
+            let mut result = Vec::new();
+            for instance in db.plugin_instances()? {
+                result.extend(
+                    db.plugin_timers(&instance.id, i64::MAX)?
+                        .into_iter()
+                        .map(serde_json::to_value)
+                        .collect::<serde_json::Result<Vec<_>>>()?,
+                );
+            }
+            Ok(result)
+        })
+        .await
+}
+
+pub async fn put_plugin_timer(
+    store: &Store,
+    value: Value,
+) -> cairn_installation::error::Result<()> {
+    let timer: cairn_installation::plugins::state::Timer = serde_json::from_value(value)?;
+    store
+        .transaction(move |db| {
+            db.remove_plugin_timer(&timer.id)?;
+            db.save_plugin_timer(&timer)
+        })
+        .await
+}
+
+pub async fn plugin_reply(
+    s: &Service,
+    connection: &cairn_installation::plugins::connections::Connection,
+    value: &Value,
+) -> cairn_installation::error::Result<Option<cairn_installation::plugins::work::Reply>> {
+    cairn_installation::plugins::work::reply(s, connection, &serde_json::from_value(value.clone())?)
+        .await
+}
+
+pub async fn plugin_progress(
+    s: &Service,
+    connection: &cairn_installation::plugins::connections::Connection,
+    value: &Value,
+) -> cairn_installation::error::Result<Option<Value>> {
+    cairn_installation::plugins::work::progress(
+        s,
+        connection,
+        &serde_json::from_value(value.clone())?,
+    )
+    .await
+}
+
+pub async fn plugin_questions(
+    s: &Service,
+    connection: &cairn_installation::plugins::connections::Connection,
+    value: &Value,
+) -> cairn_installation::error::Result<Vec<Value>> {
+    cairn_installation::plugins::work::questions(
+        s,
+        connection,
+        &serde_json::from_value(value.clone())?,
+    )
+    .await
+}
+
+pub async fn owner_plugin_route(
+    s: &Arc<Service>,
+    method: &str,
+    path: &str,
+    body: Value,
+) -> cairn_installation::error::Result<Value> {
+    let input = cairn_installation::http::Input {
+        method: method.into(),
+        path: path.into(),
+        body,
+        query: std::collections::HashMap::new(),
+        headers: axum::http::HeaderMap::new(),
+        identity: Some(cairn_installation::auth::InstallationIdentity::trusted(
+            cairn_installation::auth::InstallationRole::Owner,
+            "fixture-owner",
+        )),
+    };
+    cairn_installation::plugins::routes(s, &input).await
+}

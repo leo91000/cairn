@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
 import { beaconRelayFixture, executeBeaconSql } from './beacon-relay-fixture'
+import { relayProtocolVersion } from './relay-protocol'
 
 test('installation subdomains preserve browser drafts and canonical account access', async ({ page: initialPage, browser, browserName }) => {
   let page = initialPage
@@ -238,19 +239,19 @@ test('installation subdomains preserve browser drafts and canonical account acce
     await page.getByRole('button', { name: 'Confirm with a passkey', exact: true }).click()
     await expect(page).toHaveURL(`${hostedOrigin}/settings/sensitive`)
     await page.goto(`${origin}/installations/${installation.slug}/settings/account`)
-    const extra = await page.evaluate(async () => {
+    const extra = await page.evaluate(async (protocol) => {
       const session = await (await fetch('/api/account/session')).json()
       const headers = { 'X-CSRF-Token': session.csrf, 'Content-Type': 'application/json' }
       const claimed: string[] = []
       for (const name of ['Detached installation', 'Shared installation']) {
         const code = await (await fetch('/api/installations/claim-code', { method: 'POST', headers, body: '{}' })).json()
-        const identity = await (await fetch('/api/relay/claim', { method: 'POST', headers, body: JSON.stringify({ code: code.code, name, protocol: 5 }) })).json()
+        const identity = await (await fetch('/api/relay/claim', { method: 'POST', headers, body: JSON.stringify({ code: code.code, name, protocol }) })).json()
         claimed.push(identity.installationId)
       }
 
       const listed = await (await fetch('/api/account/session')).json()
       return listed.installations.filter((item: { id: string }) => claimed.includes(item.id))
-    })
+    }, relayProtocolVersion)
     const detached = extra.find((item: { name: string }) => item.name === 'Detached installation')
     const shared = extra.find((item: { name: string }) => item.name === 'Shared installation')
     const secondOwner = crypto.randomUUID()

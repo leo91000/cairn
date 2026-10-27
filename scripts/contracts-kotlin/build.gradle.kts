@@ -33,6 +33,7 @@ tasks.test {
     inputs.file(rootProject.file("../../packages/contracts/generated/agent-wire.json"))
     inputs.file(rootProject.file("../../tests/fixtures/agent-contracts.json"))
     inputs.file(rootProject.file("../../tests/fixtures/plugin-contracts.json"))
+    inputs.file(rootProject.file("../../tests/fixtures/plugin-package-contracts.json"))
     inputs.file(rootProject.file("../../packages/contracts/generated/plugin-wire.json"))
     inputs.file(rootProject.file("../../tests/fixtures/project-contracts.json"))
     inputs.file(rootProject.file("../../packages/contracts/generated/mission-wire.json"))

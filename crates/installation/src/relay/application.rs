@@ -112,6 +112,7 @@ impl DirectTraffic {
                             request.account_id.clone_from(&lease.claims.account_id);
                             request.role = lease.claims.role;
                             request.mcp_scopes = None;
+                            request.mcp_credential_digest = None;
                             request.public_artifact = None;
 
                             let credit = Arc::new(Semaphore::new(0));

@@ -206,7 +206,7 @@ abstract class ResourceSaveCases {
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 // A plugin with a project source and one enabled account.
                                 path.endsWith("/api/plugins") ->
-                                    """{"packages":[{"id":"github","status":"active","active":"1.0.0","manifest":{"id":"github","name":"GitHub","projectSources":[{"name":"repositories","title":"GitHub repository"}]}}],"connections":[{"id":"acct","pluginId":"github","name":"octo","enabled":true,"settings":{},"status":{"state":"disconnected","message":null},"usage":{"hour":0}}]}"""
+                                    """{"packages":[{"id":"github","status":"active","active":"1.0.0","manifest":{"id":"github","name":"GitHub","projectSources":[{"name":"repositories","title":"GitHub repository"}],"version":"1.0.0","apiVersion":2,"capabilities":[]},"builtin":true,"versions":[],"setup":null}],"connections":[{"id":"acct","pluginId":"github","name":"octo","enabled":true,"settings":{},"status":{"state":"disconnected","message":null},"usage":{"hour":0}}],"capabilities":[]}"""
                                 path.endsWith("/plugins/github/projects") ->
                                     """{"items":[{"id":"owner/repository","name":"owner/repository","description":"","defaultBranch":"main","badges":["Private"],"imported":false}],"nextPage":null}"""
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"

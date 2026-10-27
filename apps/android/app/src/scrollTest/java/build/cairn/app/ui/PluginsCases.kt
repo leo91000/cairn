@@ -38,14 +38,14 @@ abstract class PluginsCases {
                     effort = "token",
                     steps =
                         listOf(
-                            SetupStep("credential", "credential", "Bot token"),
+                            SetupStep(id = "credential", kind = "credential", title = "Bot token"),
                             SetupStep(
-                                "settings",
-                                "settings",
-                                "Settings",
+                                id = "settings",
+                                kind = "settings",
+                                title = "Settings",
                                 settings = listOf("guildId", "channelId", "messageContent"),
                             ),
-                            SetupStep("people", "people", "Who can talk to it"),
+                            SetupStep(id = "people", kind = "people", title = "Who can talk to it"),
                         ),
                 ),
             manifest =
@@ -62,43 +62,51 @@ abstract class PluginsCases {
                             "http",
                             "storage",
                         ),
-                    instances = PluginInstances("Bot", "Bots"),
-                    credential = PluginCredential("Bot token", "authorization"),
+                    instances = PluginInstances(singular = "Bot", plural = "Bots"),
+                    credential = PluginCredential(label = "Bot token", header = "authorization"),
                     instanceForm = true,
                     instanceView = true,
                     instanceTest = true,
                     settings =
-                        listOf(
-                            PluginSetting(
-                                key = "guildId",
-                                title = "Server",
-                                type = "select",
-                                required = true,
-                                dynamic = true,
-                                refresh = true,
-                            ),
-                            PluginSetting(
-                                key = "channelId",
-                                title = "Channel",
-                                type = "select",
-                                required = true,
-                                dynamic = true,
-                                refresh = true,
-                            ),
-                            PluginSetting(
-                                key = "messageContent",
-                                title = "Read replies without a mention",
-                                type = "boolean",
-                            ),
-                            PluginSetting(key = "guildName", title = "Server name", hidden = true),
-                            PluginSetting(
-                                key = "channelName",
-                                title = "Channel name",
-                                hidden = true,
-                            ),
-                            PluginSetting(key = "botName", title = "Bot name", hidden = true),
-                        ),
+                        (listOf(
+                                PluginSetting(
+                                    key = "guildId",
+                                    title = "Server",
+                                    type = "select",
+                                    required = true,
+                                    dynamic = true,
+                                    refresh = true,
+                                ),
+                                PluginSetting(
+                                    key = "channelId",
+                                    title = "Channel",
+                                    type = "select",
+                                    required = true,
+                                    dynamic = true,
+                                    refresh = true,
+                                ),
+                                PluginSetting(
+                                    key = "messageContent",
+                                    title = "Read replies without a mention",
+                                    type = "boolean",
+                                ),
+                                PluginSetting(
+                                    key = "guildName",
+                                    title = "Server name",
+                                    hidden = true,
+                                ),
+                                PluginSetting(
+                                    key = "channelName",
+                                    title = "Channel name",
+                                    hidden = true,
+                                ),
+                                PluginSetting(key = "botName", title = "Bot name", hidden = true),
+                            ))
+                            .map { wireJson.encodeToJsonElement(PluginSetting.serializer(), it) },
+                    apiVersion = 2,
                 ),
+            status = "active",
+            versions = emptyList(),
         )
     private val notes =
         PluginEntry(
@@ -109,12 +117,12 @@ abstract class PluginsCases {
                     steps =
                         listOf(
                             SetupStep(
-                                "settings",
-                                "settings",
-                                "Settings",
+                                id = "settings",
+                                kind = "settings",
+                                title = "Settings",
                                 settings = listOf("team", "limit", "loud"),
                             ),
-                            SetupStep("people", "people", "Who can talk to it"),
+                            SetupStep(id = "people", kind = "people", title = "Who can talk to it"),
                         )
                 ),
             manifest =
@@ -124,13 +132,18 @@ abstract class PluginsCases {
                     version = "1.0.0",
                     capabilities = listOf("conversations.submit", "storage"),
                     settings =
-                        listOf(
-                            PluginSetting(key = "team", title = "Team", required = true),
-                            PluginSetting(key = "limit", title = "Limit", type = "number"),
-                            PluginSetting(key = "loud", title = "Loud", type = "boolean"),
-                            PluginSetting(key = "secret", title = "Secret", hidden = true),
-                        ),
+                        (listOf(
+                                PluginSetting(key = "team", title = "Team", required = true),
+                                PluginSetting(key = "limit", title = "Limit", type = "number"),
+                                PluginSetting(key = "loud", title = "Loud", type = "boolean"),
+                                PluginSetting(key = "secret", title = "Secret", hidden = true),
+                            ))
+                            .map { wireJson.encodeToJsonElement(PluginSetting.serializer(), it) },
+                    apiVersion = 2,
                 ),
+            builtin = false,
+            status = "active",
+            versions = emptyList(),
         )
     /** The built-in 1Password package as API v2 declares it, trimmed to what screens read. */
     private val onePassword =
@@ -144,18 +157,20 @@ abstract class PluginsCases {
                     name = "1Password",
                     version = "1.0.0",
                     capabilities = listOf("exec"),
-                    instances = PluginInstances("Service account", "Service accounts"),
+                    instances =
+                        PluginInstances(singular = "Service account", plural = "Service accounts"),
                     programs = listOf(PluginProgram(name = "op", installer = "programs/op.luau")),
                     settings =
-                        listOf(
-                            PluginSetting(
-                                key = "token",
-                                title = "Service account token",
-                                type = "secret",
-                                required = true,
-                            )
-                        ),
-                    agentAccess = PluginAgentAccess("Off by default."),
+                        (listOf(
+                                PluginSetting(
+                                    key = "token",
+                                    title = "Service account token",
+                                    type = "secret",
+                                    required = true,
+                                )
+                            ))
+                            .map { wireJson.encodeToJsonElement(PluginSetting.serializer(), it) },
+                    agentAccess = PluginAgentAccess(description = "Off by default."),
                     commands =
                         listOf(
                             PluginCommand(
@@ -164,23 +179,30 @@ abstract class PluginsCases {
                                 arguments =
                                     listOf(
                                         PluginArgument(
-                                            "account",
+                                            name = "account",
                                             flag = "--account",
                                             required = true,
                                         ),
                                         PluginArgument(
-                                            "reference",
+                                            name = "reference",
                                             positional = true,
                                             required = true,
                                         ),
                                     ),
                             )
                         ),
-                    tools = listOf(PluginTool("onepassword", "Metadata")),
+                    tools =
+                        listOf(
+                            PluginTool(
+                                name = "onepassword",
+                                description = "Metadata",
+                                inputSchema = kotlinx.serialization.json.JsonObject(emptyMap()),
+                            )
+                        ),
                     instanceView = true,
                     instanceTest = true,
+                    apiVersion = 2,
                 ),
-            // As the installation resolves it from the manifest's `[setup]`.
             setup =
                 PluginSetup(
                     effort = "token",
@@ -188,23 +210,25 @@ abstract class PluginsCases {
                     steps =
                         listOf(
                             SetupStep(
-                                "token",
+                                id = "token",
                                 title = "Service account token",
                                 settings = listOf("token"),
                                 checklist =
                                     listOf(
                                         SetupTask(
-                                            "Create a service account",
-                                            "Copy its token, which starts with ops_.",
+                                            title = "Create a service account",
+                                            text = "Copy its token, which starts with ops_.",
                                             url =
                                                 "https://developer.1password.com/docs/service-accounts/get-started/",
                                             link = "Open the guide",
                                         )
                                     ),
                             ),
-                            SetupStep("agents", "agents", "Agents"),
+                            SetupStep(id = "agents", kind = "agents", title = "Agents"),
                         ),
                 ),
+            status = "active",
+            versions = emptyList(),
         )
     private val account =
         PluginConnection(
@@ -336,7 +360,7 @@ abstract class PluginsCases {
 
     @Test
     fun settingsKeepNumbersAndBooleansAndDropBlankText() {
-        val fields = notes.manifest!!.settings
+        val fields = notes.manifest!!.settingFields
         assertEquals(
             buildJsonObject {
                 put("team", "core")
@@ -491,27 +515,34 @@ abstract class PluginsCases {
                             capabilities = emptyList(),
                             instanceForm = true,
                             settings =
-                                listOf(
-                                    PluginSetting(key = "team", title = "Team", required = true),
-                                    PluginSetting(
-                                        key = "more",
-                                        title = "More destinations",
-                                        type = "boolean",
-                                        refresh = true,
-                                    ),
-                                    PluginSetting(
-                                        key = "extra",
-                                        title = "Extra destinations",
-                                        type = "boolean",
-                                        refresh = true,
-                                    ),
-                                    PluginSetting(
-                                        key = "destination",
-                                        title = "Destination",
-                                        type = "select",
-                                        dynamic = true,
-                                    ),
-                                ),
+                                (listOf(
+                                        PluginSetting(
+                                            key = "team",
+                                            title = "Team",
+                                            required = true,
+                                        ),
+                                        PluginSetting(
+                                            key = "more",
+                                            title = "More destinations",
+                                            type = "boolean",
+                                            refresh = true,
+                                        ),
+                                        PluginSetting(
+                                            key = "extra",
+                                            title = "Extra destinations",
+                                            type = "boolean",
+                                            refresh = true,
+                                        ),
+                                        PluginSetting(
+                                            key = "destination",
+                                            title = "Destination",
+                                            type = "select",
+                                            dynamic = true,
+                                        ),
+                                    ))
+                                    .map {
+                                        wireJson.encodeToJsonElement(PluginSetting.serializer(), it)
+                                    },
                             setup =
                                 PluginSetup(
                                     steps =
@@ -523,14 +554,16 @@ abstract class PluginsCases {
                                                     listOf("team", "more", "extra", "destination"),
                                                 presets =
                                                     listOf(
-                                                        SetupPreset("basic", "Basic"),
+                                                        SetupPreset(id = "basic", title = "Basic"),
                                                         SetupPreset(
-                                                            "more",
-                                                            "More places",
+                                                            id = "more",
+                                                            title = "More places",
                                                             values =
-                                                                mapOf(
-                                                                    "more" to true,
-                                                                    "extra" to true,
+                                                                build.cairn.contracts.Values(
+                                                                    mapOf(
+                                                                        "more" to true,
+                                                                        "extra" to true,
+                                                                    )
                                                                 ),
                                                         ),
                                                     ),
@@ -646,9 +679,9 @@ abstract class PluginsCases {
                         steps =
                             listOf(
                                 SetupStep(
-                                    "settings",
-                                    "settings",
-                                    "Settings",
+                                    id = "settings",
+                                    kind = "settings",
+                                    title = "Settings",
                                     settings = listOf("region", "team", "password"),
                                 )
                             ),
@@ -657,33 +690,36 @@ abstract class PluginsCases {
                     notes.manifest!!.copy(
                         capabilities = emptyList(),
                         settings =
-                            listOf(
-                                PluginSetting(
-                                    key = "region",
-                                    title = "Region",
-                                    type = "select",
-                                    required = true,
-                                    default = JsonPrimitive(" "),
-                                    options =
-                                        listOf(
-                                            PluginOption(
-                                                value = " ",
-                                                label = "Space option",
+                            (listOf(
+                                    PluginSetting(
+                                        key = "region",
+                                        title = "Region",
+                                        type = "select",
+                                        required = true,
+                                        default = JsonPrimitive(" "),
+                                        options =
+                                            listOf(
+                                                PluginOption(
+                                                    value = " ",
+                                                    label = "Space option",
+                                                ),
+                                                PluginOption(
+                                                    value = "eu",
+                                                    label = "Europe",
+                                                ),
                                             ),
-                                            PluginOption(
-                                                value = "eu",
-                                                label = "Europe",
-                                            ),
-                                        ),
-                                ),
-                                PluginSetting(key = "team", title = "Team", required = true),
-                                PluginSetting(
-                                    key = "password",
-                                    title = "Password",
-                                    type = "secret",
-                                    required = true,
-                                ),
-                            ),
+                                    ),
+                                    PluginSetting(key = "team", title = "Team", required = true),
+                                    PluginSetting(
+                                        key = "password",
+                                        title = "Password",
+                                        type = "secret",
+                                        required = true,
+                                    ),
+                                ))
+                                .map {
+                                    wireJson.encodeToJsonElement(PluginSetting.serializer(), it)
+                                },
                     ),
             )
         MockWebServer().use { server ->
@@ -692,7 +728,13 @@ abstract class PluginsCases {
                 dispatcher(includeGet = true) { path, body ->
                     when (path) {
                         "/api/installations/fixture/api/plugins" ->
-                            wireJson.encodeToString(PluginCatalog(packages = listOf(entry)))
+                            wireJson.encodeToString(
+                                PluginCatalog(
+                                    packages = listOf(entry),
+                                    capabilities = emptyList(),
+                                    connections = emptyList(),
+                                )
+                            )
                         "/api/installations/fixture/api/plugins/notes/connections" -> {
                             saved += body
                             "{}"
@@ -841,7 +883,14 @@ abstract class PluginsCases {
             setup =
                 PluginSetup(
                     effort = "signin",
-                    steps = listOf(SetupStep("credential", "credential", "Sign in with Forge")),
+                    steps =
+                        listOf(
+                            SetupStep(
+                                id = "credential",
+                                kind = "credential",
+                                title = "Sign in with Forge",
+                            )
+                        ),
                 ),
             manifest =
                 PluginManifest(
@@ -849,23 +898,29 @@ abstract class PluginsCases {
                     name = "Forge",
                     version = "1.0.0",
                     capabilities = listOf("http"),
-                    instances = PluginInstances("Account", "Accounts"),
+                    instances = PluginInstances(singular = "Account", plural = "Accounts"),
                     credential =
                         PluginCredential(
-                            "Forge token",
-                            "authorization",
-                            "Bearer ",
+                            label = "Forge token",
+                            header = "authorization",
+                            prefix = "Bearer ",
                             deviceFlow =
-                                buildJsonObject {
-                                    put("authorizationUrl", "https://forge.example/device/code")
-                                    put("tokenUrl", "https://forge.example/token")
-                                    put("clientId", "fixture")
-                                },
+                                fixturePluginDeviceFlow(
+                                    buildJsonObject {
+                                        put("authorizationUrl", "https://forge.example/device/code")
+                                        put("tokenUrl", "https://forge.example/token")
+                                        put("clientId", "fixture")
+                                    }
+                                ),
                         ),
                     instanceForm = true,
                     settings =
-                        listOf(PluginSetting(key = "login", title = "Account", hidden = true)),
+                        (listOf(PluginSetting(key = "login", title = "Account", hidden = true)))
+                            .map { wireJson.encodeToJsonElement(PluginSetting.serializer(), it) },
+                    apiVersion = 2,
                 ),
+            status = "active",
+            versions = emptyList(),
         )
 
     private fun deviceFlow(id: String, state: String, message: String? = null) =
@@ -905,14 +960,14 @@ abstract class PluginsCases {
         // The manifest's device flow is read without depending on its shape.
         val manifest =
             wireJson.decodeFromString<PluginManifest>(
-                """{"id":"github","credential":{"label":"GitHub token","header":"authorization","deviceFlow":{"clientId":"x","scopes":["repo"]}},"projectSources":[{"name":"repositories","title":"GitHub repository"}],"skillSources":[{"name":"repository","title":"GitHub repository","fields":[{"key":"repository","title":"Repository","required":true}]}],"conditions":[{"name":"workflow"}],"runCredentials":{"git":[]}}"""
+                """{"id":"github","name":"GitHub","version":"1","apiVersion":2,"capabilities":["http"],"credential":{"label":"GitHub token","header":"authorization","deviceFlow":{"authorizationUrl":"https://forge.example/device","tokenUrl":"https://forge.example/token","clientId":"x","scopes":["repo"]}},"projectSources":[{"name":"repositories","title":"GitHub repository"}],"skillSources":[{"name":"repository","title":"GitHub repository","fields":[{"key":"repository","title":"Repository","required":true}]}],"conditions":[{"name":"workflow","description":"Workflow","inputSchema":{}}],"runCredentials":{"git":[]}}"""
             )
         assertNotNull(manifest.credential?.deviceFlow)
         assertEquals("repositories", manifest.projectSources.single().name)
-        assertEquals("repository", manifest.skillSources.single().fields.single().key)
+        assertEquals("repository", manifest.skillSources.single().settingFields.single().key)
         val oauth =
             wireJson.decodeFromString<PluginManifest>(
-                """{"id":"gmail","credential":{"label":"Google authorization","header":"authorization","oauth":{"clientIdSetting":"clientId","requireRefreshToken":true}}}"""
+                """{"id":"gmail","name":"Gmail","version":"1","apiVersion":2,"capabilities":["http"],"credential":{"label":"Google authorization","header":"authorization","oauth":{"authorizationUrl":"https://google.example/authorize","tokenUrl":"https://google.example/token","clientIdSetting":"clientId","requireRefreshToken":true,"scopeSettings":{},"authorizationParameters":{}}}}"""
             )
         assertNotNull(oauth.credential?.oauth)
         assertTrue(pending.copy(state = "exchanging", userCode = "").pending)
@@ -928,12 +983,16 @@ abstract class PluginsCases {
                         steps =
                             listOf(
                                 SetupStep(
-                                    "settings",
-                                    "settings",
-                                    "Settings",
+                                    id = "settings",
+                                    kind = "settings",
+                                    title = "Settings",
                                     settings = listOf("clientId", "clientSecret"),
                                 ),
-                                SetupStep("credential", "credential", "Sign in with Forge"),
+                                SetupStep(
+                                    id = "credential",
+                                    kind = "credential",
+                                    title = "Sign in with Forge",
+                                ),
                             ),
                     ),
                 manifest =
@@ -941,21 +1000,31 @@ abstract class PluginsCases {
                         .copy(
                             credential =
                                 PluginCredential(
-                                    "Google authorization",
-                                    "authorization",
-                                    "Bearer ",
-                                    oauth = buildJsonObject { put("clientIdSetting", "clientId") },
+                                    label = "Google authorization",
+                                    header = "authorization",
+                                    prefix = "Bearer ",
+                                    oauth =
+                                        fixturePluginOAuth(
+                                            buildJsonObject { put("clientIdSetting", "clientId") }
+                                        ),
                                 ),
                             settings =
-                                listOf(
-                                    PluginSetting("clientId", "OAuth client ID", required = true),
-                                    PluginSetting(
-                                        "clientSecret",
-                                        "OAuth client secret",
-                                        type = "secret",
-                                        required = true,
-                                    ),
-                                ),
+                                (listOf(
+                                        PluginSetting(
+                                            "clientId",
+                                            "OAuth client ID",
+                                            required = true,
+                                        ),
+                                        PluginSetting(
+                                            "clientSecret",
+                                            "OAuth client secret",
+                                            type = "secret",
+                                            required = true,
+                                        ),
+                                    ))
+                                    .map {
+                                        wireJson.encodeToJsonElement(PluginSetting.serializer(), it)
+                                    },
                         ),
             )
         MockWebServer().use { server ->
@@ -1197,15 +1266,83 @@ abstract class PluginsCases {
     }
 
     @Test
+    fun packageUploadUsesTheNativeFolderPickerAndCancellationIsInert() {
+        MockWebServer().use { server ->
+            val requests = CopyOnWriteArrayList<String>()
+            server.dispatcher = dispatcher(requests = requests) { _, _ -> null }
+            server.start()
+            val launches = AtomicInteger()
+            val picker =
+                object : androidx.activity.result.ActivityResultRegistryOwner {
+                    override val activityResultRegistry =
+                        object : androidx.activity.result.ActivityResultRegistry() {
+                            override fun <I, O> onLaunch(
+                                requestCode: Int,
+                                contract:
+                                    androidx.activity.result.contract.ActivityResultContract<I, O>,
+                                input: I,
+                                options: androidx.core.app.ActivityOptionsCompat?,
+                            ) {
+                                val context =
+                                    ApplicationProvider.getApplicationContext<Application>()
+                                assertEquals(
+                                    android.content.Intent.ACTION_OPEN_DOCUMENT_TREE,
+                                    contract.createIntent(context, input).action,
+                                )
+                                launches.incrementAndGet()
+                                dispatchResult(
+                                    requestCode,
+                                    android.app.Activity.RESULT_CANCELED,
+                                    null,
+                                )
+                            }
+                        }
+                }
+            show(server) { vm, state ->
+                CompositionLocalProvider(
+                    androidx.activity.compose.LocalActivityResultRegistryOwner provides picker
+                ) {
+                    PluginsScreen(vm, state) {}
+                }
+            }
+            compose.waitUntil(5000) {
+                compose.onAllNodesWithTag("plugin-onepassword").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Choisir le dossier").performScrollTo().performClick()
+            compose.waitUntil(5000) { launches.get() == 1 }
+            compose.waitForIdle()
+            assertTrue(
+                requests.toString(),
+                requests.none { it.startsWith("POST /api/plugins/packages") },
+            )
+            compose.onNodeWithText("Choisir le dossier").performScrollTo().assertIsDisplayed()
+        }
+    }
+
+    @Test
     fun programReleasesCanBeCheckedInstalledAndRestored() {
         MockWebServer().use { server ->
-            val initial = InstalledProgram(release = ProgramRelease(version = "2.39.0"))
+            val initial =
+                InstalledProgram(
+                    release =
+                        ProgramRelease(
+                            version = "2.39.0",
+                            url = "https://downloads.example.com/tool.zip",
+                            format = "zip",
+                            executable = "probe",
+                        ),
+                    archiveSha256 = "0".repeat(64),
+                    binarySha256 = "0".repeat(64),
+                )
             val program =
                 AtomicReference(
                     ProgramInstallation(
                         name = "op",
                         installer = "programs/op.luau",
                         installed = initial,
+                        previous = null,
+                        candidate = null,
+                        digest = null,
                     )
                 )
             val actions = CopyOnWriteArrayList<String>()
@@ -1213,12 +1350,37 @@ abstract class PluginsCases {
             server.dispatcher =
                 dispatcher(includeGet = true) { path, body ->
                     val base = "/api/installations/fixture/api/plugins/onepassword/programs"
-                    when (path) {
+                    val command =
+                        if (path.endsWith("/plugins/programs/prepare"))
+                            wireJson
+                                .parseToJsonElement(body)
+                                .jsonObject
+                                .getValue("kind")
+                                .jsonPrimitive
+                                .content
+                        else null
+                    when (command ?: path) {
                         "/api/installations/fixture/api/plugins/packages/operations/program-job" ->
-                            if (polls.incrementAndGet() % 2 == 1) "{\"state\":\"running\"}"
-                            else "{\"state\":\"completed\"}"
-                        base -> wireJson.encodeToString(ProgramInstallations(listOf(program.get())))
-                        "$base/op/check" -> {
+                            wireJson.encodeToString(
+                                build.cairn.contracts.PluginOperation(
+                                    id = "program-job",
+                                    state =
+                                        if (polls.incrementAndGet() % 2 == 1) "running"
+                                        else "completed",
+                                    result =
+                                        if (polls.get() % 2 == 1) null
+                                        else
+                                            build.cairn.contracts.PluginOperationResult.B(
+                                                program.get()
+                                            ),
+                                    error = null,
+                                )
+                            )
+                        base ->
+                            wireJson.encodeToString(
+                                ProgramInstallations(programs = listOf(program.get()))
+                            )
+                        "check" -> {
                             actions += "check"
                             program.set(
                                 program
@@ -1228,13 +1390,15 @@ abstract class PluginsCases {
                                             ProgramRelease(
                                                 version = "2.41.0",
                                                 url = "https://cache.agilebits.com/op.zip",
+                                                format = "zip",
+                                                executable = "probe",
                                             ),
                                         digest = "reviewed-release",
                                     )
                             )
                             "{\"operation\":\"program-job\"}"
                         }
-                        "$base/op/install" -> {
+                        "install" -> {
                             actions += "install"
                             assertEquals(
                                 "reviewed-release",
@@ -1250,7 +1414,16 @@ abstract class PluginsCases {
                                     .copy(
                                         installed =
                                             InstalledProgram(
-                                                release = ProgramRelease(version = "2.41.0")
+                                                release =
+                                                    ProgramRelease(
+                                                        version = "2.41.0",
+                                                        url =
+                                                            "https://downloads.example.com/tool.zip",
+                                                        format = "zip",
+                                                        executable = "probe",
+                                                    ),
+                                                archiveSha256 = "0".repeat(64),
+                                                binarySha256 = "0".repeat(64),
                                             ),
                                         previous = initial,
                                         candidate = null,
@@ -1259,7 +1432,7 @@ abstract class PluginsCases {
                             )
                             "{\"operation\":\"program-job\"}"
                         }
-                        "$base/op/rollback" -> {
+                        "rollback" -> {
                             actions += "rollback"
                             program.set(program.get().copy(installed = initial, previous = null))
                             "{\"operation\":\"program-job\"}"
@@ -1391,13 +1564,25 @@ abstract class PluginsCases {
             forge.copy(
                 setup =
                     forge.setup!!.copy(
-                        steps = forge.setup.steps + SetupStep("agents", "agents", "Agents")
+                        steps =
+                            forge.setup.steps +
+                                SetupStep(id = "agents", kind = "agents", title = "Agents")
                     ),
                 manifest =
                     requireNotNull(forge.manifest)
                         .copy(
                             agentAccess = PluginAgentAccess(),
-                            runCredentials = buildJsonObject { putJsonArray("git") {} },
+                            runCredentials =
+                                build.cairn.contracts.PluginRunCredentials(
+                                    git =
+                                        listOf(
+                                            build.cairn.contracts.PluginGitCredential(
+                                                url = "https://forge.example",
+                                                username = "git",
+                                                password = "{{credential}}",
+                                            )
+                                        )
+                                ),
                         ),
             )
         val work =
@@ -1458,60 +1643,68 @@ abstract class PluginsCases {
                     name = "Gmail",
                     version = "1.0.0",
                     capabilities = listOf("http"),
-                    instances = PluginInstances("Account", "Accounts"),
+                    instances = PluginInstances(singular = "Account", plural = "Accounts"),
                     credential =
                         PluginCredential(
-                            "Google authorization",
-                            "authorization",
-                            "Bearer ",
+                            label = "Google authorization",
+                            header = "authorization",
+                            prefix = "Bearer ",
                             oauth =
-                                buildJsonObject {
-                                    put("clientIdSetting", "clientId")
-                                    put("clientSecretSetting", "clientSecret")
-                                    putJsonObject("scopeSettings") {
-                                        putJsonArray("allowSend") {
-                                            add("https://www.googleapis.com/auth/gmail.send")
-                                        }
-                                        putJsonArray("allowDrafts") {
-                                            add("https://www.googleapis.com/auth/gmail.compose")
-                                        }
-                                        putJsonArray("allowDelete") {
-                                            add("https://mail.google.com/")
+                                fixturePluginOAuth(
+                                    buildJsonObject {
+                                        put("clientIdSetting", "clientId")
+                                        put("clientSecretSetting", "clientSecret")
+                                        putJsonObject("scopeSettings") {
+                                            putJsonArray("allowSend") {
+                                                add("https://www.googleapis.com/auth/gmail.send")
+                                            }
+                                            putJsonArray("allowDrafts") {
+                                                add("https://www.googleapis.com/auth/gmail.compose")
+                                            }
+                                            putJsonArray("allowDelete") {
+                                                add("https://mail.google.com/")
+                                            }
                                         }
                                     }
-                                },
+                                ),
                         ),
                     instanceForm = true,
-                    agentAccess = PluginAgentAccess("Off by default."),
+                    agentAccess = PluginAgentAccess(description = "Off by default."),
                     settings =
-                        listOf(
-                            PluginSetting("clientId", "Google OAuth client ID", required = true),
-                            PluginSetting(
-                                "clientSecret",
-                                "Google OAuth client secret",
-                                type = "secret",
-                                required = true,
-                            ),
-                            PluginSetting("email", "Connected email", hidden = true),
-                            PluginSetting(
-                                "allowSend",
-                                "Send messages",
-                                type = "boolean",
-                                risk = "medium",
-                            ),
-                            PluginSetting(
-                                "allowDrafts",
-                                "Create and edit drafts",
-                                type = "boolean",
-                                risk = "low",
-                            ),
-                            PluginSetting(
-                                "allowDelete",
-                                "Permanently delete mail",
-                                type = "boolean",
-                                risk = "high",
-                            ),
-                        ),
+                        (listOf(
+                                PluginSetting(
+                                    "clientId",
+                                    "Google OAuth client ID",
+                                    required = true,
+                                ),
+                                PluginSetting(
+                                    "clientSecret",
+                                    "Google OAuth client secret",
+                                    type = "secret",
+                                    required = true,
+                                ),
+                                PluginSetting("email", "Connected email", hidden = true),
+                                PluginSetting(
+                                    "allowSend",
+                                    "Send messages",
+                                    type = "boolean",
+                                    risk = "medium",
+                                ),
+                                PluginSetting(
+                                    "allowDrafts",
+                                    "Create and edit drafts",
+                                    type = "boolean",
+                                    risk = "low",
+                                ),
+                                PluginSetting(
+                                    "allowDelete",
+                                    "Permanently delete mail",
+                                    type = "boolean",
+                                    risk = "high",
+                                ),
+                            ))
+                            .map { wireJson.encodeToJsonElement(PluginSetting.serializer(), it) },
+                    apiVersion = 2,
                 ),
             setup =
                 PluginSetup(
@@ -1521,46 +1714,57 @@ abstract class PluginsCases {
                     steps =
                         listOf(
                             SetupStep(
-                                "app",
+                                id = "app",
                                 title = "Google Cloud app",
                                 settings = listOf("clientId", "clientSecret"),
                                 shared = true,
                                 checklist =
                                     listOf(
                                         SetupTask(
-                                            "Enable the Gmail API",
+                                            title = "Enable the Gmail API",
                                             url =
                                                 "https://console.cloud.google.com/apis/library/gmail.googleapis.com",
                                             link = "Open API Library",
                                         ),
                                         SetupTask(
-                                            "Create an OAuth client",
-                                            "Add this address.",
+                                            title = "Create an OAuth client",
+                                            text = "Add this address.",
                                             copy = "callbackUrl",
                                         ),
                                     ),
                                 warning = "A Testing app expires after seven days.",
                             ),
                             SetupStep(
-                                "permissions",
+                                id = "permissions",
                                 title = "Permissions",
                                 settings = listOf("allowSend", "allowDrafts", "allowDelete"),
                                 presets =
                                     listOf(
-                                        SetupPreset("read", "Read only", risk = "low"),
+                                        SetupPreset(id = "read", title = "Read only", risk = "low"),
                                         SetupPreset(
-                                            "send",
-                                            "Read, draft and send",
+                                            id = "send",
+                                            title = "Read, draft and send",
                                             risk = "medium",
                                             values =
-                                                mapOf("allowDrafts" to true, "allowSend" to true),
+                                                build.cairn.contracts.Values(
+                                                    mapOf(
+                                                        "allowDrafts" to true,
+                                                        "allowSend" to true,
+                                                    )
+                                                ),
                                         ),
                                     ),
                             ),
-                            SetupStep("connect", "credential", "Sign in with Google"),
-                            SetupStep("agents", "agents", "Agents"),
+                            SetupStep(
+                                id = "connect",
+                                kind = "credential",
+                                title = "Sign in with Google",
+                            ),
+                            SetupStep(id = "agents", kind = "agents", title = "Agents"),
                         ),
                 ),
+            status = "active",
+            versions = emptyList(),
         )
 
     @Test
@@ -1785,6 +1989,7 @@ abstract class PluginsCases {
                                 PluginCatalog(
                                     packages = listOf(onePassword, discord, notes),
                                     connections = listOf(bot, account.copy(agentIds = emptyList())),
+                                    capabilities = emptyList(),
                                 )
                             )
                         else -> null
@@ -1990,21 +2195,38 @@ abstract class PluginsCases {
                             )
                         "/api/installations/fixture/api/plugins" ->
                             wireJson.encodeToString(
-                                PluginCatalog(packages = packages, connections = connections)
+                                PluginCatalog(
+                                    packages = packages,
+                                    connections = connections,
+                                    capabilities = emptyList(),
+                                )
                             )
                         "/api/installations/fixture/api/plugins/onepassword/programs" ->
                             wireJson.encodeToString(
                                 ProgramInstallations(
-                                    listOf(
-                                        ProgramInstallation(
-                                            name = "op",
-                                            installer = "programs/op.luau",
-                                            installed =
-                                                InstalledProgram(
-                                                    release = ProgramRelease(version = "2.39.0")
-                                                ),
+                                    programs =
+                                        listOf(
+                                            ProgramInstallation(
+                                                name = "op",
+                                                installer = "programs/op.luau",
+                                                installed =
+                                                    InstalledProgram(
+                                                        release =
+                                                            ProgramRelease(
+                                                                version = "2.39.0",
+                                                                url =
+                                                                    "https://downloads.example.com/tool.zip",
+                                                                format = "zip",
+                                                                executable = "probe",
+                                                            ),
+                                                        archiveSha256 = "0".repeat(64),
+                                                        binarySha256 = "0".repeat(64),
+                                                    ),
+                                                previous = null,
+                                                candidate = null,
+                                                digest = null,
+                                            )
                                         )
-                                    )
                                 )
                             )
                         "/api/installations/fixture/api/plugins/discord/connections/00000000-0000-4000-8000-000000000102/view" ->
@@ -2074,3 +2296,20 @@ private class PluginVault : SessionVault {
         if (cookie == null) values.remove(origin) else values[origin] = cookie
     }
 }
+
+private fun fixturePluginOAuth(values: JsonObject): build.cairn.contracts.PluginOAuth =
+    wireJson.decodeFromJsonElement(
+        build.cairn.contracts.PluginOAuth.serializer(),
+        JsonObject(
+            mapOf(
+                "authorizationUrl" to JsonPrimitive("https://provider.example/authorize"),
+                "tokenUrl" to JsonPrimitive("https://provider.example/token"),
+                "clientIdSetting" to JsonPrimitive("clientId"),
+                "scopeSettings" to JsonObject(emptyMap()),
+                "authorizationParameters" to JsonObject(emptyMap()),
+            ) + values
+        ),
+    )
+
+private fun fixturePluginDeviceFlow(values: JsonObject): build.cairn.contracts.PluginDeviceFlow =
+    wireJson.decodeFromJsonElement(build.cairn.contracts.PluginDeviceFlow.serializer(), values)

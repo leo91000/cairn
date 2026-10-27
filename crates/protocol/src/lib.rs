@@ -7,7 +7,7 @@ pub mod slugs;
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 pub const MAX_STREAM_CHUNK: usize = 65_536;
 pub const MAX_BODY: usize = 8_000_000;
 // Base64 expands by four bytes per three body bytes, plus envelope metadata.
@@ -60,6 +60,8 @@ pub struct ApiRequest {
     pub role: Role,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_scopes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_credential_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_artifact: Option<String>,
     pub method: String,

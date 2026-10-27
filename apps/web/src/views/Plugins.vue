@@ -2,6 +2,8 @@
 import type { IconName } from '../icons'
 import type { Catalog, PluginEntry } from '../plugins'
 import { computed, onMounted, ref } from 'vue'
+import { installPluginPackage } from '../../../../packages/contracts/generated/installPluginPackage'
+import { listPluginPackages } from '../../../../packages/contracts/generated/listPluginPackages'
 import { api, notify } from '../api'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
@@ -40,7 +42,7 @@ const busy = ref(false)
 const guide = 'https://github.com/leo91000/cairn/blob/main/docs/PLUGINS.md'
 
 async function load() {
-  catalog.value = await api<Catalog>('/plugins')
+  catalog.value = await listPluginPackages(api, {})
   loaded.value = true
 }
 
@@ -147,20 +149,17 @@ async function install() {
         modules[path] = await file.text()
     }
 
-    const installed = await api<{ manifest: { id: string, name: string } }>('/plugins/packages', {
-      method: 'POST',
-      body: JSON.stringify({
-        manifest: await manifest.text(),
-        manifestFormat: packagePath(manifest).endsWith('.toml') ? 'toml' : 'json',
-        source: await source.text(),
-        modules,
-      }),
+    const installed = await installPluginPackage(api, {
+      manifest: await manifest.text(),
+      manifestFormat: packagePath(manifest).endsWith('.toml') ? 'toml' : 'json',
+      source: await source.text(),
+      modules,
     })
     installing.value = false
     files.value = []
     await load()
-    notify(`${installed.manifest.name} installed · review it to activate`)
-    reviewing.value = catalog.value.packages.find(entry => entry.id === installed.manifest.id)
+    notify(`${installed.manifest!.name} installed · review it to activate`)
+    reviewing.value = catalog.value.packages.find(entry => entry.id === installed.manifest!.id)
   }
   catch (e) {
     error.value = e instanceof SyntaxError ? 'manifest.json is not valid JSON.' : (e as Error).message

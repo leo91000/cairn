@@ -1064,6 +1064,17 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     public_names.insert(cairn_contracts::RESUME_RUN_ID);
     public_names.insert("manage_plugin");
     public_names.extend([
+        "list_plugins",
+        "install_plugin_package",
+        "approve_plugin_package",
+        "activate_plugin_package",
+        "delete_plugin_package",
+        "list_plugin_programs",
+        "prepare_plugin_program",
+        "get_plugin_operation",
+        "cancel_plugin_operation",
+    ]);
+    public_names.extend([
         "set_agent_avatar",
         "list_agents",
         "get_agent",
@@ -1225,7 +1236,10 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
                 );
                 instance.name = "Fixture".into();
                 instance.revision = "r1".into();
-                db.save_plugin_instance(&instance)?;
+                {
+                    db.save_plugin_version(&instance.plugin_id, "fixture", &"0".repeat(64))?;
+                    db.save_plugin_instance(&instance)
+                }?;
                 for agent_id in [id.as_str(), MAIN_AGENT_ID] {
                     let mut agent = db.agent(agent_id)?.unwrap();
                     agent
@@ -2287,7 +2301,7 @@ async fn both_mcp_endpoints_can_pause_and_delete_instances_pending_package_reapp
         .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
     let main = enabled_main(&s).await;
     let (_, configuration) = active_run(&s, &main).await;
-    let installed = registry::install(
+    let installed = common::package_install(
         &s,
         &json!({
             "manifest": {
@@ -2299,7 +2313,7 @@ async fn both_mcp_endpoints_can_pause_and_delete_instances_pending_package_reapp
     )
     .await
     .unwrap();
-    registry::approve(&s, "pausable", "1.0.0", text(&installed, "digest"))
+    common::package_approve(&s, "pausable", "1.0.0", text(&installed, "digest"))
         .await
         .unwrap();
     let saved = common::save_plugin(
@@ -4140,7 +4154,7 @@ async fn plugin_preparation_cannot_publish_after_instance_or_agent_revocation() 
             );
             let (origin, server) = common::serve_locally(app).await;
             s.plugins.route_http_to(Some(origin));
-            let installed = cairn_installation::plugins::registry::install(&s,&json!({
+            let installed = common::package_install(&s,&json!({
                 "manifest": {
                     "id": "fenced", "name": "Fenced", "version": "1", "apiVersion": 2,
                     "capabilities": ["http"], "hosts": ["api.example.test"], "agentAccess": {},
@@ -4152,21 +4166,10 @@ async fn plugin_preparation_cannot_publish_after_instance_or_agent_revocation() 
                 },
                 "source": "local function check() cairn.http.request({ url = 'https://api.example.test/check' }) end return { form = function(input) if input.values.check then check() end return {} end, test = function() check(); return { ok = true, message = 'Checked' } end }"
             })).await.unwrap();
-            cairn_installation::plugins::registry::approve(
-                &s,
-                "fenced",
-                "1",
-                text(&installed, "digest"),
-            )
-            .await
-            .unwrap();
-            let initial = json!({
-                "name": "Initial",
-                "enabled": true,
-                "settings": { "check": false },
-                "secrets": { "apiKey": "synthetic-one" },
-                "agentIds": [MAIN_AGENT_ID],
-            });
+            common::package_approve(&s, "fenced", "1", text(&installed, "digest"))
+                .await
+                .unwrap();
+            let initial = json!({ "name": "Initial", "enabled": true, "settings": { "check": false }, "secrets": { "apiKey": "synthetic-one" }, "agentIds": [MAIN_AGENT_ID] });
             let saved = common::save_plugin(&s, "fenced", &initial, None)
                 .await
                 .unwrap();
@@ -4226,4 +4229,125 @@ async fn plugin_preparation_cannot_publish_after_instance_or_agent_revocation() 
             server.abort();
         }
     }
+}
+
+#[tokio::test]
+async fn package_and_program_capabilities_share_discovery_scopes_and_owner_refusals() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    s.plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    for internal in [false, true] {
+        let catalog = if internal {
+            call(&s, &configuration, "list_plugins", json!({})).await
+        } else {
+            public_call(&s, &["read"], "list_plugins", json!({})).await
+        };
+        let mut ids = result(&catalog)["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["discord", "github", "gmail", "onepassword"]);
+        let programs = if internal {
+            call(
+                &s,
+                &configuration,
+                "list_plugin_programs",
+                json!({"pluginId":"onepassword"}),
+            )
+            .await
+        } else {
+            public_call(
+                &s,
+                &["read"],
+                "list_plugin_programs",
+                json!({"pluginId":"onepassword"}),
+            )
+            .await
+        };
+        assert_eq!(result(&programs)["programs"][0]["name"], "op");
+        for (name, input) in [
+            (
+                "approve_plugin_package",
+                json!({"pluginId":"fixture","version":"1","digest":"a".repeat(64)}),
+            ),
+            (
+                "prepare_plugin_program",
+                json!({"kind":"install","pluginId":"onepassword","program":"op","digest":"a".repeat(64)}),
+            ),
+        ] {
+            let refused = if internal {
+                call(&s, &configuration, name, input).await
+            } else {
+                public_call(&s, &["manage"], name, input).await
+            };
+            assert_eq!(refused["result"]["isError"], true, "{refused}");
+            assert!(refused.to_string().contains("owner"), "{refused}");
+        }
+    }
+    let refused = public_call(
+        &s,
+        &["read"],
+        "install_plugin_package",
+        json!({"manifest":{},"source":"return {}","modules":{}}),
+    )
+    .await;
+    assert_eq!(refused["result"]["isError"], true);
+    assert!(refused.to_string().contains("manage"));
+}
+
+#[tokio::test]
+async fn expired_installation_authorization_cannot_publish_a_prepared_package() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (run, configuration) = active_run(&s, &main).await;
+    let started = root.path().join("worker-started");
+    let resume = root.path().join("worker-resume");
+    let wrapper = root.path().join("plugin-worker-gate");
+    let quote =
+        |path: &std::path::Path| format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"));
+    std::fs::write(&wrapper,format!("#!/bin/sh\n: > {}\ni=0\nwhile [ ! -f {} ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i+1)); done\nexec {} \"$@\"\n",quote(&started),quote(&resume),quote(std::path::Path::new(env!("CARGO_BIN_EXE_cairn"))))).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    s.plugins.use_worker(wrapper);
+    let task = tokio::spawn({
+        let s = s.clone();
+        async move {
+            call(&s,&configuration,"install_plugin_package",json!({"manifest":{"id":"expired-upload","name":"Expired","version":"1","apiVersion":2,"capabilities":[]},"source":"return {}","modules":{}})).await
+        }
+    });
+    common::eventually(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(10),
+        async || started.exists().then_some(()),
+    )
+    .await;
+    s.store
+        .change_run(
+            run["id"].as_str().unwrap(),
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Succeeded),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    std::fs::write(&resume, "").unwrap();
+    let refused = task.await.unwrap();
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    assert!(!root.path().join("data/plugins/expired-upload").exists());
+    assert!(
+        s.store
+            .read(|db| db.plugin_package("expired-upload"))
+            .await
+            .unwrap()
+            .revision
+            .is_none()
+    );
 }

@@ -45,7 +45,7 @@ fn worker() -> PathBuf {
 #[tokio::test]
 async fn shared_setup_keeps_an_absent_optional_secret_absent() {
     let (_root, s, _agent) = service().await;
-    let installed = registry::install(
+    let installed = common::package_install(
         &s,
         &json!({
             "manifest": {
@@ -65,7 +65,7 @@ async fn shared_setup_keeps_an_absent_optional_secret_absent() {
     )
     .await
     .unwrap();
-    registry::approve(&s, "shared-app", "1", text(&installed, "digest"))
+    common::package_approve(&s, "shared-app", "1", text(&installed, "digest"))
         .await
         .unwrap();
     let original = common::save_plugin(
@@ -182,7 +182,7 @@ async fn gateway(
     let result = async {
         socket::deliver(s, connection, &mut session, &link, start).await?;
         let personal = || async {
-            let events = s.store.list(work::EVENTS).await?;
+            let events = common::plugin_events(&s.store).await?;
             cairn_installation::error::Result::Ok(
                 events
                     .iter()
@@ -639,11 +639,13 @@ async fn handler_presentations_preserve_rejection_and_host_refusal_policies() {
 
 /// Moves the delivery's next attempt and progress throttle to now.
 async fn due(s: &Service) {
-    for mut delivery in s.store.list(work::DELIVERIES).await.unwrap() {
+    for mut delivery in common::plugin_deliveries(&s.store).await.unwrap() {
         delivery["nextAttemptAt"] = json!(now());
         delivery["progressAt"] = json!(0);
         delivery["questionRetryAt"] = json!({});
-        s.store.put(work::DELIVERIES, delivery).await.unwrap();
+        common::put_plugin_delivery(&s.store, delivery)
+            .await
+            .unwrap();
     }
 }
 
@@ -686,7 +688,7 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
         thread,
         vec![json!({ "name": "Fix the flaky deploy", "auto_archive_duration": 1440 })]
     );
-    let deliveries = s.store.list(work::DELIVERIES).await.unwrap();
+    let deliveries = common::plugin_deliveries(&s.store).await.unwrap();
     assert_eq!(deliveries.len(), 1, "the empty mention starts nothing");
     let delivery = deliveries[0].clone();
     assert_eq!(
@@ -818,15 +820,20 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
     due(&s).await;
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     assert_eq!(
-        s.store.list(work::DELIVERIES).await.unwrap().len(),
+        common::plugin_deliveries(&s.store).await.unwrap().len(),
         1,
         "rate limited, retried later"
     );
     due(&s).await;
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    assert!(s.store.list(work::DELIVERIES).await.unwrap().is_empty());
+    assert!(
+        common::plugin_deliveries(&s.store)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
-        s.store.list("plugin-activity").await.unwrap()[0]["status"],
+        common::plugin_activity(&s.store).await.unwrap()[0]["status"],
         "replied"
     );
 
@@ -896,7 +903,7 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
     );
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     assert_eq!(
-        s.store.list(work::DELIVERIES).await.unwrap()[0]["chatId"],
+        common::plugin_deliveries(&s.store).await.unwrap()[0]["chatId"],
         chat,
         "same thread, same conversation"
     );
@@ -1027,14 +1034,19 @@ async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is
     );
     due(&s).await;
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     assert_eq!(delivery["reply"]["deferred"], true);
-    let activity = s.store.list("plugin-activity").await.unwrap();
+    let activity = common::plugin_activity(&s.store).await.unwrap();
     assert!(text(&activity[0], "preview").starts_with("(Message from Sarah"));
     finish_turn(&s, &delivery, "NO_REPLY").await;
     due(&s).await;
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    assert!(s.store.list(work::DELIVERIES).await.unwrap().is_empty());
+    assert!(
+        common::plugin_deliveries(&s.store)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(
         mock.requests
             .lock()
@@ -1055,7 +1067,7 @@ async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is
         .unwrap()
     );
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     finish_turn(&s, &delivery, "Use the reset link on the sign-in page.").await;
     due(&s).await;
     runtime::pump(&s, &connection, &mut session).await.unwrap();
@@ -1084,7 +1096,12 @@ async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is
             .unwrap()
     );
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    assert!(s.store.list(work::DELIVERIES).await.unwrap().is_empty());
+    assert!(
+        common::plugin_deliveries(&s.store)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(
         mock.posts("/api/v10/channels/200/messages")
             .await
@@ -1186,22 +1203,20 @@ async fn access_requests_wait_for_approval_without_storing_content() {
         .unwrap()
     );
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let requests = s.store.list("plugin-requests").await.unwrap();
+    let requests = common::plugin_requests(&s.store).await.unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0]["name"], "Sarah");
     assert_eq!(requests[0]["mentions"], 3);
     // The script answered once, and nothing the person wrote was kept anywhere.
     assert_eq!(mock.requests.lock().await.len(), 1);
     assert!(text(&mock.requests.lock().await[0].body, "content").contains("approve"));
-    for kind in [
-        "plugin-requests",
-        "plugin-events",
-        "plugin-storage",
-        "plugin-activity",
-    ] {
-        let stored = serde_json::to_string(&s.store.list(kind).await.unwrap()).unwrap();
-        assert!(!stored.contains("private question"), "{kind}");
-    }
+    let stored = serde_json::to_string(&json!({
+        "requests": common::plugin_requests(&s.store).await.unwrap(),
+        "events": common::plugin_events(&s.store).await.unwrap(),
+        "activity": common::plugin_activity(&s.store).await.unwrap(),
+    }))
+    .unwrap();
+    assert!(!stored.contains("private question"));
 
     // Approval applies to the running worker without a new revision.
     common::plugin_people(&s, "discord", &connection.id, "301", "approve")
@@ -1213,7 +1228,7 @@ async fn access_requests_wait_for_approval_without_storing_content() {
             .unwrap()
     );
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    assert_eq!(s.store.list(work::DELIVERIES).await.unwrap().len(), 1);
+    assert_eq!(common::plugin_deliveries(&s.store).await.unwrap().len(), 1);
 
     assert!(
         !accept(&s, &connection, message("610", "302", "<@400> hi"))
@@ -1263,9 +1278,27 @@ async fn access_requests_wait_for_approval_without_storing_content() {
     connections::remove(&s, "discord", &connection.id)
         .await
         .unwrap();
-    for kind in connections::OWNED {
-        assert!(s.store.list(kind).await.unwrap().is_empty(), "{kind}");
-    }
+    s.store
+        .read(|db| {
+            for table in [
+                "plugin_events",
+                "plugin_deliveries",
+                "plugin_requests",
+                "plugin_activity",
+                "plugin_storage",
+                "plugin_http_receipts",
+                "plugin_timers",
+            ] {
+                let count: i64 =
+                    db.0.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })?;
+                assert_eq!(count, 0, "{table}");
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
     session.stop().await;
     server.abort();
 }
@@ -1443,9 +1476,9 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
         .event(run_id, "turn.completed", "", None)
         .await
         .unwrap();
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     assert!(
-        work::reply(&s, &connection, &delivery)
+        common::plugin_reply(&s, &connection, &delivery)
             .await
             .unwrap()
             .is_none()
@@ -1473,7 +1506,7 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
         .await
         .unwrap();
     assert!(
-        work::reply(&s, &connection, &delivery)
+        common::plugin_reply(&s, &connection, &delivery)
             .await
             .unwrap()
             .is_none()
@@ -1482,7 +1515,7 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
         .event(run_id, "turn.completed", "", None)
         .await
         .unwrap();
-    let reply = work::reply(&s, &connection, &delivery)
+    let reply = common::plugin_reply(&s, &connection, &delivery)
         .await
         .unwrap()
         .unwrap();
@@ -1494,13 +1527,18 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
         .await
         .unwrap();
     assert_eq!(
-        work::reply(&s, &connection, &delivery)
+        common::plugin_reply(&s, &connection, &delivery)
             .await
             .unwrap_err()
             .status,
         403
     );
-    assert!(s.store.list(work::DELIVERIES).await.unwrap().is_empty());
+    assert!(
+        common::plugin_deliveries(&s.store)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(s.get("chats", text(&receipt, "chatId")).await.is_ok());
 }
 
@@ -1536,7 +1574,7 @@ async fn replies_answer_a_retried_turn_with_its_last_attempt() {
         .unwrap();
     let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
     let run_id = text(&chat, "runId");
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
         let store = s.store.clone();
         let run_id = run_id.to_owned();
@@ -1564,7 +1602,7 @@ async fn replies_answer_a_retried_turn_with_its_last_attempt() {
     event("turn.started", "", None).await;
     event("turn.completed", "", None).await;
 
-    let reply = work::reply(&s, &connection, &delivery)
+    let reply = common::plugin_reply(&s, &connection, &delivery)
         .await
         .unwrap()
         .unwrap();
@@ -1593,7 +1631,7 @@ async fn replies_answer_a_retried_turn_stopped_by_cairn_with_its_last_attempt() 
         .unwrap();
     let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
     let run_id = text(&chat, "runId");
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
         let store = s.store.clone();
         let run_id = run_id.to_owned();
@@ -1634,7 +1672,7 @@ async fn replies_answer_a_retried_turn_stopped_by_cairn_with_its_last_attempt() 
         .await
         .unwrap();
 
-    let reply = work::reply(&s, &connection, &delivery)
+    let reply = common::plugin_reply(&s, &connection, &delivery)
         .await
         .unwrap()
         .unwrap();
@@ -1667,8 +1705,12 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     let run_id = text(&chat, "runId");
     let run = s.store.run(run_id).await.unwrap();
     assert_eq!(run["chatExecution"]["messageId"], receipt["messageId"]);
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
-    let reply = async || work::reply(&s, &connection, &delivery).await.unwrap();
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
+    let reply = async || {
+        common::plugin_reply(&s, &connection, &delivery)
+            .await
+            .unwrap()
+    };
 
     s.store
         .event(
@@ -1868,7 +1910,7 @@ async fn replies_do_not_follow_a_retry_stopped_before_it_ran() {
         .unwrap();
     let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
     let run_id = text(&chat, "runId");
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
         let store = s.store.clone();
         let run_id = run_id.to_owned();
@@ -1910,7 +1952,7 @@ async fn replies_do_not_follow_a_retry_stopped_before_it_ran() {
         .await
         .unwrap();
 
-    let reply = work::reply(&s, &connection, &delivery)
+    let reply = common::plugin_reply(&s, &connection, &delivery)
         .await
         .unwrap()
         .unwrap();
@@ -1940,7 +1982,7 @@ async fn replies_to_a_stopped_turn_do_not_carry_the_next_answer() {
             .unwrap();
         let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
         let run_id = text(&chat, "runId");
-        let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+        let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
         let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
             let store = s.store.clone();
             let run_id = run_id.to_owned();
@@ -1981,7 +2023,7 @@ async fn replies_to_a_stopped_turn_do_not_carry_the_next_answer() {
             .await
             .unwrap();
 
-        let reply = work::reply(&s, &connection, &delivery)
+        let reply = common::plugin_reply(&s, &connection, &delivery)
             .await
             .unwrap()
             .unwrap();
@@ -2014,7 +2056,7 @@ async fn revoked_and_deleted_deliveries_do_not_stop_other_people() {
             .unwrap();
     }
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let deliveries = s.store.list(work::DELIVERIES).await.unwrap();
+    let deliveries = common::plugin_deliveries(&s.store).await.unwrap();
     let removed = deliveries.iter().find(|d| d["thread"] == "511").unwrap();
     let chat_id = text(removed, "chatId").to_owned();
     s.store
@@ -2029,7 +2071,12 @@ async fn revoked_and_deleted_deliveries_do_not_stop_other_people() {
     due(&s).await;
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     assert!(session.alive());
-    assert!(s.store.list(work::DELIVERIES).await.unwrap().is_empty());
+    assert!(
+        common::plugin_deliveries(&s.store)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         mock.posts("/api/v10/channels/512/messages")
             .await
@@ -2069,7 +2116,7 @@ async fn public_question_partial_answers_require_the_starters_authority() {
         .await
         .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
@@ -2095,11 +2142,7 @@ async fn public_question_partial_answers_require_the_starters_authority() {
     })).await.unwrap();
     due(&s).await;
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let key = format!(
-        "storage:{}:{}",
-        connection.id,
-        cairn_installation::auth::hex_digest(&format!("question:520:{question}"))
-    );
+    let key = format!("question:520:{question}");
     let threads = ["520"];
     // A stranger's button cannot poison the first field.
     let click = json!({
@@ -2113,7 +2156,13 @@ async fn public_question_partial_answers_require_the_starters_authority() {
         .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     assert_eq!(
-        s.store.get("plugin-storage", &key).await.unwrap().unwrap()["value"]["answers"],
+        {
+            let instance = connection.id.clone();
+            s.store
+                .read(move |db| Ok(db.plugin_storage(&instance, &key)?.unwrap()))
+                .await
+                .unwrap()
+        }["answers"],
         json!({})
     );
     // A stranger's free text cannot poison it either; the starter can answer both.
@@ -2172,8 +2221,8 @@ async fn failures_before_acknowledgement_finish_and_followups_resume_stopped_run
             )
             .await
             .unwrap();
-        let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
-        let reply = work::reply(&s, &connection, &delivery)
+        let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
+        let reply = common::plugin_reply(&s, &connection, &delivery)
             .await
             .unwrap()
             .unwrap();
@@ -2220,7 +2269,7 @@ async fn channel_fallback_questions_retry_and_controls_route_to_the_right_conver
         .await
         .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     assert_eq!(delivery["reply"]["threaded"], false);
     s.chat_tick(&std::collections::HashSet::new())
         .await
@@ -2247,16 +2296,18 @@ async fn channel_fallback_questions_retry_and_controls_route_to_the_right_conver
     accept(&s, &connection, second).await.unwrap();
     mock.statuses.lock().await.push(429);
     due(&s).await;
-    for mut delivery in s.store.list(work::DELIVERIES).await.unwrap() {
+    for mut delivery in common::plugin_deliveries(&s.store).await.unwrap() {
         delivery["progressAt"] = json!(now());
-        s.store.put(work::DELIVERIES, delivery).await.unwrap();
+        common::put_plugin_delivery(&s.store, delivery)
+            .await
+            .unwrap();
     }
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let first = s
-        .store
-        .get(work::DELIVERIES, text(&delivery, "id"))
+    let first = common::plugin_deliveries(&s.store)
         .await
         .unwrap()
+        .into_iter()
+        .find(|value| value["id"] == delivery["id"])
         .unwrap();
     assert_eq!(first["asked"], json!([]));
     due(&s).await;
@@ -2334,8 +2385,17 @@ async fn every_host_capability_rejects_a_changed_owner() {
             .unwrap();
         assert_eq!(denied.0, "forbidden");
     }
-    assert!(s.store.list("plugin-storage").await.unwrap().is_empty());
-    assert!(s.store.list("plugin-timers").await.unwrap().is_empty());
+    assert!(
+        s.store
+            .read(|db| Ok(db
+                .0
+                .query_row("SELECT count(*) FROM plugin_storage", [], |row| row
+                    .get::<_, i64>(0))?))
+            .await
+            .unwrap()
+            == 0
+    );
+    assert!(common::plugin_timers(&s.store).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -2347,7 +2407,7 @@ async fn optional_questions_are_not_republished_on_later_turns() {
         .await
         .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let first = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let first = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
@@ -2526,11 +2586,11 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
             "source": "return function() end",
         }),
     ] {
-        assert!(registry::install(&s, &invalid).await.is_err());
+        assert!(common::package_install(&s, &invalid).await.is_err());
     }
     let package = pinger("1.0.0", &["timers", "storage", "http"]);
-    registry::install(&s, &package).await.unwrap();
-    let catalog = registry::catalog(&s).await.unwrap();
+    common::package_install(&s, &package).await.unwrap();
+    let catalog = common::package_catalog(&s).await.unwrap();
     let entry = catalog["packages"]
         .as_array()
         .unwrap()
@@ -2561,7 +2621,7 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     )
     .unwrap();
     assert_eq!(
-        registry::approve(&s, "pinger", "1.0.0", text(&entry["versions"][0], "digest"))
+        common::package_approve(&s, "pinger", "1.0.0", text(&entry["versions"][0], "digest"))
             .await
             .unwrap_err()
             .status,
@@ -2569,7 +2629,7 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     );
     assert!(registry::active(&s, "pinger").await.is_err());
     std::fs::write(&source_path, original_source).unwrap();
-    registry::approve(&s, "pinger", "1.0.0", text(&entry["versions"][0], "digest"))
+    common::package_approve(&s, "pinger", "1.0.0", text(&entry["versions"][0], "digest"))
         .await
         .unwrap();
     for bad in [json!({ "team": "core", "other": 1 }), json!({})] {
@@ -2594,10 +2654,10 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
 
     let mut session = session(&s, "pinger").await;
     runtime::begin(&s, &connection, &mut session).await.unwrap();
-    let mut timer = s.store.list("plugin-timers").await.unwrap().remove(0);
+    let mut timer = common::plugin_timers(&s.store).await.unwrap().remove(0);
     assert!(timer["at"].as_i64().unwrap() > now() + 50_000);
     timer["at"] = json!(now());
-    s.store.put("plugin-timers", timer).await.unwrap();
+    common::put_plugin_timer(&s.store, timer).await.unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     let requests = mock.requests.lock().await;
     assert_eq!(requests.len(), 2, "the undeclared host was never contacted");
@@ -2606,7 +2666,19 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     assert_eq!(requests[0].body, json!({ "team": "configured-team" }));
     assert!(requests[1].headers.get("x-api-key").is_none());
     drop(requests);
-    let stored = s.store.list("plugin-storage").await.unwrap();
+    let instance_id = connection.id.clone();
+    let stored = s
+        .store
+        .read(move |db| {
+            let keys = db.plugin_storage_keys(&instance_id)?;
+            keys.into_iter()
+                .map(|key| {
+                    Ok(json!({ "key": key, "value": db.plugin_storage(&instance_id,&key)? }))
+                })
+                .collect::<cairn_installation::error::Result<Vec<_>>>()
+        })
+        .await
+        .unwrap();
     let value = |key: &str| stored.iter().find(|item| item["key"] == key).unwrap()["value"].clone();
     assert_eq!(value("status"), 200);
     assert!(value("blocked").as_str().unwrap().contains("forbidden"));
@@ -2629,7 +2701,7 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     assert!(registry::active(&s, "pinger").await.is_ok());
 
     // A new version waits for approval; the owner can roll back afterwards.
-    registry::install(
+    common::package_install(
         &s,
         &pinger(
             "1.1.0",
@@ -2638,7 +2710,7 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     )
     .await
     .unwrap();
-    let catalog = registry::catalog(&s).await.unwrap();
+    let catalog = common::package_catalog(&s).await.unwrap();
     let entry = catalog["packages"]
         .as_array()
         .unwrap()
@@ -2649,7 +2721,7 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     assert_eq!(entry["status"], "update");
     assert_eq!(entry["active"], "1.0.0");
     assert!(registry::activate(&s, "pinger", "1.1.0").await.is_err());
-    registry::approve(
+    common::package_approve(
         &s,
         "pinger",
         "1.1.0",
@@ -2797,7 +2869,7 @@ async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_
         json!({ "lib/greet.luau": "return require('./missing')" }),
     ] {
         assert!(
-            registry::install(&s, &package(invalid.clone()))
+            common::package_install(&s, &package(invalid.clone()))
                 .await
                 .is_err(),
             "{invalid}"
@@ -2807,7 +2879,9 @@ async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_
         "lib/greet.luau": "local text = require('./text')\nreturn { hello = function(name) return text.upper('hello ') .. name end }",
         "lib/text.luau": "return { upper = string.upper }",
     });
-    let installed = registry::install(&s, &package(modules)).await.unwrap();
+    let installed = common::package_install(&s, &package(modules))
+        .await
+        .unwrap();
     assert_eq!(
         installed["files"],
         json!([
@@ -2818,7 +2892,7 @@ async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_
     );
     let directory = root.path().join("data/plugins/splitter/1.0.0");
     assert!(directory.join("lib/greet.luau").is_file());
-    registry::approve(&s, "splitter", "1.0.0", text(&installed, "digest"))
+    common::package_approve(&s, "splitter", "1.0.0", text(&installed, "digest"))
         .await
         .unwrap();
     let active = registry::active(&s, "splitter").await.unwrap();
@@ -2915,7 +2989,7 @@ async fn deleting_a_shared_source_during_setup_does_not_commit_its_draft_or_secr
     );
     let (origin, server) = common::serve_locally(app).await;
     s.plugins.route_http_to(Some(origin));
-    let installed = registry::install(&s,&json!({
+    let installed = common::package_install(&s,&json!({
         "manifest": {
             "id": "shared-fenced", "name": "Shared fenced", "version": "1", "apiVersion": 2,
             "capabilities": ["http"], "hosts": ["api.example.test"], "instanceForm": true,
@@ -2931,7 +3005,7 @@ async fn deleting_a_shared_source_during_setup_does_not_commit_its_draft_or_secr
         },
         "source": "return { form = function(input) if input.values.check then cairn.http.request({ url = 'https://api.example.test/check' }) end return {} end }"
     })).await.unwrap();
-    registry::approve(&s, "shared-fenced", "1", text(&installed, "digest"))
+    common::package_approve(&s, "shared-fenced", "1", text(&installed, "digest"))
         .await
         .unwrap();
     let source = common::save_plugin(

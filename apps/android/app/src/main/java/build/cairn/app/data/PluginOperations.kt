@@ -1,10 +1,15 @@
 package build.cairn.app.data
 
 import android.os.SystemClock
+import build.cairn.contracts.PluginOperationInput
+import build.cairn.contracts.contractJson
+import build.cairn.contracts.getPluginOperation
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -18,17 +23,35 @@ suspend fun CairnApi.pluginOperation(
     val id = result.jsonObject["operation"]?.jsonPrimitive?.contentOrNull ?: return result
     val deadline = SystemClock.elapsedRealtime() + 10 * 60 * 1000
     while (SystemClock.elapsedRealtime() < deadline) {
-        val operation =
-            wireJson
-                .parseToJsonElement(request("GET", "/plugins/packages/operations/${segment(id)}"))
-                .jsonObject
-        when (operation["state"]?.jsonPrimitive?.content) {
-            "completed" -> return operation["result"] ?: JsonNull
-            "failed" ->
+        val operation = getPluginOperation(PluginOperationInput(id))
+        when (operation.state) {
+            "completed" -> {
+                val result = contractJson.encodeToJsonElement(operation.result!!).jsonObject
+                return when (result["kind"]?.jsonPrimitive?.content) {
+                    "package" -> result.getValue("version")
+                    "program" -> result.getValue("program")
+                    "management" -> {
+                        val output = result.getValue("output").jsonObject
+                        if (result["wrapped"]?.jsonPrimitive?.content == "true") output
+                        else
+                            when (output["kind"]?.jsonPrimitive?.content) {
+                                "form" -> output.getValue("form")
+                                "saved",
+                                "enabled",
+                                "people" -> output.getValue("instance")
+                                "action" -> output["result"] ?: JsonNull
+                                "signin" -> output.getValue("flow")
+                                else -> JsonObject(output - "kind")
+                            }
+                    }
+                    else -> error("Unknown plugin operation result")
+                }
+            }
+            "failed",
+            "cancelled" ->
                 throw ApiException(
                     502,
-                    operation["error"]?.jsonPrimitive?.content
-                        ?: "La préparation du plugin a échoué.",
+                    operation.error ?: "La préparation du plugin a échoué.",
                     explained = true,
                 )
         }

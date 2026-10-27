@@ -17,6 +17,7 @@ import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { createProject } from '../../../../packages/contracts/generated/createProject'
 import { deleteAgent } from '../../../../packages/contracts/generated/deleteAgent'
 import { deleteProject } from '../../../../packages/contracts/generated/deleteProject'
+import { listPluginPackages } from '../../../../packages/contracts/generated/listPluginPackages'
 import { replaceProject } from '../../../../packages/contracts/generated/replaceProject'
 import { accessSummary } from '../agent-access'
 import {
@@ -116,7 +117,7 @@ const instanceLabel = computed(() => instanceNoun(catalog.value.packages.find(en
 
 async function loadCatalog() {
   if (state.installationRole === 'owner')
-    catalog.value = await api<Catalog>('/plugins').catch(() => catalog.value)
+    catalog.value = await listPluginPackages(api, {}).catch(() => catalog.value)
 }
 
 onMounted(loadCatalog)

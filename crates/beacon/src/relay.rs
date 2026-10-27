@@ -1186,6 +1186,7 @@ async fn send(
         account_id: account.clone(),
         role,
         mcp_scopes,
+        mcp_credential_digest: mcp_credential.clone(),
         public_artifact,
         method: request.method().to_string(),
         path: target.to_owned(),

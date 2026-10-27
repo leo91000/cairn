@@ -394,10 +394,8 @@ pub struct PluginSigninFlow {
 )]
 pub enum ManagePluginOutput {
     Setup {
-        #[ts(type = "any")]
-        manifest: serde_json::Value,
-        #[ts(type = "any")]
-        setup: serde_json::Value,
+        manifest: Box<PluginManifest>,
+        setup: PluginSetup,
         callback_url: Option<String>,
         management_url: Option<String>,
     },

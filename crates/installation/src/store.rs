@@ -39,7 +39,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-const DATABASE_VERSION: i64 = 8;
+const DATABASE_VERSION: i64 = 9;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -83,7 +83,7 @@ impl Store {
         if fresh {
             let tx = writer.transaction()?;
             tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('projects','agents','tasks','mcps','plugin-connections')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS records_kind ON records(kind,updated_at DESC);
 CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL,type TEXT NOT NULL,text TEXT NOT NULL,payload TEXT);
@@ -107,6 +107,9 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::agents::SCHEMA)?;
             tx.execute_batch(crate::mcps::sql::SCHEMA)?;
             tx.execute_batch(crate::plugins::instances::SCHEMA)?;
+            tx.execute_batch(crate::plugins::state::SCHEMA)?;
+            tx.execute_batch(crate::plugins::queues::SCHEMA)?;
+            crate::plugins::registry::initialize(&Db(&tx))?;
             tx.execute_batch(crate::agent_grants::SCHEMA)?;
             tx.execute_batch(crate::missions::SCHEMA)?;
             tx.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS records_chat_slug ON records(json_extract(data,'$.slug')) WHERE kind='chats';")?;
@@ -154,7 +157,11 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let changes = self.0.changes.clone();
+        let preparation = crate::plugins::operations::publication_cancellation();
         self.call(&self.0.writer, move |db| {
+            if preparation.is_some_and(|token| token.is_cancelled()) {
+                return Err(Error::conflict("Preparation was cancelled."));
+            }
             let before = db.0.total_changes();
             let result = f(db);
             // Notify on the database actor, after commit, even if the caller was cancelled.
@@ -420,7 +427,21 @@ impl Db<'_> {
     }
 
     pub fn put(&self, kind: &str, value: &Value) -> Result<Value> {
-        if matches!(kind, "projects" | "agents" | "mcps" | "plugin-connections") {
+        if matches!(
+            kind,
+            "projects"
+                | "agents"
+                | "mcps"
+                | "plugin-connections"
+                | "plugin-packages"
+                | "plugin-requests"
+                | "plugin-activity"
+                | "plugin-timers"
+                | "plugin-events"
+                | "plugin-deliveries"
+                | "plugin-storage"
+                | "plugin-http-receipts"
+        ) {
             return Err(Error::bad("Use typed domain commands."));
         }
         let projection = match kind {

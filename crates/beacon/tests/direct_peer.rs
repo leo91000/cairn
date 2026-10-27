@@ -361,6 +361,7 @@ fn request(id: &str, path: &str) -> cairn_protocol::Frame {
         account_id: "forged-account".into(),
         role: cairn_protocol::Role::Member,
         mcp_scopes: Some(vec!["forged-scope".into()]),
+        mcp_credential_digest: Some("forged-credential".into()),
         public_artifact: Some("forged-capability".into()),
         method: "GET".into(),
         path: path.into(),
@@ -486,6 +487,7 @@ async fn fragmented_request_and_response_keep_body_bytes_and_verified_capabiliti
             |Extension(identity): Extension<InstallationIdentity>, bytes: Bytes| async move {
                 assert_eq!(identity.role, InstallationRole::Owner);
                 assert!(identity.mcp_scopes.is_none());
+                assert!(identity.mcp_credential_digest.is_none());
                 assert!(identity.public_artifact.is_none());
                 bytes
             },

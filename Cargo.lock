@@ -1208,6 +1208,7 @@ dependencies = [
 name = "cairn-contracts"
 version = "0.52.3"
 dependencies = [
+ "cairn-plugin-api",
  "rand 0.9.5",
  "schemars",
  "serde",
@@ -1314,9 +1315,11 @@ name = "cairn-plugin-api"
 version = "0.1.0"
 dependencies = [
  "regex",
+ "schemars",
  "serde",
  "serde_json",
  "toml",
+ "ts-rs",
  "url",
 ]
 

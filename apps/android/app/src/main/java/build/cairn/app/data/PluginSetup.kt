@@ -1,65 +1,15 @@
 package build.cairn.app.data
 
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 
-/** Something the owner does on the service's site, ticked off in the assistant. */
-@Serializable
-data class SetupTask(
-    val title: String = "",
-    val text: String = "",
-    /** The service's page for this task, HTTPS. */
-    val url: String? = null,
-    /** The link's label, e.g. "Open API Library". */
-    val link: String? = null,
-    /** A value Cairn shows for the owner to copy into the service: `callbackUrl`. */
-    val copy: String? = null,
-)
+typealias SetupTask = build.cairn.contracts.SetupTask
 
-/** A named combination of a step's switches, e.g. "Read only". */
-@Serializable
-data class SetupPreset(
-    val id: String = "",
-    val title: String = "",
-    val description: String = "",
-    /** `low`, `medium` or `high`. */
-    val risk: String? = null,
-    /** Switches turned on; the step's other switches are turned off. */
-    val values: Map<String, Boolean> = emptyMap(),
-)
+typealias SetupPreset = build.cairn.contracts.SetupPreset
 
-/** One step of the setup assistant. */
-@Serializable
-data class SetupStep(
-    val id: String = "",
-    /** `settings`, `credential`, `people` or `agents`. */
-    val kind: String = "settings",
-    val title: String = "",
-    val description: String = "",
-    /** Keys of the settings this step shows, in order. */
-    val settings: List<String> = emptyList(),
-    /** The same values serve every instance; a new one can reuse them from another. */
-    val shared: Boolean = false,
-    val checklist: List<SetupTask> = emptyList(),
-    val presets: List<SetupPreset> = emptyList(),
-    /** A consequence to know before going on, e.g. a provider's token expiry. */
-    val warning: String = "",
-)
+typealias SetupStep = build.cairn.contracts.SetupStep
 
-/**
- * What connecting an instance takes and the steps the owner follows, as the installation resolves
- * them (`setup` next to each package's manifest).
- */
-@Serializable
-data class PluginSetup(
-    /** `signin`, `token` or `app`: a sign-in, a pasted token, or an app registered first. */
-    val effort: String? = null,
-    val summary: String = "",
-    /** A string setting naming a new instance once known, e.g. the verified mailbox. */
-    val nameFrom: String? = null,
-    val steps: List<SetupStep> = emptyList(),
-)
+typealias PluginSetup = build.cairn.contracts.PluginSetup
 
 /** The setup resolved by the installation; invalid packages have no setup. */
 fun PluginEntry.resolvedSetup(): PluginSetup = setup ?: PluginSetup()
@@ -105,7 +55,7 @@ fun SetupStep.matchingPreset(all: List<PluginSetting>, values: Map<String, Strin
     return presets
         .find { preset ->
             switches.all { field ->
-                (values[field.key] == "true") == (preset.values[field.key] == true)
+                (values[field.key] == "true") == (preset.values?.get(field.key) == true)
             }
         }
         ?.id
@@ -116,7 +66,7 @@ fun SetupStep.matchingPreset(all: List<PluginSetting>, values: Map<String, Strin
 fun SetupStep.presetValues(all: List<PluginSetting>, preset: SetupPreset): Map<String, String> =
     fields(all)
         .filter { it.type == "boolean" }
-        .associate { it.key to (preset.values[it.key] == true).toString() }
+        .associate { it.key to (preset.values?.get(it.key) == true).toString() }
 
 /** One app (or other shared setup) already saved, and the instances using it. */
 data class SharedSource(

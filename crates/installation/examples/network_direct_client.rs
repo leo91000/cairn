@@ -298,6 +298,7 @@ async fn direct_read(
             account_id: String::new(),
             role: Role::Member,
             mcp_scopes: None,
+        mcp_credential_digest: None,
             public_artifact: None,
             method: "GET".into(),
             path: path.into(),

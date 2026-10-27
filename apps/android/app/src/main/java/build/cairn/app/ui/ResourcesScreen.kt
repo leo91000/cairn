@@ -13,11 +13,13 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import build.cairn.contracts.CreateProjectInput
+import build.cairn.contracts.ListPluginPackagesInput
 import build.cairn.contracts.ProjectInput
 import build.cairn.contracts.ProjectSettings
 import build.cairn.contracts.ReplaceProjectInput
 import build.cairn.contracts.createProject
 import build.cairn.contracts.deleteProject
+import build.cairn.contracts.listPluginPackages
 import build.cairn.contracts.replaceProject
 import kotlinx.serialization.json.*
 import kotlinx.serialization.json.decodeFromJsonElement
@@ -189,7 +191,8 @@ internal fun ProjectEditor(
     if (creating)
         LaunchedEffect(Unit) {
             // Without the catalogue, projects can still be added from a server folder.
-            catalog = runCatching { vm.api.get<PluginCatalog>("/plugins") }.getOrNull()
+            catalog =
+                runCatching { vm.api.listPluginPackages(ListPluginPackagesInput()) }.getOrNull()
         }
     val sources = catalog?.projectSources().orEmpty()
     val source = sources.find { it.key == mode }?.takeIf { creating }

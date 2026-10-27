@@ -15,6 +15,7 @@ function entry(id: string, manifest: Partial<NonNullable<PluginEntry['manifest']
     status,
     active: '1.0.0',
     versions: [],
+    setup: null,
     manifest: {
       id,
       name: id[0]!.toUpperCase() + id.slice(1),

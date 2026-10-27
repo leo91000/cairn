@@ -7,7 +7,7 @@ use axum::{
     http::{HeaderMap, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{any, get},
+    routing::{any, get, post},
 };
 use cairn_installation::{
     auth::{InstallationIdentity, InstallationRole, digest, token},
@@ -114,6 +114,7 @@ async fn transport(
                 };
                 if path == "/mcp" {
                     identity.mcp_scopes = serde_json::from_value(context["scopes"].clone()).ok();
+                    identity.mcp_credential_digest = Some(digest(value));
                     *request.uri_mut() = "/api/mcp".parse().unwrap();
                 }
                 request.extensions_mut().insert(identity);
@@ -152,6 +153,29 @@ async fn fixture_task_authors(headers: HeaderMap) -> Result<Json<TaskAuthorPolic
     }))
 }
 
+async fn fixture_plugin_authorization(
+    State(service): State<Arc<Service>>,
+    headers: HeaderMap,
+    Json(input): Json<Value>,
+) -> Result<Json<bool>> {
+    if headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        != Some("Bearer fixture-only")
+    {
+        return Err(Error::unauthorized("Incorrect fixture installation token."));
+    }
+    let context = service
+        .store
+        .kv(&format!("test-relay:{}", text(&input, "credentialDigest")))
+        .await?;
+    Ok(Json(context.is_some_and(|context| {
+        context["scopes"]
+            .as_array()
+            .is_some_and(|scopes| scopes.iter().any(|scope| scope == "manage"))
+    })))
+}
+
 /// Synthetic authority for installation-only worker/handler tests.
 pub async fn claimed(service: &Service) -> Result<()> {
     // Integration tests need the real binary; the worker_fixture example
@@ -183,10 +207,16 @@ pub async fn claimed(service: &Service) -> Result<()> {
     let origin = format!("http://{}", listener.local_addr()?);
     // Handler tests keep their synthetic owner, but exercise the real
     // installation handlers and the same HTTP policy lookup as production.
-    let app = installation_router(Arc::new(service.clone())).await?.route(
-        "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
-        get(fixture_task_authors),
-    );
+    let app = installation_router(Arc::new(service.clone()))
+        .await?
+        .route(
+            "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+            get(fixture_task_authors),
+        )
+        .route(
+            "/api/relay/00000000-0000-4000-8000-000000000055/plugin-mcp-authorization",
+            post(fixture_plugin_authorization).with_state(Arc::new(service.clone())),
+        );
     let shutdown = service.shutdown.clone();
 
     let identity = serde_json::to_vec(&json!({

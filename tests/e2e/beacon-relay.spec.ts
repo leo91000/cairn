@@ -3,6 +3,7 @@ import { once } from 'node:events'
 import { join } from 'node:path'
 import { expect, test } from '@playwright/test'
 import { beaconRelayFixture } from './beacon-relay-fixture'
+import { relayProtocolVersion } from './relay-protocol'
 
 test('claims an installation and sends after relay restarts and beacon session renewal', async ({ page }) => {
   test.setTimeout(120000)
@@ -173,7 +174,7 @@ test('claims an installation and sends after relay restarts and beacon session r
       data: {},
     })).json()
     const identity = await (await page.request.post(`${url}/api/relay/claim`, {
-      data: { code: claim.code, name: 'Hostile fixture', protocol: 5 },
+      data: { code: claim.code, name: 'Hostile fixture', protocol: relayProtocolVersion },
     })).json()
     const incompatible = Reflect.construct(WebSocket, [
       `${url.replace('http:', 'ws:')}/api/relay/${identity.installationId}/connect`,
@@ -230,7 +231,7 @@ test('claims an installation and sends after relay restarts and beacon session r
       })
     })
     await once(peer, 'open')
-    peer.send(JSON.stringify({ type: 'hello', version: 5 }))
+    peer.send(JSON.stringify({ type: 'hello', version: relayProtocolVersion }))
     await welcomed
     await expect(page.getByRole('status', { name: 'Installation availability' })).toHaveText('Online')
 
