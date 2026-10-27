@@ -58,7 +58,8 @@
       "exclusiveAgents": [],
       "usage": {
         "memoryMiB": 1024,
-        "diskMiB": 8192
+        "diskMiB": 8192,
+        "diskBytes": 8589934592
       },
       "budgetError": null,
       "pressure": null,

@@ -1104,6 +1104,7 @@ async fn node_storage_layouts() {
                 usage: Some(NodeUsage {
                     memory_mi_b: 4096,
                     disk_mi_b: 32768,
+                    disk_bytes: (n % 2 == 0).then_some(32768 * 1_048_576),
                 }),
                 ..ExecutionNode::default()
             }

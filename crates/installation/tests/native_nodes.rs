@@ -2071,7 +2071,7 @@ async fn native_disk_growth_is_idempotent_and_competes_atomically_with_admission
         "capabilities": node["capabilities"], "pool": { "capacity": 4 },
         "sharedResources": true, "budget": { "slots": 4, "limits": node["limits"] },
         "nativeMode": { "mode": "protected", "generation": null, "status": "applied" },
-        "usage": { "diskMiB": 16384 },
+        "usage": { "memoryMiB": 0, "diskMiB": 16384, "diskBytes": 16 * gib },
         "diskGrowth": { "protocol": 1, "capturedAt": now(), "usedBytes": 16 * gib, "freeBytes": 900 * gib,
             "ownedBytes": { &attempts[0]: 8 * gib, &attempts[1]: 8 * gib },
             "requests": [
@@ -2100,6 +2100,17 @@ async fn native_disk_growth_is_idempotent_and_competes_atomically_with_admission
             "{reply}"
         );
     }
+    assert_eq!(
+        f.service
+            .get_node(text(&node, "id"))
+            .await
+            .unwrap()
+            .usage
+            .unwrap()
+            .disk_bytes,
+        Some(16 * gib),
+        "Retain the exact disk bytes emitted by native Controller::usage"
+    );
     assert_eq!(
         f.service.store.run(text(&runs[0], "id")).await.unwrap()["resources"]["diskMiB"],
         40960

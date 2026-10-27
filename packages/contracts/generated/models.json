@@ -3544,6 +3544,14 @@
     "NodeUsage": {
       "additionalProperties": false,
       "properties": {
+        "diskBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "diskMiB": {
           "default": 0,
           "format": "uint64",

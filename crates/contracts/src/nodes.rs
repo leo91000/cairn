@@ -253,6 +253,10 @@ pub struct NodeUsage {
     pub memory_mi_b: u64,
     #[ts(type = "number")]
     pub disk_mi_b: u64,
+    // Native health reports exact disk bytes; VM health only reports MiB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null", optional = nullable)]
+    pub disk_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]

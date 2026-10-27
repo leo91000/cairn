@@ -7,11 +7,14 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class NodeUsage(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val diskBytes: Long? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val diskMiB: Long = 0,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val memoryMiB: Long = 0,
 ) {
     init {
+        diskBytes?.let { require(it >= 0L) }
         require(diskMiB >= 0L)
         require(memoryMiB >= 0L)
     }
