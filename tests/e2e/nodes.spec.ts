@@ -9,7 +9,8 @@ import {
   workspacePath,
 } from './fixtures'
 
-test('shows reclaimable and unpublished disk data on desktop and phone', async ({ page, workspace }) => {
+test('shows disk accounting and keeps the storage draft revision through inventory polling', async ({ page, workspace }) => {
+  test.setTimeout(60000)
   await useRelayForHttpMocks(page)
   const node: ExecutionNode = {
     revision: 'fixture',
@@ -100,6 +101,42 @@ test('shows reclaimable and unpublished disk data on desktop and phone', async (
   await expect(details).toBeVisible()
   expect(await details.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
   await page.screenshot({ path: 'test-results/nodes-disk-accounting-phone.png', fullPage: true })
+  await page.getByRole('button', { name: 'Storage', exact: true }).click()
+  const editor = page.getByRole('dialog', { name: 'Storage · Disk capacity fixture' })
+  await editor.getByLabel('Shared memory cache (MiB)', { exact: true }).fill('1024')
+  const requests: { revision: string, storage: ExecutionNode['storage'] }[] = []
+  await page.route(`**/api/nodes/${node.id}/storage`, async (route) => {
+    const input = route.request().postDataJSON()
+    requests.push(input)
+    if (input.revision !== node.revision) {
+      await route.fulfill({ status: 409, json: { error: 'The node configuration changed. Reopen the editor.' } })
+      return
+    }
+
+    node.storage = input.storage
+    node.revision = 'saved'
+    await route.fulfill({ json: node })
+  })
+  // Another editor changes a field this draft has not touched.
+  node.revision = 'remote-change'
+  node.storage.reservePercent = 10
+  await page.waitForResponse(async response => response.request().method() === 'GET'
+    && new URL(response.url()).pathname.endsWith('/api/nodes')
+    && (await response.json())[0]?.revision === 'remote-change', { timeout: 15000 })
+  await expect(editor.getByLabel('Minimum free disk (%)', { exact: true })).toHaveValue('5')
+  await editor.getByRole('button', { name: 'Save storage settings', exact: true }).click()
+  await expect(editor.getByRole('alert')).toContainText('The node configuration changed')
+  expect(requests[0]?.revision).toBe('fixture')
+  expect(node.storage.reservePercent).toBe(10)
+  await editor.getByRole('button', { name: 'Close', exact: true }).click()
+  await page.getByRole('button', { name: 'Storage', exact: true }).click()
+  await expect(editor.getByLabel('Minimum free disk (%)', { exact: true })).toHaveValue('10')
+  await editor.getByLabel('Shared memory cache (MiB)', { exact: true }).fill('1024')
+  await editor.getByRole('button', { name: 'Save storage settings', exact: true }).click()
+  await expect(editor).toHaveCount(0)
+  expect(requests[1]?.revision).toBe('remote-change')
+  expect(node.storage.reservePercent).toBe(10)
+  expect(node.storage.memoryCacheMiB).toBe(1024)
 })
 
 test('registers, configures and revokes a node through the owner interface', async ({ page, workspace }) => {

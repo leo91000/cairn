@@ -11,11 +11,13 @@ import UiButton from './UiButton.vue'
 const props = defineProps<{ node: ExecutionNode }>()
 const emit = defineEmits<{ saved: [] }>()
 const policy = ref<NodeStoragePolicy | null>(null)
+const revision = ref('')
 const error = ref('')
 const busy = ref(false)
 
 function open() {
   error.value = ''
+  revision.value = props.node.revision
   const saved = props.node.storage
   policy.value = {
     cacheMiB: saved?.cacheMiB ?? 102400,
@@ -33,7 +35,7 @@ async function save() {
   busy.value = true
   error.value = ''
   try {
-    await updateNodeStorage(api, { nodeId: props.node.id, revision: props.node.revision, storage: policy.value })
+    await updateNodeStorage(api, { nodeId: props.node.id, revision: revision.value, storage: policy.value })
     policy.value = null
     emit('saved')
   }
