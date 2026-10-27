@@ -669,7 +669,7 @@ async fn public_mcp_rechecks_the_native_caller_when_directing_existing_work() {
     }
     let mut node = f.node.clone();
     node["nativeAccounts"] = json!([]);
-    f.service.store.put("nodes", node).await.unwrap();
+    f.service.store.put_node_fixture(node).await.unwrap();
     let response = public_mcp_call(&f, TRUSTED, &["run"], "send_chat_message", args).await;
     assert_eq!(response["result"]["isError"], true, "{response}");
     let saved = f.service.get("chats", text(&chat, "id")).await.unwrap();
