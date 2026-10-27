@@ -1,6 +1,8 @@
 //! Repeatable benchmarks through the shipped backup and outbound transport interfaces.
 //! Capture benchmarks require CAIRN_NODE_TEST_S3_ENDPOINT and synthetic AWS credentials.
 //! Run alone with --ignored --nocapture --test-threads=1. All identities/data are fixtures.
+use common::node_fixture::*;
+
 mod common;
 
 use common::relay_fixture::router;
@@ -233,7 +235,7 @@ async fn outbound_transfer_with_ack_latency() {
         let s = service(&root, origin.clone(), String::new()).await;
         let (node, token) = (id(), auth::token());
         s.store
-            .put("nodes", json!({ "id": node, "revoked": false }))
+            .put_node_fixture(json!({ "id": node, "revoked": false }))
             .await
             .unwrap();
         s.store

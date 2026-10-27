@@ -11,7 +11,7 @@ import org.junit.Test
 class NodesTest {
     private val node =
         ExecutionNode(
-            id = "n",
+            id = "67096815-500d-5d8e-94fc-396f75f5aedf",
             name = "Desktop",
             accepting = true,
             status = "online",
@@ -26,7 +26,19 @@ class NodesTest {
                     arch = "x86_64",
                     kvm = true,
                 ),
-            agents = listOf(NodeAgent("a", "Main")),
+            agents =
+                listOf(
+                    NodeAgent(
+                        id = "a",
+                        name = "Main",
+                        allNodes = false,
+                    )
+                ),
+            createdAt = 0,
+            revision = "fixture",
+            limits = NodeResources(cpu = 1, memoryMiB = 256, diskMiB = 128),
+            storage = NodeStoragePolicy(),
+            staleDisks = StaleDisks(count = 0, diskMiB = 0),
         )
 
     @Test
@@ -44,10 +56,12 @@ class NodesTest {
     }
 
     @Test
-    fun readsDiskAccountingWithoutRequiringItFromOlderNodes() {
+    fun diskAccountingIsOptionalInTheCurrentInventory() {
         val decoded =
             wireJson.decodeFromString<ExecutionNode>(
-                """{"id":"n","name":"Desktop","status":"online","diskAccounting":{"capturedAt":10,"localBytes":4096,"unusedGrantedBytes":8192,"hostFreeBytes":16384,"hostReserveBytes":1024,"poolReserveBytes":512,"reclaimableBytes":2048,"unsynchronizedBytes":1024}}"""
+                nodeWireFixture(
+                    """{"id":"67096815-500d-5d8e-94fc-396f75f5aedf","name":"Desktop","status":"online","diskAccounting":{"capturedAt":10,"localBytes":4096,"unusedGrantedBytes":8192,"hostFreeBytes":16384,"hostReserveBytes":1024,"poolReserveBytes":512,"reclaimableBytes":2048,"unsynchronizedBytes":1024}}"""
+                )
             )
         assertEquals(2048L, decoded.diskAccounting?.reclaimableBytes)
         assertEquals(1024L, decoded.diskAccounting?.unsynchronizedBytes)
@@ -98,14 +112,30 @@ class NodesTest {
     fun exclusiveGrantsAreNeverSentFromTheNode() {
         val oldNode =
             wireJson.decodeFromString<ExecutionNode>(
-                """{"id":"n","name":"Desktop","status":"online"}"""
+                nodeWireFixture(
+                    """{"id":"67096815-500d-5d8e-94fc-396f75f5aedf","name":"Desktop","status":"online"}"""
+                )
             )
         assertTrue(oldNode.exclusiveAgents.isEmpty())
         assertFalse(oldNode.exclusiveReservations)
         assertNull(oldNode.exclusiveReservation)
 
         // Omitted, the server keeps the grants saved on each agent.
-        val configuration = NodeConfiguration("Desktop", true, emptyList(), NodeResources())
+        val configuration =
+            NodeConfiguration(
+                name = "Desktop",
+                accepting = true,
+                tags = emptyList(),
+                limits =
+                    NodeResources(
+                        cpu = 1,
+                        memoryMiB = 128,
+                        diskMiB = 128,
+                    ),
+                revision = "fixture",
+                nativeAccounts = null,
+                slots = 4,
+            )
         assertFalse("exclusiveAgents" in wireJson.encodeToJsonElement(configuration).jsonObject)
     }
 
@@ -114,7 +144,7 @@ class NodesTest {
         val reservation =
             ExclusiveReservation(
                 id = "reservation",
-                nodeId = "node",
+                nodeId = "b40903f9-0487-53d0-a309-c589f0cae405",
                 ownerRunId = "owner",
                 reason = "Compilation",
                 state = "acquired",

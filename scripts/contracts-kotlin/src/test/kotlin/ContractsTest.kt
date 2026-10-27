@@ -8,6 +8,39 @@ class ContractsTest {
     private val json = Json { encodeDefaults = true }
 
     @Test
+    fun nodeInventoryAndCommandsMatchRustWithNativeAuthorityKeptSeparate() {
+        val root = File(System.getProperty("cairn.contractWire")).parentFile
+        val corpus =
+            json
+                .parseToJsonElement(
+                    File(root, "../../../tests/fixtures/node-contracts.json").readText()
+                )
+                .jsonObject
+        for (value in corpus.getValue("views").jsonArray) {
+            val node = json.decodeFromJsonElement<ExecutionNode>(value)
+            assertEquals(
+                node,
+                json.decodeFromJsonElement<ExecutionNode>(json.encodeToJsonElement(node)),
+            )
+            assertEquals("protected", node.nativeModeRequest?.mode)
+            assertEquals(4L, node.slots)
+        }
+        for (value in corpus.getValue("commands").jsonArray) {
+            val command = json.decodeFromJsonElement<UpdateNodeInput>(value)
+            assertEquals("r1", command.node.revision)
+            assertEquals(
+                command,
+                json.decodeFromJsonElement<UpdateNodeInput>(json.encodeToJsonElement(command)),
+            )
+        }
+        corpus.getValue("invalidCommands").jsonArray.forEachIndexed { index, value ->
+            // kotlinx accepts numeric strings; the Rust command decoder remains authoritative.
+            if (index != 2)
+                assertFails(value.toString()) { json.decodeFromJsonElement<UpdateNodeInput>(value) }
+        }
+    }
+
+    @Test
     fun eventAndHistoryContractsPreserveAdapterBoundariesAndCursors() {
         val root = File(System.getProperty("cairn.contractWire")).parentFile
         val corpus =

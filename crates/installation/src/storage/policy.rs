@@ -1,81 +1,19 @@
 //! Node-wide disk limits. Dirty journals never participate in cache eviction.
 use crate::error::{Error, Result};
-use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
-pub struct Policy {
-    pub cache_mi_b: u64,
-    pub memory_cache_mi_b: u64,
-    pub reserve_mi_b: u64,
-    pub reserve_percent: u64,
-    pub backup_seconds: u64,
-    pub max_dirty_seconds: u64,
-}
+pub use cairn_contracts::NodeStoragePolicy as Policy;
 
-impl Default for Policy {
-    fn default() -> Self {
-        Self {
-            cache_mi_b: 102400,
-            memory_cache_mi_b: 256,
-            reserve_mi_b: 10240,
-            reserve_percent: 5,
-            backup_seconds: 60,
-            max_dirty_seconds: 300,
-        }
-    }
-}
-
-impl Policy {
-    pub fn validate(&self) -> Result<()> {
-        if self.cache_mi_b > 16 * 1024 * 1024
-            || !(4..=4096).contains(&self.memory_cache_mi_b)
-            || self.reserve_mi_b < 64
-            || self.reserve_mi_b > 16 * 1024 * 1024
-            || !(1..=50).contains(&self.reserve_percent)
-            || !(5..=3600).contains(&self.backup_seconds)
-            || self.max_dirty_seconds < self.backup_seconds
-            || self.max_dirty_seconds > 86400
-        {
-            return Err(Error::bad("Invalid storage limits."));
-        }
-        Ok(())
-    }
-
-    pub fn for_node(value: &serde_json::Value) -> Result<Self> {
-        let value = if value.is_object() {
-            value.clone()
-        } else {
-            serde_json::Value::Object(serde_json::Map::new())
-        };
-        let policy: Self = serde_json::from_value(value)
-            .map_err(|_| Error::bad("Invalid node storage limits."))?;
-        policy.validate()?;
-        Ok(policy)
-    }
-
-    pub fn reserve(&self, total: u64) -> u64 {
-        (self.reserve_mi_b * 1024 * 1024).max(total / 100 * self.reserve_percent)
-    }
-
-    pub fn pause_reason(
-        &self,
-        total: u64,
-        free: u64,
-        dirty_since: Option<i64>,
-        now: i64,
-    ) -> Option<&'static str> {
-        if free <= self.reserve(total) {
-            return Some("disk-space");
-        }
-        if dirty_since
-            .is_some_and(|at| now.saturating_sub(at) >= (self.max_dirty_seconds * 1000) as i64)
-        {
-            return Some("backup-lag");
-        }
-        None
-    }
+pub fn for_node(value: &serde_json::Value) -> Result<Policy> {
+    let value = if value.is_object() {
+        value.clone()
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+    let policy: Policy =
+        serde_json::from_value(value).map_err(|_| Error::bad("Invalid node storage limits."))?;
+    policy.validate().map_err(Error::bad)?;
+    Ok(policy)
 }
 
 pub fn space(path: &Path) -> std::io::Result<(u64, u64)> {

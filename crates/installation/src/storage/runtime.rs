@@ -244,7 +244,7 @@ fn open_volume(directory: &Path) -> Result<Arc<Volume>> {
         ));
     }
     let policy: Policy = serde_json::from_value(context["policy"].clone()).unwrap_or_default();
-    policy.validate()?;
+    policy.validate().map_err(Error::bad)?;
     disk.memory_budget(policy.memory_cache_mi_b as usize * 1024 * 1024)?;
     let volume = Arc::new(Volume {
         disk,
@@ -482,7 +482,7 @@ impl Volume {
             ));
         }
         let policy: Policy = serde_json::from_value(context["policy"].clone())?;
-        policy.validate()?;
+        policy.validate().map_err(Error::bad)?;
         let (volume, owner, context) = (self.clone(), owner.clone(), context.clone());
         blocking(move || {
             // A dropped async caller must not unlock the conversation while
@@ -658,7 +658,7 @@ impl Volume {
         match std::fs::read(state.join("storage-policy.json")) {
             Ok(bytes) => {
                 let policy: Policy = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-                policy.validate().map_err(|e| io::Error::other(e.message))?;
+                policy.validate().map_err(io::Error::other)?;
                 Ok(policy)
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(self

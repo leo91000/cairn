@@ -251,7 +251,7 @@ fn target_agent(db: &Db<'_>, run: &Value, input: &Value) -> Result<Value> {
     // Wildcard node grants do not include an administrator review. A narrower
     // reviewed target must not give an unreviewed requester host privileges.
     let administrator_reviews = !crate::native::policy::supports(&agent, "native")
-        || db.list("nodes")?.iter().all(|node| {
+        || db.nodes_boundary()?.iter().all(|node| {
             !crate::service::allowed(&target_access["nodes"], text(node, "id"))
                 || !crate::nodes::native_mode::reviewed(node, &agent)
                 || crate::nodes::native_mode::reviewed(node, &current)

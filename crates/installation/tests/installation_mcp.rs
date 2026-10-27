@@ -1,5 +1,6 @@
 use crate::common::run_fixture::DbRunFixture;
 use cairn_contracts::EventKind;
+use common::node_fixture::*;
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
@@ -330,6 +331,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
             json!({
                 "nodeId": next,
                 "node": {
+                    "revision": s.get_node(next).await.unwrap().revision,
                     "name": "Trusted desktop", "tags": ["gpu"],
                     "limits": { "cpu": 2, "memoryMiB": 2048, "diskMiB": 8192 },
                     "slots": 6, "accepting": true,
@@ -340,9 +342,9 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
         .await;
         assert_eq!(result(&updated)["nativeEnabled"], true);
         assert_eq!(result(&updated)["capabilities"]["backend"], "native");
-        let mut capable = s.get("nodes", next).await.unwrap();
+        let mut capable = s.node_boundary(next).await.unwrap();
         capable["capabilities"]["nativeModeProtocol"] = 1.into();
-        s.store.put("nodes", capable).await.unwrap();
+        s.store.put_node_fixture(capable).await.unwrap();
         let (_, preview) = node_management_call(
             &app,
             endpoint,
@@ -364,20 +366,16 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
             "nodeId": next, "change": { "mode": "administrator", "previewId": preview["previewId"], "confirm": true },
         })).await;
         if endpoint == "/mcp-installation" {
-            assert_eq!(
-                result(&requested)["status"],
-                "awaiting-owner",
-                "{requested}"
-            );
-            assert!(s.get("nodes", next).await.unwrap()["nativeModeRequest"].is_null());
+            assert_eq!(result(&requested)["kind"], "awaitingOwner", "{requested}");
+            assert!(s.node_boundary(next).await.unwrap()["nativeModeRequest"].is_null());
         } else {
             assert_eq!(
-                result(&requested)["nativeModeStatus"],
+                result(&requested)["node"]["nativeModeStatus"],
                 "pending",
                 "{requested}"
             );
             assert_eq!(
-                result(&requested)["nativeModeRequest"]["mode"],
+                result(&requested)["node"]["nativeModeRequest"]["mode"],
                 "administrator"
             );
         }
@@ -409,7 +407,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
             }),
         )
         .await;
-        assert_eq!(result(&retired)["revoked"], true);
+        assert_eq!(result(&retired)["node"]["revoked"], true);
         assert_eq!(result(&retired)["releasedPlacements"], 1);
         assert!(s.store.run(run["id"].as_str().unwrap()).await.unwrap()["pinnedNodeId"].is_null());
         // Ordinary revocation preserves an explicit preference, as the owner UI does.
@@ -536,7 +534,7 @@ async fn node_storage_controls_share_probes_persistence_and_permissions_across_b
             endpoint,
             token,
             "update_node_storage",
-            json!({ "nodeId": node, "storage": policy }),
+            json!({ "nodeId": node, "revision": s.get_node(node).await.unwrap().revision, "storage": policy }),
         )
         .await;
         assert_eq!(result(&updated)["storage"], policy);
@@ -559,11 +557,11 @@ async fn node_storage_controls_share_probes_persistence_and_permissions_across_b
             endpoint,
             token,
             "update_node_storage",
-            json!({ "nodeId": node, "storage": rejected }),
+            json!({ "nodeId": node, "revision": s.get_node(node).await.unwrap().revision, "storage": rejected }),
         )
         .await;
         assert_eq!(response["result"]["isError"], true, "{response}");
-        assert_eq!(s.get("nodes", node).await.unwrap()["storage"], policy);
+        assert_eq!(s.node_boundary(node).await.unwrap()["storage"], policy);
         fail_probe.store(false, Ordering::SeqCst);
         last_node = node.to_owned();
     }
@@ -1078,6 +1076,13 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "cancel_plugin_operation",
     ]);
     public_names.extend([
+        "list_nodes",
+        "list_native_callers",
+        "create_node_enrollment",
+        "update_node",
+        "change_native_node_mode",
+        "update_node_storage",
+        "revoke_node",
         "set_agent_avatar",
         "list_agents",
         "get_agent",
@@ -3162,16 +3167,13 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
     let run = cairn_installation::config::id();
     let node = cairn_installation::config::id();
     s.store
-        .put(
-            "nodes",
-            json!({
-                "id": node,
-                "runtimeId": "development",
-                "capabilities": { "backend": "native" },
-                "nativeEnabled": true,
-                "nativeAccounts": [],
-            }),
-        )
+        .put_node_fixture(json!({
+            "id": node,
+            "runtimeId": "development",
+            "capabilities": { "backend": "native" },
+            "nativeEnabled": true,
+            "nativeAccounts": [],
+        }))
         .await
         .unwrap();
     s.store
@@ -3364,7 +3366,7 @@ async fn neither_agent_interface_can_review_an_administrator_node() {
     let mut nodes = Vec::new();
     for _ in 0..2 {
         let node = cairn_installation::config::id();
-        s.store.put("nodes", json!({
+        s.store.put_node_fixture(json!({
             "id": node, "capabilities": { "backend": "native", "nativeModeProtocol": 1 },
             "nativeModeRequest": { "mode": "administrator", "generation": cairn_installation::config::id() },
             "nativeReviewedAgents": [],
@@ -3386,7 +3388,7 @@ async fn neither_agent_interface_can_review_an_administrator_node() {
     .await;
     assert_eq!(denied["result"]["isError"], true, "{denied}");
     assert!(
-        s.get("nodes", &nodes[0]).await.unwrap()["nativeReviewedAgents"]
+        s.node_boundary(&nodes[0]).await.unwrap()["nativeReviewedAgents"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -3395,7 +3397,7 @@ async fn neither_agent_interface_can_review_an_administrator_node() {
         node_management_call(&app, "/mcp", &owner_token, "replace_agent", args).await;
     assert_eq!(response["result"]["isError"], true, "{response}");
     assert!(
-        s.get("nodes", &nodes[0]).await.unwrap()["nativeReviewedAgents"]
+        s.node_boundary(&nodes[0]).await.unwrap()["nativeReviewedAgents"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -4003,8 +4005,7 @@ async fn automatic_agent_priorities_round_trip_through_both_management_tools() {
     ];
     for id in &nodes {
         s.store
-            .put(
-                "nodes",
+            .put_node_fixture(
                 json!({ "id": id, "name": id, "capabilities": { "backend": "firecracker" } }),
             )
             .await

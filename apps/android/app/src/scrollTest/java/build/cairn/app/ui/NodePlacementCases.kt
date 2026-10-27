@@ -31,18 +31,59 @@ abstract class NodePlacementCases {
         var kept = false
         val previous =
             ExecutionNode(
-                id = "vm",
+                id = "9b7288b3-40e6-5ead-8948-ddf668adb25c",
                 name = "Workstation",
                 status = "online",
-                agents = listOf(NodeAgent("a", "Builder"), NodeAgent("b", "Everywhere", true)),
+                agents =
+                    listOf(
+                        NodeAgent(
+                            id = "a",
+                            name = "Builder",
+                            allNodes = false,
+                        ),
+                        NodeAgent(
+                            id = "b",
+                            name = "Everywhere",
+                            allNodes = true,
+                        ),
+                    ),
+                createdAt = 0,
+                revision = "fixture",
+                capabilities =
+                    NodeCapabilities(
+                        os = "",
+                        arch = "",
+                        cpu = 1,
+                        memoryMiB = 128,
+                        diskMiB = 128,
+                        kvm = false,
+                    ),
+                limits = NodeResources(cpu = 1, memoryMiB = 256, diskMiB = 128),
+                storage = NodeStoragePolicy(),
+                staleDisks = StaleDisks(count = 0, diskMiB = 0),
             )
         val next =
             ExecutionNode(
-                id = "native",
+                id = "beac7d45-75ca-544c-a4f6-a61c1e5787f2",
                 name = "Workstation GPU",
                 status = "online",
                 slots = 1,
-                capabilities = NodeCapabilities(backend = NATIVE_BACKEND, ublk = true),
+                capabilities =
+                    NodeCapabilities(
+                        backend = NATIVE_BACKEND,
+                        ublk = true,
+                        os = "",
+                        arch = "",
+                        cpu = 1,
+                        memoryMiB = 128,
+                        diskMiB = 128,
+                        kvm = false,
+                    ),
+                createdAt = 0,
+                revision = "fixture",
+                limits = NodeResources(cpu = 1, memoryMiB = 256, diskMiB = 128),
+                storage = NodeStoragePolicy(),
+                staleDisks = StaleDisks(count = 0, diskMiB = 0),
             )
         compose.setContent {
             CairnTheme {
@@ -87,7 +128,7 @@ abstract class NodePlacementCases {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/installations/fixture/api/overview" -> "{}"
                                 "/api/installations/fixture/api/nodes/native-callers" -> "[]"
-                                "/api/installations/fixture/api/nodes/desk/native-mode" -> {
+                                "/api/installations/fixture/api/nodes/aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503/native-mode" -> {
                                     val change =
                                         wireJson
                                             .parseToJsonElement(request.body.readUtf8())
@@ -105,7 +146,7 @@ abstract class NodePlacementCases {
                                         if (failed.get())
                                             ",\"nativeModeRequest\":{\"mode\":\"administrator\",\"generation\":\"g1\"},\"nativeModeStatus\":\"failed\""
                                         else ""
-                                    """[{"id":"desk","name":"Machine jetable","status":"online","accepting":true,"slots":2,"capabilities":{"backend":"native","nativeModeProtocol":1},"nativeModeObserved":{"mode":"protected","status":"$status"}$requested}]"""
+                                    """[{"id":"aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503","name":"Machine jetable","status":"online","accepting":true,"slots":2,"capabilities":{"backend":"native","nativeModeProtocol":1},"nativeModeObserved":{"mode":"protected","status":"$status"}$requested}]"""
                                 }
                                 else ->
                                     if (
@@ -131,7 +172,7 @@ abstract class NodePlacementCases {
                                         """{"mcps":[]}"""
                                     else "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(nodeWireFixture(request.path, body))
                     }
                 }
             server.start()
@@ -208,11 +249,25 @@ abstract class NodePlacementCases {
         var keyboard: androidx.compose.ui.platform.SoftwareKeyboardController? = null
         val node =
             ExecutionNode(
-                id = "native",
+                id = "beac7d45-75ca-544c-a4f6-a61c1e5787f2",
                 name = "Desktop",
                 status = "online",
                 slots = 1,
-                capabilities = NodeCapabilities(backend = "native"),
+                capabilities =
+                    NodeCapabilities(
+                        backend = "native",
+                        os = "",
+                        arch = "",
+                        cpu = 1,
+                        memoryMiB = 128,
+                        diskMiB = 128,
+                        kvm = false,
+                    ),
+                createdAt = 0,
+                revision = "fixture",
+                limits = NodeResources(cpu = 1, memoryMiB = 256, diskMiB = 128),
+                storage = NodeStoragePolicy(),
+                staleDisks = StaleDisks(count = 0, diskMiB = 0),
             )
         compose.setContent {
             keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
@@ -220,7 +275,12 @@ abstract class NodePlacementCases {
                 NodeEditor(
                     node,
                     Workspace(),
-                    listOf(NativeCaller("trusted", "trusted@example.test")),
+                    listOf(
+                        NativeCaller(
+                            id = "trusted",
+                            email = "trusted@example.test",
+                        )
+                    ),
                     {},
                     { saved = it },
                 )
@@ -270,22 +330,25 @@ abstract class NodePlacementCases {
                         ) {
                             val body = request.body.readUtf8().ifBlank { "{}" }
                             writes += path to wireJson.parseToJsonElement(body).jsonObject
-                            if (request.method == "PUT" && path.endsWith("/nodes/desk"))
+                            if (
+                                request.method == "PUT" &&
+                                    path.endsWith("/nodes/aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503")
+                            )
                                 enrollmentConfigured.set(true)
                         }
                         val body =
                             when (path) {
                                 "/api/installations/fixture/api/nodes/enrollments" -> {
                                     enrolled.set(true)
-                                    """{"code":"native-enrollment","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/native | bash","backend":"native","nodeId":"desk"}"""
+                                    """{"code":"native-enrollment","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/native | bash","backend":"native","nodeId":"aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503"}"""
                                 }
                                 "/api/installations/fixture/api/nodes/native-callers" ->
                                     """[{"id":"trusted","email":"trusted@example.test"}]"""
                                 "/api/installations/fixture/api/nodes" ->
                                     if (enrollmentConfigured.get())
-                                        """[{"id":"desk","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
+                                        """[{"id":"aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
                                     else if (enrolled.get())
-                                        """[{"id":"unrelated","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]},{"id":"desk","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
+                                        """[{"id":"9c2392e5-c83b-5811-b075-031baebd40b3","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]},{"id":"aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
                                     else if (
                                         request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
                                             true
@@ -312,7 +375,7 @@ abstract class NodePlacementCases {
                                         """{"mcps":[]}"""
                                     else "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(nodeWireFixture(request.path, body))
                     }
                 }
             server.start()
@@ -380,7 +443,11 @@ abstract class NodePlacementCases {
                 compose.onNodeWithText("Qui peut utiliser « Desk » ?").assertDoesNotExist()
                 compose.onNodeWithText("Activer l’exécution native").assertDoesNotExist()
                 assertTrue(
-                    writes.none { it.first.startsWith("/api/installations/fixture/api/nodes/desk") }
+                    writes.none {
+                        it.first.startsWith(
+                            "/api/installations/fixture/api/nodes/aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503"
+                        )
+                    }
                 )
                 return
             }
@@ -400,15 +467,22 @@ abstract class NodePlacementCases {
             compose.onNode(isOff() and hasText("Agent natif")).assertIsEnabled().performClick()
             compose.onNodeWithText("Terminer").performScrollTo().performClick()
             compose.waitUntil(10000) {
-                writes.any { it.first == "/api/installations/fixture/api/nodes/desk/agents" }
+                writes.any {
+                    it.first ==
+                        "/api/installations/fixture/api/nodes/aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503/agents"
+                }
             }
             val configured = writes.first {
-                it.first == "/api/installations/fixture/api/nodes/desk"
+                it.first ==
+                    "/api/installations/fixture/api/nodes/aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503"
             }
             assertEquals(JsonPrimitive(true), configured.second["nativeEnabled"])
             val grant =
                 writes
-                    .first { it.first == "/api/installations/fixture/api/nodes/desk/agents" }
+                    .first {
+                        it.first ==
+                            "/api/installations/fixture/api/nodes/aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503/agents"
+                    }
                     .second
             assertEquals(
                 listOf("38235acc-317f-50db-b506-53809ad1c8a0"),
@@ -450,7 +524,7 @@ abstract class NodePlacementCases {
             val reservation =
                 ExclusiveReservation(
                     "reservation",
-                    "node",
+                    "b40903f9-0487-53d0-a309-c589f0cae405",
                     "owner",
                     "Compilation Android",
                     "acquired",
@@ -491,7 +565,7 @@ abstract class NodePlacementCases {
                                 "event: batch\nid: 0\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), live, true, false))}\n\n"
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
-                                .setBody(frame)
+                                .setBody(nodeWireFixture(request.path, frame))
                         }
                         val body =
                             when {
@@ -548,7 +622,7 @@ abstract class NodePlacementCases {
                                         """{"mcps":[]}"""
                                     else "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(nodeWireFixture(request.path, body))
                     }
                 }
             server.start()
@@ -596,13 +670,13 @@ abstract class NodePlacementCases {
                         val body =
                             when {
                                 path ==
-                                    "/api/installations/fixture/api/nodes/node/exclusive/reservation/release" -> {
+                                    "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405/exclusive/reservation/release" -> {
                                     releases += request
                                     releasing.set(true)
                                     "{}"
                                 }
                                 path == "/api/installations/fixture/api/nodes" ->
-                                    """[{"id":"node","name":"Serveur réservé","status":"online","accepting":true,"executionReady":true,"capabilities":{"kvm":true},"exclusiveReservations":true,"exclusiveReservation":{"id":"reservation","nodeId":"node","ownerRunId":"owner-run","reason":"Compilation Android","state":"${if (releasing.get()) "releasing" else "acquired"}","createdAt":100,"expiresAt":4102444800000,"waitUntil":4102444800000,"pausedRunIds":["neighbor-one","neighbor-two"],"minimumAvailableMemoryMiB":4096}}]"""
+                                    """[{"id":"b40903f9-0487-53d0-a309-c589f0cae405","name":"Serveur réservé","status":"online","accepting":true,"executionReady":true,"capabilities":{"kvm":true},"exclusiveReservations":true,"exclusiveReservation":{"id":"reservation","nodeId":"b40903f9-0487-53d0-a309-c589f0cae405","ownerRunId":"owner-run","reason":"Compilation Android","state":"${if (releasing.get()) "releasing" else "acquired"}","createdAt":100,"expiresAt":4102444800000,"waitUntil":4102444800000,"pausedRunIds":["neighbor-one","neighbor-two"],"minimumAvailableMemoryMiB":4096}}]"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations/fixture/api/overview" -> "{}"
@@ -630,7 +704,7 @@ abstract class NodePlacementCases {
                                         """{"mcps":[]}"""
                                     else "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(nodeWireFixture(request.path, body))
                     }
                 }
             server.start()
@@ -677,7 +751,7 @@ abstract class NodePlacementCases {
                         val body =
                             when (request.path!!.substringBefore('?')) {
                                 "/api/installations/fixture/api/nodes/placement/neighbor" ->
-                                    """{"nodes":[{"id":"node","name":"Serveur réservé","status":"online"}]}"""
+                                    """{"nodes":[{"id":"b40903f9-0487-53d0-a309-c589f0cae405","name":"Serveur réservé","status":"online"}]}"""
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/overview" -> "{}"
@@ -705,7 +779,7 @@ abstract class NodePlacementCases {
                                         """{"mcps":[]}"""
                                     else "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(nodeWireFixture(request.path, body))
                     }
                 }
             server.start()
@@ -719,7 +793,7 @@ abstract class NodePlacementCases {
                         suspendedByExclusive =
                             ExclusiveReservation(
                                 id = "reservation",
-                                nodeId = "node",
+                                nodeId = "b40903f9-0487-53d0-a309-c589f0cae405",
                                 ownerRunId = "owner-run",
                                 reason = "Compilation Android",
                                 state = "acquired",
@@ -778,8 +852,8 @@ abstract class NodePlacementCases {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val body =
                             when (request.path!!.substringBefore('?')) {
-                                "/api/installations/fixture/api/nodes/placement/native" ->
-                                    """{"nodes":[{"id":"desk","name":"Bureau GPU","status":"online","capabilities":{"backend":"native","ublk":true},"nativeModeStatus":"${privilegeStatus.get()}","nativeModeObserved":{"mode":"${if (privilegeStatus.get() == "applied") "administrator" else "protected"}"}}]}"""
+                                "/api/installations/fixture/api/nodes/placement/beac7d45-75ca-544c-a4f6-a61c1e5787f2" ->
+                                    """{"nodes":[{"id":"aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503","name":"Bureau GPU","status":"online","capabilities":{"backend":"native","ublk":true},"nativeModeStatus":"${privilegeStatus.get()}","nativeModeObserved":{"mode":"${if (privilegeStatus.get() == "applied") "administrator" else "protected"}"}}]}"""
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/overview" -> "{}"
@@ -807,7 +881,7 @@ abstract class NodePlacementCases {
                                         """{"mcps":[]}"""
                                     else "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(nodeWireFixture(request.path, body))
                     }
                 }
             server.start()
@@ -816,9 +890,9 @@ abstract class NodePlacementCases {
             val run =
                 mutableStateOf(
                     Run(
-                        id = "native",
+                        id = "beac7d45-75ca-544c-a4f6-a61c1e5787f2",
                         status = "running",
-                        nodeId = "desk",
+                        nodeId = "aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503",
                         executionBackend = "native",
                         storage = RunStorage(mode = "native", dirtyBytes = 0),
                         backup = NodeBackup(capturedAt = System.currentTimeMillis() - 120_000),
@@ -916,7 +990,7 @@ abstract class NodePlacementCases {
                                     "{}"
                                 }
                                 path == "/api/installations/fixture/api/nodes/placement/run" ->
-                                    """{"nodes":[{"id":"node","name":"Mon serveur","status":"online"},{"id":"other","name":"Autre serveur","status":"online"}],"pinnedNodeId":null,"preferredNodeId":null}"""
+                                    """{"nodes":[{"id":"b40903f9-0487-53d0-a309-c589f0cae405","name":"Mon serveur","status":"online"},{"id":"824f3da3-b37b-5713-9c61-06e3f54a7ff8","name":"Autre serveur","status":"online"}],"pinnedNodeId":null,"preferredNodeId":null}"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations/fixture/api/overview" -> "{}"
@@ -944,7 +1018,7 @@ abstract class NodePlacementCases {
                                         """{"mcps":[]}"""
                                     else "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(nodeWireFixture(request.path, body))
                     }
                 }
             server.start()
@@ -978,8 +1052,13 @@ abstract class NodePlacementCases {
                                 Run(
                                     id = "run",
                                     status = "succeeded",
-                                    nodeId = "node",
-                                    resources = NodeResources(2, 4096, 32768),
+                                    nodeId = "b40903f9-0487-53d0-a309-c589f0cae405",
+                                    resources =
+                                        NodeResources(
+                                            cpu = 2,
+                                            memoryMiB = 4096,
+                                            diskMiB = 32768,
+                                        ),
                                     storage =
                                         RunStorage(
                                             mode = "on-demand",
@@ -1021,7 +1100,10 @@ abstract class NodePlacementCases {
                         .fetchSemanticsNodes()
                         .isNotEmpty()
             }
-            assertEquals("node", saved[0]["preferredNodeId"]?.jsonPrimitive?.content)
+            assertEquals(
+                "b40903f9-0487-53d0-a309-c589f0cae405",
+                saved[0]["preferredNodeId"]?.jsonPrimitive?.content,
+            )
             assertEquals(JsonNull, saved[0]["pinnedNodeId"])
             compose.onNodeWithText("Fixer").performScrollTo().performClick()
             compose.onNodeWithText("Enregistrer").performScrollTo().performClick()
@@ -1032,7 +1114,10 @@ abstract class NodePlacementCases {
                         .fetchSemanticsNodes()
                         .isNotEmpty()
             }
-            assertEquals("node", saved[1]["pinnedNodeId"]?.jsonPrimitive?.content)
+            assertEquals(
+                "b40903f9-0487-53d0-a309-c589f0cae405",
+                saved[1]["pinnedNodeId"]?.jsonPrimitive?.content,
+            )
             assertEquals(JsonNull, saved[1]["preferredNodeId"])
             compose.onNodeWithText("Dernière synchronisation", substring = true).assertExists()
             compose.onNodeWithText("Préférence enregistrée", substring = true).assertExists()
@@ -1071,7 +1156,7 @@ abstract class NodePlacementCases {
                                     "{}"
                                 }
                                 path.endsWith("/backend-migration") ->
-                                    """{"required":${!automatic && !completed.get()},"optional":$automatic,"fromBackend":"${if (completed.get()) "native" else "firecracker"}","toBackend":"${if (automatic && completed.get()) "firecracker" else "native"}","pending":${submitted.isNotEmpty() && !completed.get()},"nodes":[{"id":"gpu","name":"Desktop GPU"}]}"""
+                                    """{"required":${!automatic && !completed.get()},"optional":$automatic,"fromBackend":"${if (completed.get()) "native" else "firecracker"}","toBackend":"${if (automatic && completed.get()) "firecracker" else "native"}","pending":${submitted.isNotEmpty() && !completed.get()},"nodes":[{"id":"475328ca-1491-5a74-abfb-fb52c2e04160","name":"Desktop GPU"}]}"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path.endsWith("/overview") -> "{}"
@@ -1099,7 +1184,7 @@ abstract class NodePlacementCases {
                                         """{"mcps":[]}"""
                                     else "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(nodeWireFixture(request.path, body))
                     }
                 }
             server.start()
@@ -1145,7 +1230,10 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Confirmer").performClick()
             compose.waitUntil(10000) { submitted.isNotEmpty() }
             assertEquals("native", submitted[0]["backend"]?.jsonPrimitive?.content)
-            assertEquals("gpu", submitted[0]["nodeId"]?.jsonPrimitive?.content)
+            assertEquals(
+                "475328ca-1491-5a74-abfb-fb52c2e04160",
+                submitted[0]["nodeId"]?.jsonPrimitive?.content,
+            )
             assertEquals(true, submitted[0]["confirm"]?.jsonPrimitive?.boolean)
             completed.set(true)
             elapse(2000)
@@ -1198,30 +1286,33 @@ abstract class NodePlacementCases {
                             when {
                                 path == "/api/installations/fixture/api/nodes/enrollments" -> {
                                     enrolled = true
-                                    """{"code":"fixture-enrollment","nodeId":"fresh","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/install | bash"}"""
+                                    """{"code":"fixture-enrollment","nodeId":"f65d5a2a-81d0-5580-bfa4-7ec33313e328","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/install | bash"}"""
                                 }
-                                path == "/api/installations/fixture/api/nodes/node/revoke" -> {
+                                path ==
+                                    "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405/revoke" -> {
                                     revoked = true
                                     """{"releasedPlacements":0}"""
                                 }
-                                path == "/api/installations/fixture/api/nodes/node" -> {
+                                path ==
+                                    "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405" -> {
                                     configured = true
                                     "{}"
                                 }
                                 path == "/api/installations/fixture/api/nodes/settings" -> "{}"
-                                path == "/api/installations/fixture/api/nodes/fresh/agents" -> {
+                                path ==
+                                    "/api/installations/fixture/api/nodes/f65d5a2a-81d0-5580-bfa4-7ec33313e328/agents" -> {
                                     granted = true
                                     "{}"
                                 }
                                 path ==
-                                    "/api/installations/fixture/api/nodes/node/stale-disks/delete" -> {
+                                    "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405/stale-disks/delete" -> {
                                     cleaned = true
                                     """{"freedMiB":2048,"failed":0}"""
                                 }
                                 path == "/api/installations/fixture/api/nodes" ->
-                                    """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"storage":{"memoryCacheMiB":512},"agents":[],"exclusiveAgents":[],"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}${if (enrolled) """,{"id":"fresh","name":"Nouvelle node","status":"online","accepting":true,"agents":[{"id":"ebfa691e-a987-5771-8e65-e1e51d1e4bb5","name":"Agent autorisé"},{"id":"ce26d2b8-ac9e-597f-a8ff-d2d679cbe59c","name":"Agent global","allNodes":true}${if (grantedElsewhere) """,{"id":"8d489b40-6d91-5e69-ab94-d43fa270f612","name":"Agent tardif"}""" else ""}${if (granted) """,{"id":"d3153f9f-724b-59c3-9614-ab78f231c4d3","name":"Agent test"}""" else ""}]}""" else ""}]"""
+                                    """[{"id":"b40903f9-0487-53d0-a309-c589f0cae405","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"storage":{"memoryCacheMiB":512},"agents":[],"exclusiveAgents":[],"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}${if (enrolled) """,{"id":"f65d5a2a-81d0-5580-bfa4-7ec33313e328","name":"Nouvelle node","status":"online","accepting":true,"agents":[{"id":"ebfa691e-a987-5771-8e65-e1e51d1e4bb5","name":"Agent autorisé"},{"id":"ce26d2b8-ac9e-597f-a8ff-d2d679cbe59c","name":"Agent global","allNodes":true}${if (grantedElsewhere) """,{"id":"8d489b40-6d91-5e69-ab94-d43fa270f612","name":"Agent tardif"}""" else ""}${if (granted) """,{"id":"d3153f9f-724b-59c3-9614-ab78f231c4d3","name":"Agent test"}""" else ""}]}""" else ""}]"""
                                 path == "/api/installations/fixture/api/agents" ->
-                                    """{"agents":[{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"d3153f9f-724b-59c3-9614-ab78f231c4d3","instructions":"","model":"","name":"Agent test","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["fresh"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"ebfa691e-a987-5771-8e65-e1e51d1e4bb5","instructions":"","model":"","name":"Agent autorisé","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"8d489b40-6d91-5e69-ab94-d43fa270f612","instructions":"","model":"","name":"Agent tardif","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":null,"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"ce26d2b8-ac9e-597f-a8ff-d2d679cbe59c","instructions":"","model":"","name":"Agent global","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"native","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":[],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"38235acc-317f-50db-b506-53809ad1c8a0","instructions":"","model":"","name":"Agent natif","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0}]}"""
+                                    """{"agents":[{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"d3153f9f-724b-59c3-9614-ab78f231c4d3","instructions":"","model":"","name":"Agent test","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["f65d5a2a-81d0-5580-bfa4-7ec33313e328"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"ebfa691e-a987-5771-8e65-e1e51d1e4bb5","instructions":"","model":"","name":"Agent autorisé","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"8d489b40-6d91-5e69-ab94-d43fa270f612","instructions":"","model":"","name":"Agent tardif","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":null,"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"ce26d2b8-ac9e-597f-a8ff-d2d679cbe59c","instructions":"","model":"","name":"Agent global","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"native","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":[],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"38235acc-317f-50db-b506-53809ad1c8a0","instructions":"","model":"","name":"Agent natif","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0}]}"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations/fixture/api/overview" -> "{}"
@@ -1249,7 +1340,7 @@ abstract class NodePlacementCases {
                                         """{"mcps":[]}"""
                                     else "[]"
                             }
-                        return MockResponse().setBody(body).apply {
+                        return MockResponse().setBody(nodeWireFixture(request.path, body)).apply {
                             // Keep the save busy while the subsequent node refresh is in flight.
                             if (path == "/api/installations/fixture/api/nodes" && configured)
                                 setBodyDelay(1, java.util.concurrent.TimeUnit.SECONDS)
@@ -1257,7 +1348,7 @@ abstract class NodePlacementCases {
                                 path == "/api/installations/fixture/api/nodes" &&
                                     writes.any {
                                         it.first ==
-                                            "/api/installations/fixture/api/nodes/node/storage"
+                                            "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405/storage"
                                     }
                             )
                                 setBodyDelay(200, java.util.concurrent.TimeUnit.MILLISECONDS)
@@ -1303,11 +1394,15 @@ abstract class NodePlacementCases {
                 .assertExists()
             capture("nodes")
             compose.onNodeWithText("Stockage").performScrollTo().performClick()
+            compose.onNodeWithText("Cache mémoire partagé (Mio)").performTextReplacement("1024")
             compose.onNodeWithText("Cache propre (Mio)").performTextReplacement("51200")
             capture("storage")
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) {
-                writes.any { it.first == "/api/installations/fixture/api/nodes/node/storage" } &&
+                writes.any {
+                    it.first ==
+                        "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405/storage"
+                } &&
                     compose
                         .onAllNodesWithText("Stockage · Serveur test")
                         .fetchSemanticsNodes()
@@ -1315,11 +1410,15 @@ abstract class NodePlacementCases {
             }
             val storage =
                 writes
-                    .first { it.first == "/api/installations/fixture/api/nodes/node/storage" }
+                    .first {
+                        it.first ==
+                            "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405/storage"
+                    }
                     .second
-            assertEquals(51200, storage["cacheMiB"]!!.jsonPrimitive.int)
-            // The memory cache is edited on the web; saving here keeps its value.
-            assertEquals(512, storage["memoryCacheMiB"]!!.jsonPrimitive.int)
+            assertEquals("fixture", storage["revision"]!!.jsonPrimitive.content)
+            val policy = storage["storage"]!!.jsonObject
+            assertEquals(51200, policy["cacheMiB"]!!.jsonPrimitive.int)
+            assertEquals(1024, policy["memoryCacheMiB"]!!.jsonPrimitive.int)
             // Agent access is read-only here: it is set on each agent's page.
             compose.onNodeWithText("Choisir les agents").assertDoesNotExist()
             compose.onNodeWithText("Aucun agent ne peut exécuter ici.").assertExists()
@@ -1336,7 +1435,8 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Confirmer").performClick()
             compose.waitUntil(10000) {
                 writes.any {
-                    it.first == "/api/installations/fixture/api/nodes/node/stale-disks/delete"
+                    it.first ==
+                        "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405/stale-disks/delete"
                 } &&
                     compose
                         .onAllNodesWithText("Anciens disques", substring = true)
@@ -1374,12 +1474,18 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Autoriser Agent test").assertDoesNotExist()
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) {
-                writes.any { it.first == "/api/installations/fixture/api/nodes/node" }
+                writes.any {
+                    it.first ==
+                        "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405"
+                }
             }
             assertEquals(
                 3,
                 writes
-                    .first { it.first == "/api/installations/fixture/api/nodes/node" }
+                    .first {
+                        it.first ==
+                            "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405"
+                    }
                     .second["limits"]!!
                     .jsonObject["cpu"]!!
                     .jsonPrimitive
@@ -1388,7 +1494,12 @@ abstract class NodePlacementCases {
             // Exclusive grants stay with the agents: the node never sends them.
             assertFalse(
                 "exclusiveAgents" in
-                    writes.first { it.first == "/api/installations/fixture/api/nodes/node" }.second
+                    writes
+                        .first {
+                            it.first ==
+                                "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405"
+                        }
+                        .second
             )
             compose.onNodeWithText("Révoquer", substring = false).performScrollTo().performClick()
             compose.waitUntil(10000) {
@@ -1412,7 +1523,10 @@ abstract class NodePlacementCases {
                 compose.onAllNodesWithText("Révoquée").fetchSemanticsNodes().isNotEmpty()
             }
             assertTrue(
-                writes.any { it.first == "/api/installations/fixture/api/nodes/node/revoke" }
+                writes.any {
+                    it.first ==
+                        "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405/revoke"
+                }
             )
             compose.onNodeWithText("Ajouter une machine").performScrollTo().performClick()
             compose.onNodeWithText("Nom de la machine").performTextInput("Nouvelle node")
@@ -1478,7 +1592,10 @@ abstract class NodePlacementCases {
             compose.onNode(isOn() and hasText("Agent tardif")).assertIsNotEnabled()
             compose.onNodeWithText("Terminer").performScrollTo().performClick()
             compose.waitUntil(10000) {
-                writes.any { it.first == "/api/installations/fixture/api/nodes/fresh/agents" } &&
+                writes.any {
+                    it.first ==
+                        "/api/installations/fixture/api/nodes/f65d5a2a-81d0-5580-bfa4-7ec33313e328/agents"
+                } &&
                     compose
                         .onAllNodesWithText("Qui peut utiliser « Nouvelle node » ?")
                         .fetchSemanticsNodes()
@@ -1488,7 +1605,10 @@ abstract class NodePlacementCases {
             // including the one allowed meanwhile, are never revoked.
             val grant =
                 writes
-                    .first { it.first == "/api/installations/fixture/api/nodes/fresh/agents" }
+                    .first {
+                        it.first ==
+                            "/api/installations/fixture/api/nodes/f65d5a2a-81d0-5580-bfa4-7ec33313e328/agents"
+                    }
                     .second
             assertEquals(
                 listOf("d3153f9f-724b-59c3-9614-ab78f231c4d3"),

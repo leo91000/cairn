@@ -89,7 +89,7 @@ fn budget_request(value: &Value) -> Result<crate::microvm::budget::Budget> {
         return Err(Error::bad("Unknown native mode storage protocol."));
     }
     let budget: crate::microvm::budget::Budget = serde_json::from_value(value)?;
-    budget.limits.validate()?;
+    budget.limits.validate().map_err(Error::bad)?;
     if !(1..=4096).contains(&budget.slots) {
         return Err(Error::bad("Use between 1 and 4096 execution slots."));
     }
@@ -361,7 +361,7 @@ impl Controller {
         let plan = self.plan(id).await?;
         mode::check_plan(&*self.mode.lock().await, &plan)?;
         let resources: crate::nodes::Resources = serde_json::from_value(plan["resources"].clone())?;
-        resources.validate()?;
+        resources.validate().map_err(Error::bad)?;
         let budget: crate::nodes::Resources =
             serde_json::from_value(self.budget.lock().await["limits"].clone())?;
         if resources.cpu > budget.cpu
@@ -1549,7 +1549,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         ("POST", ["storage-policy"]) => {
             let policy: crate::storage::policy::Policy =
                 serde_json::from_value(input(request, 16384).await?)?;
-            policy.validate()?;
+            policy.validate().map_err(Error::bad)?;
             let path = controller.state.join("storage-policy.json");
             let encoded = serde_json::to_vec(&policy)?;
             if tokio::fs::read(&path).await.ok().as_ref() != Some(&encoded) {

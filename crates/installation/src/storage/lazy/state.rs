@@ -88,7 +88,7 @@ impl LazyDisk {
 
     /// Private controller context, never included in exported recovery manifests.
     pub fn set_context(&self, value: &Value) -> io::Result<()> {
-        let policy = super::super::policy::Policy::for_node(&value["policy"]).map_err(failure)?;
+        let policy = crate::storage::policy::for_node(&value["policy"]).map_err(failure)?;
         self.memory_budget(policy.memory_cache_mi_b as usize * 1024 * 1024)?;
         let encoded = encode_context(value)?;
         self.db

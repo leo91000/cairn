@@ -24,6 +24,41 @@ fn main() {
     let root = Path::new(&root);
     fs::create_dir_all(root).unwrap();
     let mut generator = SchemaSettings::draft07().for_serialize().into_generator();
+    export::<ExecutionNode>(root, &mut generator, Contract::Deserialize);
+    export::<NodeConfiguration>(root, &mut generator, Contract::Deserialize);
+    export::<NodeCapabilities>(root, &mut generator, Contract::Deserialize);
+    export::<NodeResources>(root, &mut generator, Contract::Deserialize);
+    export::<NativeModeRequest>(root, &mut generator, Contract::Deserialize);
+    export::<NativeModeObserved>(root, &mut generator, Contract::Deserialize);
+    export::<NativeModeProposal>(root, &mut generator, Contract::Deserialize);
+    export::<NodeStoragePolicy>(root, &mut generator, Contract::Deserialize);
+    export::<NodeDiskAccounting>(root, &mut generator, Contract::Deserialize);
+    export::<NodeAgent>(root, &mut generator, Contract::Deserialize);
+    export::<NodeUsage>(root, &mut generator, Contract::Deserialize);
+    export::<StaleDisks>(root, &mut generator, Contract::Deserialize);
+    export::<NativeCaller>(root, &mut generator, Contract::Deserialize);
+    export::<NativeModePreview>(root, &mut generator, Contract::Deserialize);
+    export::<NativeModeChange>(root, &mut generator, Contract::Deserialize);
+    export::<ChangeNativeNodeModeInput>(root, &mut generator, Contract::Deserialize);
+    export::<NativeModeChangeOutput>(root, &mut generator, Contract::Deserialize);
+    export::<CreateNodeEnrollmentInput>(root, &mut generator, Contract::Deserialize);
+    export::<UpdateNodeInput>(root, &mut generator, Contract::Deserialize);
+    export::<UpdateNodeStorageInput>(root, &mut generator, Contract::Deserialize);
+    export::<RevokeNodeInput>(root, &mut generator, Contract::Deserialize);
+    export::<NodeRevocation>(root, &mut generator, Contract::Deserialize);
+    export::<NodeEnrollment>(root, &mut generator, Contract::Deserialize);
+    export::<ListNodesInput>(root, &mut generator, Contract::Deserialize);
+    export::<NodeInput>(root, &mut generator, Contract::Deserialize);
+    let node_clients = serde_json::json!([
+        {"name":"createNodeEnrollment", "input":"CreateNodeEnrollmentInput", "output":"NodeEnrollment", "method":"POST", "path":"/nodes/enrollments"},
+        {"name":"updateNodeStorage", "input":"UpdateNodeStorageInput", "output":"ExecutionNode", "method":"PUT", "path":"/nodes/{nodeId}/storage"},
+        {"name":"revokeNode", "input":"RevokeNodeInput", "output":"NodeRevocation", "method":"POST", "path":"/nodes/{nodeId}/revoke"}
+    ]);
+    fs::write(
+        root.join("node-clients.json"),
+        serde_json::to_string_pretty(&node_clients).unwrap() + "\n",
+    )
+    .unwrap();
     let run_clients = serde_json::json!([
         {
             "name": "readRunHistory", "input": "ReadRunHistoryInput", "output": "HistoryPage",
@@ -659,6 +694,11 @@ fn main() {
     // Kotlin consumes run views as well as emitting commands. Honor Rust's
     // deserialization defaults (notably absent nullable timestamps in summaries).
     // The public output schemas above still describe the serialized wire shape.
+    let mut node_decoder = SchemaSettings::draft07().for_deserialize().into_generator();
+    node_decoder.subschema_for::<ExecutionNode>();
+    for (name, schema) in node_decoder.take_definitions(true) {
+        definitions.insert(name, schema);
+    }
     let mut run_decoder = SchemaSettings::draft07().for_deserialize().into_generator();
     run_decoder.subschema_for::<Run>();
     for (name, schema) in run_decoder.take_definitions(true) {

@@ -1,6 +1,7 @@
 //! Permissions are edited on typed profiles. Resource lists are projections of
 //! the same relations used by enforcement; no resource JSON is authoritative.
 use common::MissionFixture;
+use common::node_fixture::*;
 use common::{McpFixture, StoreAgentFixture};
 
 #[allow(unused_imports)]
@@ -89,6 +90,13 @@ impl Owner {
         } else {
             body
         };
+        let body = if method == "PUT" {
+            common::node_fixture::configuration(&self.service, path, body)
+                .await
+                .unwrap()
+        } else {
+            body
+        };
         let request = self
             .session
             .authorize(
@@ -113,6 +121,8 @@ impl Owner {
                 .await
                 .unwrap()
                 .unwrap()
+        } else if kind == "nodes" {
+            self.service.store.node_boundary(id).await.unwrap().unwrap()
         } else if kind == "plugin-connections" {
             self.service.instance_fixture(id).await.unwrap()
         } else {
@@ -123,18 +133,15 @@ impl Owner {
     async fn add_node(&self) {
         self.service
             .store
-            .put(
-                "nodes",
-                json!({
-                    "id": NODE,
-                    "name": "gpu-box",
-                    "revoked": false,
-                    "accepting": true,
-                    "tags": [],
-                    "limits": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 8192 },
-                    "capabilities": { "cpu": 4, "memoryMiB": 8192, "diskMiB": 16384 },
-                }),
-            )
+            .put_node_fixture(json!({
+                "id": NODE,
+                "name": "gpu-box",
+                "revoked": false,
+                "accepting": true,
+                "tags": [],
+                "limits": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 8192 },
+                "capabilities": { "cpu": 4, "memoryMiB": 8192, "diskMiB": 16384 },
+            }))
             .await
             .unwrap();
     }
@@ -434,7 +441,7 @@ async fn deleting_an_agent_or_revoking_a_node_removes_its_live_grants() {
         .send("POST", &format!("/api/nodes/{NODE}/revoke"), json!({}))
         .await;
     assert_eq!(status, StatusCode::OK, "{revoked}");
-    assert_eq!(revoked["exclusiveAgents"], json!([]));
+    assert_eq!(revoked["node"]["exclusiveAgents"], json!([]));
     assert_eq!(
         owner.stored("agents", text(&kept, "id")).await["exclusiveNodes"],
         json!([])
@@ -689,14 +696,11 @@ async fn grants_follow_the_agent_execution_backend() {
     owner
         .service
         .store
-        .put(
-            "nodes",
-            json!({
-                "id": native, "name": "desk", "revoked": false, "accepting": true, "tags": [],
-                "capabilities": { "backend": "native", "cpu": 4, "memoryMiB": 8192, "diskMiB": 16384 },
-                "limits": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 8192 },
-            }),
-        )
+        .put_node_fixture(json!({
+            "id": native, "name": "desk", "revoked": false, "accepting": true, "tags": [],
+            "capabilities": { "backend": "native", "cpu": 4, "memoryMiB": 8192, "diskMiB": 16384 },
+            "limits": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 8192 },
+        }))
         .await
         .unwrap();
     let agent = owner.create_agent("VM agent").await;
@@ -785,14 +789,11 @@ async fn native_agents_cannot_newly_get_the_current_runner_and_drop_reservations
     owner
         .service
         .store
-        .put(
-            "nodes",
-            json!({
-                "id": desk, "name": "desk", "revoked": false, "accepting": true, "tags": [],
-                "capabilities": { "backend": "native", "cpu": 4, "memoryMiB": 8192, "diskMiB": 16384 },
-                "limits": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 8192 },
-            }),
-        )
+        .put_node_fixture(json!({
+            "id": desk, "name": "desk", "revoked": false, "accepting": true, "tags": [],
+            "capabilities": { "backend": "native", "cpu": 4, "memoryMiB": 8192, "diskMiB": 16384 },
+            "limits": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 8192 },
+        }))
         .await
         .unwrap();
     let mut native = agent.clone();

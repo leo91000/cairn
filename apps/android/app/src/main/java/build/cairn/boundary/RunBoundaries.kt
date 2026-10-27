@@ -66,17 +66,6 @@ data class ChatWakeup(
 )
 
 @Serializable
-data class NodeResources(val cpu: Int = 1, val memoryMiB: Long = 128, val diskMiB: Long = 128)
-
-@Serializable
-data class NativeModeState(
-    val mode: String = "protected",
-    val generation: String? = null,
-    val status: String = "",
-    val error: String? = null,
-)
-
-@Serializable
 data class ExclusiveReservation(
     val id: String,
     val nodeId: String,

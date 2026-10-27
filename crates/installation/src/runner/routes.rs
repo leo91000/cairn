@@ -158,7 +158,7 @@ async fn storage_policy(broker: &Broker, request: Request) -> Result<Response> {
     require_post(&request)?;
     let bytes = body(request, 16384, "Invalid storage policy.").await?;
     let policy: crate::storage::policy::Policy = serde_json::from_slice(&bytes)?;
-    policy.validate()?;
+    policy.validate().map_err(Error::bad)?;
     crate::skills::atomic_write(
         &broker.state.join("storage-policy.json"),
         &serde_json::to_vec(&policy)?,

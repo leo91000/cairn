@@ -216,8 +216,22 @@ fun agentNodeChoices(nodes: List<ExecutionNode>, backend: String? = null): List<
     val local =
         nodes.find { it.local || it.id == LOCAL_NODE_ID }
             ?: ExecutionNode(
-                LOCAL_NODE_ID,
-                "Runner actuel",
+                id = LOCAL_NODE_ID,
+                name = "Runner actuel",
+                revision = "unknown",
+                createdAt = 0,
+                capabilities =
+                    NodeCapabilities(
+                        os = "",
+                        arch = "",
+                        kvm = false,
+                        cpu = 1,
+                        memoryMiB = 128,
+                        diskMiB = 128,
+                    ),
+                limits = NodeResources(cpu = 1, memoryMiB = 128, diskMiB = 128),
+                storage = NodeStoragePolicy(),
+                staleDisks = StaleDisks(count = 0, diskMiB = 0),
                 local = true,
                 accepting = true,
                 status = "online",

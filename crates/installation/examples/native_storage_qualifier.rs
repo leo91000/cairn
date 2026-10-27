@@ -144,9 +144,9 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
             Ok(json!({ "hash": blake3::hash(&tokio::fs::read(path).await?).to_hex().to_string() }))
         }
         "revoke" => {
-            let mut node = s.get("nodes", nodes::LOCAL_NODE_ID).await?;
+            let mut node = s.node_boundary(nodes::LOCAL_NODE_ID).await?;
             node["nativeEnabled"] = false.into();
-            s.store.put("nodes", node).await?;
+            s.store.save_node_boundary(node).await?;
             Ok(json!({ "ok": true }))
         }
         "purge" => {
@@ -231,7 +231,7 @@ async fn main() -> Result<()> {
     })
     .await?;
     authority(&s).await?;
-    s.store.put("nodes", json!({
+    s.store.save_node_boundary(json!({
         "id": nodes::LOCAL_NODE_ID, "local": true, "name": "Disposable fixture", "accepting": true,
         "nativeEnabled": true, "nativeAccounts": [TRUSTED], "lastSeen": now(),
         "capabilities": {

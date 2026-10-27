@@ -835,12 +835,12 @@ impl Execution<'_> {
                 .await?
         } else {
             s.store
-                .get("nodes", storage_node)
+                .node_boundary(storage_node)
                 .await?
                 .unwrap_or_default()["storage"]
                 .clone()
         };
-        let storage_policy = Policy::for_node(&node_storage)?;
+        let storage_policy = crate::storage::policy::for_node(&node_storage)?;
         let grant = nodes::disk_grants::new_disk(s, self.run, storage_node).await?;
         s.store
             .update_run_boundary(&self.id, json!({ "storage": { "mode": "on-demand" } }))

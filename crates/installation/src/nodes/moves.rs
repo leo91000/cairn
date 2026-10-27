@@ -356,7 +356,7 @@ async fn record_request(
                 let directed = db.run(&owner)?.unwrap_or_default();
                 if crate::native::policy::native(&directed["snapshot"]["agent"]) {
                     let node = db
-                        .get("nodes", text(&move_request, "nodeId"))?
+                        .node_boundary(text(&move_request, "nodeId"))?
                         .unwrap_or_default();
                     if !crate::native::policy::allows(db, &directed, &node)? {
                         return Err(Error::forbidden(
@@ -382,7 +382,7 @@ async fn record_request(
 
 async fn node_name(s: &Service, node: &str) -> Result<String> {
     Ok(s.store
-        .get("nodes", node)
+        .node_boundary(node)
         .await?
         .and_then(|n| n["name"].as_str().map(str::to_owned))
         .unwrap_or_else(|| "another node".into()))
@@ -448,7 +448,7 @@ fn source_mode_unconfirmed(db: &Db<'_>, run: &str) -> Result<bool> {
     let Some(source) = checkpoint["nodeId"].as_str() else {
         return Ok(false);
     };
-    let node = db.get("nodes", source)?.unwrap_or_default();
+    let node = db.node_boundary(source)?.unwrap_or_default();
     Ok(super::native_mode::unconfirmed(&node))
 }
 
@@ -530,7 +530,7 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
         // A stale local record only delays recovery until the next attempt.
         let _ = super::refresh_local(s).await;
     }
-    let node = s.get("nodes", source).await?;
+    let node = s.node_boundary(source).await?;
     if super::native_mode::unconfirmed(&node) {
         return Ok(Recovery::Waiting);
     }

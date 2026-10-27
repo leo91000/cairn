@@ -52,7 +52,7 @@ async fn authorize(s: &Service, node: &str, attempt: &str) -> Result<(Value, Val
         .get("node-attempts", attempt)
         .await?
         .unwrap_or_default();
-    let record = s.get("nodes", node).await?;
+    let record = s.node_boundary(node).await?;
     let native_allowed = if crate::native::policy::node_native(&record) {
         let (run, record) = (run.clone(), record.clone());
         s.store

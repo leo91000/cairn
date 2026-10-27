@@ -1,5 +1,10 @@
 //! Test-only stdin/stdout bridge to the native fixture APIs. Never shipped in the image.
 use cairn_contracts::EventKind;
+
+#[path = "../tests/common/node_fixture.rs"]
+mod node_fixture;
+
+use node_fixture::DbNodeFixture;
 use run_fixture::DbRunFixture;
 
 #[path = "../tests/common/mission_fixture.rs"]
@@ -105,9 +110,13 @@ async fn main() -> Result<()> {
                     db.agent_snapshot(string(1))?.unwrap_or(Value::Null)
                 }
                 "get" if string(0) == "tasks" => serde_json::to_value(db.mission(string(1))?)?,
+                "get" if string(0) == "nodes" => {
+                    db.node_boundary(string(1))?.unwrap_or(Value::Null)
+                }
                 "get" => db.get(string(0), string(1))?.unwrap_or(Value::Null),
                 "list" if string(0) == "agents" => db.agent_snapshots()?.into(),
                 "list" if string(0) == "tasks" => serde_json::to_value(db.missions()?)?,
+                "list" if string(0) == "nodes" => db.nodes_boundary()?.into(),
                 "list" => db.list(string(0))?.into(),
                 "projects" => serde_json::to_value(db.projects()?)?,
                 "put" if string(0) == "agents" => {
@@ -117,6 +126,7 @@ async fn main() -> Result<()> {
                     db.save_mission(&serde_json::from_value(arg(1))?)?;
                     arg(1)
                 }
+                "put" if string(0) == "nodes" => db.put_node_fixture(&arg(1))?,
                 "put" => db.put(string(0), &arg(1))?,
                 "run" => db.run(string(0))?.unwrap_or(Value::Null),
                 "runs" => db.runs(None, None, 10000, 0, true)?.into(),

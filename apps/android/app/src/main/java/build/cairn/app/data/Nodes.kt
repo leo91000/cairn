@@ -7,80 +7,31 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
+typealias NodeAgent = build.cairn.contracts.NodeAgent
+
+typealias NodeResources = build.cairn.contracts.NodeResources
+
+typealias NodeCapabilities = build.cairn.contracts.NodeCapabilities
+
+typealias ExecutionNode = build.cairn.contracts.ExecutionNode
+
+typealias NodeDiskAccounting = build.cairn.contracts.NodeDiskAccounting
+
+typealias NodeUsage = build.cairn.contracts.NodeUsage
+
+typealias StaleDisks = build.cairn.contracts.StaleDisks
+
+typealias NodeEnrollment = build.cairn.contracts.NodeEnrollment
+
+typealias NativeCaller = build.cairn.contracts.NativeCaller
+
+typealias NodeRevocation = build.cairn.contracts.NodeRevocation
+
+typealias NodeConfiguration = build.cairn.contracts.NodeConfiguration
+
+typealias NodeStoragePolicy = build.cairn.contracts.NodeStoragePolicy
+
 const val LOCAL_NODE_ID = "00000000-0000-4000-8000-000000000002"
-
-@Serializable
-data class NodeAgent(val id: String, val name: String = "", val allNodes: Boolean = false)
-
-typealias NodeResources = build.cairn.boundary.NodeResources
-
-@Serializable
-data class NodeCapabilities(
-    val cpu: Int = 1,
-    val memoryMiB: Long = 128,
-    val diskMiB: Long = 128,
-    val os: String = "",
-    val arch: String = "",
-    val kvm: Boolean = false,
-    val backend: String = "firecracker",
-    val ublk: Boolean = false,
-    val nativeModeProtocol: Int = 0,
-)
-
-@Serializable
-data class ExecutionNode(
-    val id: String,
-    val name: String,
-    val local: Boolean = false,
-    val accepting: Boolean = false,
-    val nativeModeRequest: NativeModeState? = null,
-    val nativeModeObserved: NativeModeState? = null,
-    val nativeModeStatus: String? = null,
-    val nativeModeProposal: NativeModeState? = null,
-    val nativeReviewedAgents: List<String> = emptyList(),
-    val nativeEnabled: Boolean = false,
-    val nativeAccounts: List<String> = emptyList(),
-    val exclusiveAgents: List<String> = emptyList(),
-    val exclusiveReservations: Boolean = false,
-    val exclusiveReservation: ExclusiveReservation? = null,
-    val revoked: Boolean = false,
-    val status: String,
-    val tags: List<String> = emptyList(),
-    val capabilities: NodeCapabilities = NodeCapabilities(),
-    val limits: NodeResources = NodeResources(),
-    val slots: Int = 4,
-    val occupiedSlots: Int = 0,
-    val availableSlots: Int = 4,
-    val usage: NodeUsage? = null,
-    val diskAccounting: NodeDiskAccounting? = null,
-    val budgetError: String? = null,
-    val pressure: String? = null,
-    val executionReady: Boolean = false,
-    val maintenance: String? = null,
-    val imageDigest: String? = null,
-    val updateError: String? = null,
-    val runtimeId: String = "",
-    val lastSeen: Long? = null,
-    val systemTags: List<String> = emptyList(),
-    val maintenanceError: String? = null,
-    val agents: List<NodeAgent> = emptyList(),
-    val staleDisks: StaleDisks = StaleDisks(),
-    val storage: NodeStoragePolicy? = null,
-)
-
-typealias NativeModeState = build.cairn.boundary.NativeModeState
-
-@Serializable
-data class NodeDiskAccounting(
-    val capturedAt: Long,
-    val localBytes: Long,
-    val unusedGrantedBytes: Long,
-    val hostFreeBytes: Long,
-    val hostReserveBytes: Long,
-    val poolReserveBytes: Long,
-    val reclaimableBytes: Long,
-    val unsynchronizedBytes: Long,
-)
 
 fun nativeModeLabel(mode: String) =
     if (mode == "administrator") "Natif administrateur" else "Natif protégé"
@@ -138,11 +89,7 @@ fun exclusiveReservationState(state: String): String =
         else -> state
     }
 
-@Serializable data class NodeUsage(val memoryMiB: Long = 0, val diskMiB: Long = 0)
-
 /** Disk kept on a node that no conversation needs there any more. */
-@Serializable data class StaleDisks(val count: Int = 0, val diskMiB: Long = 0)
-
 @Serializable data class StaleDiskCleanup(val freedMiB: Long = 0, val failed: Int = 0)
 
 @Serializable
@@ -173,34 +120,7 @@ fun NodeAlert.localized(): Pair<String, String> =
         else -> title to body
     }
 
-@Serializable
-data class NodeEnrollment(
-    val code: String,
-    val expiresAt: Long,
-    val installCommand: String? = null,
-    val backend: String = "firecracker",
-    val nodeId: String,
-)
-
-@Serializable data class NativeCaller(val id: String, val email: String)
-
 /** Reply to a revocation. */
-@Serializable data class NodeRevocation(val releasedPlacements: Int)
-
-@Serializable
-data class NodeConfiguration(
-    val name: String,
-    val accepting: Boolean,
-    val tags: List<String>,
-    val limits: NodeResources,
-    val slots: Int = 4,
-    // No exclusiveAgents: exclusive reservations are granted on each agent's page, and the server
-    // keeps them when the key is omitted.
-    val nativeEnabled: Boolean? = null,
-    val nativeAccounts: List<String>? = null,
-    val confirmNativeAdministration: Boolean = false,
-)
-
 typealias NodeBackup = build.cairn.boundary.NodeBackup
 
 @Serializable
@@ -271,16 +191,6 @@ fun nodeDiagnostics(node: ExecutionNode, now: Long = System.currentTimeMillis())
 }
 
 typealias RunStorage = build.cairn.boundary.RunStorage
-
-@Serializable
-data class NodeStoragePolicy(
-    val cacheMiB: Long = 102400,
-    val reserveMiB: Long = 10240,
-    val reservePercent: Int = 5,
-    val backupSeconds: Long = 60,
-    val maxDirtySeconds: Long = 300,
-    val memoryCacheMiB: Long? = null,
-)
 
 fun formatBytes(bytes: Long): String {
     if (bytes < 1024) return "$bytes o"

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { ExecutionNode, NodeStoragePolicy } from '../../../../packages/contracts/nodes'
 import { ref } from 'vue'
+import { updateNodeStorage } from '../../../../packages/contracts/generated/updateNodeStorage'
 import { api } from '../api'
 import { HardDrive } from '../icons'
 import Icon from './Icon.vue'
@@ -27,10 +28,12 @@ function open() {
 }
 
 async function save() {
+  if (!policy.value)
+    return
   busy.value = true
   error.value = ''
   try {
-    await api(`/nodes/${props.node.id}/storage`, { method: 'PUT', body: JSON.stringify(policy.value) })
+    await updateNodeStorage(api, { nodeId: props.node.id, revision: props.node.revision, storage: policy.value })
     policy.value = null
     emit('saved')
   }

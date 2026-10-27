@@ -293,6 +293,55 @@
       ],
       "type": "object"
     },
+    "NativeModeRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "pattern": "^(protected|administrator)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "generation"
+      ],
+      "type": "object"
+    },
+    "NodeResources": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "format": "uint32",
+          "maximum": 4096,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "diskMiB": {
+          "format": "uint64",
+          "maximum": 1099511627776,
+          "minimum": 128,
+          "type": "integer"
+        },
+        "memoryMiB": {
+          "format": "uint64",
+          "maximum": 1073741824,
+          "minimum": 128,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpu",
+        "memoryMiB",
+        "diskMiB"
+      ],
+      "type": "object"
+    },
     "Project": {
       "properties": {
         "baseBranch": {
@@ -941,13 +990,15 @@
       ]
     },
     "nativeMode": {
-      "additionalProperties": true,
-      "default": null,
-      "type": [
-        "object",
-        "null"
+      "anyOf": [
+        {
+          "$ref": "#/definitions/NativeModeRequest"
+        },
+        {
+          "type": "null"
+        }
       ],
-      "x-kotlin-type": "NativeModeState"
+      "default": null
     },
     "nodeId": {
       "default": null,
@@ -1024,13 +1075,15 @@
       "default": null
     },
     "resources": {
-      "additionalProperties": true,
-      "default": null,
-      "type": [
-        "object",
-        "null"
+      "anyOf": [
+        {
+          "$ref": "#/definitions/NodeResources"
+        },
+        {
+          "type": "null"
+        }
       ],
-      "x-kotlin-type": "NodeResources"
+      "default": null
     },
     "restoredAt": {
       "default": null,

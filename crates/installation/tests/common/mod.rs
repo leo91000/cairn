@@ -719,3 +719,5 @@ pub async fn owner_plugin_route(
     };
     cairn_installation::plugins::routes(s, &input).await
 }
+
+pub mod node_fixture;

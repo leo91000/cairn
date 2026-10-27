@@ -221,11 +221,10 @@ pub fn capabilities(path: &Path) -> Result<Value> {
         os: "linux".into(),
         arch: "x86_64".into(),
         backend: if crate::native::enabled() {
-            "native"
+            cairn_contracts::NodeBackend::Native
         } else {
-            "firecracker"
-        }
-        .into(),
+            cairn_contracts::NodeBackend::Firecracker
+        },
         kvm,
         ublk: device_opens("/dev/ublk-control").is_some(),
         native_mode_protocol: u32::from(crate::native::enabled()),

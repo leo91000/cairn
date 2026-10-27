@@ -218,7 +218,7 @@ impl Bases {
         policy: &storage::policy::Policy,
         stop: &CancellationToken,
     ) -> Result<()> {
-        policy.validate()?;
+        policy.validate().map_err(Error::bad)?;
         if self.stored(archives, disk_mib).await?.is_some() {
             return Ok(());
         }

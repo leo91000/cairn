@@ -32,14 +32,14 @@ fn ready() -> Value {
 pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Result<()> {
     let _operation = s.node_backup_operation.lock(text(run, "id")).await;
     let manifest = super::publication::manifest(s, backup).await?;
-    let record = s.get("nodes", node).await?;
+    let record = s.node_boundary(node).await?;
     let native = crate::native::policy::node_native(&record);
     if native != matches!(manifest["kind"].as_str(), Some("native-ext4-v1")) {
         return Err(Error::conflict(
             "Conversation moves cannot change execution backend.",
         ));
     }
-    let policy = crate::storage::policy::Policy::for_node(&record["storage"])?;
+    let policy = crate::storage::policy::for_node(&record["storage"])?;
     let grant = super::disk_grants::issue(s, run, node, backup).await?;
     let request = RestoreRequest {
         manifest,

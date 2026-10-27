@@ -55,7 +55,7 @@ pub(super) fn accounting(db: &Db<'_>, node: &Value, attempts: &[Value]) -> Resul
         .as_u64()
         .unwrap_or(0)
         .saturating_mul(MIB);
-    let reserve = crate::storage::policy::Policy::for_node(&node["storage"])?.reserve(
+    let reserve = crate::storage::policy::for_node(&node["storage"])?.reserve(
         node["capabilities"]["diskTotalMiB"]
             .as_u64()
             .unwrap_or(0)
@@ -109,7 +109,7 @@ pub(crate) fn fits(node: &Value, attempts: &[Value], additional: u64) -> bool {
         .unwrap_or(0)
         .saturating_mul(MIB);
     let promised = unused(attempts, node, &sample).0.saturating_add(additional);
-    let host_reserve = crate::storage::policy::Policy::for_node(&node["storage"])
+    let host_reserve = crate::storage::policy::for_node(&node["storage"])
         .unwrap_or_default()
         .reserve(
             node["capabilities"]["diskTotalMiB"]

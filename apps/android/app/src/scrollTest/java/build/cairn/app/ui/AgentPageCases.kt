@@ -75,9 +75,9 @@ abstract class AgentPageCases {
 
     private val nodes =
         """[{"id":"$LOCAL_NODE_ID","name":"local","local":true,"status":"online","accepting":true,"executionReady":true,"exclusiveReservations":true},""" +
-            """{"id":"gpu","name":"gpu-box","status":"online","accepting":true,"executionReady":true,"exclusiveReservations":true,"tags":["gpu","linux"]},""" +
-            """{"id":"mac","name":"mac-mini","status":"offline","accepting":true,"tags":["macos"]},""" +
-            """{"id":"desk","name":"desk-native","status":"online","accepting":true,"executionReady":true,"capabilities":{"backend":"native"}}]"""
+            """{"id":"475328ca-1491-5a74-abfb-fb52c2e04160","name":"gpu-box","status":"online","accepting":true,"executionReady":true,"exclusiveReservations":true,"tags":["475328ca-1491-5a74-abfb-fb52c2e04160","linux"]},""" +
+            """{"id":"17ce976c-733b-5e32-9840-7888af8907c0","name":"mac-mini","status":"offline","accepting":true,"tags":["macos"]},""" +
+            """{"id":"aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503","name":"desk-native","status":"online","accepting":true,"executionReady":true,"capabilities":{"backend":"native"}}]"""
 
     private val catalog =
         PluginCatalog(
@@ -266,7 +266,9 @@ abstract class AgentPageCases {
                         if (loseCreation.getAndSet(false))
                             return MockResponse()
                                 .setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
-                        return response.setBody(wireJson.encodeToString(created))
+                        return response.setBody(
+                            nodeWireFixture(request.path, wireJson.encodeToString(created))
+                        )
                     }
                     if (request.method == "PUT" && path.startsWith("/agents/")) {
                         val body = wireJson.parseToJsonElement(text).jsonObject
@@ -279,11 +281,18 @@ abstract class AgentPageCases {
                         if (github > 1)
                             return response
                                 .setResponseCode(400)
-                                .setBody("""{"error":"$oneInstance"}""")
+                                .setBody(
+                                    nodeWireFixture(request.path, """{"error":"$oneInstance"}""")
+                                )
                         if (rejectUpdate.getAndSet(false))
                             return response
                                 .setResponseCode(429)
-                                .setBody("""{"error":"Trop de requêtes"}""")
+                                .setBody(
+                                    nodeWireFixture(
+                                        request.path,
+                                        """{"error":"Trop de requêtes"}""",
+                                    )
+                                )
                         // Like the server: a stale revision is refused, an absent one is not
                         // checked.
                         val sent = body["revision"]?.jsonPrimitive?.content.orEmpty()
@@ -294,7 +303,10 @@ abstract class AgentPageCases {
                             return response
                                 .setResponseCode(409)
                                 .setBody(
-                                    """{"error":"This agent was changed elsewhere. Reload it before saving."}"""
+                                    nodeWireFixture(
+                                        request.path,
+                                        """{"error":"This agent was changed elsewhere. Reload it before saving."}""",
+                                    )
                                 )
                         val updated =
                             wireJson
@@ -314,20 +326,34 @@ abstract class AgentPageCases {
                                     revision = "saved-${saved.size}",
                                 )
                         agents.set(agents.get().map { if (it.id == updated.id) updated else it })
-                        return response.setBody(wireJson.encodeToString(updated))
+                        return response.setBody(
+                            nodeWireFixture(request.path, wireJson.encodeToString(updated))
+                        )
                     }
                     if (path == "/tasks" && failRefresh.get())
                         return response
                             .setResponseCode(409)
-                            .setBody("""{"error":"Rechargement impossible"}""")
+                            .setBody(
+                                nodeWireFixture(
+                                    request.path,
+                                    """{"error":"Rechargement impossible"}""",
+                                )
+                            )
                     if (path == "/plugins" && failPlugins.get())
                         return response
                             .setResponseCode(409)
-                            .setBody("""{"error":"Plugins indisponibles"}""")
+                            .setBody(
+                                nodeWireFixture(
+                                    request.path,
+                                    """{"error":"Plugins indisponibles"}""",
+                                )
+                            )
                     if (path == "/nodes" && failNodes.get())
                         return response
                             .setResponseCode(409)
-                            .setBody("""{"error":"Nodes indisponibles"}""")
+                            .setBody(
+                                nodeWireFixture(request.path, """{"error":"Nodes indisponibles"}""")
+                            )
                     val body =
                         when {
                             path.endsWith("/preview") ->
@@ -369,7 +395,7 @@ abstract class AgentPageCases {
                                     """{"mcps":[]}"""
                                 else "[]"
                         }
-                    return response.setBody(body)
+                    return response.setBody(nodeWireFixture(request.path, body))
                 }
             }
         server.start()
@@ -587,11 +613,11 @@ abstract class AgentPageCases {
             val body = fixture.saved.single().second
             val access = body["settings"]!!.jsonObject["access"]!!.jsonObject
             assertEquals(
-                listOf(LOCAL_NODE_ID, "gpu"),
+                listOf(LOCAL_NODE_ID, "475328ca-1491-5a74-abfb-fb52c2e04160"),
                 access["nodes"]!!.jsonArray.map { it.jsonPrimitive.content },
             )
             assertEquals(
-                JsonArray(listOf(JsonPrimitive("gpu"))),
+                JsonArray(listOf(JsonPrimitive("475328ca-1491-5a74-abfb-fb52c2e04160"))),
                 body["settings"]!!.jsonObject["exclusiveNodes"],
             )
             assertFalse("exclusiveNodes" in access)
@@ -631,7 +657,12 @@ abstract class AgentPageCases {
             compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
             val settings = fixture.saved.single().second["settings"]!!.jsonObject
             assertEquals(
-                JsonArray(listOf(JsonPrimitive(LOCAL_NODE_ID), JsonPrimitive("gpu"))),
+                JsonArray(
+                    listOf(
+                        JsonPrimitive(LOCAL_NODE_ID),
+                        JsonPrimitive("475328ca-1491-5a74-abfb-fb52c2e04160"),
+                    )
+                ),
                 settings["nodePriorities"],
             )
             assertEquals(
@@ -845,7 +876,10 @@ abstract class AgentPageCases {
             val access =
                 fixture.saved.single().second["settings"]!!.jsonObject["access"]!!.jsonObject
             assertEquals(JsonPrimitive("native"), access["backend"])
-            assertEquals(JsonArray(listOf(JsonPrimitive("desk"))), access["nodes"])
+            assertEquals(
+                JsonArray(listOf(JsonPrimitive("aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503"))),
+                access["nodes"],
+            )
         }
     }
 

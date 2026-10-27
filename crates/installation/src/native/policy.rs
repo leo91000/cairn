@@ -103,7 +103,7 @@ pub(crate) fn provenance(db: &Db<'_>, source: &Origin) -> Result<Value> {
         Origin::Unknown => Ok(unknown()),
         Origin::Human(account) => {
             let nodes = db
-                .list("nodes")?
+                .nodes_boundary()?
                 .into_iter()
                 .filter(|node| {
                     node_native(node)
@@ -458,7 +458,7 @@ pub(crate) fn authorize_origin(db: &Db<'_>, agent: &Value, source: &Origin) -> R
 
     let mut run = json!({ "snapshot": { "agent": agent } });
     apply(&mut run, &grant);
-    for node in db.list("nodes")? {
+    for node in db.nodes_boundary()? {
         if authority_allows(db, &run, &node)? {
             return Ok(grant);
         }
@@ -535,7 +535,7 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
         unknown = true;
     }
     let mut nodes = Vec::new();
-    for node in db.list("nodes")? {
+    for node in db.nodes_boundary()? {
         if !node_native(&node) || node["nativeEnabled"] != true || node["revoked"] == true {
             continue;
         }
@@ -572,7 +572,7 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
     if native(&effective) {
         let mut combined = json!({ "snapshot": { "agent": effective } });
         apply(&mut combined, &grant);
-        if !db.list("nodes")?.iter().any(|node| {
+        if !db.nodes_boundary()?.iter().any(|node| {
             run["nodeId"]
                 .as_str()
                 .is_none_or(|current| node["id"] == current)
@@ -689,7 +689,7 @@ pub(crate) async fn refresh_for(s: &Service, agent: &Value) -> Result<()> {
     if policy(agent)["backend"] != "auto" {
         return Ok(());
     }
-    let has_native = s.store.list("nodes").await?.iter().any(|node| {
+    let has_native = s.store.nodes_boundary().await?.iter().any(|node| {
         node_native(node)
             && node["revoked"] != true
             && node["nativeEnabled"] == true

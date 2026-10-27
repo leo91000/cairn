@@ -1,0 +1,254 @@
+{
+  "views": [
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "name": "Node é",
+      "revision": "r1",
+      "local": false,
+      "accepting": true,
+      "revoked": false,
+      "status": "online",
+      "tags": [
+        "gpu",
+        "site:home"
+      ],
+      "systemTags": [
+        "linux",
+        "x86_64"
+      ],
+      "capabilities": {
+        "os": "linux",
+        "arch": "x86_64",
+        "backend": "native",
+        "kvm": false,
+        "ublk": true,
+        "nativeModeProtocol": 1,
+        "cpu": 8,
+        "memoryMiB": 16384,
+        "diskMiB": 65536,
+        "diskTotalMiB": 131072
+      },
+      "limits": {
+        "cpu": 4,
+        "memoryMiB": 8192,
+        "diskMiB": 32768
+      },
+      "slots": 4,
+      "runtimeSlots": 4,
+      "nativeEnabled": true,
+      "nativeAccounts": [
+        "00000000-0000-4000-8000-000000000010"
+      ],
+      "nativeReviewedAgents": [],
+      "nativeModeRequest": {
+        "mode": "protected",
+        "generation": null
+      },
+      "nativeModeObserved": {
+        "mode": "protected",
+        "generation": null,
+        "status": "applied",
+        "error": null,
+        "target": null
+      },
+      "nativeModeProposal": null,
+      "nativeModeStatus": "applied",
+      "exclusiveReservations": true,
+      "exclusiveReservation": null,
+      "exclusiveAgents": [],
+      "usage": {
+        "memoryMiB": 1024,
+        "diskMiB": 8192
+      },
+      "budgetError": null,
+      "pressure": null,
+      "executionReady": true,
+      "maintenance": null,
+      "maintenanceError": null,
+      "maintenanceGeneration": null,
+      "maintenanceStartedAt": null,
+      "imageDigest": null,
+      "updateError": null,
+      "runtimeId": "development",
+      "lastSeen": 9007199254740991,
+      "createdAt": 0,
+      "storage": {
+        "cacheMiB": 102400,
+        "memoryCacheMiB": 256,
+        "reserveMiB": 10240,
+        "reservePercent": 5,
+        "backupSeconds": 60,
+        "maxDirtySeconds": 300
+      },
+      "retainedRuns": [],
+      "diskGrowthProtocol": null,
+      "diskCapacity": null,
+      "occupiedSlots": 1,
+      "availableSlots": 3,
+      "agents": [],
+      "staleDisks": {
+        "count": 0,
+        "diskMiB": 0
+      },
+      "diskAccounting": null
+    }
+  ],
+  "commands": [
+    {
+      "nodeId": "00000000-0000-4000-8000-000000000002",
+      "node": {
+        "revision": "r1",
+        "name": "Node é",
+        "tags": [
+          "gpu"
+        ],
+        "limits": {
+          "cpu": 4,
+          "memoryMiB": 8192,
+          "diskMiB": 32768
+        },
+        "slots": 4,
+        "accepting": true,
+        "nativeEnabled": true,
+        "nativeAccounts": [
+          "00000000-0000-4000-8000-000000000010"
+        ],
+        "confirmNativeAdministration": false
+      }
+    }
+  ],
+  "invalidCommands": [
+    {
+      "nodeId": "not-a-uuid",
+      "node": {
+        "revision": "r1",
+        "name": "Node é",
+        "tags": [
+          "gpu"
+        ],
+        "limits": {
+          "cpu": 4,
+          "memoryMiB": 8192,
+          "diskMiB": 32768
+        },
+        "slots": 4,
+        "accepting": true,
+        "nativeEnabled": true,
+        "nativeAccounts": [
+          "00000000-0000-4000-8000-000000000010"
+        ],
+        "confirmNativeAdministration": false
+      }
+    },
+    {
+      "nodeId": "00000000-0000-4000-8000-000000000002",
+      "node": {
+        "revision": "r1",
+        "name": "Node é",
+        "tags": [
+          "gpu"
+        ],
+        "limits": {
+          "cpu": 4,
+          "memoryMiB": 8192,
+          "diskMiB": 32768
+        },
+        "slots": 4,
+        "accepting": true,
+        "nativeEnabled": true,
+        "nativeAccounts": [
+          "00000000-0000-4000-8000-000000000010"
+        ],
+        "confirmNativeAdministration": false
+      },
+      "surprise": true
+    },
+    {
+      "nodeId": "00000000-0000-4000-8000-000000000002",
+      "node": {
+        "revision": "r1",
+        "name": "Node é",
+        "tags": [
+          "gpu"
+        ],
+        "limits": {
+          "cpu": "4",
+          "memoryMiB": 8192,
+          "diskMiB": 32768
+        },
+        "slots": 4,
+        "accepting": true,
+        "nativeEnabled": true,
+        "nativeAccounts": [
+          "00000000-0000-4000-8000-000000000010"
+        ],
+        "confirmNativeAdministration": false
+      }
+    },
+    {
+      "nodeId": "00000000-0000-4000-8000-000000000002",
+      "node": {
+        "revision": "r1",
+        "name": "Node é",
+        "tags": [
+          "gpu"
+        ],
+        "limits": {
+          "cpu": 4,
+          "memoryMiB": 8192,
+          "diskMiB": 32768
+        },
+        "slots": 4097,
+        "accepting": true,
+        "nativeEnabled": true,
+        "nativeAccounts": [
+          "00000000-0000-4000-8000-000000000010"
+        ],
+        "confirmNativeAdministration": false
+      }
+    },
+    {
+      "nodeId": "00000000-0000-4000-8000-000000000002",
+      "node": {
+        "name": "Node é",
+        "tags": [
+          "gpu"
+        ],
+        "limits": {
+          "cpu": 4,
+          "memoryMiB": 8192,
+          "diskMiB": 32768
+        },
+        "slots": 4,
+        "accepting": true,
+        "nativeEnabled": true,
+        "nativeAccounts": [
+          "00000000-0000-4000-8000-000000000010"
+        ],
+        "confirmNativeAdministration": false
+      }
+    },
+    {
+      "nodeId": "00000000-0000-4000-8000-000000000002",
+      "node": {
+        "revision": "r1",
+        "name": "Node é",
+        "tags": [
+          "gpu"
+        ],
+        "limits": {
+          "cpu": 4,
+          "memoryMiB": 8192,
+          "diskMiB": 1099511627777
+        },
+        "slots": 4,
+        "accepting": true,
+        "nativeEnabled": true,
+        "nativeAccounts": [
+          "00000000-0000-4000-8000-000000000010"
+        ],
+        "confirmNativeAdministration": false
+      }
+    }
+  ]
+}

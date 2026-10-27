@@ -12,6 +12,47 @@ import {
 test('shows reclaimable and unpublished disk data on desktop and phone', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const node: ExecutionNode = {
+    revision: 'fixture',
+    createdAt: 0,
+    systemTags: [],
+    runtimeSlots: null,
+    nativeEnabled: false,
+    nativeAccounts: [],
+    nativeReviewedAgents: [],
+    nativeModeRequest: null,
+    nativeModeObserved: null,
+    nativeModeProposal: null,
+    nativeModeStatus: null,
+    exclusiveReservations: false,
+    exclusiveReservation: null,
+    exclusiveAgents: [],
+    usage: null,
+    budgetError: null,
+    pressure: null,
+    executionReady: false,
+    maintenance: null,
+    maintenanceError: null,
+    maintenanceGeneration: null,
+    maintenanceStartedAt: null,
+    imageDigest: null,
+    updateError: null,
+    retainedRuns: null,
+    diskGrowthProtocol: null,
+    diskCapacity: null,
+    occupiedSlots: 0,
+    availableSlots: 4,
+    agents: [],
+    staleDisks: { count: 0, diskMiB: 0 },
+    diskAccounting: null,
+    storage: {
+      cacheMiB: 102400,
+      memoryCacheMiB: 256,
+      reserveMiB: 10240,
+      reservePercent: 5,
+      backupSeconds: 60,
+      maxDirtySeconds: 300,
+    },
+
     id: randomUUID(),
     name: 'Disk capacity fixture',
     local: false,
@@ -20,12 +61,17 @@ test('shows reclaimable and unpublished disk data on desktop and phone', async (
     status: 'online',
     tags: [],
     capabilities: {
+      backend: 'firecracker',
+      ublk: false,
+      nativeModeProtocol: 0,
+      diskTotalMiB: 0,
       cpu: 8,
       memoryMiB: 16384,
       diskMiB: 92160,
       os: 'linux',
       arch: 'x86_64',
       kvm: true,
+
     },
     limits: { cpu: 4, memoryMiB: 8192, diskMiB: 102400 },
     slots: 4,
@@ -747,11 +793,12 @@ test('previews node administrator powers and keeps failed transitions visibly bl
         status: 'failed',
         error: 'Stop confirmation unavailable',
       }
-      return route.fulfill({ json: node })
+      return route.fulfill({ json: { kind: 'requested', node } })
     }
 
     return route.fulfill({
       json: {
+        kind: 'preview',
         previewId: 'preview-one',
         preview: {
           mode: change.mode,

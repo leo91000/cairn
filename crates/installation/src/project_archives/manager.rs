@@ -190,7 +190,7 @@ pub(crate) async fn run_archives(
 }
 
 async fn allowed(s: &Service, node_id: &str, project: &Value) -> Result<bool> {
-    let node = s.get("nodes", node_id).await?;
+    let node = s.node_boundary(node_id).await?;
     if node["revoked"] == true || node["accepting"] != true {
         return Ok(false);
     }

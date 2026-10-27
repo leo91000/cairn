@@ -1,0 +1,116 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "NodeConfiguration": {
+      "additionalProperties": false,
+      "properties": {
+        "accepting": {
+          "type": "boolean"
+        },
+        "confirmNativeAdministration": {
+          "default": false,
+          "type": "boolean"
+        },
+        "limits": {
+          "$ref": "#/definitions/NodeResources"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "nativeAccounts": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "nativeEnabled": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": "string"
+        },
+        "slots": {
+          "default": null,
+          "format": "uint32",
+          "maximum": 4096,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "type": "array"
+        }
+      },
+      "required": [
+        "revision",
+        "name",
+        "tags",
+        "limits",
+        "accepting"
+      ],
+      "type": "object"
+    },
+    "NodeResources": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "format": "uint32",
+          "maximum": 4096,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "diskMiB": {
+          "format": "uint64",
+          "maximum": 1099511627776,
+          "minimum": 128,
+          "type": "integer"
+        },
+        "memoryMiB": {
+          "format": "uint64",
+          "maximum": 1073741824,
+          "minimum": 128,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpu",
+        "memoryMiB",
+        "diskMiB"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "node": {
+      "$ref": "#/definitions/NodeConfiguration"
+    },
+    "nodeId": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "nodeId",
+    "node"
+  ],
+  "title": "UpdateNodeInput",
+  "type": "object"
+}

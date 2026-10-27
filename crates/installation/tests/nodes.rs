@@ -1,5 +1,6 @@
 use common::McpFixture;
 use common::StoreAgentFixture;
+use common::node_fixture::*;
 use common::run_fixture::DbRunFixture;
 
 #[path = "nodes/backend_migration.rs"]
@@ -154,6 +155,13 @@ impl Owner {
 
     /// Calls an owner endpoint.
     async fn send(&self, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+        let body = if method == "PUT" {
+            common::node_fixture::configuration(&self.service, path, body)
+                .await
+                .unwrap()
+        } else {
+            body
+        };
         let body = if matches!(method, "POST" | "PUT")
             && (path == "/api/agents" || path.starts_with("/api/agents/"))
             && body.get("settings").is_none()
@@ -201,6 +209,10 @@ impl Owner {
         .1
     }
 
+    async fn put_node_fixture(&self, value: Value) {
+        self.service.store.put_node_fixture(value).await.unwrap();
+    }
+
     async fn put(&self, kind: &str, document: Value) {
         if kind == "agents" {
             self.service
@@ -216,6 +228,8 @@ impl Owner {
     async fn stored(&self, kind: &str, id: &str) -> Option<Value> {
         if kind == "agents" {
             self.service.store.agent_snapshot(id).await.unwrap()
+        } else if kind == "nodes" {
+            self.service.store.node_boundary(id).await.unwrap()
         } else {
             self.service.store.get(kind, id).await.unwrap()
         }
@@ -248,7 +262,7 @@ impl Owner {
 
     /// Records an enrolled node reachable with `token`.
     async fn register_node(&self, node: &str, token: &str) {
-        self.put("nodes", json!({ "id": node, "revoked": false }))
+        self.put_node_fixture(json!({ "id": node, "revoked": false }))
             .await;
         self.authorize_node(node, token).await;
     }
@@ -419,7 +433,7 @@ async fn shared_budget_must_be_applied_before_admission_and_reconfiguration_paus
     record["name"] = "Shared worker".into();
     record["slots"] = 4.into();
     record["capabilities"] = capabilities(true, 8, 8192, 65536);
-    owner.put("nodes", record).await;
+    owner.put_node_fixture(record).await;
     owner.authorize_node(&node, token).await;
     let mut heartbeat = json!({
         "runtimeId": "development",
@@ -554,7 +568,7 @@ async fn component_version_mismatches_are_explicitly_rejected() {
         "sharedResources": true, "dataRoot": owner.service.config.data_dir,
         "budget": { "slots": 2, "limits": node["limits"] },
     });
-    owner.put("nodes", node).await;
+    owner.put_node_fixture(node).await;
     owner.grant_nodes(MAIN_AGENT_ID, json!([node_id])).await;
     for request in [
         json!({ "runtimeId": "other-version", "nodeProtocol": 2 }),
@@ -1240,7 +1254,7 @@ async fn revoking_a_replaced_node_can_release_its_conversation_placements() {
         .send("POST", &path, json!({ "releasePlacements": true }))
         .await;
     assert_eq!(status, StatusCode::OK, "{value}");
-    assert_eq!(value["revoked"], true);
+    assert_eq!(value["node"]["revoked"], true);
     assert_eq!(value["releasedPlacements"], 2);
     let run = owner.run(&pinned).await;
     assert!(run["pinnedNodeId"].is_null());
@@ -1373,15 +1387,12 @@ async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_gran
         (id(), auth::token(), id(), id(), id(), id());
     owner.register_node(&node, &token).await;
     owner
-        .put(
-            "nodes",
-            json!({
-                "id": node, "revoked": false, "accepting": true,
-                "capabilities": { "backend": "native", "nativeModeProtocol": 1 }, "nativeEnabled": true,
-                "nativeModeObserved": { "mode": "protected", "generation": null, "status": "applied" },
-                "nativeAccounts": [person],
-            }),
-        )
+        .put_node_fixture(json!({
+            "id": node, "revoked": false, "accepting": true,
+            "capabilities": { "backend": "native", "nativeModeProtocol": 1 }, "nativeEnabled": true,
+            "nativeModeObserved": { "mode": "protected", "generation": null, "status": "applied" },
+            "nativeAccounts": [person],
+        }))
         .await;
     owner
         .service
@@ -2081,7 +2092,7 @@ async fn binary_node_responses_are_scoped_and_never_hide_truncation() {
 async fn bulk_stream_backpressure_and_reader_cancellation_bound_the_upload() {
     let owner = Owner::new().await;
     let (node, token) = (id(), auth::token());
-    owner.put("nodes", json!({ "id": node })).await;
+    owner.put_node_fixture(json!({ "id": node })).await;
     owner.authorize_node(&node, &token).await;
     let (hub, target) = (owner.service.node_transport.clone(), node.clone());
     let waiting = tokio::spawn(async move {
@@ -2152,7 +2163,7 @@ async fn current_components_resume_a_backend_converted_environment_after_an_appl
     let owner = Owner::new().await;
     let (node, agent, run) = (id(), id(), id());
     owner
-        .put("nodes", schedulable_node(&node, &limits(4, 8192, 65536)))
+        .put_node_fixture(schedulable_node(&node, &limits(4, 8192, 65536)))
         .await;
     owner.grant_nodes(&agent, json!([node])).await;
     owner
@@ -2186,7 +2197,7 @@ async fn concurrent_admission_reserves_capacity_once_and_preserves_agent_grants(
     let mut record = schedulable_node(&node, &limits(2, 4096, 65536));
     record["local"] = false.into();
     record["slots"] = 1.into();
-    owner.put("nodes", record).await;
+    owner.put_node_fixture(record).await;
     owner.grant_nodes(&agent, json!([node])).await;
     let a = agent_run(&id(), &agent);
     let b = agent_run(&id(), &agent);
@@ -2228,7 +2239,7 @@ async fn queued_capacity_moves_preserve_the_source_and_unfinished_mission_waits(
             if node == &source {
                 record["pressure"] = "memory".into();
             }
-            owner.put("nodes", record).await;
+            owner.put_node_fixture(record).await;
         }
         owner
             .grant_nodes(&agent, json!([source, destination]))
@@ -2292,16 +2303,10 @@ async fn capacity_moves_keep_pinned_unauthorized_and_running_conversations_in_pl
     let owner = Owner::new().await;
     let (run, agent, source, destination) = (id(), id(), id(), id());
     owner
-        .put(
-            "nodes",
-            schedulable_node(&source, &limits(1, 32768, 131072)),
-        )
+        .put_node_fixture(schedulable_node(&source, &limits(1, 32768, 131072)))
         .await;
     owner
-        .put(
-            "nodes",
-            schedulable_node(&destination, &limits(12, 32768, 131072)),
-        )
+        .put_node_fixture(schedulable_node(&destination, &limits(12, 32768, 131072)))
         .await;
     owner.grant_nodes(&agent, json!([source])).await;
     let mut record = run_record(&run, RunStatus::Queued);
@@ -2348,7 +2353,7 @@ async fn retained_s3_disks_charge_local_cache_and_cancellation_releases_destinat
     let owner = Owner::new().await;
     let (node, agent, run, attempt) = (id(), id(), id(), id());
     owner
-        .put("nodes", schedulable_node(&node, &limits(4, 8192, 32768)))
+        .put_node_fixture(schedulable_node(&node, &limits(4, 8192, 32768)))
         .await;
     owner.grant_nodes(&agent, json!([node])).await;
     let execution = agent_run(&run, &agent);
@@ -2451,7 +2456,7 @@ async fn tags_filter_authorized_nodes_without_granting_access() {
     for (node, tags) in [(&fast, json!(["fast"])), (&other, json!(["slow"]))] {
         let mut record = schedulable_node(node, &limits(4, 8192, 65536));
         record["tags"] = tags;
-        owner.put("nodes", record).await;
+        owner.put_node_fixture(record).await;
     }
     owner.grant_nodes(&agent, json!([other])).await;
     let mut run = agent_run(&id(), &agent);
@@ -2522,16 +2527,13 @@ async fn owner_placement_obeys_agent_grants_and_preserves_last_good_selection() 
         (denied.as_str(), false, now(), false),
     ] {
         owner
-            .put(
-                "nodes",
-                json!({
-                    "id": node,
-                    "name": "Placement fixture",
-                    "local": local,
-                    "lastSeen": last_seen,
-                    "revoked": is_revoked,
-                }),
-            )
+            .put_node_fixture(json!({
+                "id": node,
+                "name": "Placement fixture",
+                "local": local,
+                "lastSeen": last_seen,
+                "revoked": is_revoked,
+            }))
             .await;
     }
     owner
@@ -2972,10 +2974,7 @@ async fn retained_completed_disk_monitor_discovers_late_writes() {
         json!({ "status": "ready", "requestedRevision": 1, "acknowledgedRevision": 1 });
     owner.add_run_fixture(&record).await;
     owner
-        .put(
-            "nodes",
-            json!({ "id": LOCAL_NODE_ID, "retainedRuns": [run] }),
-        )
+        .put_node_fixture(json!({ "id": LOCAL_NODE_ID, "retainedRuns": [run] }))
         .await;
     let monitor = tokio::spawn(storage::monitor(owner.service.clone()));
     common::eventually(
@@ -3016,7 +3015,7 @@ async fn completed_disk_monitor_reconciles_lost_ack_without_a_retained_vm() {
     owner.add_run_fixture(&record).await;
     owner.put("node-backups", point.clone()).await;
     owner
-        .put("nodes", json!({ "id": LOCAL_NODE_ID, "retainedRuns": [] }))
+        .put_node_fixture(json!({ "id": LOCAL_NODE_ID, "retainedRuns": [] }))
         .await;
     let credential = disk_grants::new_disk(&owner.service, &record, LOCAL_NODE_ID)
         .await
@@ -3738,7 +3737,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             reserve_mi_b: 16_777_216,
             ..Policy::default()
         });
-        owner.put("nodes", local).await;
+        owner.put_node_fixture(local).await;
         publication::maintain_local_cache(&owner.service)
             .await
             .unwrap();
@@ -3812,7 +3811,7 @@ async fn an_unreachable_owner_is_fenced_only_after_its_last_lease_and_cannot_ren
         let owner = Owner::with_runner("127.0.0.1:1".into(), runner_url).await;
         let (run, attempt, token) = (id(), id(), auth::token());
         owner
-            .put("nodes", json!({ "id": node, "revoked": false }))
+            .put_node_fixture(json!({ "id": node, "revoked": false }))
             .await;
         owner.grant_nodes(MAIN_AGENT_ID, json!([node])).await;
         owner.authorize_node(&node, &token).await;
@@ -3883,7 +3882,7 @@ async fn abandoned_return_to_a_node_releases_only_the_unmaterialized_disk_reserv
     let owner = Owner::new().await;
     let (node, agent, run) = (id(), id(), id());
     owner
-        .put("nodes", schedulable_node(&node, &limits(4, 8192, 65536)))
+        .put_node_fixture(schedulable_node(&node, &limits(4, 8192, 65536)))
         .await;
     owner.grant_nodes(&agent, json!([node])).await;
     owner
@@ -3941,7 +3940,7 @@ async fn legacy_disks_keep_their_size_and_resource_requests_do_not_reserve_capac
     let owner = Owner::new().await;
     let (node, agent, run) = (id(), id(), id());
     owner
-        .put("nodes", schedulable_node(&node, &limits(1, 1024, 8192)))
+        .put_node_fixture(schedulable_node(&node, &limits(1, 1024, 8192)))
         .await;
     owner.grant_nodes(&agent, json!([node])).await;
     let mut record = agent_run(&run, &agent);
@@ -4162,7 +4161,7 @@ async fn connect_node(
     enrolled["revoked"] = false.into();
     enrolled["runtimeId"] = "development".into();
     enrolled["storage"] = json!(small_reserve());
-    owner.put("nodes", enrolled).await;
+    owner.put_node_fixture(enrolled).await;
     owner.authorize_node(node, &token).await;
     let (controller, controller_address) = common::bind().await;
     let app = movement_controller(state, run.to_owned(), faults.clone(), owner.service.clone());
@@ -4371,7 +4370,7 @@ async fn queued_capacity_transfer_carries_unpublished_writes_and_keeps_the_sourc
     tasks.push(owner.serve(listener));
     let mut source_node = owner.stored("nodes", &source).await.unwrap();
     source_node["slots"] = 1.into();
-    owner.put("nodes", source_node).await;
+    owner.put_node_fixture(source_node).await;
     let mut busy = agent_run(&id(), &agent);
     busy["pinnedNodeId"] = source.clone().into();
     busy["resources"] = limits(1, 128, 128);
@@ -4438,7 +4437,7 @@ async fn new_disks_use_the_default_size_within_shared_headroom_and_retained_disk
     owner.grant_nodes(&agent, json!([node])).await;
     for (budget, expected) in [(400_844, 32_768), (8_192, 8_192)] {
         owner
-            .put("nodes", schedulable_node(&node, &limits(7, 36_352, budget)))
+            .put_node_fixture(schedulable_node(&node, &limits(7, 36_352, budget)))
             .await;
         let result = placement::reserve(&owner.service, &agent_run(&id(), &agent), &id())
             .await
@@ -4449,10 +4448,7 @@ async fn new_disks_use_the_default_size_within_shared_headroom_and_retained_disk
     }
 
     owner
-        .put(
-            "nodes",
-            schedulable_node(&node, &limits(7, 36_352, 400_844)),
-        )
+        .put_node_fixture(schedulable_node(&node, &limits(7, 36_352, 400_844)))
         .await;
     let mut retained = agent_run(&id(), &agent);
     retained["resources"] = limits(2, 4_096, 400_844);
@@ -4468,10 +4464,7 @@ async fn automatic_placement_spreads_work_unless_a_node_is_preferred() {
     let (small, large, agent) = (id(), id(), id());
     for (node, cpu, memory) in [(&small, 4, 8192), (&large, 16, 65536)] {
         owner
-            .put(
-                "nodes",
-                schedulable_node(node, &limits(cpu, memory, 262_144)),
-            )
+            .put_node_fixture(schedulable_node(node, &limits(cpu, memory, 262_144)))
             .await;
     }
     owner.grant_nodes(&agent, json!([small, large])).await;
@@ -4505,20 +4498,17 @@ async fn node_agent_grants_are_edited_from_the_node_without_narrowing_all_node_a
     let node = id();
     let (explicit, everywhere) = (id(), id());
     owner
-        .put(
-            "nodes",
-            json!({
-                "id": node,
-                "name": "Desktop",
-                "local": false,
-                "revoked": false,
-                "accepting": true,
-                "tags": [],
-                "lastSeen": now(),
-                "capabilities": { "kvm": true },
-                "limits": limits(4, 8192, 65536),
-            }),
-        )
+        .put_node_fixture(json!({
+            "id": node,
+            "name": "Desktop",
+            "local": false,
+            "revoked": false,
+            "accepting": true,
+            "tags": [],
+            "lastSeen": now(),
+            "capabilities": { "kvm": true },
+            "limits": limits(4, 8192, 65536),
+        }))
         .await;
     for (agent, nodes) in [(&explicit, json!([])), (&everywhere, Value::Null)] {
         owner
@@ -4561,7 +4551,7 @@ async fn mission_wait_and_node_move_exclude_each_other_without_leaking_destinati
         let (node, run_id) = (id(), id());
         let mut destination = schedulable_node(&node, &limits(2, 4096, 65536));
         destination["slots"] = 1.into();
-        owner.put("nodes", destination).await;
+        owner.put_node_fixture(destination).await;
         owner.grant_nodes(MAIN_AGENT_ID, json!([node])).await;
         let mut record = run_record(&run_id, RunStatus::Running);
         record["trigger"] = "manual".into();
@@ -4719,19 +4709,16 @@ async fn stale_node_disks_are_reported_and_freed_on_request() {
     let owner = Owner::with_runner(common::HOST.into(), url).await;
     let other = id();
     owner
-        .put(
-            "nodes",
-            json!({
-                "id": LOCAL_NODE_ID,
-                "name": "Current runner",
-                "local": true,
-                "revoked": false,
-                "accepting": true,
-                "tags": [],
-                "capabilities": { "kvm": true },
-                "limits": limits(4, 8192, 65536),
-            }),
-        )
+        .put_node_fixture(json!({
+            "id": LOCAL_NODE_ID,
+            "name": "Current runner",
+            "local": true,
+            "revoked": false,
+            "accepting": true,
+            "tags": [],
+            "capabilities": { "kvm": true },
+            "limits": limits(4, 8192, 65536),
+        }))
         .await;
     let (moved, current) = (id(), id());
     for (run, node, total) in [
@@ -5456,7 +5443,7 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
     let (run, node, next, agent) = (id(), id(), id(), id());
     for node in [&node, &next] {
         owner
-            .put("nodes", json!({ "id": node, "revoked": false }))
+            .put_node_fixture(json!({ "id": node, "revoked": false }))
             .await;
     }
     owner.grant_nodes(&agent, json!([node, next])).await;
@@ -6421,7 +6408,7 @@ async fn slot_shortage_reports_free_slots_and_check_reserves_nothing() {
     let mut record = schedulable_node(&node, &limits(7, 16384, 131072));
     record["name"] = "Server".into();
     record["slots"] = 1.into();
-    owner.put("nodes", record).await;
+    owner.put_node_fixture(record).await;
     owner.grant_nodes(&agent, json!([node])).await;
     let attempt = id();
     placement::reserve(&owner.service, &agent_run(&id(), &agent), &attempt)
@@ -6463,4 +6450,67 @@ async fn slot_shortage_reports_free_slots_and_check_reserves_nothing() {
     let node = find_by_id(&inventory, &node);
     assert_eq!(node["availableSlots"], 1);
     assert!(node.get("reserved").is_none());
+}
+
+#[tokio::test]
+async fn node_configuration_conflicts_are_atomic_and_heartbeats_keep_the_configuration_revision() {
+    let owner = Owner::new().await;
+    let identity = owner
+        .enroll("Build node", &capabilities(true, 8, 16384, 131072))
+        .await;
+    let node_id = text(&identity, "nodeId");
+    let path = format!("/api/nodes/{node_id}");
+    let node = owner.service.get_node(node_id).await.unwrap();
+    let request = json!({
+        "revision": node.revision, "name": "First editor", "tags": ["build"],
+        "limits": node.limits, "slots": 4, "accepting": true,
+    });
+    let mut missing = request.clone();
+    missing.as_object_mut().unwrap().remove("revision");
+    assert_eq!(
+        owner.call("PUT", &path, missing, None).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut concurrent = request.clone();
+    concurrent["name"] = "Second editor".into();
+    let (first, second) = tokio::join!(
+        owner.call("PUT", &path, request, None),
+        owner.call("PUT", &path, concurrent, None)
+    );
+    assert!(matches!(
+        (first.0, second.0),
+        (StatusCode::OK, StatusCode::CONFLICT) | (StatusCode::CONFLICT, StatusCode::OK)
+    ));
+    let saved = owner.service.get_node(node_id).await.unwrap();
+    assert_ne!(saved.revision, node.revision);
+    assert_eq!(saved.tags, ["build"]);
+    assert_eq!(
+        saved.name,
+        if first.0 == StatusCode::OK {
+            "First editor"
+        } else {
+            "Second editor"
+        }
+    );
+    let observation = json!({
+        "nodeProtocol":2, "runtimeId":"development", "capabilities":saved.capabilities,
+        "pool":{"capacity":4,"retained_runs":[]}, "usage":{"memoryMiB":128,"diskMiB":128},
+    });
+    let (status, response) = owner
+        .call(
+            "POST",
+            HEARTBEAT,
+            observation,
+            Some(text(&identity, "token")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let observed = owner.service.get_node(node_id).await.unwrap();
+    assert_eq!(observed.revision, saved.revision);
+    assert_eq!(observed.name, saved.name);
+    assert_eq!(observed.tags, saved.tags);
+    assert!(
+        owner.service.store.list("nodes").await.unwrap().is_empty(),
+        "No records mirror remains"
+    );
 }

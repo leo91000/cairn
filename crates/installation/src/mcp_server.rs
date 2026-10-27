@@ -1,7 +1,6 @@
 mod chat_files;
 mod chat_tools;
 pub mod code_mode;
-mod node_tools;
 
 use crate::{
     error::{Error, Result, required},
@@ -533,6 +532,11 @@ pub(crate) fn operations() -> Vec<Value> {
             .map(crate::capabilities::plugin_packages::PluginPackageOperation::descriptor),
     );
     operations.extend(
+        crate::capabilities::NODE_OPERATIONS
+            .iter()
+            .map(crate::capabilities::NodeOperation::descriptor),
+    );
+    operations.extend(
         crate::capabilities::PROJECT_OPERATIONS
             .iter()
             .map(crate::capabilities::ProjectOperation::descriptor),
@@ -627,6 +631,18 @@ pub(crate) async fn operation(
             .await;
     }
     if let Some(op) = crate::capabilities::agent_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::node_operation(name) {
         return op
             .invoke(
                 s,
@@ -877,13 +893,7 @@ pub(crate) async fn invoke(
             crate::backend_migration::preview(s, text(&args, "chatId"), authorize).await
         }
         "migrate_chat_backend" => s.migrate_chat_backend(args, authorize).await,
-        "list_nodes"
-        | "list_native_callers"
-        | "create_node_enrollment"
-        | "update_node"
-        | "change_native_node_mode"
-        | "update_node_storage"
-        | "revoke_node" => node_tools::invoke(s, name, args, bearer).await,
+
         "list_chat_artifacts"
         | "read_chat_artifact"
         | "set_chat_artifact_visibility"
