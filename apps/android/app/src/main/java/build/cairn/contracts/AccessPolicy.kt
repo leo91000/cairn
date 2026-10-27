@@ -17,7 +17,7 @@ data class AccessPolicy(
     val skills: List<String>?,
 ) {
     init {
-        require(Regex("^(firecracker|native)\$").containsMatchIn(backend))
+        require(Regex("^(auto|firecracker|native)\$").containsMatchIn(backend))
         require(Regex("^(yolo|workspace-write|read-only)\$").containsMatchIn(sandbox))
     }
 }

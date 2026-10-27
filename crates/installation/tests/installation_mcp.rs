@@ -3991,6 +3991,68 @@ async fn typed_agent_profiles_preview_and_avatars_match_on_both_tools() {
     }
 }
 
+#[tokio::test]
+async fn automatic_agent_priorities_round_trip_through_both_management_tools() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let nodes = [
+        cairn_installation::config::id(),
+        cairn_installation::config::id(),
+    ];
+    for id in &nodes {
+        s.store
+            .put(
+                "nodes",
+                json!({ "id": id, "name": id, "capabilities": { "backend": "firecracker" } }),
+            )
+            .await
+            .unwrap();
+    }
+    let target = s.agent_fixture(json!({
+        "name": "Automatic placement", "access": { "backend": "auto", "nodes": nodes }, "nodePriorities": nodes,
+    }), None).await.unwrap();
+    for internal in [false, true] {
+        let mut profile = s.store.agent(text(&target, "id")).await.unwrap().unwrap();
+        profile.settings.node_priorities.reverse();
+        let input = serde_json::to_value(cairn_contracts::ReplaceAgentInput {
+            agent_id: profile.id,
+            revision: profile.revision,
+            settings: profile.settings.clone(),
+            review: cairn_contracts::AgentReview::default(),
+        })
+        .unwrap();
+        let response = if internal {
+            call(&s, &configuration, "replace_agent", input).await
+        } else {
+            public_call(&s, &["manage"], "replace_agent", input).await
+        };
+        assert_ne!(response["result"]["isError"], true, "{response}");
+        let saved: cairn_contracts::Agent =
+            serde_json::from_value(result(&response).clone()).unwrap();
+        assert_eq!(saved.settings, profile.settings);
+        let read = if internal {
+            call(
+                &s,
+                &configuration,
+                "get_agent",
+                json!({ "agentId": saved.id }),
+            )
+            .await
+        } else {
+            public_call(&s, &["read"], "get_agent", json!({ "agentId": saved.id })).await
+        };
+        let read: cairn_contracts::Agent = serde_json::from_value(result(&read).clone()).unwrap();
+        assert_eq!(read.settings.access.backend, "auto");
+        assert_eq!(
+            read.settings.node_priorities,
+            saved.settings.node_priorities
+        );
+        assert_eq!(read.settings.access.nodes, Some(nodes.to_vec()));
+    }
+}
+
 fn mission_settings(mission: &Value) -> Value {
     let mut settings = mission.clone();
     settings.as_object_mut().unwrap().retain(|key, _| {

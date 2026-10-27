@@ -9,6 +9,7 @@ import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
@@ -1043,9 +1044,19 @@ abstract class NodePlacementCases {
 
     @Test
     fun backendMigrationRequiresConfirmationAndFollowsItsCompletion() {
+        backendMigrationCompletion(false)
+    }
+
+    @Test
+    fun automaticMigrationCompletesBeforeOfferingExplicitReverseConversion() {
+        backendMigrationCompletion(true)
+    }
+
+    private fun backendMigrationCompletion(automatic: Boolean) {
         MockWebServer().use { server ->
             val submitted = CopyOnWriteArrayList<JsonObject>()
             val completed = AtomicBoolean(false)
+            val refreshed = AtomicInteger(0)
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
@@ -1060,7 +1071,7 @@ abstract class NodePlacementCases {
                                     "{}"
                                 }
                                 path.endsWith("/backend-migration") ->
-                                    """{"required":${!completed.get()},"toBackend":"native","pending":${submitted.isNotEmpty() && !completed.get()},"nodes":[{"id":"gpu","name":"Desktop GPU"}]}"""
+                                    """{"required":${!automatic && !completed.get()},"optional":$automatic,"fromBackend":"${if (completed.get()) "native" else "firecracker"}","toBackend":"${if (automatic && completed.get()) "firecracker" else "native"}","pending":${submitted.isNotEmpty() && !completed.get()},"nodes":[{"id":"gpu","name":"Desktop GPU"}]}"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path.endsWith("/overview") -> "{}"
@@ -1114,7 +1125,10 @@ abstract class NodePlacementCases {
                     vm.state.first { it.ready }
                     vm.connect(server.url("/").toString())
                 }
-                CairnTheme { if (state.session.authenticated) Page { BackendMigration(vm, "run") } }
+                CairnTheme {
+                    if (state.session.authenticated)
+                        Page { BackendMigration(vm, "run") { refreshed.incrementAndGet() } }
+                }
             }
             compose.waitUntil(20000) {
                 compose
@@ -1141,6 +1155,20 @@ abstract class NodePlacementCases {
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
+            if (automatic) {
+                compose.onNodeWithText("Migrer cette conversation…").assertDoesNotExist()
+                compose
+                    .onNodeWithText("Changer encore l’environnement")
+                    .performScrollTo()
+                    .performClick()
+                compose
+                    .onNodeWithText(
+                        "Vous pouvez choisir explicitement une VM Firecracker",
+                        substring = true,
+                    )
+                    .assertExists()
+            }
+            assertEquals(1, refreshed.get())
         }
     }
 

@@ -8,6 +8,7 @@ import VirtualSelect from './VirtualSelect.vue'
 interface Migration {
   chatId: string
   required: boolean
+  optional?: boolean
   fromBackend: 'native' | 'firecracker'
   toBackend: 'native' | 'firecracker'
   nodes: { id: string, name: string }[]
@@ -38,7 +39,7 @@ async function load() {
     const value = await api<Migration>(`/nodes/placement/${props.runId}/backend-migration`)
     if (stopped)
       return
-    if (state.value?.pending && !value.pending && !value.required) {
+    if (state.value?.pending && !value.pending && value.fromBackend === state.value.toBackend && value.fromBackend !== state.value.fromBackend) {
       completed.value = true
       emit('completed')
     }
@@ -80,18 +81,28 @@ async function migrate() {
 </script>
 
 <template>
-  <section v-if="state?.required || state?.pending || completed" class="mt-3 border-t border-line pt-3" aria-label="Change execution backend">
+  <section v-if="state?.required || state?.optional || state?.pending || completed" class="mt-3 border-t border-line pt-3" aria-label="Change execution backend">
     <h3 class="m-0! text-xs! font-semibold text-ink">
       Change execution backend
     </h3>
-    <p v-if="completed" role="status">
-      Migration complete. Send a new message to continue in the same conversation.
-    </p>
+    <template v-if="completed">
+      <p role="status">
+        Migration complete. Send a new message to continue in the same conversation.
+      </p>
+      <UiButton v-if="state?.optional" size="small" @click="completed = false">
+        Change environment again
+      </UiButton>
+    </template>
     <p v-else-if="state?.pending" role="status">
       Migrating to {{ label }}. Execution is stopped while the environment is saved and transferred. You can leave this screen.
     </p>
     <template v-else>
-      <p>The agent now uses {{ label }}. Migrate this conversation to keep its history and files.</p>
+      <p v-if="state?.optional">
+        You can explicitly change this conversation to {{ label }}. Its current environment is kept until you confirm.
+      </p>
+      <p v-else>
+        The agent now uses {{ label }}. Migrate this conversation to keep its history and files.
+      </p>
       <p v-if="state?.reason" class="text-warning">
         {{ state.reason }}
       </p>

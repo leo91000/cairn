@@ -12,6 +12,7 @@ data class AgentSettings(
     val instructions: String = "",
     val model: String = "",
     val name: String,
+    val nodePriorities: List<String> = listOf(),
     val plugins: List<String>,
     val provider: String = "codex",
     val reasoning: String = "high",

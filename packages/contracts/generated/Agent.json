@@ -7,7 +7,7 @@
       "properties": {
         "backend": {
           "default": "firecracker",
-          "pattern": "^(firecracker|native)$",
+          "pattern": "^(auto|firecracker|native)$",
           "type": "string"
         },
         "delegation": {
@@ -186,6 +186,16 @@
       "minLength": 1,
       "type": "string"
     },
+    "nodePriorities": {
+      "default": [],
+      "description": "Preferred placement order. This does not grant access to any node.",
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
     "plugins": {
       "items": {
         "format": "uuid",
@@ -234,6 +244,7 @@
     "timeoutMinutes",
     "access",
     "exclusiveNodes",
+    "nodePriorities",
     "plugins",
     "revision",
     "createdAt"

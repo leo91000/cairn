@@ -93,7 +93,8 @@ const val VM_BACKEND = "firecracker"
 
 /** Whether the node runs on the agent's execution backend: the server refuses any other grant. */
 fun ExecutionNode.accepts(agent: Agent) =
-    (capabilities.backend == NATIVE_BACKEND) == (agent.access.backend == NATIVE_BACKEND)
+    agent.access.backend == "auto" ||
+        (capabilities.backend == NATIVE_BACKEND) == (agent.access.backend == NATIVE_BACKEND)
 
 /**
  * Agents already allowed to run on this machine without being allowed everywhere, from the node

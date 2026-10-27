@@ -72,6 +72,9 @@ async fn heartbeat(s: Arc<Service>, checkpoint: Arc<Checkpoint>, stop: Cancellat
             () = stop.cancelled() => break,
             _ = timer.tick() => {
                 let run_id = checkpoint.id.as_str();
+                if let Some(attempt) = checkpoint.snapshot().await.runner_id() {
+                    let _ = crate::nodes::placement::renew_preparation(&s, run_id, attempt).await;
+                }
                 // Both fail routinely once the run is stopping, moving or revoked;
                 // the next beat retries and execution notices the revocation itself.
                 let _ = crate::nodes::moves::pause_pending(&s, run_id).await;
@@ -287,6 +290,9 @@ async fn release(
         clear_credentials(s, run_id).await;
     }
     if let Some(runner) = saved.runner_id() {
+        if fenced {
+            crate::nodes::placement::release(s, runner).await?;
+        }
         let plan = s
             .config
             .data_dir

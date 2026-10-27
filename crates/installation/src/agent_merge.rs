@@ -49,11 +49,11 @@ pub(crate) fn merge(
     let target = required(db.agent(target_id)?, "Destination agent not found")?;
     let source_snapshot = serde_json::to_value(&source)?;
     let target_snapshot = serde_json::to_value(&target)?;
-    if crate::native::policy::native(&source_snapshot)
-        || crate::native::policy::native(&target_snapshot)
+    if crate::native::policy::supports(&source_snapshot, "native")
+        || crate::native::policy::supports(&target_snapshot, "native")
     {
         return Err(Error::conflict(
-            "Native agents cannot be merged. Their execution approvals are tied to the agent.",
+            "Agents permitting native execution cannot be merged. Their execution approvals are tied to the agent.",
         ));
     }
     if !covers(&target_snapshot, &source_snapshot)

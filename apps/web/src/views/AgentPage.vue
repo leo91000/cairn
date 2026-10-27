@@ -1130,6 +1130,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               v-else
               v-model:access="draft.access"
               v-model:exclusive-nodes="draft.exclusiveNodes"
+              v-model:node-priorities="draft.nodePriorities"
               :nodes="nodes"
               :agent-id="agent?.id"
             />

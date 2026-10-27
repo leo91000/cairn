@@ -299,7 +299,7 @@ function freeStaleDisks() {
 function mismatch(agentId: string) {
   const agent = state.agents.find(item => item.id === agentId)
   const native = granting.value?.capabilities.backend === 'native'
-  if (!agent || (agent.access?.backend === 'native') === native)
+  if (!agent || agent.access?.backend === 'auto' || (agent.access?.backend === 'native') === native)
     return ''
   return native ? 'Runs in a Firecracker VM: set it to native execution on its page first' : 'Uses native execution: only native nodes can run it'
 }

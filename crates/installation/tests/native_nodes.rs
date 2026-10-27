@@ -278,7 +278,21 @@ async fn an_owner_approved_bot_can_submit_to_its_native_agent() {
 
 #[tokio::test]
 async fn native_administrator_requires_owner_review_verified_generation_and_explicit_admission() {
-    let f = Fixture::new().await;
+    for backend in ["native", "auto"] {
+        administrator_admission(backend).await;
+    }
+}
+
+async fn administrator_admission(backend: &str) {
+    let mut f = Fixture::new().await;
+    f.agent = f
+        .service
+        .agent_fixture(
+            json!({ "access": { "backend": backend } }),
+            f.agent["id"].as_str(),
+        )
+        .await
+        .unwrap();
     let node_id = text(&f.node, "id");
     let path = format!("/api/nodes/{node_id}/native-mode");
     let mut unsupported = f.node.clone();
@@ -397,7 +411,7 @@ async fn native_administrator_requires_owner_review_verified_generation_and_expl
     let future = f
         .service
         .agent_fixture(
-            json!({ "name": "Future native", "access": { "backend": "native", "nodes": null } }),
+            json!({ "name": "Future native", "access": { "backend": backend, "nodes": null } }),
             None,
         )
         .await
@@ -515,7 +529,356 @@ struct Fixture {
     node: Value,
 }
 
+#[tokio::test]
+async fn automatic_placement_uses_agent_priorities_and_falls_back_without_converting_existing_work()
+{
+    use cairn_installation::nodes::LOCAL_NODE_ID;
+
+    for scenario in [
+        "preferred",
+        "full",
+        "untrusted",
+        "offline",
+        "existing-vm",
+        "preferred-vm",
+        "no-controller",
+    ] {
+        let mut f = Fixture::new().await;
+        let vm = f.vm_node().await;
+        let vm_id = if scenario == "no-controller" {
+            LOCAL_NODE_ID
+        } else {
+            text(&vm, "id")
+        };
+        f.agent = f
+            .service
+            .agent_fixture(
+                json!({
+                    "access": { "backend": "auto", "nodes": [f.node["id"], vm_id] },
+                    "nodePriorities": if scenario == "no-controller" { json!([vm_id, f.node["id"]]) } else { json!([f.node["id"], vm_id]) },
+                }),
+                f.agent["id"].as_str(),
+            )
+            .await
+            .unwrap();
+        let persisted = f
+            .service
+            .agent_snapshot(text(&f.agent, "id"))
+            .await
+            .unwrap();
+        assert_eq!(persisted["nodePriorities"], f.agent["nodePriorities"]);
+
+        let mut run = f.run();
+        match scenario {
+            "full" => {
+                f.service
+                    .store
+                    .put(
+                        "node-attempts",
+                        json!({
+                            "id": id(), "runId": id(), "nodeId": f.node["id"], "role": "execution",
+                            "released": false, "leaseExpiresAt": now() + 60_000,
+                            "resources": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 32768 },
+                        }),
+                    )
+                    .await
+                    .unwrap();
+            }
+            "offline" => {
+                f.node["lastSeen"] = 0.into();
+            }
+            "untrusted" => {
+                run["nativeProvenanceUnknown"] = true.into();
+            }
+            "existing-vm" => {
+                run["snapshot"]["agent"]["access"]["backend"] = "firecracker".into();
+            }
+            "preferred-vm" => {
+                run["preferredNodeId"] = vm_id.into();
+            }
+            _ => {}
+        }
+        f.service.store.put("nodes", f.node.clone()).await.unwrap();
+        common::add_run(&f.service.store, &run).await;
+        let attempt = id();
+        let placement = placement::reserve(&f.service, &run, &attempt)
+            .await
+            .unwrap();
+        let expected = if matches!(scenario, "preferred" | "no-controller") {
+            text(&f.node, "id")
+        } else {
+            vm_id
+        };
+        assert_eq!(placement["nodeId"], expected, "{scenario}");
+        let saved = f.service.store.run(text(&run, "id")).await.unwrap();
+        let backend = if matches!(scenario, "preferred" | "no-controller") {
+            "native"
+        } else {
+            "firecracker"
+        };
+        assert_eq!(
+            saved["snapshot"]["agent"]["access"]["backend"], backend,
+            "{scenario}"
+        );
+        if scenario == "existing-vm" {
+            f.service
+                .store
+                .update_run_boundary(text(&saved, "id"), json!({ "nodeId": vm_id }))
+                .await
+                .unwrap();
+            let grant = cairn_installation::nodes::disk_grants::new_disk(&f.service, &saved, vm_id)
+                .await
+                .unwrap();
+            assert!(
+                cairn_installation::nodes::disk_grants::authorize(&f.service, &grant)
+                    .await
+                    .is_ok()
+            );
+        }
+        placement::release(&f.service, &attempt).await.unwrap();
+
+        if scenario == "preferred" {
+            f.node["accepting"] = false.into();
+            f.service.store.put("nodes", f.node.clone()).await.unwrap();
+            assert!(placement::is_no_capacity(
+                &placement::reserve(&f.service, &run, &id())
+                    .await
+                    .unwrap_err()
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn priorities_never_authorize_an_ungranted_node() {
+    let f = Fixture::new().await;
+    let error = f
+        .service
+        .agent_fixture(
+            json!({
+                "access": { "backend": "auto", "nodes": [f.node["id"]] },
+                "nodePriorities": [cairn_installation::nodes::LOCAL_NODE_ID],
+            }),
+            f.agent["id"].as_str(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, 400);
+    assert!(error.message.contains("Only authorized nodes"));
+    let saved = f
+        .service
+        .agent_snapshot(text(&f.agent, "id"))
+        .await
+        .unwrap();
+    assert_eq!(saved["access"]["backend"], "native");
+}
+
+#[tokio::test]
+async fn automatic_profiles_offer_optional_conversion_to_the_other_environment() {
+    let mut f = Fixture::new().await;
+    let vm = f.vm_node().await;
+    f.node["nativeAccounts"] = json!([TRUSTED, OTHER]);
+    f.service.store.put("nodes", f.node.clone()).await.unwrap();
+    f.agent = f
+        .service
+        .agent_fixture(
+            json!({ "access": { "backend": "auto", "nodes": [f.node["id"], vm["id"]] } }),
+            f.agent["id"].as_str(),
+        )
+        .await
+        .unwrap();
+    let (_, run) = f.conversation().await;
+    for from in ["firecracker", "native"] {
+        let mut snapshot = run["snapshot"].clone();
+        snapshot["agent"]["access"]["backend"] = from.into();
+        f.service
+            .store
+            .change_run(
+                text(&run, "id"),
+                cairn_installation::runs::RunChanges {
+                    snapshot: Some(serde_json::from_value(snapshot).unwrap()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let (status, preview) = f
+            .owner_call(
+                "GET",
+                &format!(
+                    "/api/nodes/placement/{}/backend-migration",
+                    text(&run, "id")
+                ),
+                Value::Null,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{preview}");
+        assert_eq!(preview["fromBackend"], from);
+        assert_eq!(preview["required"], false);
+        assert_eq!(preview["optional"], true);
+        let (to, node) = if from == "native" {
+            ("firecracker", &vm["id"])
+        } else {
+            ("native", &f.node["id"])
+        };
+        assert_eq!(preview["toBackend"], to);
+        assert!(preview["reason"].is_null(), "{preview}");
+        assert!(
+            preview["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|candidate| &candidate["id"] == node),
+            "{preview}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_authority_outage_preserves_automatic_vm_admission_and_vm_continuations() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for mixed in [false, true] {
+        let mut f = Fixture::new().await;
+        let vm = f.vm_node().await;
+        let nodes = if mixed {
+            json!([vm["id"], f.node["id"]])
+        } else {
+            json!([vm["id"]])
+        };
+        f.agent = f
+            .service
+            .agent_fixture(
+                json!({ "access": { "backend": "auto", "nodes": nodes } }),
+                f.agent["id"].as_str(),
+            )
+            .await
+            .unwrap();
+        let (listener, address) = common::bind().await;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().fallback(move || {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    async { StatusCode::SERVICE_UNAVAILABLE }
+                }),
+            )
+            .await
+            .unwrap();
+        });
+        let identity_dir = f.service.config.data_dir.join("installation-relay");
+        std::fs::create_dir_all(&identity_dir).unwrap();
+        let identity = identity_dir.join("identity.json");
+        std::fs::write(&identity, json!({ "origin": format!("http://{address}"), "installationId": id(), "token": "synthetic-native-authority-test" }).to_string()).unwrap();
+        std::fs::set_permissions(identity, std::fs::Permissions::from_mode(0o600)).unwrap();
+        f.service.store.set("native-authority", json!({ "observedAt": now() - 30_000, "accounts": { TRUSTED: { "email": "trusted@example.test", "accessId": "one" } } }), None).await.unwrap();
+
+        let (chat, run) = f.conversation().await;
+        assert_eq!(requests.load(Ordering::SeqCst) > 0, mixed);
+        let placement = placement::reserve(&f.service, &run, &id()).await.unwrap();
+        assert_eq!(placement["nodeId"], vm["id"]);
+        let before = requests.load(Ordering::SeqCst);
+        policy::refresh_chat(&f.service, text(&chat, "id"))
+            .await
+            .unwrap();
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            before,
+            "A concrete VM never requires native authority"
+        );
+        let (status, body) = f
+            .call(
+                &f.trusted,
+                "POST",
+                &format!("/api/chats/{}/messages", text(&chat, "id")),
+                json!({ "id": id(), "text": "Continue in this VM" }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(requests.load(Ordering::SeqCst), before);
+
+        let mut saved = f.service.store.run(text(&run, "id")).await.unwrap();
+        saved["snapshot"]["agent"]["access"]["backend"] = "native".into();
+        f.service
+            .store
+            .change_run(
+                text(&run, "id"),
+                cairn_installation::runs::RunChanges {
+                    snapshot: Some(serde_json::from_value(saved["snapshot"].clone()).unwrap()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            policy::refresh_chat(&f.service, text(&chat, "id"))
+                .await
+                .is_err(),
+            "A concrete native environment still requires fresh authority"
+        );
+        assert!(requests.load(Ordering::SeqCst) > before);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn automatic_vm_only_bot_delegation_needs_no_native_authority() {
+    let mut f = Fixture::new().await;
+    f.service
+        .plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    f.agent = f.service.agent_fixture(json!({ "access": { "backend": "auto", "nodes": [cairn_installation::nodes::LOCAL_NODE_ID] } }), f.agent["id"].as_str()).await.unwrap();
+    f.service
+        .store
+        .set(
+            "native-authority",
+            json!({ "observedAt": 0, "accounts": {} }),
+            None,
+        )
+        .await
+        .unwrap();
+    let owner = RelayContext::new(&common::relay_fixture::context(&f.service).await);
+    let (status, saved) = f
+        .call_as(
+            &owner,
+            "POST",
+            "/api/plugins/discord/connections",
+            json!({
+                "name": "Automatic VM bot", "enabled": true, "agentId": f.agent["id"],
+                "accessMode": "everyone", "settings": { "guildId": "100", "channelId": "200" },
+                "token": "synthetic-discord-token"
+            }),
+            false,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let connection = f
+        .service
+        .store
+        .plugin_instance(text(&saved, "id"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(connection.granted_access.unwrap().backend, "auto");
+    assert!(connection.native_authority.is_none());
+}
+
 impl Fixture {
+    async fn vm_node(&self) -> Value {
+        let mut node = self.node.clone();
+        node["id"] = id().into();
+        node["name"] = "VM runner".into();
+        node["capabilities"]["backend"] = "firecracker".into();
+        node["capabilities"]["kvm"] = true.into();
+        node["nativeEnabled"] = false.into();
+        node["nativeAccounts"] = json!([]);
+        self.service.store.put("nodes", node.clone()).await.unwrap();
+        node
+    }
+
     async fn new() -> Self {
         Self::with_workspace(false).await
     }
@@ -2625,18 +2988,42 @@ async fn converting_wildcard_access_never_reviews_host_root_without_explicit_own
 
 #[tokio::test]
 async fn native_mode_preview_includes_unplaced_automatic_work_and_rejects_concurrent_arrivals() {
-    let f = Fixture::new().await;
+    for backend in ["native", "auto"] {
+        unplaced_administrator_preview(backend).await;
+    }
+}
+
+async fn unplaced_administrator_preview(backend: &str) {
+    let mut f = Fixture::new().await;
+    f.agent = f
+        .service
+        .agent_fixture(
+            json!({ "access": { "backend": backend } }),
+            f.agent["id"].as_str(),
+        )
+        .await
+        .unwrap();
     let node_id = text(&f.node, "id");
     let mut node = f.node.clone();
     node["capabilities"]["nativeModeProtocol"] = 1.into();
     f.service.store.put("nodes", node).await.unwrap();
     let first = f.run();
     common::add_run(&f.service.store, &first).await;
+    let mut vm = f.run();
+    vm["snapshot"]["agent"]["access"]["backend"] = "firecracker".into();
+    common::add_run(&f.service.store, &vm).await;
     let path = format!("/api/nodes/{node_id}/native-mode");
     let (status, preview) = f
         .owner_call("POST", &path, json!({ "mode": "administrator" }))
         .await;
     assert_eq!(status, StatusCode::OK, "{preview}");
+    assert!(
+        !preview["preview"]["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|run| run["id"] == vm["id"])
+    );
     assert!(
         preview["preview"]["conversations"]
             .as_array()

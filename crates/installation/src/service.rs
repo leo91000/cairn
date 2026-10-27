@@ -191,8 +191,8 @@ impl Service {
             editor == AgentEditor::Owner && crate::nodes::native_mode::owner().is_some();
         let reapproved = !review.reapprove_delegations.is_empty();
         let origin = crate::native::policy::origin();
-        if reapproved && crate::native::policy::native(&snapshot) {
-            crate::native::policy::refresh(self).await?;
+        if reapproved {
+            crate::native::policy::refresh_for(self, &snapshot).await?;
         }
         let (agent, created) = self.store.transaction(move |db| {
             authorize(db)?;
@@ -538,9 +538,7 @@ impl Service {
         } else {
             crate::native::policy::origin()
         };
-        if crate::native::policy::native(&run["snapshot"]["agent"]) {
-            crate::native::policy::refresh(self).await?;
-        }
+        crate::native::policy::refresh_for(self, &run["snapshot"]["agent"]).await?;
         let result = self
             .store
             .transaction(move |db| {

@@ -472,7 +472,8 @@ private fun AgentPage(
                             change = ::update,
                         )
                     AgentSection.Sandbox ->
-                        SandboxSection(draft.agent.access.sandbox) { value ->
+                        SandboxSection(draft.agent.access.sandbox, draft.agent.access.backend) {
+                            value ->
                             access { it.copy(sandbox = value) }
                         }
                     AgentSection.Powers ->
@@ -1734,30 +1735,95 @@ private fun NodesSection(
     var explain by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
     val native = access.backend == NATIVE_BACKEND
+    val automatic = access.backend == "auto"
     // Only machines of the agent's backend can run it; the current runner is a VM runner.
     val choices = agent.nodeChoices(nodes)
     SwitchRow(
-        "Exécution native sur l’hôte",
-        if (native)
-            "Partage le GPU et les outils de l’hôte, avec une isolation plus faible qu’une VM. Chaque node doit aussi autoriser les personnes qui dirigent cet agent."
-        else "Dans une VM Firecracker isolée.",
-        native,
+        "Choix automatique · VM ou natif",
+        "Les nouvelles conversations suivent les priorités de cet agent, puis les autres nodes autorisées disponibles. Les conversations existantes gardent leur environnement jusqu’à une migration explicite.",
+        automatic,
         enabled = editable,
-        power = true,
     ) { on ->
-        change { it.withBackend(on) }
+        change { it.withBackend(if (on) "auto" else VM_BACKEND) }
     }
+    if (!automatic)
+        SwitchRow(
+            "Exécution native sur l’hôte",
+            if (native)
+                "Partage le GPU et les outils de l’hôte, avec une isolation plus faible qu’une VM. Chaque node doit aussi autoriser les personnes qui dirigent cet agent."
+            else "Dans une VM Firecracker isolée.",
+            native,
+            enabled = editable,
+            power = true,
+        ) { on ->
+            change { it.withBackend(on) }
+        }
+    Text("Priorités de cet agent", style = MaterialTheme.typography.titleSmall)
+    Note(
+        "Premier node autorisé disponible, puis les suivants. Une priorité ne donne aucun droit d’accès."
+    )
+    agent.nodePriorities.forEachIndexed { index, id ->
+        val name = choices.find { it.id == id }?.name ?: nodes.find { it.id == id }?.name ?: id
+        Column {
+            Text("${index + 1}. $name")
+            Row {
+                TextButton(
+                    enabled = editable && index > 0,
+                    onClick = {
+                        change { current ->
+                            val order = current.nodePriorities.toMutableList()
+                            java.util.Collections.swap(order, index, index - 1)
+                            current.copy(nodePriorities = order)
+                        }
+                    },
+                    modifier = Modifier.semantics { contentDescription = "Monter $name" },
+                ) {
+                    Text("Monter")
+                }
+                TextButton(
+                    enabled = editable && index < agent.nodePriorities.lastIndex,
+                    onClick = {
+                        change { current ->
+                            val order = current.nodePriorities.toMutableList()
+                            java.util.Collections.swap(order, index, index + 1)
+                            current.copy(nodePriorities = order)
+                        }
+                    },
+                    modifier = Modifier.semantics { contentDescription = "Descendre $name" },
+                ) {
+                    Text("Descendre")
+                }
+                TextButton(
+                    enabled = editable,
+                    onClick = { change { it.copy(nodePriorities = it.nodePriorities - id) } },
+                ) {
+                    Text("Retirer la priorité")
+                }
+            }
+        }
+    }
+    choices
+        .filter { it.id !in agent.nodePriorities }
+        .forEach { node ->
+            TextButton(
+                enabled = editable && access.runsOn(node.id),
+                onClick = { change { it.copy(nodePriorities = it.nodePriorities + node.id) } },
+            ) {
+                Text("Prioriser ${node.name}")
+            }
+        }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     SwitchRow(
-        if (native) "Toutes les nodes natives, y compris futures"
+        if (automatic) "Toutes les nodes, y compris futures"
+        else if (native) "Toutes les nodes natives, y compris futures"
         else "Toutes les nodes VM, y compris futures",
-        if (native)
+        if (native || automatic)
             "Chaque node doit aussi activer l’exécution native et autoriser toutes les personnes qui dirigent la conversation."
         else "Les nouvelles machines seront utilisables par cet agent dès leur inscription.",
         access.nodes == null,
         enabled = editable,
     ) { all ->
-        change { it.copy(access = it.access.withAllNodes(all, nodes, agent.id)) }
+        change { it.withAllNodes(all, nodes) }
     }
     if (native && loaded && choices.isEmpty())
         Note("Aucune node native. Inscrivez une machine en exécution native depuis Nodes.")
@@ -1916,10 +1982,18 @@ private fun NodesSection(
 }
 
 @Composable
-private fun SandboxSection(value: String, change: (String) -> Unit) {
+private fun SandboxSection(value: String, backend: String, change: (String) -> Unit) {
     Note("Un mode plus strict bloque les exécutions en file qui demandaient plus.")
     SANDBOX_CHOICES.forEach { (key, label, effect) ->
-        RadioRow(label, effect, value == key) { change(key) }
+        val description =
+            when {
+                key != "yolo" || backend == VM_BACKEND -> effect
+                backend == "auto" ->
+                    "Les droits suivent le node choisi : VM privée ou hôte natif de confiance."
+                else ->
+                    "Processus natif. Les droits de l’hôte suivent son mode protégé ou administrateur confirmé."
+            }
+        RadioRow(label, description, value == key) { change(key) }
     }
 }
 

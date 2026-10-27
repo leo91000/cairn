@@ -19,5 +19,9 @@ export interface Agent {
   timeoutMinutes: number
   access: AccessPolicy
   exclusiveNodes: Array<string>
+  /**
+   * Preferred placement order. This does not grant access to any node.
+   */
+  nodePriorities: Array<string>
   plugins: Array<string>
 }
