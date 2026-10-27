@@ -91,7 +91,7 @@ async fn restart_restores_missing_chat_summaries_once_without_repeating_existing
             let run_id = run_id.clone();
             let events = restarted
                 .store
-                .read(move |db| db.events(&run_id, 0, 100))
+                .read(move |db| db.events_fixture(&run_id, 0, 100))
                 .await
                 .unwrap();
             let answers = events
@@ -487,7 +487,7 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
         .unwrap();
     let events = reopened
         .store
-        .read(move |db| db.events(&run_id, 0, 100))
+        .read(move |db| db.events_fixture(&run_id, 0, 100))
         .await
         .unwrap();
     assert_eq!(events.len(), 1);

@@ -8,6 +8,31 @@ class ContractsTest {
     private val json = Json { encodeDefaults = true }
 
     @Test
+    fun eventAndHistoryContractsPreserveAdapterBoundariesAndCursors() {
+        val root = File(System.getProperty("cairn.contractWire")).parentFile
+        val corpus =
+            json
+                .parseToJsonElement(
+                    File(root, "../../../tests/fixtures/event-contracts.json").readText()
+                )
+                .jsonObject
+        for (event in corpus.getValue("events").jsonArray) {
+            assertEquals(
+                event,
+                json.encodeToJsonElement(json.decodeFromJsonElement<RunEvent>(event)),
+            )
+        }
+        val history = corpus.getValue("history")
+        assertEquals(
+            history,
+            json.encodeToJsonElement(json.decodeFromJsonElement<HistoryPage>(history)),
+        )
+        corpus.getValue("invalidEvents").jsonArray.forEach { value ->
+            assertFails(value.toString()) { json.decodeFromJsonElement<RunEvent>(value) }
+        }
+    }
+
+    @Test
     fun runDefaultsStatesAndRetryMatchRust() {
         val root = File(System.getProperty("cairn.contractWire")).parentFile
         val corpus =

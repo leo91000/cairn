@@ -17,5 +17,8 @@ data class RunEvent(
     val text: String,
     val type: String,
 ) {
-    init {}
+    init {
+        require(createdAt in -9007199254740991L..9007199254740991L)
+        require(id in -9007199254740991L..9007199254740991L)
+    }
 }

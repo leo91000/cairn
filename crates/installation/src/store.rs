@@ -76,10 +76,10 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS records_kind ON records(kind,updated_at DESC);
 CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
-CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL,type TEXT NOT NULL,text TEXT NOT NULL,payload TEXT);
+CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),type TEXT NOT NULL CHECK(length(type)>0),text TEXT NOT NULL,payload TEXT CHECK(payload IS NULL OR json_valid(payload)));
 CREATE TABLE run_checkpoints(run_id TEXT PRIMARY KEY NOT NULL REFERENCES runs(id) ON DELETE CASCADE,state TEXT NOT NULL CHECK(json_valid(state) AND json_type(state)='object'));
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id,id);
-CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY,data TEXT NOT NULL,expires INTEGER);
+CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%'),data TEXT NOT NULL,expires INTEGER);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at INTEGER NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL);",
         )?;
             tx.execute_batch(
@@ -178,13 +178,24 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         &self,
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        self.write(move |db| {
+        let changes = self.0.changes.clone();
+        let preparation = crate::plugins::operations::publication_cancellation();
+        self.call(&self.0.writer, move |db| {
+            if preparation.is_some_and(|token| token.is_cancelled()) {
+                return Err(Error::conflict("Preparation was cancelled."));
+            }
+            let before = db.0.total_changes();
             let tx = rusqlite::Transaction::new_unchecked(
                 db.0,
                 rusqlite::TransactionBehavior::Immediate,
             )?;
             let value = f(&mut Db(&tx))?;
             tx.commit()?;
+            // SQLite total_changes includes rolled-back rows. Only a successful
+            // commit may publish a revision; a failed/empty transaction stays quiet.
+            if db.0.total_changes() != before {
+                changes.send_modify(|revision| *revision = revision.wrapping_add(1));
+            }
             Ok(value)
         })
         .await
@@ -675,27 +686,34 @@ impl Db<'_> {
             summary: String,
             finished_at: Option<i64>,
         }
-        let summaries: Vec<Summary> = self.json_rows_as(
-            "SELECT json_object('id',r.id,'summary',json_extract(r.data,'$.summary'),
-                'finishedAt',json_extract(r.data,'$.finishedAt')) FROM runs r
-             WHERE r.status='succeeded' AND json_extract(r.data,'$.trigger')='chat'
+        let mut query = self.0.prepare_cached(
+            "SELECT r.id,r.summary,r.finished_at FROM runs r
+             WHERE r.status='succeeded' AND r.trigger='chat'
                AND (?1 IS NULL OR r.id=?1)
                AND NOT EXISTS (
                  SELECT 1 FROM records c
                  WHERE c.kind='chats' AND json_extract(c.data,'$.runId')=r.id
                    AND COALESCE(json_extract(c.data,'$.lifecycle'),'active')!='active'
                )
-               AND length(trim(COALESCE(json_extract(r.data,'$.summary'),''),char(9)||char(10)||char(13)||' '))>0
+               AND length(trim(COALESCE(r.summary,''),char(9)||char(10)||char(13)||' '))>0
                AND NOT EXISTS (
                  SELECT 1 FROM events e WHERE e.run_id=r.id
                    AND e.id>COALESCE((SELECT MAX(u.id) FROM events u WHERE u.run_id=r.id AND u.type='chat.user'),0)
                    AND (json_extract(e.payload,'$.item.type')='agent_message'
                      OR (e.type='item.completed' AND json_extract(e.payload,'$.item.type') IS NULL))
                    AND trim(substr(COALESCE(json_extract(e.payload,'$.item.text'),e.text),1,100000),char(9)||char(10)||char(13)||' ')
-                     =trim(json_extract(r.data,'$.summary'),char(9)||char(10)||char(13)||' ')
+                     =trim(r.summary,char(9)||char(10)||char(13)||' ')
                )",
-            [run],
         )?;
+        let summaries = query
+            .query_map([run], |row| {
+                Ok(Summary {
+                    id: row.get(0)?,
+                    summary: row.get(1)?,
+                    finished_at: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         for Summary {
             id,
             summary,
@@ -720,13 +738,6 @@ impl Db<'_> {
             )?;
         }
         Ok(())
-    }
-
-    pub fn events(&self, run: &str, after: i64, limit: i64) -> Result<Vec<Value>> {
-        self.event_page(run, after, limit)?
-            .into_iter()
-            .map(|event| serde_json::to_value(event).map_err(Error::from))
-            .collect()
     }
 
     // Stored payloads are already JSON. Validate their bytes without allocating

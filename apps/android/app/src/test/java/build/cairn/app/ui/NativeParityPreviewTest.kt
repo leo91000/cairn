@@ -178,22 +178,29 @@ class NativeParityPreviewTest {
                         "une-longue-adresse-".repeat(7)
             val events =
                 listOf(
-                    RunEvent(id = 1,
-createdAt = now - 60000,
-type = "chat.user",
-text = "Peux-tu simplifier cette interface ?"),
-                    RunEvent(id = 2,
-createdAt = now,
-type = "item.completed",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                            "item" to
-                                buildJsonObject {
-                                    put("id", "reply")
-                                    put("type", "agent_message")
-                                    put("text", reply)
-                                }
-                        ))),
+                    RunEvent(
+                        id = 1,
+                        createdAt = now - 60000,
+                        type = "chat.user",
+                        text = "Peux-tu simplifier cette interface ?",
+                    ),
+                    RunEvent(
+                        id = 2,
+                        createdAt = now,
+                        type = "item.completed",
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "item" to
+                                        buildJsonObject {
+                                            put("id", "reply")
+                                            put("type", "agent_message")
+                                            put("text", reply)
+                                        }
+                                )
+                            ),
+                    ),
                 )
             fun stream(state: LiveState): MockResponse {
                 val frame =

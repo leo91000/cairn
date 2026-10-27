@@ -20,10 +20,12 @@ class HistoryCacheMeasurementTest {
     fun `measure a loaded conversation against the former 200 event window`() = runBlocking {
         val events =
             (1L..1250L).map {
-                RunEvent(id = it,
-createdAt = it,
-type = "item.completed",
-text = "Output $it\n" + "Synthetic output line.\n".repeat(20))
+                RunEvent(
+                    id = it,
+                    createdAt = it,
+                    type = "item.completed",
+                    text = "Output $it\n" + "Synthetic output line.\n".repeat(20),
+                )
             }
         val process =
             ManagementFactory.getOperatingSystemMXBean() as com.sun.management.OperatingSystemMXBean

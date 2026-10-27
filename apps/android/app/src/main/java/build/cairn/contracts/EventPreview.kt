@@ -11,7 +11,11 @@ data class EventPreview(
     val runId: String,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val text: String? = null,
-    val type: String,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val type: String? = null,
 ) {
-    init {}
+    init {
+        require(createdAt in -9007199254740991L..9007199254740991L)
+        require(id in -9007199254740991L..9007199254740991L)
+    }
 }

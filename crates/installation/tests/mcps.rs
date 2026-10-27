@@ -122,7 +122,8 @@ async fn read_every_page(mcp: &Mcp, run: &str, output: &str) -> i64 {
             .await;
         assert_ne!(response["result"]["isError"], true);
         let page = result(&response);
-        for event in page["events"].as_array().unwrap() {
+        for record in page["events"].as_array().unwrap() {
+            let event = &record["event"];
             if event["type"] == "item.completed" {
                 assert_eq!(event["payload"]["item"]["aggregated_output"], output);
                 seen.push(event["payload"]["item"]["id"].as_i64().unwrap());
@@ -258,10 +259,31 @@ async fn run_history_includes_the_engine_retries_limits_and_notices() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|event| event["type"] != "status")
-        .map(|event| event["payload"].clone())
+        .filter(|record| record["event"]["type"] != "status")
+        .map(|record| record["event"]["payload"].clone())
         .collect();
     assert_eq!(payloads, reports);
+    let first = result(&response)["events"][0]["event"]["id"]
+        .as_i64()
+        .unwrap();
+    let revision = format!("v1:{run_id}:{first}");
+    let window = mcp
+        .call(
+            "read_run_history",
+            json!({"runId":run_id,"history":revision}),
+        )
+        .await;
+    assert_ne!(window["result"]["isError"], true);
+    let page = result(&window);
+    assert_eq!(page["history"], revision);
+    assert_eq!(page["events"].as_array().unwrap().len(), 4);
+    let stale = mcp
+        .call(
+            "read_run_history",
+            json!({"runId":run_id,"history":"stale"}),
+        )
+        .await;
+    assert_eq!(stale["result"]["isError"], true);
     server.abort();
 }
 
@@ -312,8 +334,8 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
         .await;
     let page = result(&response);
     let event = &page["events"][0];
-    assert_eq!(event["truncated"], true);
-    let event_id = event["id"].as_i64().unwrap();
+    assert_eq!(event["kind"], "truncated");
+    let event_id = event["preview"]["id"].as_i64().unwrap();
     let (original, digest) = read_whole_event(&mcp, run_id, event_id).await;
     assert_eq!(
         serde_json::from_str::<Value>(&original).unwrap()["payload"],
@@ -337,7 +359,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
         )
         .await;
     let last = result(&response);
-    assert_eq!(last["events"][0]["type"], "turn.completed");
+    assert_eq!(last["events"][0]["event"]["type"], "turn.completed");
     assert_eq!(last["hasMore"], false);
 
     let other_run = manual_run(&s, "Other history", "Other run").await;

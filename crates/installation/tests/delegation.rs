@@ -1,3 +1,4 @@
+use crate::common::run_fixture::DbRunFixture;
 use common::AgentFixture;
 use common::PluginStoreFixture;
 use common::StoreAgentFixture;
@@ -215,7 +216,7 @@ async fn a_delegated_conversation_remembers_its_requester_and_runs_on_the_chosen
     let run = turn.run.clone();
     let events =
         f.s.store
-            .read(move |db| db.events(&run, 0, 500))
+            .read(move |db| db.events_fixture(&run, 0, 500))
             .await
             .unwrap();
     let announced: Vec<_> = events
@@ -396,7 +397,7 @@ async fn omitted_engine_choices_are_recorded_before_the_task_starts() {
     assert_eq!(delegated["model"], "gpt-5.5");
     let events =
         f.s.store
-            .read(move |db| db.events(&turn.run, 0, 500))
+            .read(move |db| db.events_fixture(&turn.run, 0, 500))
             .await
             .unwrap();
     let announced = events

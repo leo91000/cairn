@@ -25,20 +25,25 @@ class HistoryCacheCostDiagnosisTest {
         val events =
             (1L..count.toLong()).map { id ->
                 val text = "Synthetic cache output. ".repeat(8)
-                RunEvent(id = id,
-createdAt = id,
-type = "item.completed",
-text = text,
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                        "item" to
-                            buildJsonObject {
-                                put("id", "item-$id")
-                                put("type", "command_execution")
-                                put("aggregated_output", text)
-                                put("status", "completed")
-                            }
-                    )),
-runId = "fixture")
+                RunEvent(
+                    id = id,
+                    createdAt = id,
+                    type = "item.completed",
+                    text = text,
+                    payload =
+                        kotlinx.serialization.json.JsonObject(
+                            mapOf(
+                                "item" to
+                                    buildJsonObject {
+                                        put("id", "item-$id")
+                                        put("type", "command_execution")
+                                        put("aggregated_output", text)
+                                        put("status", "completed")
+                                    }
+                            )
+                        ),
+                    runId = "fixture",
+                )
             }
         return CachedHistory(count.toLong(), "v1:fixture:1", LiveState(), events)
     }

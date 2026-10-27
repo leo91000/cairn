@@ -1,5 +1,6 @@
 use common::McpFixture;
 use common::StoreAgentFixture;
+use common::run_fixture::DbRunFixture;
 
 #[path = "nodes/backend_migration.rs"]
 mod backend_migration;
@@ -4534,7 +4535,7 @@ async fn node_alerts_reach_the_conversation_and_clients_without_repeating() {
     let events = owner
         .service
         .store
-        .read(move |db| db.events(&run, 0, 100))
+        .read(move |db| db.events_fixture(&run, 0, 100))
         .await
         .unwrap();
     assert!(

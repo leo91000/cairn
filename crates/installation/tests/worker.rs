@@ -1,3 +1,4 @@
+use crate::common::run_fixture::DbRunFixture;
 use common::AgentFixture;
 use common::MissionFixture;
 use common::StoreAgentFixture;
@@ -560,7 +561,7 @@ async fn agent_failure_without_a_message_keeps_its_code_for_the_retry() {
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 1000))
+        .read(move |db| db.events_fixture(&id, 0, 1000))
         .await
         .unwrap();
     let failures = events
@@ -631,7 +632,7 @@ async fn agent_retries_stop_after_five_attempts_or_when_the_error_becomes_termin
         let events = fixture
             .service
             .store
-            .read(move |db| db.events(&id, 0, 1000))
+            .read(move |db| db.events_fixture(&id, 0, 1000))
             .await
             .unwrap();
         let failures = events
@@ -679,7 +680,7 @@ async fn cancellation_during_retry_wait_does_not_launch_another_agent() {
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 1000))
+        .read(move |db| db.events_fixture(&id, 0, 1000))
         .await
         .unwrap();
     let after_retry = events
@@ -885,7 +886,7 @@ async fn verbose_tools_do_not_hide_chat_answers_or_failures() {
             .store
             .read(move |db| {
                 Ok((
-                    db.events(&run_id, 0, 500)?,
+                    db.events_fixture(&run_id, 0, 500)?,
                     serde_json::to_value(db.events_before(&run_id, i64::MAX)?.0)?,
                 ))
             })
@@ -1157,7 +1158,7 @@ async fn native_worker_records_artifacts_and_completes_task() {
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 500))
+        .read(move |db| db.events_fixture(&id, 0, 500))
         .await
         .unwrap();
     assert!(events.iter().any(|e| e["payload"].is_object()));
@@ -1349,7 +1350,7 @@ async fn sleeping_chat_survives_worker_restart_and_releases_capacity_before_waki
     let run_id = run.clone();
     let events = s
         .store
-        .read(move |db| db.events(&run_id, 0, 100))
+        .read(move |db| db.events_fixture(&run_id, 0, 100))
         .await
         .unwrap();
     let wake_event = events
@@ -1484,7 +1485,7 @@ async fn waiting_mission_survives_restart_and_releases_capacity_without_finishin
     let id = run_id.to_owned();
     let events = s
         .store
-        .read(move |db| db.events(&id, 0, 300))
+        .read(move |db| db.events_fixture(&id, 0, 300))
         .await
         .unwrap();
     assert_eq!(
@@ -1668,7 +1669,7 @@ async fn condition_wait_yields_the_only_slot_to_its_dependency_and_resumes_the_s
     let run_id = run.clone();
     let events = s
         .store
-        .read(move |db| db.events(&run_id, 0, 100))
+        .read(move |db| db.events_fixture(&run_id, 0, 100))
         .await
         .unwrap();
     assert_eq!(
@@ -2496,7 +2497,7 @@ async fn failed_provider_startup_can_retry_without_replaying_an_uncertain_launch
             let id = run_id.clone();
             let events = s
                 .store
-                .read(move |db| db.events(&id, 0, 500))
+                .read(move |db| db.events_fixture(&id, 0, 500))
                 .await
                 .unwrap();
             assert!(events.iter().any(|event| {
@@ -2854,7 +2855,7 @@ async fn unlimited_runs_cancel_and_resume_without_creating_a_deadline() {
             let id = id.to_owned();
             let events = s
                 .store
-                .read(move |db| db.events(&id, 0, 1000))
+                .read(move |db| db.events_fixture(&id, 0, 1000))
                 .await
                 .unwrap();
             events
@@ -3050,7 +3051,7 @@ async fn queued_work_waits_for_node_capacity_without_failing() {
     let id = run_id.to_owned();
     let events = s
         .store
-        .read(move |db| db.events(&id, 0, 500))
+        .read(move |db| db.events_fixture(&id, 0, 500))
         .await
         .unwrap();
     let waits = events

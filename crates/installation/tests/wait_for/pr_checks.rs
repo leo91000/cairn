@@ -1,4 +1,5 @@
 use super::*;
+use crate::common::run_fixture::DbRunFixture;
 
 #[tokio::test]
 async fn legacy_statuses_cannot_satisfy_multiple_application_bindings() {
@@ -141,7 +142,7 @@ async fn required_pr_checks_resume_once_without_waiting_for_optional_checks() {
     let run = f.run.clone();
     let events = restarted
         .store
-        .read(move |db| db.events(&run, 0, 1000))
+        .read(move |db| db.events_fixture(&run, 0, 1000))
         .await
         .unwrap();
     assert_eq!(

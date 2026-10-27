@@ -74,29 +74,38 @@ abstract class QueueStripCases {
                 )
             val events =
                 listOf(
-                    RunEvent(id = 1,
-createdAt = System.currentTimeMillis() - 60000,
-type = "chat.user",
-text = "Peux-tu revoir l’interface de la file d’attente ?"),
-                    RunEvent(id = 2,
-createdAt = System.currentTimeMillis() - 50000,
-type = "turn.started",
-text = ""),
-                    RunEvent(id = 3,
-createdAt = System.currentTimeMillis() - 40000,
-type = "item.completed",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                            "item" to
-                                buildJsonObject {
-                                    put("id", "answer")
-                                    put("type", "agent_message")
-                                    put(
-                                        "text",
-                                        "Je regarde le composant actuel et je prépare une version plus lisible.",
-                                    )
-                                }
-                        ))),
+                    RunEvent(
+                        id = 1,
+                        createdAt = System.currentTimeMillis() - 60000,
+                        type = "chat.user",
+                        text = "Peux-tu revoir l’interface de la file d’attente ?",
+                    ),
+                    RunEvent(
+                        id = 2,
+                        createdAt = System.currentTimeMillis() - 50000,
+                        type = "turn.started",
+                        text = "",
+                    ),
+                    RunEvent(
+                        id = 3,
+                        createdAt = System.currentTimeMillis() - 40000,
+                        type = "item.completed",
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "item" to
+                                        buildJsonObject {
+                                            put("id", "answer")
+                                            put("type", "agent_message")
+                                            put(
+                                                "text",
+                                                "Je regarde le composant actuel et je prépare une version plus lisible.",
+                                            )
+                                        }
+                                )
+                            ),
+                    ),
                 )
             server.dispatcher =
                 object : Dispatcher() {

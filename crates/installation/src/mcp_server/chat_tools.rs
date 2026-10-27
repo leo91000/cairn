@@ -100,13 +100,35 @@ fn detail(db: &Db<'_>, args: &Value) -> Result<Value> {
     Ok(result)
 }
 
+fn record_preview(record: Value, fields: &[&str]) -> Result<(Value, usize)> {
+    let bytes = serde_json::to_vec(&record)?.len();
+    if bytes <= PAGE_BYTES {
+        return Ok((record, bytes));
+    }
+    let mut preview = json!({
+        "truncated": true,
+        "totalBytes": bytes
+    });
+    let mut bytes = serde_json::to_vec(&preview)?.len();
+    for field in fields {
+        if let Some(value) = record.get(*field) {
+            let size = serde_json::to_vec(value)?.len() + field.len() + 4;
+            if bytes + size <= PAGE_BYTES {
+                preview[*field] = value.clone();
+                bytes += size;
+            }
+        }
+    }
+    Ok((preview, bytes))
+}
+
 pub(super) fn page(values: &[Value], args: &Value, key: &str) -> Result<Value> {
     let offset = args["offset"].as_u64().unwrap() as usize;
     let limit = args["limit"].as_u64().unwrap() as usize;
     let mut items = Vec::new();
     let mut bytes = 0;
     for value in values.iter().skip(offset).take(limit) {
-        let (value, size) = super::run_record_preview(
+        let (value, size) = record_preview(
             value.clone(),
             &["id", "chatId", "runId", "status", "createdAt", "blocking"],
         )?;

@@ -44,20 +44,26 @@ class HistoryScrollDeviceTest {
                     put("exit_code", 0)
                 }
                 listOf(
-                    RunEvent(id = id,
-createdAt = id,
-type = "item.started",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf("item" to item))),
-                    RunEvent(id = id + 1,
-createdAt = id + 1,
-type = "diagnostic",
-text = "heartbeat"),
-                    RunEvent(id = id + 2,
-createdAt = id + 2,
-type = "item.completed",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf("item" to item))),
+                    RunEvent(
+                        id = id,
+                        createdAt = id,
+                        type = "item.started",
+                        text = "",
+                        payload = kotlinx.serialization.json.JsonObject(mapOf("item" to item)),
+                    ),
+                    RunEvent(
+                        id = id + 1,
+                        createdAt = id + 1,
+                        type = "diagnostic",
+                        text = "heartbeat",
+                    ),
+                    RunEvent(
+                        id = id + 2,
+                        createdAt = id + 2,
+                        type = "item.completed",
+                        text = "",
+                        payload = kotlinx.serialization.json.JsonObject(mapOf("item" to item)),
+                    ),
                 )
             }
         val entries = TimelineKeys().stabilize("grouping", timelineEntries(events, chat = true))
@@ -87,46 +93,58 @@ payload = kotlinx.serialization.json.JsonObject(mapOf("item" to item))),
         (1..turns).flatMap { turn ->
             val base = (turn - 1) * 10L
             listOf(
-                RunEvent(id = base + 1,
-createdAt = base + 1,
-type = "chat.user",
-text = "Question $turn : peux-tu vérifier l’étape $turn ?",
-runId = "long")
+                RunEvent(
+                    id = base + 1,
+                    createdAt = base + 1,
+                    type = "chat.user",
+                    text = "Question $turn : peux-tu vérifier l’étape $turn ?",
+                    runId = "long",
+                )
             ) +
                 (1..8).map { step ->
-                    RunEvent(id = base + 1 + step,
-createdAt = base + 1 + step,
-type = "item.completed",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                            "item" to
-                                buildJsonObject {
-                                    put("id", "cmd-$turn-$step")
-                                    put("type", "command_execution")
-                                    put("command", "./gradlew check --step $step")
-                                    put("status", "completed")
-                                    put("aggregated_output", "ok")
-                                    put("exit_code", 0)
-                                }
-                        )),
-runId = "long")
-                } +
-                RunEvent(id = base + 10,
-createdAt = base + 10,
-type = "item.completed",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                        "item" to
-                            buildJsonObject {
-                                put("id", "answer-$turn")
-                                put("type", "agent_message")
-                                put(
-                                    "text",
-                                    "Réponse $turn. L’étape $turn est vérifiée : les commandes passent et rien d’autre n’a changé.",
+                    RunEvent(
+                        id = base + 1 + step,
+                        createdAt = base + 1 + step,
+                        type = "item.completed",
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "item" to
+                                        buildJsonObject {
+                                            put("id", "cmd-$turn-$step")
+                                            put("type", "command_execution")
+                                            put("command", "./gradlew check --step $step")
+                                            put("status", "completed")
+                                            put("aggregated_output", "ok")
+                                            put("exit_code", 0)
+                                        }
                                 )
-                            }
-                    )),
-runId = "long")
+                            ),
+                        runId = "long",
+                    )
+                } +
+                RunEvent(
+                    id = base + 10,
+                    createdAt = base + 10,
+                    type = "item.completed",
+                    text = "",
+                    payload =
+                        kotlinx.serialization.json.JsonObject(
+                            mapOf(
+                                "item" to
+                                    buildJsonObject {
+                                        put("id", "answer-$turn")
+                                        put("type", "agent_message")
+                                        put(
+                                            "text",
+                                            "Réponse $turn. L’étape $turn est vérifiée : les commandes passent et rien d’autre n’a changé.",
+                                        )
+                                    }
+                            )
+                        ),
+                    runId = "long",
+                )
         }
 
     @Test
@@ -164,10 +182,10 @@ runId = "long")
                                 .setBody(
                                     wireJson.encodeToString(
                                         HistoryPage(
-                                            page,
-                                            history,
-                                            page.first().id,
-                                            page.first().id > 1,
+                                            events = page,
+                                            history = history,
+                                            oldest = page.first().id,
+                                            hasOlder = page.first().id > 1,
                                         )
                                     )
                                 )

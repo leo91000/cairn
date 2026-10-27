@@ -40,19 +40,24 @@ class MissionChatDeviceTest {
                     ),
             )
         val child =
-            RunEvent(id = 1,
-createdAt = System.currentTimeMillis(),
-type = "item.started",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                    "item" to
-                        buildJsonObject {
-                            put("id", "child")
-                            put("type", "subagent")
-                            put("name", "CI observer")
-                            put("status", "in_progress")
-                        }
-                )))
+            RunEvent(
+                id = 1,
+                createdAt = System.currentTimeMillis(),
+                type = "item.started",
+                text = "",
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        mapOf(
+                            "item" to
+                                buildJsonObject {
+                                    put("id", "child")
+                                    put("type", "subagent")
+                                    put("name", "CI observer")
+                                    put("status", "in_progress")
+                                }
+                        )
+                    ),
+            )
         val cancellations = java.util.concurrent.atomic.AtomicInteger()
         MockWebServer().use { server ->
             server.dispatcher =

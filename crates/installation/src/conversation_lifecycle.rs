@@ -542,16 +542,6 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
-        let state = RunCheckpoint::from_value(json!({
-            "launched": true,
-            "completed": true,
-            "controllerRecoveries": 2,
-            "prepared": { "workspace": "preserved" },
-        }))
-        .unwrap();
-        let checkpoint = Checkpoint::new(store.clone(), "run".into(), state);
-        checkpoint.persist().await.unwrap();
-        let before = store.checkpoint_boundary("run").await.unwrap();
         store
             .transaction(|db| {
                 db.add_run_fixture(
@@ -565,6 +555,22 @@ mod tests {
                     }),
                     None,
                 )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let state = RunCheckpoint::from_value(json!({
+            "launched": true,
+            "completed": true,
+            "controllerRecoveries": 2,
+            "prepared": { "workspace": "preserved" },
+        }))
+        .unwrap();
+        let checkpoint = Checkpoint::new(store.clone(), "run".into(), state);
+        checkpoint.persist().await.unwrap();
+        let before = store.checkpoint_boundary("run").await.unwrap();
+        store
+            .transaction(|db| {
                 db.put(
                     "chats",
                     &json!({

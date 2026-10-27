@@ -138,14 +138,17 @@ async fn record_failure(
     if status != RunStatus::Queued {
         patch.boundary = Some(json!({ "wakeup": null }));
     }
-    s.store.change_run(run_id, patch).await?;
     let kind = if s.shutdown.is_cancelled() {
-        "status"
+        EventKind::Status
     } else {
-        "error"
+        EventKind::Error
     };
+    let run_id = run_id.to_owned();
     s.store
-        .event(run_id, &EventKind::from_adapter(kind), &summary, None)
+        .transaction(move |db| {
+            db.change_run(&run_id, patch)?;
+            db.event(&run_id, &kind, &summary, None)
+        })
         .await
 }
 

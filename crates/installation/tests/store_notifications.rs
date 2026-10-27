@@ -288,3 +288,73 @@ async fn cancelling_a_writer_caller_still_notifies_after_its_commit() {
         .unwrap();
     assert_eq!(store.kv("committed").await.unwrap(), Some(json!(true)));
 }
+
+#[tokio::test]
+async fn rolled_back_state_and_events_never_publish_a_store_revision() {
+    let root = tempfile::TempDir::new().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            db.add_run_fixture(
+                &json!({"id": "run", "taskId": "task", "status": "running"}),
+                None,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let changes = store.subscribe();
+    let result = store
+        .transaction(|db| {
+            db.change_run(
+                "run",
+                cairn_installation::runs::RunChanges {
+                    session_id: Some(Some("must-roll-back".into())),
+                    ..Default::default()
+                },
+            )?;
+            db.event("run", &cairn_contracts::EventKind::TurnStarted, "", None)?;
+            Err::<(), _>(cairn_installation::error::Error::conflict(
+                "Abort publication",
+            ))
+        })
+        .await;
+    assert!(result.is_err());
+    assert!(!changes.has_changed().unwrap());
+    assert!(store.run_state("run").await.unwrap().session_id.is_none());
+    assert!(
+        store
+            .read(|db| db.event_page("run", 0, 100))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    store.transaction(|_| Ok(())).await.unwrap();
+    assert!(!changes.has_changed().unwrap());
+    store
+        .transaction(|db| {
+            db.change_run(
+                "run",
+                cairn_installation::runs::RunChanges {
+                    session_id: Some(Some("committed".into())),
+                    ..Default::default()
+                },
+            )?;
+            db.event("run", &cairn_contracts::EventKind::TurnStarted, "", None)
+        })
+        .await
+        .unwrap();
+    assert!(changes.has_changed().unwrap());
+    assert_eq!(
+        store.run_state("run").await.unwrap().session_id.as_deref(),
+        Some("committed")
+    );
+    assert_eq!(
+        store
+            .read(|db| db.event_page("run", 0, 100))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}

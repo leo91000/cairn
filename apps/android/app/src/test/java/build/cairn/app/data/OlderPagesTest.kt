@@ -4,11 +4,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class OlderPagesTest {
-    private fun event(id: Long) = RunEvent(id = id,
-createdAt = id,
-type = "chat.user",
-text = "Message $id",
-runId = "r1")
+    private fun event(id: Long) =
+        RunEvent(
+            id = id,
+            createdAt = id,
+            type = "chat.user",
+            text = "Message $id",
+            runId = "r1",
+        )
 
     private fun snapshot() =
         LiveSnapshot(
@@ -20,7 +23,13 @@ runId = "r1")
             cursor = 12,
         )
 
-    private fun page() = HistoryPage((5L..9L).map(::event), "h1", 5, true)
+    private fun page() =
+        HistoryPage(
+            events = (5L..9L).map(::event),
+            history = "h1",
+            oldest = 5,
+            hasOlder = true,
+        )
 
     @Test
     fun `a page from a replaced history or epoch is rejected without altering current pages`() {
@@ -70,7 +79,16 @@ runId = "r1")
         assertEquals(restored, pages.display(restored))
         val applied =
             checkNotNull(
-                pages.apply(HistoryPage((1L..4L).map(::event), "h1", 1, false), restored, restored)
+                pages.apply(
+                    HistoryPage(
+                        events = (1L..4L).map(::event),
+                        history = "h1",
+                        oldest = 1,
+                        hasOlder = false,
+                    ),
+                    restored,
+                    restored,
+                )
             )
         val revalidated = pages.display(restored.copy(cursor = 13))
         assertEquals((1L..12L).toList(), applied.events.map { it.id })

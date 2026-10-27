@@ -807,20 +807,30 @@ class DirectTransportTest {
 status = "running",
 taskId = "",)), false, false, history = "h1",))}\n\n"
                     val first =
-                        RunEvent(id = 7,
-createdAt = 7,
-type = "turn.waiting",
-text = "direct",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                                "tasks" to
-                                    buildJsonArray {
-                                        addJsonObject { put("description", "Vérifier la CI") }
-                                    }
-                            )))
-                    val next = RunEvent(id = 8,
-createdAt = 8,
-type = "output",
-text = "relay")
+                        RunEvent(
+                            id = 7,
+                            createdAt = 7,
+                            type = "turn.waiting",
+                            text = "direct",
+                            payload =
+                                kotlinx.serialization.json.JsonObject(
+                                    mapOf(
+                                        "tasks" to
+                                            buildJsonArray {
+                                                addJsonObject {
+                                                    put("description", "Vérifier la CI")
+                                                }
+                                            }
+                                    )
+                                ),
+                        )
+                    val next =
+                        RunEvent(
+                            id = 8,
+                            createdAt = 8,
+                            type = "output",
+                            text = "relay",
+                        )
                     server.enqueue(
                         MockResponse()
                             .setHeader("Content-Type", "text/event-stream")

@@ -1022,3 +1022,6 @@ async fn run_storage_layouts() {
 
 #[path = "project_measurement/plugin_packages.rs"]
 mod plugin_packages;
+
+#[path = "measurements/events.rs"]
+mod event_measurement;

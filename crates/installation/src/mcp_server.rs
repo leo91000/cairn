@@ -675,66 +675,78 @@ pub(crate) async fn operation(
     invoke(s, name, args, None).await
 }
 
-fn run_record_preview(record: Value, fields: &[&str]) -> Result<(Value, usize)> {
-    let bytes = serde_json::to_vec(&record)?.len();
-    if bytes <= RUN_PAGE_BYTES {
-        return Ok((record, bytes));
+fn event_preview(event: cairn_contracts::RunEvent) -> Result<cairn_contracts::RunEventPage> {
+    use cairn_contracts::{EventPreview, RunEventPage};
+    let total_bytes = serde_json::to_vec(&event)?.len() as u64;
+    let complete = RunEventPage::Complete { event };
+    if serde_json::to_vec(&complete)?.len() <= RUN_PAGE_BYTES - 2 {
+        return Ok(complete);
     }
-    let mut preview = json!({
-        "truncated": true,
-        "totalBytes": bytes
-    });
-    let mut bytes = serde_json::to_vec(&preview)?.len();
-    for field in fields {
-        if let Some(value) = record.get(*field) {
-            let size = serde_json::to_vec(value)?.len() + field.len() + 4;
-            if bytes + size <= RUN_PAGE_BYTES {
-                preview[*field] = value.clone();
-                bytes += size;
-            }
+    let RunEventPage::Complete { event } = complete else {
+        unreachable!()
+    };
+    let mut preview = RunEventPage::Truncated {
+        total_bytes,
+        preview: EventPreview {
+            id: event.id,
+            run_id: event.run_id,
+            created_at: event.created_at,
+            kind: None,
+            text: None,
+        },
+    };
+    if let RunEventPage::Truncated {
+        preview: fields, ..
+    } = &mut preview
+    {
+        // Unknown adapter markers can themselves be oversized. The full event
+        // remains addressable by ID; omit fields that do not fit the preview.
+        let marker = event.kind.as_str().to_owned();
+        let remaining = RUN_PAGE_BYTES - 1024;
+        let marker_bytes = serde_json::to_vec(&marker)?.len();
+        let text_bytes = serde_json::to_vec(&event.text)?.len();
+        if marker_bytes <= remaining {
+            fields.kind = Some(marker);
+        }
+        if marker_bytes.saturating_add(text_bytes) <= remaining {
+            fields.text = Some(event.text);
         }
     }
-    Ok((preview, bytes))
+    Ok(preview)
 }
 
 pub(crate) fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
-    let run = required(db.run(id)?, "Run not found")?;
-    let (run, _) = run_record_preview(
-        run,
-        &[
-            "id",
-            "taskId",
-            "projectId",
-            "status",
-            "trigger",
-            "createdAt",
-            "startedAt",
-            "finishedAt",
-        ],
-    )?;
+    let run = required(db.run_view(id)?, "Run not found")?;
+    let total_bytes = serde_json::to_vec(&run)?.len() as u64;
+    let run = if total_bytes <= RUN_PAGE_BYTES as u64 {
+        cairn_contracts::RunMetadataPage::Complete { run: Box::new(run) }
+    } else {
+        let state = run.state;
+        cairn_contracts::RunMetadataPage::Truncated {
+            total_bytes,
+            preview: cairn_contracts::RunPreview {
+                id: state.id,
+                task_id: state.task_id,
+                project_id: state.project_id,
+                status: state.status,
+                trigger: state.trigger,
+                created_at: state.created_at,
+                started_at: state.started_at,
+                finished_at: state.finished_at,
+            },
+        }
+    };
     let mut events = Vec::new();
-    let mut bytes = 0;
+    let mut bytes = 2;
     let mut next = after;
     for event in db.event_batch(id, after, 100, RUN_PAGE_BYTES)? {
         let event_id = event.id;
-        let (event, size) = run_record_preview(
-            serde_json::to_value(event)?,
-            &["id", "runId", "createdAt", "type", "text"],
-        )?;
+        let page = event_preview(event)?;
+        let size = serde_json::to_vec(&page)?.len() + usize::from(!events.is_empty());
         if !events.is_empty() && bytes + size > RUN_PAGE_BYTES {
             break;
         }
         bytes += size;
-        let page = if event["truncated"] == true {
-            cairn_contracts::RunEventPage::Truncated {
-                total_bytes: event["totalBytes"].as_u64().unwrap(),
-                preview: serde_json::from_value(event)?,
-            }
-        } else {
-            cairn_contracts::RunEventPage::Complete {
-                event: serde_json::from_value(event)?,
-            }
-        };
         events.push(page);
         next = event_id;
     }
@@ -744,16 +756,7 @@ pub(crate) fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
         |row| row.get(0),
     )?;
     let history = cairn_contracts::RunHistoryOutput {
-        run: if run["truncated"] == true {
-            cairn_contracts::RunMetadataPage::Truncated {
-                total_bytes: run["totalBytes"].as_u64().unwrap(),
-                preview: serde_json::from_value(run)?,
-            }
-        } else {
-            cairn_contracts::RunMetadataPage::Complete {
-                run: Box::new(serde_json::from_value(run)?),
-            }
-        },
+        run,
         events,
         next_after: next,
         has_more: more,
@@ -761,23 +764,13 @@ pub(crate) fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
     Ok(serde_json::to_value(history)?)
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunContentChunk<'a> {
-    run_id: &'a str,
-    event_id: &'a Value,
-    encoding: &'static str,
-    format: &'static str,
-    offset: usize,
-    total_bytes: usize,
-    sha256: String,
-    data: &'a str,
-    next_offset: Option<usize>,
-}
-
-pub(crate) fn read_run_content(db: &Db<'_>, args: &Value) -> Result<Value> {
-    let id = text(args, "runId");
-    let data = if let Some(event_id) = args["eventId"].as_i64() {
+pub(crate) fn read_run_content(
+    db: &Db<'_>,
+    args: &cairn_contracts::ReadRunContentInput,
+) -> Result<Value> {
+    let run_id = args.run_id.to_string();
+    let id = run_id.as_str();
+    let data = if let Some(event_id) = args.event_id {
         db.require_run(id)?;
         let event = db
             .event_batch(id, event_id - 1, 1, RUN_PAGE_BYTES)?
@@ -787,11 +780,11 @@ pub(crate) fn read_run_content(db: &Db<'_>, args: &Value) -> Result<Value> {
         // a potentially huge nested JSON object just to serialize it again.
         serde_json::to_string(&required(event, "Event not found in this run")?)?
     } else {
-        required(db.run(id)?, "Run not found")?.to_string()
+        serde_json::to_string(&required(db.run_view(id)?, "Run not found")?)?
     };
     let digest = crate::auth::hex_digest(&data);
-    let offset = args["offset"].as_u64().unwrap() as usize;
-    if (offset > 0 || args["sha256"].is_string()) && text(args, "sha256") != digest {
+    let offset = usize::try_from(args.offset).map_err(|_| Error::bad("Invalid content offset."))?;
+    if (offset > 0 || args.sha256.is_some()) && args.sha256.as_deref() != Some(&digest) {
         return Err(Error::conflict(
             "Content changed or checksum missing. Restart at offset 0 and pass the returned sha256 with each subsequent chunk.",
         ));
@@ -802,16 +795,16 @@ pub(crate) fn read_run_content(db: &Db<'_>, args: &Value) -> Result<Value> {
         ));
     }
     let end = data.floor_char_boundary((offset + RUN_PAGE_BYTES).min(data.len()));
-    let chunk = RunContentChunk {
-        run_id: id,
-        event_id: &args["eventId"],
-        encoding: "utf-8",
-        format: "json",
-        offset,
-        total_bytes: data.len(),
+    let chunk = cairn_contracts::RunContentOutput {
+        run_id,
+        event_id: args.event_id,
+        encoding: "utf-8".into(),
+        format: "json".into(),
+        offset: offset as u64,
+        total_bytes: data.len() as u64,
         sha256: digest,
-        data: &data[offset..end],
-        next_offset: (end < data.len()).then_some(end),
+        data: data[offset..end].to_owned(),
+        next_offset: (end < data.len()).then_some(end as u64),
     };
     Ok(serde_json::to_value(chunk)?)
 }

@@ -1,5 +1,6 @@
 //! Prompt text sent to a native agent session for a chat turn.
 use crate::{error::Result, store::Db, validation::text};
+#[cfg(test)]
 use cairn_contracts::EventKind;
 use rusqlite::OptionalExtension;
 use serde_json::Value;

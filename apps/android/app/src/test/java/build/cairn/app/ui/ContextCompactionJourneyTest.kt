@@ -72,54 +72,76 @@ class ContextCompactionJourneyTest {
                 )
             val events =
                 listOf(
-                    RunEvent(id = 1,
-createdAt = 1789315189000,
-type = "chat.user",
-text = "Refactorise le module de paiement"),
-                    RunEvent(id = 2,
-createdAt = 1789315190000,
-type = "context.usage",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf("usage" to item("contextTokens" to 150_000)))),
-                    RunEvent(id = 3,
-createdAt = 1789315190100,
-type = "item.started",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                            "item" to
-                                item(
-                                    "id" to "compaction-1",
-                                    "type" to "context_compaction",
-                                    "status" to "in_progress",
+                    RunEvent(
+                        id = 1,
+                        createdAt = 1789315189000,
+                        type = "chat.user",
+                        text = "Refactorise le module de paiement",
+                    ),
+                    RunEvent(
+                        id = 2,
+                        createdAt = 1789315190000,
+                        type = "context.usage",
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf("usage" to item("contextTokens" to 150_000))
+                            ),
+                    ),
+                    RunEvent(
+                        id = 3,
+                        createdAt = 1789315190100,
+                        type = "item.started",
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "item" to
+                                        item(
+                                            "id" to "compaction-1",
+                                            "type" to "context_compaction",
+                                            "status" to "in_progress",
+                                        )
                                 )
-                        ))),
-                    RunEvent(id = 4,
-createdAt = 1789315190200,
-type = "item.completed",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                            "item" to
-                                item(
-                                    "id" to "compaction-1",
-                                    "type" to "context_compaction",
-                                    "status" to "completed",
-                                    "trigger" to "auto",
-                                    "pre_tokens" to 167_500,
-                                    "post_tokens" to 9_100,
+                            ),
+                    ),
+                    RunEvent(
+                        id = 4,
+                        createdAt = 1789315190200,
+                        type = "item.completed",
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "item" to
+                                        item(
+                                            "id" to "compaction-1",
+                                            "type" to "context_compaction",
+                                            "status" to "completed",
+                                            "trigger" to "auto",
+                                            "pre_tokens" to 167_500,
+                                            "post_tokens" to 9_100,
+                                        )
                                 )
-                        ))),
-                    RunEvent(id = 5,
-createdAt = 1789315190300,
-type = "item.completed",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                            "item" to
-                                item(
-                                    "id" to "answer",
-                                    "type" to "agent_message",
-                                    "text" to "Le module est refactorisé.",
+                            ),
+                    ),
+                    RunEvent(
+                        id = 5,
+                        createdAt = 1789315190300,
+                        type = "item.completed",
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "item" to
+                                        item(
+                                            "id" to "answer",
+                                            "type" to "agent_message",
+                                            "text" to "Le module est refactorisé.",
+                                        )
                                 )
-                        ))),
+                            ),
+                    ),
                 )
             fun stream(state: LiveState, events: List<RunEvent> = emptyList()): MockResponse {
                 val body =

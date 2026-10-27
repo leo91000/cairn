@@ -13,15 +13,20 @@ class EngineStatusTest {
 
     private fun event(type: String, body: JsonObjectBuilder.() -> Unit = {}): RunEvent {
         val id = ++serial
-        return RunEvent(id = id,
-createdAt = id * 1000,
-type = type,
-text = "",
-payload = kotlinx.serialization.json.JsonObject(buildJsonObject {
-                put("type", type)
-                body()
-            }),
-runId = "run")
+        return RunEvent(
+            id = id,
+            createdAt = id * 1000,
+            type = type,
+            text = "",
+            payload =
+                kotlinx.serialization.json.JsonObject(
+                    buildJsonObject {
+                        put("type", type)
+                        body()
+                    }
+                ),
+            runId = "run",
+        )
     }
 
     private fun retry(attempt: Int) =
@@ -298,21 +303,26 @@ runId = "run")
     fun `the usage banner gives the reset the engine reported`() {
         val resetsAt = 1_893_499_200_000L
         val failed =
-            RunEvent(id = 1,
-createdAt = 1,
-type = "turn.failed",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(buildJsonObject {
-                    put(
-                        "error",
+            RunEvent(
+                id = 1,
+                createdAt = 1,
+                type = "turn.failed",
+                text = "",
+                payload =
+                    kotlinx.serialization.json.JsonObject(
                         buildJsonObject {
-                            put("message", "Your usage allowance is used up for now.")
-                            put("code", "usage_limit_reached")
-                            put("resetsAt", resetsAt)
-                        },
-                    )
-                }),
-runId = "run")
+                            put(
+                                "error",
+                                buildJsonObject {
+                                    put("message", "Your usage allowance is used up for now.")
+                                    put("code", "usage_limit_reached")
+                                    put("resetsAt", resetsAt)
+                                },
+                            )
+                        }
+                    ),
+                runId = "run",
+            )
         val run =
             Run(
                 id = "run",
@@ -353,23 +363,28 @@ runId = "run")
 
         // The runner repeats the failure without its reset, in wording the banner recognizes.
         fun failure(id: Long, message: String, reset: Long? = null) =
-            RunEvent(id = id,
-createdAt = id,
-type = "turn.failed",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(buildJsonObject {
-                    put(
-                        "error",
+            RunEvent(
+                id = id,
+                createdAt = id,
+                type = "turn.failed",
+                text = "",
+                payload =
+                    kotlinx.serialization.json.JsonObject(
                         buildJsonObject {
-                            put("message", message)
-                            if (reset != null) {
-                                put("code", "usage_limit_reached")
-                                put("resetsAt", reset)
-                            }
-                        },
-                    )
-                }),
-runId = "run")
+                            put(
+                                "error",
+                                buildJsonObject {
+                                    put("message", message)
+                                    if (reset != null) {
+                                        put("code", "usage_limit_reached")
+                                        put("resetsAt", reset)
+                                    }
+                                },
+                            )
+                        }
+                    ),
+                runId = "run",
+            )
         val known = "Claude AI usage limit reached"
         val reported = failure(2, known, resetsAt)
         assertEquals(

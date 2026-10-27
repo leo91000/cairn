@@ -24,11 +24,15 @@ class HistoryCacheWriterTest {
             cursor,
             history,
             LiveState(),
-            listOf(RunEvent(id = 1,
-createdAt = 1,
-type = "chat.user",
-text = "Revision $cursor",
-runId = "fixture")),
+            listOf(
+                RunEvent(
+                    id = 1,
+                    createdAt = 1,
+                    type = "chat.user",
+                    text = "Revision $cursor",
+                    runId = "fixture",
+                )
+            ),
         )
 
     @Test
@@ -48,10 +52,15 @@ runId = "fixture")),
     @Test
     fun positionsFromATrimmedQueuedSnapshotSurvivePersistence() = runBlocking {
         val cache = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
-        val events = (1L..4L).map { RunEvent(id = it,
-createdAt = it,
-type = "output",
-text = "x".repeat(1200 * 1024)) }
+        val events =
+            (1L..4L).map {
+                RunEvent(
+                    id = it,
+                    createdAt = it,
+                    type = "output",
+                    text = "x".repeat(1200 * 1024),
+                )
+            }
         val request = cache.prepareSave("chat", record(4).copy(events = events), cache.generation)!!
         val restored = cache.read("chat")!!
         assertEquals(listOf(3L, 4L), restored.events.map { it.id })
@@ -95,10 +104,15 @@ text = "x".repeat(1200 * 1024)) }
     @Test
     fun aStaleQueuedBoundaryCannotDiscardTheRetainedReadingPosition() = runBlocking {
         val cache = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
-        val events = (1L..10L).map { RunEvent(id = it,
-createdAt = it,
-type = "chat.user",
-text = "Message $it") }
+        val events =
+            (1L..10L).map {
+                RunEvent(
+                    id = it,
+                    createdAt = it,
+                    type = "chat.user",
+                    text = "Message $it",
+                )
+            }
         cache.save("chat", record(10).copy(events = events), true)
         val stale =
             cache.prepareSave(

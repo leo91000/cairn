@@ -226,6 +226,19 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
 
 async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
     let result = match route {
+        ("POST", ["runs", id, "history"]) => {
+            if input.body["runId"] != *id {
+                return Err(Error::bad("Run identity does not match the path."));
+            }
+            crate::capabilities::run_operation("read_run_history")
+                .unwrap()
+                .invoke(
+                    s,
+                    input.body.clone(),
+                    crate::capabilities::ResumeContext::http(input)?,
+                )
+                .await?
+        }
         ("GET", ["runs"]) => {
             let limit = input.number("limit", 40, 1, 100)?;
             let offset = input.number("offset", 0, 0, i64::MAX)?;
@@ -249,7 +262,7 @@ async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result
             let limit = input.number("limit", 100, 1, 500)?;
             let id = (*id).to_owned();
             s.store
-                .read(move |db| Ok(db.events(&id, after, limit)?.into()))
+                .read(move |db| Ok(serde_json::to_value(db.event_page(&id, after, limit)?)?))
                 .await?
         }
         ("GET", [provider, "models"]) => {

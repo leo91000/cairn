@@ -1161,7 +1161,7 @@ impl Execution<'_> {
             patch.retry = Some(None);
         }
         let id = self.id.clone();
-        let status = s.store.transaction(move |db| {
+        s.store.transaction(move |db| {
             let current = db.run(&id)?.ok_or_else(|| Error::not_found("Run not found"))?;
             let status = if !current["cancelRequestedAt"].is_null() {
                 RunStatus::Cancelled
@@ -1183,12 +1183,9 @@ impl Execution<'_> {
                 patch.boundary.as_mut().unwrap()["wakeup"] = Value::Null;
             }
             db.change_run(&id, patch)?;
-            Ok(status)
-        }).await?;
-        let details = details.filter(|_| status == RunStatus::Failed);
-        s.store
-            .event(&self.id, &EventKind::Status, status.as_str(), details)
-            .await
+            let details = details.filter(|_| status == RunStatus::Failed);
+            db.event(&id, &EventKind::Status, status.as_str(), details.as_ref())
+        }).await
     }
 
     fn failure_message(&self, status: RunStatus, exit: &Exit, saved: &RunCheckpoint) -> String {

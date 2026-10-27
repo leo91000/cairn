@@ -94,20 +94,24 @@ class ChatRenderingBenchmarkDeviceTest {
                         (1 until count).map { index ->
                             val user = shape == "users" || index % 2 == 1
                             val text = if (user) "Question $index" else source(300)
-                            RunEvent(id = index.toLong(),
-createdAt = index.toLong(),
-type = if (user) "chat.user" else "item.completed",
-text = text,
-payload = kotlinx.serialization.json.JsonObject(if (user) mapOf("text" to JsonPrimitive(text))
-                                else
-                                    mapOf(
-                                        "item" to
-                                            buildJsonObject {
-                                                put("id", "answer-$index")
-                                                put("type", "agent_message")
-                                                put("text", text)
-                                            }
-                                    )))
+                            RunEvent(
+                                id = index.toLong(),
+                                createdAt = index.toLong(),
+                                type = if (user) "chat.user" else "item.completed",
+                                text = text,
+                                payload =
+                                    (if (user) mapOf("text" to JsonPrimitive(text))
+                                        else
+                                            mapOf(
+                                                "item" to
+                                                    buildJsonObject {
+                                                        put("id", "answer-$index")
+                                                        put("type", "agent_message")
+                                                        put("text", text)
+                                                    }
+                                            ))
+                                        ?.let { kotlinx.serialization.json.JsonObject(it) },
+                            )
                         }
                     var text = source(if (shape == "large_answer") 100_000 else 2_000)
                     val keys = TimelineKeys()
@@ -118,19 +122,24 @@ payload = kotlinx.serialization.json.JsonObject(if (user) mapOf("text" to JsonPr
                     repeat(40) { sample ->
                         text += " suite $sample"
                         val last =
-                            RunEvent(id = (count + sample).toLong(),
-createdAt = count.toLong(),
-type = "item.updated",
-text = text,
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                                    "item" to
-                                        buildJsonObject {
-                                            put("id", "current-answer")
-                                            put("type", "agent_message")
-                                            put("text", text)
-                                        }
-                                )),
-displayId = count.toLong())
+                            RunEvent(
+                                id = (count + sample).toLong(),
+                                createdAt = count.toLong(),
+                                type = "item.updated",
+                                text = text,
+                                payload =
+                                    kotlinx.serialization.json.JsonObject(
+                                        mapOf(
+                                            "item" to
+                                                buildJsonObject {
+                                                    put("id", "current-answer")
+                                                    put("type", "agent_message")
+                                                    put("text", text)
+                                                }
+                                        )
+                                    ),
+                                displayId = count.toLong(),
+                            )
                         val events = prefix + last
                         val start = System.nanoTime()
                         val cpuStart = Debug.threadCpuTimeNanos()
@@ -297,10 +306,12 @@ displayId = count.toLong())
             for (count in listOf(40, 400, 2000)) {
                 val events =
                     (1..count).map {
-                        RunEvent(id = it.toLong(),
-createdAt = it.toLong(),
-type = "chat.user",
-text = "Question $it")
+                        RunEvent(
+                            id = it.toLong(),
+                            createdAt = it.toLong(),
+                            type = "chat.user",
+                            text = "Question $it",
+                        )
                     }
                 val keys = TimelineKeys()
                 val times = mutableListOf<Double>()

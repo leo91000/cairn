@@ -955,14 +955,6 @@ fn resumes_mission_thread(run: &Value) -> bool {
     run["sessionId"].is_string() && run["sessionId"] == run["sourceSessionId"]
 }
 
-fn remove_keys(value: &mut Value, keys: &[&str]) {
-    if let Some(object) = value.as_object_mut() {
-        for key in keys {
-            object.remove(*key);
-        }
-    }
-}
-
 /// Starts the agent turn for `message` unless the chat or message changed meanwhile.
 fn launch_turn(
     db: &Db<'_>,

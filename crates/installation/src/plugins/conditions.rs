@@ -614,7 +614,7 @@ mod tests {
                     &Err(stale_denial),
                 )?;
                 assert_eq!(db.get("chats", "chat")?.unwrap(), chat);
-                assert!(db.events("run", 0, 10)?.is_empty());
+                assert!(db.events_fixture("run", 0, 10)?.is_empty());
 
                 let fresh = Ok(Observed {
                     result: Some(json!({ "state": "completed" })),
@@ -638,7 +638,7 @@ mod tests {
                     db.get("chats", "chat")?.unwrap()["wakeup"]["observation"]["state"],
                     "completed"
                 );
-                assert_eq!(db.events("run", 0, 10)?.len(), 1);
+                assert_eq!(db.events_fixture("run", 0, 10)?.len(), 1);
                 Ok(())
             })
             .await

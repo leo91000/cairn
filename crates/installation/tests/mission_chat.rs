@@ -135,7 +135,7 @@ async fn mission_conversion_preserves_history_session_workspace_and_schedule() {
     assert_eq!(checkpoint["prepared"]["workspace"], "/saved/workspace");
     let events = service
         .store
-        .read(move |db| db.events(text(&original, "id"), 0, 100))
+        .read(move |db| db.events_fixture(text(&original, "id"), 0, 100))
         .await
         .unwrap();
     assert_eq!(events[0]["text"], "Deployment reviewed");
@@ -232,7 +232,7 @@ async fn mission_conversion_keeps_summary_only_results_in_the_chat_history() {
     assert_eq!(service.store.run(&run_id).await.unwrap()["summary"], "");
     let events = service
         .store
-        .read(move |db| db.events(&run_id, 0, 100))
+        .read(move |db| db.events_fixture(&run_id, 0, 100))
         .await
         .unwrap();
     assert_eq!(events.len(), 1);

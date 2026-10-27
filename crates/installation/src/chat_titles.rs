@@ -9,6 +9,7 @@ use crate::{
     store::Db,
     validation::text,
 };
+#[cfg(test)]
 use cairn_contracts::EventKind;
 use serde::Serialize;
 use serde_json::{Value, json};

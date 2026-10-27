@@ -136,7 +136,7 @@ JSON Schema's UUID format; clients never grant authority through validation.
 
 ### Development reset
 
-The fresh installation schema is now version 8. Earlier development databases
+The fresh installation schema is now version 10. Earlier development databases
 are rejected, without being rewritten. Stop the development processes, remove the
 **disposable development data directory** (SQLite, vault and related local state)
 and start with a newly empty data directory. Recreate projects/agents and rerun
@@ -525,3 +525,45 @@ The A1/A2 `project_measurement` harness compares the frozen A12 records layout a
 repetitions. Measurements include encoded bytes, physical DB/WAL/pages, CPU and
 cold-connection/warm latency. Raw artifacts stay outside Git; local SQLite timings
 are not production network latency.
+
+
+## Events, checkpoints and history (A6)
+
+Fresh SQLite v10 retains the append-only `events` table, its ordering/turn/message
+indexes and pruning rules, with checked timestamps and valid JSON payloads.
+`run_checkpoints(run_id PK/FK -> runs ON DELETE CASCADE, state)` stores the current
+checkpoint serialized from `RunCheckpoint`; generic KV rejects checkpoint keys.
+The worker, chat continuation and mission wakeup use named checkpoint fields.
+Node preparation/publication/movement retain explicit validating adapters until
+their owning A9–A11/A18 conversions; they share the same writer, with no mirror or
+historical reader. SQL snapshot JSON is business state serialized from its type,
+not an open document accepting new decision fields.
+
+Rust owns `RunEvent`, `EventKind`, `HistoryPage`, complete/truncated event pages
+and the digest-pinned content DTO. Both apps delete their manual event/history
+models. The presentation identity stored only by client caches is optional; the
+server writer never supplies it. Engine payloads remain redacted raw JSON, so
+storage/chunk reads avoid adding an intermediate engine object tree. Unknown engine
+markers remain data, are diagnosed, and cannot select a lifecycle transition.
+Chat, wait and artifact payloads are explicit boundaries of A7/A8/A16 and C1–C4;
+this ticket does not change timeline interpretation or presentation.
+
+The existing registry adds `read_run_history` with the same `read` scope and
+transactional installation-grant checks. HTTP GET history and the generated POST
+client share its snapshot/page implementation. `get_run.events` is now an explicit
+`kind: complete` (`event`) or `kind: truncated` (`preview`, `totalBytes`) union.
+Event identity and forward cursors survive previews; full redacted JSON remains
+available through `read_run_content`, pinned by digest and UTF-8 byte offsets.
+
+Engine transitions publish their state/checkpoint and event in one transaction;
+text snapshots do not rewrite a checkpoint per token. Store transactions notify
+after successful commit even if their caller was cancelled; failed and empty
+transactions do not publish a revision. Existing live cursor, reconnect reset,
+recent-window, superseded-text and byte-budget behavior remains covered.
+
+`project_measurement::event_measurement::event_storage_layouts` reuses the A1/A2
+clocks, SQLite connections and distributions against the frozen `f5aebef5` event
+mapping. It qualifies 100/10k/100k events, cursor reads, long-conversation opening,
+cold connections and transactional streaming writes/checkpoints, in five
+alternating repetitions. PR descriptions own the results and host conditions;
+raw measurement artifacts are never committed.

@@ -128,21 +128,26 @@ class ChatJourneyTest {
                     }
                     .toByteArray()
             val event =
-                RunEvent(id = 1,
-createdAt = 1789315200000,
-type = "item.completed",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                        "item" to
-                            buildJsonObject {
-                                put("id", "answer")
-                                put("type", "agent_message")
-                                put(
-                                    "text",
-                                    "J’ai terminé la **revue du projet**. Les changements sont cohérents et les vérifications passent.\n\nLes points essentiels :\n- Une conversation plus lisible\n- Les fichiers regroupés au même endroit\n\n[Ouvrir le compte rendu](/api/installations/fixture/api/runs/run/artifacts/report-v2).",
-                                )
-                            }
-                    )))
+                RunEvent(
+                    id = 1,
+                    createdAt = 1789315200000,
+                    type = "item.completed",
+                    text = "",
+                    payload =
+                        kotlinx.serialization.json.JsonObject(
+                            mapOf(
+                                "item" to
+                                    buildJsonObject {
+                                        put("id", "answer")
+                                        put("type", "agent_message")
+                                        put(
+                                            "text",
+                                            "J’ai terminé la **revue du projet**. Les changements sont cohérents et les vérifications passent.\n\nLes points essentiels :\n- Une conversation plus lisible\n- Les fichiers regroupés au même endroit\n\n[Ouvrir le compte rendu](/api/installations/fixture/api/runs/run/artifacts/report-v2).",
+                                        )
+                                    }
+                            )
+                        ),
+                )
             fun stream(state: LiveState, events: List<RunEvent> = emptyList()): MockResponse {
                 val body =
                     "event: batch\nid: ${events.lastOrNull()?.id ?: 0}\ndata: ${wireJson.encodeToString(LiveBatch(events,state,false,false))}\n\n"
@@ -267,44 +272,65 @@ payload = kotlinx.serialization.json.JsonObject(mapOf(
                                                 ),
                                         ),
                                         listOf(
-                                            RunEvent(id = 9,
-createdAt = 1789315189000,
-type = "chat.user",
-text = "Peux-tu examiner le projet et préparer un compte rendu ?"),
-                                            RunEvent(id = 10,
-createdAt = 1789315190000,
-type = "turn.started",
-text = ""),
-                                            RunEvent(id = 11,
-createdAt = 1789315190100,
-type = "item.started",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                                                    "item" to
-                                                        buildJsonObject {
-                                                            put("id", "command-1")
-                                                            put("type", "command_execution")
-                                                            put("command", "git status --short")
-                                                            put("status", "in_progress")
-                                                        }
-                                                ))),
-                                            RunEvent(id = 12,
-createdAt = 1789315190200,
-type = "item.completed",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                                                    "item" to
-                                                        buildJsonObject {
-                                                            put("id", "command-1")
-                                                            put("type", "command_execution")
-                                                            put("command", "git status --short")
-                                                            put("status", "completed")
-                                                            put(
-                                                                "aggregated_output",
-                                                                "Workspace clean",
-                                                            )
-                                                        }
-                                                ))),
+                                            RunEvent(
+                                                id = 9,
+                                                createdAt = 1789315189000,
+                                                type = "chat.user",
+                                                text =
+                                                    "Peux-tu examiner le projet et préparer un compte rendu ?",
+                                            ),
+                                            RunEvent(
+                                                id = 10,
+                                                createdAt = 1789315190000,
+                                                type = "turn.started",
+                                                text = "",
+                                            ),
+                                            RunEvent(
+                                                id = 11,
+                                                createdAt = 1789315190100,
+                                                type = "item.started",
+                                                text = "",
+                                                payload =
+                                                    kotlinx.serialization.json.JsonObject(
+                                                        mapOf(
+                                                            "item" to
+                                                                buildJsonObject {
+                                                                    put("id", "command-1")
+                                                                    put("type", "command_execution")
+                                                                    put(
+                                                                        "command",
+                                                                        "git status --short",
+                                                                    )
+                                                                    put("status", "in_progress")
+                                                                }
+                                                        )
+                                                    ),
+                                            ),
+                                            RunEvent(
+                                                id = 12,
+                                                createdAt = 1789315190200,
+                                                type = "item.completed",
+                                                text = "",
+                                                payload =
+                                                    kotlinx.serialization.json.JsonObject(
+                                                        mapOf(
+                                                            "item" to
+                                                                buildJsonObject {
+                                                                    put("id", "command-1")
+                                                                    put("type", "command_execution")
+                                                                    put(
+                                                                        "command",
+                                                                        "git status --short",
+                                                                    )
+                                                                    put("status", "completed")
+                                                                    put(
+                                                                        "aggregated_output",
+                                                                        "Workspace clean",
+                                                                    )
+                                                                }
+                                                        )
+                                                    ),
+                                            ),
                                             event.copy(id = 13),
                                         ),
                                     )

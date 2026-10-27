@@ -6,6 +6,8 @@
       "properties": {
         "createdAt": {
           "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
           "type": "integer"
         },
         "displayId": {
@@ -18,6 +20,8 @@
         },
         "id": {
           "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
           "type": "integer"
         },
         "payload": {

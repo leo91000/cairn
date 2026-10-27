@@ -236,6 +236,14 @@ fn record_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
 }
 
 impl Db<'_> {
+    /// The public run view crosses the named unconverted node/chat boundary
+    /// once here. History readers never inspect a generic run document.
+    pub fn run_view(&self, id: &str) -> Result<Option<cairn_contracts::Run>> {
+        self.run_record(id)?
+            .map(|record| Ok(serde_json::from_value(record.wire()?)?))
+            .transpose()
+    }
+
     pub fn run_state(&self, id: &str) -> Result<Option<RunState>> {
         Ok(self
             .0

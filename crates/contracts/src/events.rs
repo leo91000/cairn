@@ -7,8 +7,12 @@ use crate::*;
 #[serde(rename_all = "camelCase")]
 pub struct RunEvent {
     #[ts(type = "number")]
+    #[serde(deserialize_with = "crate::wire_integer")]
+    #[schemars(range(min = -9007199254740991_i64, max = 9007199254740991_i64))]
     pub id: i64,
     #[ts(type = "number")]
+    #[serde(deserialize_with = "crate::wire_integer")]
+    #[schemars(range(min = -9007199254740991_i64, max = 9007199254740991_i64))]
     pub created_at: i64,
     #[serde(rename = "type")]
     #[schemars(with = "String")]
@@ -185,12 +189,65 @@ pub enum RunEventPage {
 #[serde(rename_all = "camelCase")]
 pub struct EventPreview {
     #[ts(type = "number")]
+    #[serde(deserialize_with = "crate::wire_integer")]
+    #[schemars(range(min = -9007199254740991_i64, max = 9007199254740991_i64))]
     pub id: i64,
     pub run_id: String,
     #[ts(type = "number")]
+    #[serde(deserialize_with = "crate::wire_integer")]
+    #[schemars(range(min = -9007199254740991_i64, max = 9007199254740991_i64))]
     pub created_at: i64,
     #[serde(rename = "type")]
-    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadRunHistoryInput {
+    pub run_id: RunId,
+    #[serde(default = "history_end", deserialize_with = "crate::wire_integer")]
+    #[schemars(range(min = 1_i64, max = 9007199254740991_i64))]
+    #[ts(type = "number")]
+    pub before: i64,
+    #[schemars(length(min = 1, max = 200))]
+    pub history: String,
+}
+
+fn history_end() -> i64 {
+    9_007_199_254_740_991
+}
+
+impl ReadRunHistoryInput {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.before < 1 || self.history.is_empty() || self.history.len() > 200 {
+            return Err("Invalid history cursor or revision.".into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_and_history_contracts_round_trip_adapter_boundaries() {
+        let corpus: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/event-contracts.json"))
+                .unwrap();
+        for value in corpus["events"].as_array().unwrap() {
+            let event: RunEvent = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(event).unwrap(), *value);
+        }
+        let history: HistoryPage = serde_json::from_value(corpus["history"].clone()).unwrap();
+        assert_eq!(serde_json::to_value(history).unwrap(), corpus["history"]);
+        let input: ReadRunHistoryInput = serde_json::from_value(corpus["window"].clone()).unwrap();
+        input.validate().unwrap();
+        for value in corpus["invalidEvents"].as_array().unwrap() {
+            assert!(serde_json::from_value::<RunEvent>(value.clone()).is_err());
+        }
+    }
 }

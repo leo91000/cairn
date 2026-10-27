@@ -31,41 +31,55 @@ class WorkingIndicatorTest {
     @get:Rule val compose = createComposeRule()
 
     private fun tool(id: Long, command: String, running: Boolean = false, exit: Int = 0) =
-        RunEvent(id = id,
-createdAt = 1000 + id,
-type = if (running) "item.started" else "item.completed",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                "item" to
-                    buildJsonObject {
-                        put("type", "command_execution")
-                        put("command", command)
-                        if (running) put("status", "in_progress") else put("exit_code", exit)
-                    }
-            )))
+        RunEvent(
+            id = id,
+            createdAt = 1000 + id,
+            type = if (running) "item.started" else "item.completed",
+            text = "",
+            payload =
+                kotlinx.serialization.json.JsonObject(
+                    mapOf(
+                        "item" to
+                            buildJsonObject {
+                                put("type", "command_execution")
+                                put("command", command)
+                                if (running) put("status", "in_progress")
+                                else put("exit_code", exit)
+                            }
+                    )
+                ),
+        )
 
-    private fun user(id: Long, at: Long) = RunEvent(id = id,
-createdAt = at,
-type = "chat.user",
-text = "Vérifie les tests")
+    private fun user(id: Long, at: Long) =
+        RunEvent(
+            id = id,
+            createdAt = at,
+            type = "chat.user",
+            text = "Vérifie les tests",
+        )
 
     private fun waiting(id: Long, at: Long, vararg descriptions: String) =
-        RunEvent(id = id,
-createdAt = at,
-type = "turn.waiting",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                "type" to JsonPrimitive("turn.waiting"),
-                "tasks" to
-                    buildJsonArray {
-                        descriptions.forEachIndexed { index, description ->
-                            addJsonObject {
-                                put("id", "task-$index")
-                                put("description", description)
-                            }
-                        }
-                    },
-            )))
+        RunEvent(
+            id = id,
+            createdAt = at,
+            type = "turn.waiting",
+            text = "",
+            payload =
+                kotlinx.serialization.json.JsonObject(
+                    mapOf(
+                        "type" to JsonPrimitive("turn.waiting"),
+                        "tasks" to
+                            buildJsonArray {
+                                descriptions.forEachIndexed { index, description ->
+                                    addJsonObject {
+                                        put("id", "task-$index")
+                                        put("description", description)
+                                    }
+                                }
+                            },
+                    )
+                ),
+        )
 
     @Test
     fun `the step in progress is named with its command`() {
@@ -99,10 +113,12 @@ payload = kotlinx.serialization.json.JsonObject(mapOf(
             listOf(
                 tool(1, "./gradlew build", running = true),
                 user(2, 7000),
-                RunEvent(id = 3,
-createdAt = 7100,
-type = "turn.started",
-text = """{"type":"turn.started"}"""),
+                RunEvent(
+                    id = 3,
+                    createdAt = 7100,
+                    type = "turn.started",
+                    text = """{"type":"turn.started"}""",
+                ),
             )
         val step = workingStep(events, "", 3000)
         assertEquals("L’agent travaille", step.title)
@@ -155,10 +171,12 @@ text = """{"type":"turn.started"}"""),
             listOf(
                 user(1, 1000),
                 waiting(2, 2000, "Build", "Watch CI"),
-                RunEvent(id = 3,
-createdAt = 2500,
-type = "diagnostic",
-text = "Reconnecting"),
+                RunEvent(
+                    id = 3,
+                    createdAt = 2500,
+                    type = "diagnostic",
+                    text = "Reconnecting",
+                ),
                 waiting(4, 3000, "Watch CI"),
             )
         assertEquals(BackgroundWait(listOf("Watch CI"), 2000), backgroundWait(events))
@@ -182,15 +200,29 @@ text = "Reconnecting"),
         assertNull(backgroundWait(announced + waiting(3, 3000)))
         assertNull(backgroundWait(announced + tool(3, "cat log", running = true)))
         assertNull(backgroundWait(announced + user(3, 3000)))
-        assertNull(backgroundWait(announced + RunEvent(id = 3,
-createdAt = 3000,
-type = "turn.started",
-text = "")))
+        assertNull(
+            backgroundWait(
+                announced +
+                    RunEvent(
+                        id = 3,
+                        createdAt = 3000,
+                        type = "turn.started",
+                        text = "",
+                    )
+            )
+        )
         // Connection diagnostics do not mean the agent is working again.
-        assertNotNull(backgroundWait(announced + RunEvent(id = 3,
-createdAt = 3000,
-type = "diagnostic",
-text = "Reconnecting")))
+        assertNotNull(
+            backgroundWait(
+                announced +
+                    RunEvent(
+                        id = 3,
+                        createdAt = 3000,
+                        type = "diagnostic",
+                        text = "Reconnecting",
+                    )
+            )
+        )
     }
 
     @Test

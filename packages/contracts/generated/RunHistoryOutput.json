@@ -266,10 +266,14 @@
       "properties": {
         "createdAt": {
           "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
           "type": "integer"
         },
         "id": {
           "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
           "type": "integer"
         },
         "runId": {
@@ -282,14 +286,16 @@
           ]
         },
         "type": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "id",
         "runId",
-        "createdAt",
-        "type"
+        "createdAt"
       ],
       "type": "object"
     },
@@ -881,6 +887,8 @@
       "properties": {
         "createdAt": {
           "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
           "type": "integer"
         },
         "displayId": {
@@ -893,6 +901,8 @@
         },
         "id": {
           "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
           "type": "integer"
         },
         "payload": {

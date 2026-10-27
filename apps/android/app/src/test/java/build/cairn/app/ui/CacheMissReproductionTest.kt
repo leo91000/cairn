@@ -58,37 +58,46 @@ class CacheMissReproductionTest {
                 val releaseOlder = CountDownLatch(1)
                 val output = "x".repeat(if (large) 2200 * 1024 else 100)
                 fun message(n: Int) =
-                    RunEvent(id = n.toLong(),
-createdAt = n.toLong(),
-type = "chat.user",
-text = if (n == 40) "Message témoin" else "Message %03d".format(n),
-runId = "fixture")
+                    RunEvent(
+                        id = n.toLong(),
+                        createdAt = n.toLong(),
+                        type = "chat.user",
+                        text = if (n == 40) "Message témoin" else "Message %03d".format(n),
+                        runId = "fixture",
+                    )
                 val accepted = if (paged) 40 else 2
                 val events =
                     if (paged) (21..40).map(::message)
                     else
                         listOf(
-                            RunEvent(id = 1,
-createdAt = 1,
-type = "item.completed",
-text = output,
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                                    "item" to
-                                        buildJsonObject {
-                                            put("id", "tool")
-                                            put("type", "command_execution")
-                                            put("command", "fixture")
-                                            put("status", "completed")
-                                            put("aggregated_output", output)
-                                            put("exit_code", 0)
-                                        }
-                                )),
-runId = "fixture"),
-                            RunEvent(id = 2,
-createdAt = 2,
-type = "chat.user",
-text = "Message témoin",
-runId = "fixture"),
+                            RunEvent(
+                                id = 1,
+                                createdAt = 1,
+                                type = "item.completed",
+                                text = output,
+                                payload =
+                                    kotlinx.serialization.json.JsonObject(
+                                        mapOf(
+                                            "item" to
+                                                buildJsonObject {
+                                                    put("id", "tool")
+                                                    put("type", "command_execution")
+                                                    put("command", "fixture")
+                                                    put("status", "completed")
+                                                    put("aggregated_output", output)
+                                                    put("exit_code", 0)
+                                                }
+                                        )
+                                    ),
+                                runId = "fixture",
+                            ),
+                            RunEvent(
+                                id = 2,
+                                createdAt = 2,
+                                type = "chat.user",
+                                text = "Message témoin",
+                                runId = "fixture",
+                            ),
                         )
                 val batch =
                     wireJson.encodeToString(
@@ -145,7 +154,12 @@ runId = "fixture"),
                                     .setHeader("Content-Type", "application/json")
                                     .setBody(
                                         wireJson.encodeToString(
-                                            HistoryPage(emptyList(), "v1:fixture:1", 1, false)
+                                            HistoryPage(
+                                                events = emptyList(),
+                                                history = "v1:fixture:1",
+                                                oldest = 1,
+                                                hasOlder = false,
+                                            )
                                         )
                                     )
                             }
@@ -164,10 +178,10 @@ runId = "fixture"),
                                     .setBody(
                                         wireJson.encodeToString(
                                             HistoryPage(
-                                                (1..20).map(::message),
-                                                "v1:fixture:1",
-                                                1,
-                                                false,
+                                                events = (1..20).map(::message),
+                                                history = "v1:fixture:1",
+                                                oldest = 1,
+                                                hasOlder = false,
                                             )
                                         )
                                     )

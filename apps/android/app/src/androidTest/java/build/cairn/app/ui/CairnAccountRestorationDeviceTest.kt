@@ -70,10 +70,14 @@ class CairnAccountRestorationDeviceTest {
                         7,
                         "v1:restore:1",
                         LiveState(),
-                        listOf(RunEvent(id = 7,
-createdAt = 1,
-type = "chat.user",
-text = "Message conservé")),
+                        listOf(
+                            RunEvent(
+                                id = 7,
+                                createdAt = 1,
+                                type = "chat.user",
+                                text = "Message conservé",
+                            )
+                        ),
                         position = position,
                     ),
                     force = true,

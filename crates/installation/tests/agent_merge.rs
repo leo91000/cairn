@@ -145,7 +145,7 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
             move |db| {
                 assert_eq!(db.messages(chat["id"].as_str().unwrap())?.len(), 1);
                 assert_eq!(
-                    db.events(run["id"].as_str().unwrap(), 0, 100)?
+                    db.events_fixture(run["id"].as_str().unwrap(), 0, 100)?
                         .last()
                         .unwrap()["text"],
                     "Keep this history"

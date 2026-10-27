@@ -209,7 +209,7 @@ async fn ids(f: &Fixture) -> Vec<i64> {
         .store
         .read(move |db| {
             Ok(db
-                .events(&run, 0, 10000)?
+                .events_fixture(&run, 0, 10000)?
                 .iter()
                 .map(|e| e["id"].as_i64().unwrap())
                 .collect())
@@ -248,7 +248,7 @@ async fn cached_resume_drains_backlog_without_waiting_between_live_batches() {
         .store
         .read(move |db| {
             Ok(db
-                .events(&run, cursor, 25000)?
+                .events_fixture(&run, cursor, 25000)?
                 .iter()
                 .map(|event| event["id"].as_i64().unwrap())
                 .collect())
@@ -335,7 +335,7 @@ async fn following_viewer_resumes_a_long_backlog_on_the_recent_window() {
         .store
         .read(move |db| {
             Ok(db
-                .events(&run, cursor, 2500)?
+                .events_fixture(&run, cursor, 2500)?
                 .iter()
                 .map(|event| event["id"].as_i64().unwrap())
                 .collect())
@@ -858,7 +858,7 @@ async fn wire_deltas_reestablish_baselines_after_reconnect_and_keep_rest_compati
     let stored = f
         .service
         .store
-        .read(move |db| db.events(&run, cursor, 10))
+        .read(move |db| db.events_fixture(&run, cursor, 10))
         .await
         .unwrap();
     assert_eq!(stored[0]["payload"]["item"]["text"], "Bonjour 👋 café");

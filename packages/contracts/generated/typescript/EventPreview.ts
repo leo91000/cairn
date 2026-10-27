@@ -4,6 +4,6 @@ export interface EventPreview {
   id: number
   runId: string
   createdAt: number
-  type: string
+  type?: string | null
   text?: string | null
 }

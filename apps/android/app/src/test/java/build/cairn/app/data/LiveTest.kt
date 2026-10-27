@@ -11,19 +11,24 @@ import org.junit.Test
 
 class LiveTest {
     private fun message(id: Long, text: String, delta: Boolean = false, itemId: String = "answer") =
-        RunEvent(id = id,
-createdAt = id * 10,
-type = "item.updated",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                "item" to
-                    buildJsonObject {
-                        put("id", itemId)
-                        put("type", "agent_message")
-                        put(if (delta) "delta" else "text", text)
-                    }
-            )),
-runId = "r1")
+        RunEvent(
+            id = id,
+            createdAt = id * 10,
+            type = "item.updated",
+            text = "",
+            payload =
+                kotlinx.serialization.json.JsonObject(
+                    mapOf(
+                        "item" to
+                            buildJsonObject {
+                                put("id", itemId)
+                                put("type", "agent_message")
+                                put(if (delta) "delta" else "text", text)
+                            }
+                    )
+                ),
+            runId = "r1",
+        )
 
     private fun frame(cursor: Long, batch: LiveBatch) =
         "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(batch)}\n\n"
@@ -78,10 +83,11 @@ runId = "r1")
                                     applied =
                                         pages.apply(
                                             HistoryPage(
-                                                listOf(message(11, "Older", itemId = "m11")),
-                                                history,
-                                                11,
-                                                false,
+                                                events =
+                                                    listOf(message(11, "Older", itemId = "m11")),
+                                                history = history,
+                                                oldest = 11,
+                                                hasOlder = false,
                                             ),
                                             snapshot,
                                             snapshot,
@@ -120,12 +126,17 @@ runId = "r1")
                             )
                     )
                 fun item(id: Long, body: JsonObjectBuilder.() -> Unit) =
-                    RunEvent(id = id,
-createdAt = id,
-type = "item.completed",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf("item" to buildJsonObject(body))),
-runId = "r1")
+                    RunEvent(
+                        id = id,
+                        createdAt = id,
+                        type = "item.completed",
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf("item" to buildJsonObject(body))
+                            ),
+                        runId = "r1",
+                    )
                 val spawn =
                     item(1) {
                         put("id", "worker")
@@ -145,13 +156,14 @@ runId = "r1")
                     spawn.copy(
                         id = 3,
                         payload =
-                            mapOf(
-                                "item" to
-                                    JsonObject(
-                                        spawn.payload!!.getValue("item").jsonObject +
-                                            ("status" to JsonPrimitive("completed"))
-                                    )
-                            ),
+                            (mapOf(
+                                    "item" to
+                                        JsonObject(
+                                            spawn.payload!!.getValue("item").jsonObject +
+                                                ("status" to JsonPrimitive("completed"))
+                                        )
+                                ))
+                                ?.let { kotlinx.serialization.json.JsonObject(it) },
                     )
                 val value = CachedHistory(1, "v1:r1:1", state, listOf(spawn))
                 server.dispatcher =
@@ -372,24 +384,34 @@ runId = "r1")
     @Test
     fun `backwards page keeps latest message snapshot and intervening tools`() {
         fun message(id: Long, content: String) =
-            RunEvent(id = id,
-createdAt = id,
-type = "item.updated",
-text = content,
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                    "item" to
-                        buildJsonObject {
-                            put("id", "m")
-                            put("type", "agent_message")
-                            put("text", content)
-                        }
-                )))
+            RunEvent(
+                id = id,
+                createdAt = id,
+                type = "item.updated",
+                text = content,
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        mapOf(
+                            "item" to
+                                buildJsonObject {
+                                    put("id", "m")
+                                    put("type", "agent_message")
+                                    put("text", content)
+                                }
+                        )
+                    ),
+            )
         val merged =
             mergeHistory(
-                listOf(message(1, "old"), RunEvent(id = 2,
-createdAt = 2,
-type = "output",
-text = "tool")),
+                listOf(
+                    message(1, "old"),
+                    RunEvent(
+                        id = 2,
+                        createdAt = 2,
+                        type = "output",
+                        text = "tool",
+                    ),
+                ),
                 listOf(message(3, "complete")),
             )
         assertEquals(2, merged.size)
@@ -418,10 +440,12 @@ text = "tool")),
             accumulator.append(
                 listOf(
                     message(2, "duplicate", true),
-                    RunEvent(id = 3,
-createdAt = 30,
-type = "turn.started",
-text = ""),
+                    RunEvent(
+                        id = 3,
+                        createdAt = 30,
+                        type = "turn.started",
+                        text = "",
+                    ),
                     message(4, "Nouvelle réponse"),
                 )
             )
@@ -440,10 +464,15 @@ text = ""),
         accumulator.append(listOf(message(1, "baseline")))
         assertThrows(IllegalArgumentException::class.java) {
             accumulator.append(
-                listOf(RunEvent(id = 2,
-createdAt = 20,
-type = "turn.started",
-text = ""), message(3, "delta", true))
+                listOf(
+                    RunEvent(
+                        id = 2,
+                        createdAt = 20,
+                        type = "turn.started",
+                        text = "",
+                    ),
+                    message(3, "delta", true),
+                )
             )
         }
         assertEquals(1L, accumulator.cursor)

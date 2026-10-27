@@ -148,31 +148,47 @@ abstract class RetryNoticeCases {
     @Test
     fun chatShowsOneRetryNoticePerFailureChainWithItsRetryTitle() {
         fun failure(id: Long, message: String) =
-            RunEvent(id = id,
-createdAt = id * 1000,
-type = "turn.failed",
-text = message,
-payload = kotlinx.serialization.json.JsonObject(mapOf("error" to buildJsonObject { put("message", message) })))
+            RunEvent(
+                id = id,
+                createdAt = id * 1000,
+                type = "turn.failed",
+                text = message,
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        mapOf("error" to buildJsonObject { put("message", message) })
+                    ),
+            )
         fun retry(id: Long) =
-            RunEvent(id = id,
-createdAt = id * 1000,
-type = "retry.scheduled",
-text = "Temporary agent error.",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                    "retry" to
-                        buildJsonObject {
-                            put("attempt", 1)
-                            put("limit", 3)
-                        }
-                )))
+            RunEvent(
+                id = id,
+                createdAt = id * 1000,
+                type = "retry.scheduled",
+                text = "Temporary agent error.",
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        mapOf(
+                            "retry" to
+                                buildJsonObject {
+                                    put("attempt", 1)
+                                    put("limit", 3)
+                                }
+                        )
+                    ),
+            )
         val capacity = "Selected model is at capacity. Please try a different model."
         val connection = "WebSocket connection failed: 503 Service Unavailable"
         var events by
             mutableStateOf(
-                listOf(RunEvent(id = 1,
-createdAt = 1000,
-type = "turn.started",
-text = ""), failure(2, capacity), retry(3))
+                listOf(
+                    RunEvent(
+                        id = 1,
+                        createdAt = 1000,
+                        type = "turn.started",
+                        text = "",
+                    ),
+                    failure(2, capacity),
+                    retry(3),
+                )
             )
         compose.setContent {
             CairnTheme {
@@ -197,20 +213,32 @@ text = ""), failure(2, capacity), retry(3))
         compose.onAllNodesWithText(capacity).assertCountEquals(1)
         capture("failure-retrying")
 
-        events = events + RunEvent(id = 4,
-createdAt = 4000,
-type = "turn.started",
-text = "") + failure(5, capacity)
+        events =
+            events +
+                RunEvent(
+                    id = 4,
+                    createdAt = 4000,
+                    type = "turn.started",
+                    text = "",
+                ) +
+                failure(5, capacity)
         compose
             .onNodeWithText("L’agent a rencontré une erreur après 1 nouvelle tentative automatique")
             .assertIsDisplayed()
         compose.onAllNodesWithText(capacity).assertCountEquals(1)
 
         // A retry title says more than the connection pattern of its reason.
-        events = listOf(RunEvent(id = 1,
-createdAt = 1000,
-type = "turn.started",
-text = ""), failure(2, connection), retry(3))
+        events =
+            listOf(
+                RunEvent(
+                    id = 1,
+                    createdAt = 1000,
+                    type = "turn.started",
+                    text = "",
+                ),
+                failure(2, connection),
+                retry(3),
+            )
         compose
             .onNodeWithText("Erreur temporaire — nouvelle tentative automatique 1/3")
             .assertIsDisplayed()

@@ -122,7 +122,7 @@ async fn populate(service: &Service, count: usize) -> Value {
              (SELECT coalesce(sum(length(CAST(data AS BLOB))),0) FROM runs) +
              (SELECT coalesce(sum(length(CAST(data AS BLOB))),0) FROM chat_messages) +
              (SELECT coalesce(sum(length(CAST(text AS BLOB))),0) FROM events) +
-             (SELECT coalesce(sum(length(CAST(data AS BLOB))),0) FROM kv WHERE key LIKE 'artifact:%' )",
+             (SELECT coalesce(sum(length(CAST(data AS BLOB))),0) FROM kv WHERE key LIKE 'artifact:%') + (SELECT coalesce(sum(length(CAST(state AS BLOB))),0) FROM run_checkpoints)",
             [], |row| row.get::<_, i64>(0),
         )?;
         Ok(json!({

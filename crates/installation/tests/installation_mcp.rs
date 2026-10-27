@@ -1,3 +1,4 @@
+use crate::common::run_fixture::DbRunFixture;
 use cairn_contracts::EventKind;
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
@@ -1179,10 +1180,30 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     let history = call(&s, &configuration, "get_run", json!({ "runId": run["id"] })).await;
     assert_eq!(result(&history)["run"]["run"]["id"], run["id"]);
     let events = result(&history)["events"].as_array().unwrap().clone();
+    let first = events[0]["event"]["id"].as_i64().unwrap();
+    let window = call(
+        &s,
+        &configuration,
+        "read_run_history",
+        json!({
+            "runId": run["id"], "history": format!("v1:{}:{first}", run["id"].as_str().unwrap()),
+        }),
+    )
+    .await;
+    assert_ne!(window["result"]["isError"], true);
+    assert!(
+        result(&window)["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "engine.retry")
+    );
+
     assert!(
         events
             .iter()
-            .any(|event| event["type"] == "engine.retry" && event["payload"] == engine)
+            .any(|record| record["event"]["type"] == "engine.retry"
+                && record["event"]["payload"] == engine)
     );
     let chunk = call(
         &s,
@@ -3638,7 +3659,7 @@ async fn concurrent_resume_run_publishes_once_and_a_revoked_grant_cannot_resume(
     let run_id = id.to_owned();
     let events = s
         .store
-        .read(move |db| db.events(&run_id, 0, 100))
+        .read(move |db| db.events_fixture(&run_id, 0, 100))
         .await
         .unwrap();
     assert_eq!(

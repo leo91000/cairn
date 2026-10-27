@@ -1,3 +1,4 @@
+use crate::common::run_fixture::DbRunFixture;
 use common::MissionFixture;
 use common::StoreAgentFixture;
 
@@ -168,7 +169,7 @@ async fn delay_is_idempotent_durable_and_resumes_same_workspace_once_without_use
         .store
         .read(move |db| {
             Ok(db
-                .events(&run, 0, 100)?
+                .events_fixture(&run, 0, 100)?
                 .iter()
                 .filter(|event| event["type"] == "chat.wakeup")
                 .count())
@@ -807,7 +808,7 @@ async fn timer_completion_is_a_result_and_existing_timer_records_still_resume() 
     let run = f.run.clone();
     let events = restarted
         .store
-        .read(move |db| db.events(&run, 0, 100))
+        .read(move |db| db.events_fixture(&run, 0, 100))
         .await
         .unwrap();
     let event = events

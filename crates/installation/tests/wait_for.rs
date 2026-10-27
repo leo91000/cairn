@@ -1,3 +1,4 @@
+use crate::common::run_fixture::DbRunFixture;
 use crate::common::run_fixture::RunFixture;
 use common::AgentFixture;
 use common::MissionFixture;
@@ -390,7 +391,7 @@ async fn already_finished_sources_return_results_without_scheduling_or_ending_th
         f.s.store
             .read(move |db| {
                 Ok(db
-                    .events(&run, 0, 100)?
+                    .events_fixture(&run, 0, 100)?
                     .into_iter()
                     .filter(|event| event["type"] == "chat.wait_ready")
                     .map(|event| (event["text"].clone(), event["payload"].clone()))

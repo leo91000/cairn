@@ -1,4 +1,5 @@
 use super::*;
+use crate::run_fixture::DbRunFixture;
 use crate::{
     config::{Config, MAIN_AGENT_ID},
     performance::Activity,
@@ -96,7 +97,7 @@ impl Fixture {
         let id = self.id.clone();
         self.service
             .store
-            .read(move |db| db.events(&id, 0, 1000))
+            .read(move |db| db.events_fixture(&id, 0, 1000))
             .await
             .unwrap()
             .into_iter()
@@ -144,7 +145,7 @@ async fn runtime_disk_notice_preserves_publication_metadata_and_redacts_all_payl
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 100))
+        .read(move |db| db.events_fixture(&id, 0, 100))
         .await
         .unwrap();
     assert!(events.iter().any(|event| event["type"] == "status"));
@@ -178,7 +179,7 @@ async fn speed_checks_before_a_turn_become_conversation_notices() {
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 100))
+        .read(move |db| db.events_fixture(&id, 0, 100))
         .await
         .unwrap();
     let notices = events
@@ -231,7 +232,7 @@ async fn partial_guest_stdout_cannot_hide_controller_failure_after_exhausted_log
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 1000))
+        .read(move |db| db.events_fixture(&id, 0, 1000))
         .await
         .unwrap();
     let failures = events
@@ -294,7 +295,7 @@ async fn controller_failures_survive_exhausted_logs_without_provider_retry() {
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 1000))
+        .read(move |db| db.events_fixture(&id, 0, 1000))
         .await
         .unwrap();
     let failures = events
@@ -331,7 +332,7 @@ async fn native_retry_notices_survive_log_budget_without_claiming_the_final_fail
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 1000))
+        .read(move |db| db.events_fixture(&id, 0, 1000))
         .await
         .unwrap();
     let notice = events
@@ -392,7 +393,7 @@ async fn engine_reports_survive_log_budget_redacted_and_only_a_reported_limit_ex
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 1000))
+        .read(move |db| db.events_fixture(&id, 0, 1000))
         .await
         .unwrap();
     // The run's own queued status precedes them.
@@ -1057,7 +1058,7 @@ async fn context_usage_survives_log_budget_and_keeps_the_latest_snapshot_on_the_
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 1000))
+        .read(move |db| db.events_fixture(&id, 0, 1000))
         .await
         .unwrap();
     let usage = events
@@ -1078,4 +1079,83 @@ async fn context_usage_survives_log_budget_and_keeps_the_latest_snapshot_on_the_
         .await;
     let run = fixture.service.store.run(&fixture.id).await.unwrap();
     assert_eq!(run["contextUsage"]["contextTokens"], 6_200);
+}
+
+#[tokio::test]
+async fn failed_event_publication_rolls_back_the_checkpoint_and_does_not_notify() {
+    let mut fixture = Fixture::new().await;
+    let before = fixture.service.store.revision();
+    fixture.service.store.write(|db| {
+        db.0.execute_batch("CREATE TRIGGER reject_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'fixture publication failure'); END;")?;
+        Ok(())
+    }).await.unwrap();
+    let output = Output::new(
+        false,
+        json!({"type":"turn.completed","usage":{"input_tokens":42}}).to_string(),
+    );
+    let result = record(
+        &fixture.service,
+        &output,
+        &fixture.checkpoint,
+        false,
+        &[],
+        &mut fixture.log_total,
+        &mut fixture.activity,
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(fixture.service.store.revision(), before);
+    assert!(!fixture.checkpoint.snapshot().await.completed());
+    assert!(
+        RunCheckpoint::load(&fixture.service.store, &fixture.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(fixture.service.store.run(&fixture.id).await.unwrap()["usage"].is_null());
+    fixture
+        .service
+        .store
+        .write(|db| {
+            db.0.execute_batch("DROP TRIGGER reject_event")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    fixture.output(output).await;
+    assert!(fixture.checkpoint.snapshot().await.completed());
+    assert!(
+        RunCheckpoint::load(&fixture.service.store, &fixture.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .completed()
+    );
+    assert_eq!(
+        fixture.service.store.run(&fixture.id).await.unwrap()["usage"]["input_tokens"],
+        42
+    );
+}
+
+#[tokio::test]
+async fn unknown_engine_events_remain_redacted_data_without_changing_checkpoint_state() {
+    let mut fixture = Fixture::new().await;
+    fixture
+        .event(json!({"type":"engine.future","payload":{"token":"sensitive-tool-credential"}}))
+        .await;
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.event_page(&id, 0, 100))
+        .await
+        .unwrap();
+    let event = events
+        .iter()
+        .find(|event| matches!(&event.kind, EventKind::External(kind) if kind == "engine.future"))
+        .unwrap();
+    let encoded = serde_json::to_string(event).unwrap();
+    assert!(!encoded.contains("sensitive-tool-credential"));
+    assert!(encoded.contains("[redacted]"));
+    assert!(!fixture.checkpoint.snapshot().await.completed());
 }

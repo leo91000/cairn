@@ -151,15 +151,20 @@ abstract class AttachmentCases {
             val message = "Voilà la maquette actuelle, deux photos et le brief"
             val events =
                 listOf(
-                    RunEvent(id = 1,
-createdAt = System.currentTimeMillis() - 60_000,
-type = "chat.user",
-text = message,
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                            "text" to JsonPrimitive(message),
-                            "attachments" to wireJson.encodeToJsonElement(files),
-                        )),
-runId = "run")
+                    RunEvent(
+                        id = 1,
+                        createdAt = System.currentTimeMillis() - 60_000,
+                        type = "chat.user",
+                        text = message,
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "text" to JsonPrimitive(message),
+                                    "attachments" to wireJson.encodeToJsonElement(files),
+                                )
+                            ),
+                        runId = "run",
+                    )
                 )
             server.dispatcher =
                 object : Dispatcher() {

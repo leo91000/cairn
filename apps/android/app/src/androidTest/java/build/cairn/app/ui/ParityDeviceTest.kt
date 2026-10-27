@@ -92,26 +92,33 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
         )
     private val events =
         listOf(
-            RunEvent(id = 1,
-createdAt = timestamp - 60000,
-type = "chat.user",
-text = "Peux-tu simplifier cette interface et vérifier les détails ?"),
-            RunEvent(id = 2,
-createdAt = timestamp,
-type = "item.completed",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                    "item" to
-                        buildJsonObject {
-                            put("id", "reply")
-                            put("type", "agent_message")
-                            put(
-                                "text",
-                                "La nouvelle interface est prête.\n\n- Navigation compacte\n- Détails accessibles à la demande\n- Plus de place pour la conversation\n\nLes mots longs restent dans le message : https://example.test/" +
-                                    "longue-adresse".repeat(8),
-                            )
-                        }
-                ))),
+            RunEvent(
+                id = 1,
+                createdAt = timestamp - 60000,
+                type = "chat.user",
+                text = "Peux-tu simplifier cette interface et vérifier les détails ?",
+            ),
+            RunEvent(
+                id = 2,
+                createdAt = timestamp,
+                type = "item.completed",
+                text = "",
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        mapOf(
+                            "item" to
+                                buildJsonObject {
+                                    put("id", "reply")
+                                    put("type", "agent_message")
+                                    put(
+                                        "text",
+                                        "La nouvelle interface est prête.\n\n- Navigation compacte\n- Détails accessibles à la demande\n- Plus de place pour la conversation\n\nLes mots longs restent dans le message : https://example.test/" +
+                                            "longue-adresse".repeat(8),
+                                    )
+                                }
+                        )
+                    ),
+            ),
         )
 
     private val chats =

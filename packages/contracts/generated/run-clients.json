@@ -1,5 +1,12 @@
 [
   {
+    "input": "ReadRunHistoryInput",
+    "method": "POST",
+    "name": "readRunHistory",
+    "output": "HistoryPage",
+    "path": "/runs/{runId}/history"
+  },
+  {
     "input": "RunMissionInput",
     "method": "POST",
     "name": "runMission",

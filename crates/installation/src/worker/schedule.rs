@@ -370,9 +370,12 @@ async fn report_account_wait(
         account_required: Some(serde_json::from_value(serde_json::json!(required))?),
         ..Default::default()
     };
-    s.store.change_run(run_id, patch).await?;
+    let (run_id, message) = (run_id.to_owned(), error.message.clone());
     s.store
-        .event(run_id, &EventKind::Status, &error.message, None)
+        .transaction(move |db| {
+            db.change_run(&run_id, patch)?;
+            db.event(&run_id, &EventKind::Status, &message, None)
+        })
         .await
 }
 
@@ -390,12 +393,16 @@ pub(super) async fn report_capacity_wait(s: &Service, run: &RunState, detail: &s
         account_required: Some(None),
         ..Default::default()
     };
-    s.store.change_run(run_id, patch).await?;
-    if previous.starts_with(CAPACITY_WAIT_REASON) {
-        return Ok(());
-    }
+    let changed_figures = previous.starts_with(CAPACITY_WAIT_REASON);
+    let run_id = run_id.to_owned();
     s.store
-        .event(run_id, &EventKind::Status, &reason, None)
+        .transaction(move |db| {
+            db.change_run(&run_id, patch)?;
+            if !changed_figures {
+                db.event(&run_id, &EventKind::Status, &reason, None)?;
+            }
+            Ok(())
+        })
         .await
 }
 

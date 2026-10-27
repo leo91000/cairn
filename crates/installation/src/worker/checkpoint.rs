@@ -323,13 +323,45 @@ impl Checkpoint {
         state.store(&self.store, &self.id).await
     }
 
-    pub async fn persist(&self) -> Result<()> {
-        self.update(|_| {}).await
+    /// Publishes engine state, its checkpoint and the event in one commit. A
+    /// streamed text snapshot only changes memory; it does not rewrite the
+    /// checkpoint per token. Memory advances only after successful publication.
+    pub async fn record_event(
+        &self,
+        kind: cairn_contracts::EventKind,
+        text: String,
+        payload: Value,
+        change: impl FnOnce(&mut RunCheckpoint) -> (Option<crate::runs::RunChanges>, bool),
+    ) -> Result<()> {
+        let mut state = self.state.lock().await;
+        let mut next = state.clone();
+        let (changes, persist) = change(&mut next);
+        if persist {
+            let previous = self.pause_observation.lock().unwrap();
+            next.administrative_pause_observation = Some(AdministrativePauseObservation {
+                attempt: previous.0.clone(),
+                total_ms: previous.1,
+            });
+            next.remaining_ms = Some(self.deadline().map(|deadline| (deadline - now()).max(0)));
+        }
+        let (id, saved) = (self.id.clone(), persist.then(|| next.clone()));
+        self.store
+            .transaction(move |db| {
+                if let Some(changes) = changes {
+                    db.change_run(&id, changes)?;
+                }
+                if let Some(saved) = saved {
+                    saved.store_in(db, &id)?;
+                }
+                db.event(&id, &kind, &text, Some(&payload))
+            })
+            .await?;
+        *state = next;
+        Ok(())
     }
 
-    /// Changes the in-memory state only; the next update persists it.
-    pub async fn remember(&self, change: impl FnOnce(&mut RunCheckpoint)) {
-        change(&mut *self.state.lock().await);
+    pub async fn persist(&self) -> Result<()> {
+        self.update(|_| {}).await
     }
 }
 
@@ -405,6 +437,17 @@ mod tests {
     async fn pause_credit_is_monotonic_per_attempt_and_survives_checkpoint_recovery() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
+        use crate::run_fixture::DbRunFixture;
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({ "id": "budget-fixture", "taskId": "budget", "status": "running" }),
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
         let checkpoint = Checkpoint::new(
             store.clone(),
             "budget-fixture".into(),

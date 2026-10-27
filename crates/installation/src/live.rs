@@ -490,21 +490,31 @@ pub async fn history(s: &Service, kind: &str, id: &str, input: &Input) -> Result
             } else {
                 text(&scoped_run(&db, &scope, &Value::Null)?, "id").to_owned()
             };
-            let (first, _) = event_bounds(&db, &run)?;
-            let history = format!("v1:{run}:{first}");
-            if expected.is_some_and(|value| value != history) {
-                return Err(Error::conflict(
-                    "History changed. Reconnect before loading older messages.",
-                ));
-            }
-            let (events, has_older) = db.events_before(&run, before)?;
-            Ok(HistoryPage {
-                oldest: events.first().map_or(before, |e| e.id),
-                events,
-                history,
-                has_older,
-            })
+            history_page(&db, &run, before, expected.as_deref().unwrap())
         })
         .await?;
     Ok(serde_json::to_value(page)?)
+}
+
+/// Both the UI's backwards pages and the agent capability read the same snapshot.
+pub(crate) fn history_page(
+    db: &Db<'_>,
+    run: &str,
+    before: i64,
+    expected: &str,
+) -> Result<HistoryPage> {
+    let (first, _) = event_bounds(db, run)?;
+    let history = format!("v1:{run}:{first}");
+    if expected != history {
+        return Err(Error::conflict(
+            "History changed. Reconnect before loading older messages.",
+        ));
+    }
+    let (events, has_older) = db.events_before(run, before)?;
+    Ok(HistoryPage {
+        oldest: events.first().map_or(before, |event| event.id),
+        events,
+        history,
+        has_older,
+    })
 }

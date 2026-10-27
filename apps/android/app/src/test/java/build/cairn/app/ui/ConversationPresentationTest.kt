@@ -10,31 +10,44 @@ class ConversationPresentationTest {
     fun `later admission waits do not borrow a recovered quota message or reset`() {
         val old = "You've hit your individual spend limit · resets Monday 3pm (UTC)"
         fun failure(id: Long, message: String) =
-            RunEvent(id = id,
-createdAt = id,
-type = "turn.failed",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(buildJsonObject { put("error", buildJsonObject { put("message", message) }) }),
-runId = "run")
+            RunEvent(
+                id = id,
+                createdAt = id,
+                type = "turn.failed",
+                text = "",
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        buildJsonObject {
+                            put("error", buildJsonObject { put("message", message) })
+                        }
+                    ),
+                runId = "run",
+            )
         val failed = listOf(failure(1, old))
         val recovered =
             failed +
                 listOf(
-                    RunEvent(id = 2,
-createdAt = 2,
-type = "turn.started",
-text = "",
-runId = "run"),
-                    RunEvent(id = 3,
-createdAt = 3,
-type = "turn.completed",
-text = "",
-runId = "run"),
-                    RunEvent(id = 4,
-createdAt = 4,
-type = "status",
-text = "succeeded",
-runId = "run"),
+                    RunEvent(
+                        id = 2,
+                        createdAt = 2,
+                        type = "turn.started",
+                        text = "",
+                        runId = "run",
+                    ),
+                    RunEvent(
+                        id = 3,
+                        createdAt = 3,
+                        type = "turn.completed",
+                        text = "",
+                        runId = "run",
+                    ),
+                    RunEvent(
+                        id = 4,
+                        createdAt = 4,
+                        type = "status",
+                        text = "succeeded",
+                        runId = "run",
+                    ),
                 )
         val admission =
             Run(
@@ -94,12 +107,14 @@ runId = "run"),
     fun `quota history supports structured failures and retry notices`() {
         val text = "Account usage is exhausted."
         fun event(id: Long, type: String, payload: JsonObject? = null, raw: String = "") =
-            RunEvent(id = id,
-createdAt = id,
-type = type,
-text = raw,
-payload = kotlinx.serialization.json.JsonObject(payload),
-runId = "run")
+            RunEvent(
+                id = id,
+                createdAt = id,
+                type = type,
+                text = raw,
+                payload = (payload)?.let { kotlinx.serialization.json.JsonObject(it) },
+                runId = "run",
+            )
         val reply =
             event(
                 2,
@@ -142,12 +157,14 @@ runId = "run")
     fun `a reply that only repeats the turn failure folds into its notice`() {
         val overloaded = "API Error: 529 Overloaded"
         fun event(id: Long, type: String, payload: JsonObject? = null, raw: String = "") =
-            RunEvent(id = id,
-createdAt = id,
-type = type,
-text = raw,
-payload = kotlinx.serialization.json.JsonObject(payload),
-runId = "run")
+            RunEvent(
+                id = id,
+                createdAt = id,
+                type = type,
+                text = raw,
+                payload = (payload)?.let { kotlinx.serialization.json.JsonObject(it) },
+                runId = "run",
+            )
         fun reply(id: Long, text: String) =
             event(
                 id,
@@ -212,14 +229,19 @@ runId = "run")
     fun `a failed run's banner is hidden once its reason shows as a failure notice`() {
         val capacity = "Selected model is at capacity. Please try a different model."
         val failure =
-            RunEvent(id = 1,
-createdAt = 1,
-type = "turn.failed",
-text = capacity,
-payload = kotlinx.serialization.json.JsonObject(buildJsonObject {
-                    put("error", buildJsonObject { put("message", capacity) })
-                }),
-runId = "run")
+            RunEvent(
+                id = 1,
+                createdAt = 1,
+                type = "turn.failed",
+                text = capacity,
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        buildJsonObject {
+                            put("error", buildJsonObject { put("message", capacity) })
+                        }
+                    ),
+                runId = "run",
+            )
         val chat =
             Chat(
                 "chat",
@@ -244,7 +266,8 @@ runId = "run")
             failure.copy(
                 text = stop,
                 payload =
-                    buildJsonObject { put("error", buildJsonObject { put("message", stop) }) },
+                    (buildJsonObject { put("error", buildJsonObject { put("message", stop) }) })
+                        ?.let { kotlinx.serialization.json.JsonObject(it) },
             )
         assertFalse(failureShown(chat.copy(run = chat.run!!.copy(error = stop)), listOf(echo)))
         // A run records at most 10,000 characters of its error.
@@ -256,23 +279,39 @@ runId = "run")
         val timeLimit = "Run exceeded its time limit."
         val exhausted =
             listOf(
-                RunEvent(id = 1,
-createdAt = 1,
-type = "turn.started",
-text = "",
-runId = "run"),
-                RunEvent(id = 2,
-createdAt = 2,
-type = "turn.failed",
-text = limit,
-payload = kotlinx.serialization.json.JsonObject(buildJsonObject { put("error", buildJsonObject { put("message", limit) }) }),
-runId = "run"),
-                RunEvent(id = 3,
-createdAt = 3,
-type = "status",
-text = "failed",
-payload = kotlinx.serialization.json.JsonObject(buildJsonObject { put("error", buildJsonObject { put("message", timeLimit) }) }),
-runId = "run"),
+                RunEvent(
+                    id = 1,
+                    createdAt = 1,
+                    type = "turn.started",
+                    text = "",
+                    runId = "run",
+                ),
+                RunEvent(
+                    id = 2,
+                    createdAt = 2,
+                    type = "turn.failed",
+                    text = limit,
+                    payload =
+                        kotlinx.serialization.json.JsonObject(
+                            buildJsonObject {
+                                put("error", buildJsonObject { put("message", limit) })
+                            }
+                        ),
+                    runId = "run",
+                ),
+                RunEvent(
+                    id = 3,
+                    createdAt = 3,
+                    type = "status",
+                    text = "failed",
+                    payload =
+                        kotlinx.serialization.json.JsonObject(
+                            buildJsonObject {
+                                put("error", buildJsonObject { put("message", timeLimit) })
+                            }
+                        ),
+                    runId = "run",
+                ),
             )
         assertFalse(failureShown(chat.copy(run = chat.run!!.copy(error = timeLimit)), exhausted))
     }
@@ -610,11 +649,17 @@ runId = "run"),
         val chat =
             Chat("chat", run = run, messages = listOf(first.copy(mode = "steer"), privateAnswer))
         assertEquals(listOf("one"), chatDelivery(chat, emptyList()).sending.map { it.message.id })
-        val ack = RunEvent(id = 1,
-createdAt = 1,
-type = "chat.user",
-text = "Bonjour",
-payload = kotlinx.serialization.json.JsonObject(mapOf("messageId" to JsonPrimitive("one"))))
+        val ack =
+            RunEvent(
+                id = 1,
+                createdAt = 1,
+                type = "chat.user",
+                text = "Bonjour",
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        mapOf("messageId" to JsonPrimitive("one"))
+                    ),
+            )
         assertTrue(chatDelivery(chat, listOf(ack), first).sending.isEmpty())
     }
 

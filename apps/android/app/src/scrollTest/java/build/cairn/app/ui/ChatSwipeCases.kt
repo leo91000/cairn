@@ -376,7 +376,12 @@ abstract class ChatSwipeCases {
                             return MockResponse()
                                 .setBody(
                                     wireJson.encodeToString(
-                                        HistoryPage(emptyList(), "v1:swipe:1", 1, false)
+                                        HistoryPage(
+                                            events = emptyList(),
+                                            history = "v1:swipe:1",
+                                            oldest = 1,
+                                            hasOlder = false,
+                                        )
                                     )
                                 )
                         }
@@ -388,23 +393,28 @@ abstract class ChatSwipeCases {
                                 if (chat == null) emptyList()
                                 else
                                     (if (paginated) 101..103 else 1..30).map {
-                                        RunEvent(id = it.toLong(),
-createdAt = it.toLong(),
-type = "item.completed",
-text = "",
-payload = kotlinx.serialization.json.JsonObject(mapOf(
-                                                "item" to
-                                                    buildJsonObject {
-                                                        put("id", "answer-$it")
-                                                        put("type", "agent_message")
-                                                        put(
-                                                            "text",
-                                                            "Réponse **$it** de ${chat.title}. " +
-                                                                "Du contenu sélectionnable pour faire défiler l’historique. "
-                                                                    .repeat(12),
-                                                        )
-                                                    }
-                                            )))
+                                        RunEvent(
+                                            id = it.toLong(),
+                                            createdAt = it.toLong(),
+                                            type = "item.completed",
+                                            text = "",
+                                            payload =
+                                                kotlinx.serialization.json.JsonObject(
+                                                    mapOf(
+                                                        "item" to
+                                                            buildJsonObject {
+                                                                put("id", "answer-$it")
+                                                                put("type", "agent_message")
+                                                                put(
+                                                                    "text",
+                                                                    "Réponse **$it** de ${chat.title}. " +
+                                                                        "Du contenu sélectionnable pour faire défiler l’historique. "
+                                                                            .repeat(12),
+                                                                )
+                                                            }
+                                                    )
+                                                ),
+                                        )
                                     }
                             val state =
                                 if (chat == null) LiveState(chats = chats)
