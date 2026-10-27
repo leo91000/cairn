@@ -6,6 +6,10 @@ use run_fixture::DbRunFixture;
 mod agent_fixture;
 
 use agent_fixture::{AgentFixture, StoreAgentFixture};
+use cairn_contracts::{
+    ExecutionNode, NativeMode, NativeModeObserved, NativeObservationStatus, NodeBackend,
+    NodeCapabilities, NodeId, NodeStoragePolicy,
+};
 use cairn_installation::{
     config::{Config, id, now},
     error::{Error, Result},
@@ -231,19 +235,44 @@ async fn main() -> Result<()> {
     })
     .await?;
     authority(&s).await?;
-    s.store.save_node_boundary(json!({
-        "id": nodes::LOCAL_NODE_ID, "local": true, "name": "Disposable fixture", "accepting": true,
-        "nativeEnabled": true, "nativeAccounts": [TRUSTED], "lastSeen": now(),
-        "capabilities": {
-            "backend": "native",
-            "ublk": true,
-            "nativeModeProtocol": 1,
-            "os": "linux",
-            "arch": "x86_64",
-        },
-        "nativeModeObserved": { "mode": "protected", "generation": null, "status": "applied" },
-        "storage": { "reserveMiB": 64, "reservePercent": 1, "memoryCacheMiB": 4, "cacheMiB": 128 }
-    })).await?;
+    s.store
+        .transaction(|db| {
+            db.save_node(&ExecutionNode {
+                id: NodeId(uuid::Uuid::parse_str(nodes::LOCAL_NODE_ID).map_err(Error::internal)?),
+                revision: id(),
+                local: true,
+                name: "Disposable fixture".into(),
+                accepting: true,
+                native_enabled: true,
+                native_accounts: vec![TRUSTED.into()],
+                last_seen: Some(now()),
+                created_at: now(),
+                capabilities: NodeCapabilities {
+                    backend: NodeBackend::Native,
+                    ublk: true,
+                    native_mode_protocol: 1,
+                    os: "linux".into(),
+                    arch: "x86_64".into(),
+                    ..Default::default()
+                },
+                native_mode_observed: Some(NativeModeObserved {
+                    mode: NativeMode::Protected,
+                    generation: None,
+                    status: NativeObservationStatus::Applied,
+                    error: None,
+                    target: None,
+                }),
+                storage: NodeStoragePolicy {
+                    reserve_mi_b: 64,
+                    reserve_percent: 1,
+                    memory_cache_mi_b: 4,
+                    cache_mi_b: 128,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        })
+        .await?;
     let requests = Arc::new(AtomicU64::new(0));
     let count = requests.clone();
     let router = http::router(s.clone())
