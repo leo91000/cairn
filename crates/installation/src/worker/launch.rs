@@ -219,6 +219,13 @@ impl Execution<'_> {
         }
         let runner = crate::config::id();
         let placement = placement::reserve(self.s, self.run, &runner).await?;
+        *self.run = self.s.store.run(&self.id).await?;
+        if !execution::uses_vm(self.run, &self.s.config) {
+            // Development's shared process has no controller or retained node disk.
+            // Keep the selected backend, but never give recovery a node to contact.
+            placement::release(self.s, &runner).await?;
+            return Ok(());
+        }
         let saved_runner = runner.clone();
         let node = placement["nodeId"].as_str().map(str::to_owned);
         let runtime = placement["runtimeId"].clone();
@@ -230,7 +237,6 @@ impl Execution<'_> {
             })
             .await?;
         self.reservation = Some((runner, placement));
-        *self.run = self.s.store.run(&self.id).await?;
         Ok(())
     }
 

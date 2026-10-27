@@ -551,6 +551,7 @@ abstract class AgentPageCases {
                 .performClick()
             compose
                 .onNodeWithContentDescription("Réserver gpu-box en exclusivité")
+                .performScrollTo()
                 .assertIsEnabled()
                 .performClick()
                 .assertIsOn()

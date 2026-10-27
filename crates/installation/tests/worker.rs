@@ -1243,6 +1243,49 @@ async fn abrupt_restart_fences_previous_process_and_resumes_workspace() {
 }
 
 #[tokio::test]
+async fn automatic_shared_process_turns_do_not_acquire_a_managed_node_owner() {
+    let mut fixture = Fixture::new().await;
+    let s = fixture.service.clone();
+    s.agent_fixture(
+        json!({ "access": { "backend": "auto" } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let chat = fixture.start_chat(message("First automatic message")).await;
+    let run = fixture.chat_run(&chat).await;
+    let first = fixture.until_finished(&run).await;
+    assert_eq!(first["status"], RunStatus::Succeeded, "{first}");
+    assert_eq!(
+        first["snapshot"]["agent"]["access"]["backend"],
+        "firecracker"
+    );
+    let checkpoint = fixture.checkpoint(&run).await;
+    assert!(checkpoint["nodeId"].is_null(), "{checkpoint}");
+    assert!(checkpoint["runnerId"].is_null(), "{checkpoint}");
+    assert!(s.store.list("node-volumes").await.unwrap().is_empty());
+    assert!(
+        s.store
+            .list("node-attempts")
+            .await
+            .unwrap()
+            .iter()
+            .all(|attempt| attempt["released"] == true)
+    );
+    s.chat_send(&chat, message("Second automatic message"))
+        .await
+        .unwrap();
+    let second = fixture
+        .until(&run, |r| {
+            r["status"] == RunStatus::Succeeded && r["resumeCount"] == 1
+        })
+        .await;
+    assert_eq!(second["sessionId"], first["sessionId"]);
+    assert_eq!(second["workspace"], first["workspace"]);
+    fixture.stop(false).await;
+}
+
+#[tokio::test]
 async fn native_chat_turns_reuse_the_same_run_and_conversation() {
     let mut fixture = Fixture::new().await;
     let s = fixture.service.clone();
