@@ -8,8 +8,8 @@ outputs consumed by `ci.yaml`.
 
 | Tool | Official source | Channel | Native check in CI |
 | --- | --- | --- | --- |
-| Codex | npm `@openai/codex` | dist-tag `latest` | none |
-| Claude Code | npm `@anthropic-ai/claude-code` | dist-tag `stable` | catalog, usage, turn, resumption |
+| Codex | npm `@openai/codex` | dist-tag `latest` | plan-turn boundary |
+| Claude Code | npm `@anthropic-ai/claude-code` | dist-tag `stable` | catalog, usage, turn, resumption, plan-turn boundary |
 | OpenCode | npm `opencode-ai` | dist-tag `latest` | catalog, turn, resumption |
 | GitHub CLI | GitHub `cli/cli` latest release | not draft or prerelease | none |
 
@@ -73,6 +73,13 @@ production, the CLIs may still contact their vendors' public endpoints:
   its `legacy` release resume on the resolved one.
 - For both engines, sessions move both ways between the resolved release and the
   release production serves, as after an update or a rollback.
+- Claude Code and Codex each run a plan turn through their adapter
+  (`tests/native_plan_turns.rs`) against a local model that asks for writes,
+  network access, escalation and subagents. None may take effect, the proposed plan
+  must reach the conversation, and the turn after a plan must write again. The job
+  installs bubblewrap and socat, and lifts Ubuntu's restriction on unprivileged user
+  namespaces, which both sandboxes need. `publish` depends on this job, so a release
+  whose plan-turn boundary does not hold is not served.
 
 The `resolve` job reads the served versions from the configuration of the
 installation image production reports at `CAIRN_BEACON_ORIGIN/install/release`
@@ -120,11 +127,11 @@ channel between qualifications:
 
 - Without a subscription: the `auth login --claudeai` flow, quota values from
   `get_usage`, token rotation against the endpoint, and subscription inference.
-- The native turn runs with YOLO access and calls no tool. How a release applies
-  the sandbox settings of restricted agents (`settings` in `claude_process.rs`),
-  the `--permission-prompt-tool` approval flow, and MCP tool calls under
-  `--strict-mcp-config` has no per-release native check. Production runner
-  isolation still applies.
+- The native turn runs with YOLO access and calls no tool. Apart from plan turns,
+  how a release applies the sandbox settings of restricted agents (`settings` in
+  `claude_process.rs`), the `--permission-prompt-tool` approval flow, and MCP tool
+  calls under `--strict-mcp-config` has no per-release native check. Production
+  runner isolation still applies.
 
 A change in an adapter
 that depends on engine behavior, or a reported engine regression, needs the
@@ -142,12 +149,12 @@ following checks before merge:
   a permission prompt reaches Cairn, and that an MCP tool call completes. With a
   test account, check `claude auth login --claudeai`, `get_usage` quota values and
   resuming a subscription session.
-- Plan turns (Claude Code and Codex): run
+- Plan turns (Claude Code and Codex): CI runs `native_plan_turns` for the resolved
+  releases. To run it elsewhere:
   `CLAUDE_NATIVE_BIN=… CODEX_NATIVE_BIN=… pnpm test:backend -p cairn-installation --test native_plan_turns -- --ignored`.
-  A local scripted model asks for writes, network access, escalation and a
-  subagent; none may take effect. The tests also need bubblewrap, and socat for
-  Claude Code: `NATIVE_PROBE_PATH` adds a directory to the engine's `PATH`,
+  It needs bubblewrap, and socat for Claude Code. On a native node,
+  `NATIVE_PROBE_PATH` adds a directory to the engine's `PATH`,
   `NATIVE_PROBE_DROP_CAPS` drops inherited capabilities, and
   `NATIVE_PROBE_PRIVATE_TMP` gives Codex its own `/tmp` (with `TMPDIR` outside
-  `/tmp`). Record the results in [the plan-turn decision](adr/0072-plan-turns.md#qualification).
+  `/tmp`); see [the plan-turn decision](adr/0072-plan-turns.md#qualification).
 - All engines: keep their autoupdaters disabled at runtime.

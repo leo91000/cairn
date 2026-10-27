@@ -50,8 +50,11 @@ Pendant un tour de plan, Cairn applique lui-même la frontière :
   son classificateur du mode automatique, un modèle qui peut approuver une commande
   et ses domaines : `useAutoModeDuringPlan: false` et
   `permissions.disableAutoMode` rendent la décision au callback de Cairn. `ExitPlanMode` est refusé : l’accepter laisserait Claude implémenter dans le
-  même tour. Son plan est affiché comme **plan proposé**, comme l’élément `plan` de
-  Codex.
+  même tour. Le modèle écrit son plan dans le fichier de plan puis appelle
+  `ExitPlanMode` sans argument ; Claude Code (2.1.280, 2.1.308) ajoute alors le contenu
+  du fichier (`plan`) et son chemin à l’appel. Ce plan est affiché comme **plan
+  proposé**, comme l’élément `plan` de Codex. Sans fichier de plan, aucun plan vide
+  n’est affiché et Claude est invité à l’écrire avant de réessayer.
 - **Outils MCP en lecture seule seulement** : pour une connexion, les outils qu’elle
   déclare `readOnlyHint`, appliqués par la passerelle (connexions HTTP) et par la
   liste d’outils du moteur (connexions par commande) ; pour `cairn_installation`, les
@@ -62,7 +65,10 @@ Pendant un tour de plan, Cairn applique lui-même la frontière :
   suivent l’autorisation du tour (`chatExecution.plan`), que le tour suivant remplace.
 
 Les préréglages du moteur ne servent qu’à guider le modèle. Cairn découvre ceux de
-Codex à chaque tour et envoie `plan`, puis `default` au tour qui suit un tour de plan.
+Codex à chaque tour et envoie `plan`, puis `default` au tour qui suit un tour de plan,
+avec le modèle du message ou, à défaut, celui que Codex applique au fil (sa
+configuration peut le fixer), jamais le modèle par défaut de son catalogue à sa place.
+La reprise d’un tour de plan déjà terminé rejoue son plan, même sans autre réponse.
 Si Codex n’en propose pas, le tour reste borné et reçoit seulement la consigne de
 Cairn.
 
@@ -73,23 +79,27 @@ avant par `covers` : il n’élargit aucun droit.
 
 ## Qualification
 
-`crates/installation/tests/native_plan_turns.rs` (tests ignorés par défaut) fait
-exécuter un tour de plan aux vrais binaires, à travers les adaptateurs de Cairn, face
-à un modèle local scripté qui demande des effets. Aucun identifiant ni service externe
-n’est utilisé ; toutes les écritures visent un répertoire temporaire. Résultats du
-2026-10-27 :
+`crates/installation/tests/native_plan_turns.rs` fait exécuter un tour de plan aux
+vrais binaires, à travers les adaptateurs de Cairn, face à un modèle local scripté qui
+demande des effets. Aucun identifiant ni service externe n’est utilisé ; toutes les
+écritures visent un répertoire temporaire. Ignorés dans la suite ordinaire, ces tests
+sont lancés par le job `backend` de la CI pour les versions de Claude Code et de Codex
+que le build résout, et `publish` dépend de ce job : une version dont la frontière ne
+tient pas n’est pas servie. Résultats du 2026-10-27 :
 
 - Claude Code 2.1.308 et 2.1.280 : écritures du shell dans l’espace de travail, le
   HOME et `/tmp` refusées (système de fichiers en lecture seule), connexion locale
   refusée, hôte non autorisé refusé par le proxy (403), `allowed_domains` refusé,
   `dangerouslyDisableSandbox` refusé par le callback, `Write`/`Edit` refusés, et un
-  sous-agent démarré par `Agent` soumis aux mêmes refus. Avant
+  sous-agent démarré par `Agent` soumis aux mêmes refus. Le plan écrit dans le fichier
+  de plan, puis `ExitPlanMode` sans argument, est le plan proposé affiché. Avant
   `strictAllowlist`, un classificateur qui approuvait la commande laissait passer
   l’hôte de ses `allowed_domains` jusqu’au proxy (502).
 - Codex 0.164.0, sur un fil créé par un tour YOLO : écritures dans l’espace de travail
-  et le HOME refusées, connexion locale refusée, demande d’escalade refusée, sous-agent
-  lancé par `spawn_agent` soumis aux mêmes refus ; le tour précédent et le tour qui
-  suit le plan écrivent normalement.
+  et le HOME refusées, connexion locale refusée, demande d’escalade refusée ; le
+  sous-agent lancé par `spawn_agent` a tenté d’écrire et de se connecter, et ses deux
+  tentatives ont été refusées ; tous les tours gardent le modèle configuré ; le tour
+  précédent et le tour qui suit le plan écrivent normalement.
 
 ## Limites
 
@@ -105,5 +115,7 @@ n’est utilisé ; toutes les écritures visent un répertoire temporaire. Résu
   dont `/tmp` est monté depuis un répertoire inaccessible, bubblewrap refuse de
   démarrer : les commandes du shell échouent sans effet pendant le tour de plan.
   La qualification ci-dessus retire ces capacités et donne à Codex un `/tmp` privé.
-- La frontière qualifiée est celle des versions mesurées. Une nouvelle version des
-  moteurs doit repasser `native_plan_turns` avant d’être servie.
+- La CI qualifie les versions qu’elle résout, sur un exécuteur Ubuntu où bubblewrap
+  et socat sont installés et où les espaces de noms utilisateur non privilégiés sont
+  permis ; elle ne mesure pas chaque configuration de node. OpenCode refuse les tours
+  de plan et n’est pas qualifié.

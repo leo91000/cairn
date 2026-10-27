@@ -1224,11 +1224,16 @@ async fn plan_turns_deny_writes_effects_and_leaving_plan_mode() {
         "excluded-mcp",
         "scheduler",
         "exit-plan",
+        "exit-without-plan",
     ] {
         assert_eq!(decisions[denied]["behavior"], "deny", "{denied}");
     }
     let exit = decisions["exit-plan"]["message"].as_str().unwrap();
     assert!(exit.contains("plan was shown to the user"), "{exit}");
+    // Without a plan file there is nothing to show: Claude is told so, and no empty
+    // proposal appears.
+    let missing = decisions["exit-without-plan"]["message"].as_str().unwrap();
+    assert!(missing.contains("No plan reached the user"), "{missing}");
     assert!(
         decisions["workspace-write"]["message"]
             .as_str()

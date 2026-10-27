@@ -176,7 +176,7 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
@@ -271,6 +271,27 @@ jobs:
             qualify "$served" "$resolved"
             qualify "$resolved" "$served"
           fi
+      - name: Qualify plan turns of the resolved Claude Code and Codex releases
+        env:
+          CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
+          CODEX_VERSION: ${{ needs.resolve.outputs.codex }}
+        run: |
+          # Each engine's own sandbox enforces a plan turn's boundary. The releases this build
+          # ships run one through Cairn's adapters against a local model that asks for writes,
+          # network access, escalation and subagents; none may take effect, and the turn after
+          # the plan must write again. See docs/adr/0072-plan-turns.md#qualification.
+          sudo apt-get install -y --no-install-recommends bubblewrap socat
+          # Ubuntu restricts the unprivileged user namespaces both sandboxes create.
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          claude="$RUNNER_TEMP/claude-$CLAUDE_VERSION/bin/claude"
+          test "$("$claude" --version)" = "$CLAUDE_VERSION (Claude Code)"
+          npm install --global --prefix "$RUNNER_TEMP/codex-$CODEX_VERSION" "@openai/codex@$CODEX_VERSION"
+          codex="$RUNNER_TEMP/codex-$CODEX_VERSION/bin/codex"
+          test "$("$codex" --version)" = "codex-cli $CODEX_VERSION"
+          CLAUDE_NATIVE_BIN="$claude" CODEX_NATIVE_BIN="$codex" \
+            node scripts/test-backend.mjs -p cairn-installation --test native_plan_turns -- --ignored --test-threads 1
   node-checks:
     services:
       postgres:

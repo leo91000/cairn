@@ -1035,8 +1035,11 @@ impl Chat<'_> {
             .iter()
             .find(|preset| preset["mode"] == kind)?
             .clone();
+        // A preset names its model: without a chosen one, keep the model Codex runs the
+        // thread with, which its configuration may set, rather than the catalog's default.
         let model = match model(plan) {
             Some(model) => model.clone(),
+            None if !self.thread_model.is_empty() => self.thread_model.clone().into(),
             None => {
                 let models = crate::models::discover(self.session).await.ok()?;
                 let default = models.as_array()?.iter().find(|m| m["isDefault"] == true)?;
@@ -1308,10 +1311,11 @@ fn keep_item(turn: &mut Value, item: &Value) -> Result<()> {
         "userMessage" => {
             items.push(json!({ "type": "userMessage", "clientId": item["clientId"] }));
         }
-        "agentMessage" => {
-            // Only the final answer is needed to settle a completed turn. Its tools are
-            // already in our durable event log.
-            items.retain(|item| item["type"] != "agentMessage");
+        // Only the final answer is needed to settle a completed turn: its latest message
+        // and, for a plan turn, its proposed plan, which may be the only answer. Its tools
+        // are already in our durable event log.
+        kind @ ("agentMessage" | "plan") => {
+            items.retain(|item| item["type"] != kind);
             items.push(item.clone());
         }
         _ => {}

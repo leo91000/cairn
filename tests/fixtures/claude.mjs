@@ -281,6 +281,11 @@ else {
       const plans = path.join(home, 'plans')
       mkdirSync(plans, { recursive: true })
       const file = path.join(process.cwd(), 'main.rs')
+      // The model calls ExitPlanMode without arguments. Claude Code 2.1.280 and 2.1.308 add
+      // the plan file it wrote, as `plan` and `planFilePath`; without a plan file the
+      // input stays empty.
+      const planFile = path.join(plans, 'fixture-plan.md')
+      const proposal = { plan: '1. Change main.rs\n2. Run the tests', planFilePath: planFile }
       const requests = [
         ['workspace-write', 'Write', { file_path: file, content: 'changed' }],
         ['workspace-edit', 'Edit', { file_path: file, old_string: 'a', new_string: 'b' }],
@@ -296,7 +301,8 @@ else {
         ['excluded-mcp', 'mcp__cairn_fixture__delete', {}],
         ['gateway-mcp', 'mcp__cairn_workspace__publish_artifact', {}],
         ['scheduler', 'CronCreate', {}],
-        ['exit-plan', 'ExitPlanMode', { plan: '1. Change main.rs\n2. Run the tests' }],
+        ['exit-plan', 'ExitPlanMode', proposal],
+        ['exit-without-plan', 'ExitPlanMode', {}],
       ]
       planRequests = new Set(requests.map(([id]) => id))
       planCorrelation = correlation
@@ -304,12 +310,20 @@ else {
         type: 'assistant',
         message: {
           id: 'plan-message',
-          content: [{
-            type: 'tool_use',
-            id: 'exit-plan-tool',
-            name: 'ExitPlanMode',
-            input: { plan: '1. Change main.rs\n2. Run the tests' },
-          }],
+          content: [
+            {
+              type: 'tool_use',
+              id: 'exit-without-plan-tool',
+              name: 'ExitPlanMode',
+              input: {},
+            },
+            {
+              type: 'tool_use',
+              id: 'exit-plan-tool',
+              name: 'ExitPlanMode',
+              input: proposal,
+            },
+          ],
         },
       })
       for (const [id, tool, input] of requests)

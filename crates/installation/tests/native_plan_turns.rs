@@ -24,6 +24,12 @@ use tokio_util::sync::CancellationToken;
 /// The marker of the subagent's task, which tells its requests apart from the main agent's.
 const SUBAGENT: &str = "SUBAGENT PROBE";
 
+/// Stands for the plan file Claude Code names in a scripted tool call.
+const PLAN_FILE: &str = "<plan file>";
+
+/// The plan the scripted model writes to its plan file.
+const PROPOSAL: &str = "1. Change main.rs\n2. Run the tests\n";
+
 /// The user request of the probed Codex plan turn.
 const PLAN_REQUEST: &str = "Plan the change.";
 
@@ -144,11 +150,20 @@ async fn scripted_model(
         let step = tool_results(&request).len();
         let body = match script.get(step) {
             Some((name, input)) => {
+                // The plan file Claude Code names in its plan-mode instructions.
+                let plan_file = request
+                    .to_string()
+                    .split(|c: char| c.is_whitespace() || "\"\\()".contains(c))
+                    .find(|word| word.contains("/plans/") && word.ends_with(".md"))
+                    .map(str::to_owned);
+                let input = input
+                    .to_string()
+                    .replace(PLAN_FILE, &plan_file.unwrap_or_default());
                 let call = json!({
                     "type": "tool_use",
                     "id": tool_id(agent, step),
                     "name": name,
-                    "input": input,
+                    "input": serde_json::from_str::<Value>(&input).unwrap(),
                 });
                 streamed(model, &call, "tool_use")
             }
@@ -252,10 +267,13 @@ async fn native_claude_plan_turn_blocks_writes_network_and_subagent_effects() {
             "Agent",
             json!({ "description": "Probe", "prompt": format!("{SUBAGENT}: change the workspace"), "subagent_type": "general-purpose" }),
         ),
+        // As Claude Code's plan mode asks: write the plan file, then leave plan mode
+        // without arguments.
         (
-            "ExitPlanMode",
-            json!({ "plan": "1. Change main.rs\n2. Run the tests" }),
+            "Write",
+            json!({ "file_path": PLAN_FILE, "content": PROPOSAL }),
         ),
+        ("ExitPlanMode", json!({})),
     ];
     let subagent = vec![
         (
@@ -351,7 +369,7 @@ async fn native_claude_plan_turn_blocks_writes_network_and_subagent_effects() {
             "result": result.as_ref().map(|()| "completed").map_err(|error| error.message.clone()),
             "effects": effects,
             "toolCalls": transcript(&requests),
-            "proposedPlan": events.iter().any(|event| event["item"]["type"] == "proposed_plan"),
+            "proposedPlan": events.iter().rfind(|event| event["item"]["type"] == "proposed_plan").map(|event| event["item"]["text"].clone()),
             "requests": requests.len(),
             "requestBodies": if std::env::var("NATIVE_PROBE_DUMP").is_ok() { json!(requests) } else { Value::Null },
         }),
@@ -369,6 +387,20 @@ async fn native_claude_plan_turn_blocks_writes_network_and_subagent_effects() {
             .iter()
             .any(|call| call["id"] == tool_id("sub", 0)),
         "the subagent did not run, so its effects were not exercised"
+    );
+    // The plan the model wrote is the proposal shown, and leaving plan mode is refused.
+    let proposed = events
+        .iter()
+        .rfind(|event| event["item"]["type"] == "proposed_plan")
+        .expect("no proposed plan");
+    assert_eq!(proposed["item"]["text"], PROPOSAL);
+    let exit = transcript(&requests)
+        .into_iter()
+        .find(|call| call["id"] == tool_id("main", 9))
+        .expect("ExitPlanMode was not answered");
+    assert!(
+        exit["content"].to_string().contains("plan was shown"),
+        "{exit}"
     );
     // The proxy refuses the unlisted host (403); any other status means it let the
     // request through, as a command's own `allowed_domains` could.
@@ -481,9 +513,12 @@ fn codex_call(act: &Act, step: usize) -> Value {
 async fn scripted_responses(
     main: Arc<Mutex<Vec<Act>>>,
     subagent: Vec<Act>,
-) -> (String, Arc<Mutex<Vec<Value>>>) {
+) -> (String, Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<Value>>>) {
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let recorded = requests.clone();
+    // What a sub-agent's own calls returned, which shows it ran and attempted effects.
+    let child_outputs = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let observed = child_outputs.clone();
     let router = Router::new().route(
         "/v1/responses",
         post(move |body: Bytes| {
@@ -499,6 +534,9 @@ async fn scripted_responses(
             // A sub-agent's history holds its task but not the parent's request.
             let history = Value::from(input.clone()).to_string();
             let child = history.contains(SUBAGENT) && !history.contains(PLAN_REQUEST);
+            if child {
+                observed.lock().unwrap().extend(function_outputs(&current));
+            }
             let script = if child {
                 subagent.clone()
             } else {
@@ -524,7 +562,30 @@ async fn scripted_responses(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    (format!("http://{address}/v1"), requests)
+    (format!("http://{address}/v1"), requests, child_outputs)
+}
+
+/// A model Codex lists other than its default, which its catalog ranks first: the
+/// conversation's configured model, which no plan preset may replace.
+fn configured_model(binary: &str, home: &Path) -> String {
+    let output = std::process::Command::new(binary)
+        .args(["debug", "models"])
+        .env("CODEX_HOME", home)
+        .output()
+        .unwrap();
+    let catalog: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let mut listed = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|model| model["visibility"] == "list")
+        .collect::<Vec<_>>();
+    listed.sort_by_key(|model| model["priority"].as_i64());
+    let model = listed
+        .get(1)
+        .or(listed.first())
+        .expect("Codex lists no model");
+    model["slug"].as_str().unwrap().to_owned()
 }
 
 #[tokio::test]
@@ -542,14 +603,15 @@ async fn native_codex_plan_turn_blocks_writes_network_and_subagent_effects() {
         Act::Shell(format!("touch {ws}/subagent-write; echo exit=$?")),
         Act::Shell(loopback.clone()),
     ];
-    let (url, requests) = scripted_responses(main.clone(), subagent).await;
+    let (url, requests, child_outputs) = scripted_responses(main.clone(), subagent).await;
 
     let home = root.path().join("codex");
     std::fs::create_dir(&home).unwrap();
+    let configured = configured_model(&binary, &home);
     std::fs::write(
         home.join("config.toml"),
         format!(
-            "model = \"gpt-6-astra\"\nmodel_provider = \"local\"\n\n[model_providers.local]\nname = \"local\"\nbase_url = \"{url}\"\nwire_api = \"responses\"\nenv_key = \"LOCAL_PROBE_KEY\"\n"
+            "model = \"{configured}\"\nmodel_provider = \"local\"\n\n[model_providers.local]\nname = \"local\"\nbase_url = \"{url}\"\nwire_api = \"responses\"\nenv_key = \"LOCAL_PROBE_KEY\"\n"
         ),
     )
     .unwrap();
@@ -683,6 +745,12 @@ async fn native_codex_plan_turn_blocks_writes_network_and_subagent_effects() {
                 .map(move |tool| format!("{name}.{}", tool["name"].as_str().unwrap_or_default()))
         })
         .collect::<std::collections::BTreeSet<_>>();
+    // No turn chose a model: each keeps the one Codex's configuration sets, including the
+    // plan turn and the turn after it, whose presets name a model.
+    let models = requests
+        .iter()
+        .map(|request| request["model"].as_str().unwrap_or_default().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
     let effects = json!({
         "plan-write": workspace.join("plan-write").exists(),
         "escalated": workspace.join("escalated").exists(),
@@ -703,6 +771,8 @@ async fn native_codex_plan_turn_blocks_writes_network_and_subagent_effects() {
             "controls": controls,
             "planTurnTools": plan_tools,
             "toolOutputs": outputs,
+            "subagentOutputs": child_outputs.lock().unwrap().clone(),
+            "models": models,
             "requestBodies": if std::env::var("NATIVE_PROBE_DUMP").is_ok() { json!(requests) } else { Value::Null },
         }),
     );
@@ -716,6 +786,15 @@ async fn native_codex_plan_turn_blocks_writes_network_and_subagent_effects() {
             "{effect} happened during a plan turn"
         );
     }
+    // A sub-agent ran in the plan turn and its own write and connection were refused,
+    // rather than never starting.
+    let child = Value::from(child_outputs.lock().unwrap().clone()).to_string();
+    assert!(
+        child.contains("subagent-write") && child.contains("Read-only file system"),
+        "{child}"
+    );
+    assert!(child.contains("Failed to connect"), "{child}");
+    assert_eq!(models, [configured].into(), "{models:?}");
     for (control, happened) in controls.as_object().unwrap() {
         assert_eq!(happened, true, "the {control} turn could not write");
     }

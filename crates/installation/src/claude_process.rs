@@ -41,6 +41,8 @@ const PLAN_DENIED: &str = "This is a plan turn: Cairn allows reading, searching 
 
 const PLAN_RECORDED: &str = "The plan was shown to the user. Stop here and summarize it briefly: the user starts implementation explicitly in a later turn.";
 
+const PLAN_MISSING: &str = "No plan reached the user: write your plan to the plan file named in the plan-mode instructions, then call ExitPlanMode again. The user starts implementation explicitly in a later turn.";
+
 const SANDBOX_UNAVAILABLE: &str = "Plan turns need Claude Code's sandbox, which is unavailable on this node (it requires bubblewrap and socat). Nothing was changed.";
 
 const SHELL_ENVIRONMENT_ERROR: &str = "Claude Code's session environment contains NUL bytes, so shell commands cannot start. Repair the affected .sh file in the Claude session-env directory, then resume this conversation to start a fresh process. The conversation and workspace have been preserved.";
@@ -298,12 +300,18 @@ pub fn item(block: &Value, message: &str, index: usize) -> Option<Value> {
         "tool_use" if matches!(text(block, "name"), "Agent" | "Task") => {
             subagent(&id, &block["input"])
         }
-        "tool_use" if block["name"] == "ExitPlanMode" => json!({
-            "id": id,
-            "type": "proposed_plan",
-            "text": block["input"]["plan"],
-            "status": "in_progress",
-        }),
+        // Claude Code fills `plan` from the plan file the model wrote; without one there is
+        // no proposal to show.
+        "tool_use"
+            if block["name"] == "ExitPlanMode" && !proposed_plan(&block["input"]).is_empty() =>
+        {
+            json!({
+                "id": id,
+                "type": "proposed_plan",
+                "text": block["input"]["plan"],
+                "status": "in_progress",
+            })
+        }
         "tool_use" if block["name"] == "TodoWrite" => {
             let mut plan = crate::agent_plan::todos(&id, &block["input"]);
             plan["status"] = "in_progress".into();
@@ -325,6 +333,12 @@ pub fn item(block: &Value, message: &str, index: usize) -> Option<Value> {
         }),
         _ => return None,
     })
+}
+
+/// The plan an `ExitPlanMode` call proposes: Claude Code reads it from the plan file the
+/// model wrote and adds it to the call, with `planFilePath`.
+fn proposed_plan(input: &Value) -> &str {
+    text(input, "plan").trim()
 }
 
 /// A subagent the agent delegates work to, followed until it reports back.
@@ -1417,7 +1431,12 @@ impl Turn<'_> {
             json!({ "behavior": "allow", "updatedInput": request["input"] })
         } else if planning && name == "ExitPlanMode" {
             // Approving would let Claude Code implement in this same turn.
-            json!({ "behavior": "deny", "message": PLAN_RECORDED })
+            let message = if proposed_plan(&request["input"]).is_empty() {
+                PLAN_MISSING
+            } else {
+                PLAN_RECORDED
+            };
+            json!({ "behavior": "deny", "message": message })
         } else if planning {
             json!({ "behavior": "deny", "message": PLAN_DENIED })
         } else {
