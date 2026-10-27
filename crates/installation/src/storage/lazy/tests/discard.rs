@@ -141,7 +141,10 @@ fn invalid_discard_does_not_change_any_prefix_and_sparse_payload_is_authenticate
     file.write_all_at(b"corruption", 112 + 4 + 112 + 512)
         .unwrap();
     file.sync_all().unwrap();
-    assert!(LazyDisk::open(root.path(), source).is_err());
+    let disk = LazyDisk::open(root.path(), source).unwrap();
+    assert!(disk.read_at(0, &mut kept).is_err());
+    let generation = disk.seal().unwrap();
+    assert!(disk.capture(generation).is_err());
 }
 
 #[test]

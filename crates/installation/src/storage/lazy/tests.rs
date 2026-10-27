@@ -11,6 +11,123 @@ use std::{
 mod discard;
 mod group_commit;
 
+#[test]
+#[ignore = "explicit local journal recovery measurement; run alone"]
+fn journal_reopen_measurement() {
+    use std::os::unix::fs::MetadataExt;
+    use std::time::Instant;
+
+    fn cpu_micros() -> u64 {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        assert_eq!(
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
+            0
+        );
+        let usage = unsafe { usage.assume_init() };
+        ((usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1_000_000
+            + usage.ru_utime.tv_usec
+            + usage.ru_stime.tv_usec) as u64
+    }
+
+    fn read_bytes() -> u64 {
+        std::fs::read_to_string("/proc/self/io")
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("rchar: "))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    let gib: u64 =
+        std::env::var("CAIRN_REOPEN_BENCH_GIB").map_or(16, |value| value.parse().unwrap());
+    let frame: u64 = std::env::var("CAIRN_REOPEN_BENCH_FRAME_KIB")
+        .map_or(BLOCK, |value| value.parse::<u64>().unwrap() * 1024);
+    assert!(frame > 0 && frame <= BLOCK && BLOCK.is_multiple_of(frame));
+    let root = tempfile::tempdir_in("/var/tmp").unwrap();
+    let source = Arc::new(Source {
+        reads: AtomicUsize::new(0),
+    });
+    let disk = LazyDisk::create(
+        root.path(),
+        &single_block(BLOCK, BLOCK, &Value::Null),
+        source.clone(),
+    )
+    .unwrap();
+    let zeros = vec![0; frame as usize];
+    // Repeated sparse discards model accumulated obsolete append history while
+    // allocating only headers. Every zero write follows a nonzero byte so it
+    // cannot be suppressed by the live zero-range optimization.
+    let count = gib * 1024 * 1024 * 1024 / frame;
+    let pairs_per_batch = (MAX_IO / (frame as usize + 1)).min(64);
+    for first in (0..count).step_by(pairs_per_batch) {
+        let mut writes = Vec::new();
+        for index in first..(first + pairs_per_batch as u64).min(count) {
+            let offset = index % (BLOCK / frame) * frame;
+            writes.push(DiskWrite {
+                offset,
+                bytes: b"x",
+            });
+            writes.push(DiskWrite {
+                offset,
+                bytes: &zeros,
+            });
+        }
+        disk.write_batch(&writes).unwrap();
+    }
+    disk.sync().unwrap();
+    let logical = disk.accounting().unwrap()["journalBytes"].as_u64().unwrap();
+    drop(disk);
+    let physical = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().metadata().unwrap().blocks() * 512)
+        .sum::<u64>();
+
+    for trial in 0..3 {
+        let before_reads = read_bytes();
+        let before_cpu = cpu_micros();
+        let started = Instant::now();
+        let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
+        let open_us = started.elapsed().as_micros();
+        let open_cpu_us = cpu_micros() - before_cpu;
+        let open_read_bytes = read_bytes() - before_reads;
+        let mut bytes = [1; 4096];
+        let started = Instant::now();
+        disk.read_at(0, &mut bytes).unwrap();
+        assert_eq!(bytes, [if trial == 0 { 0 } else { 7 }; 4096]);
+        let cold_read_us = started.elapsed().as_micros();
+        let started = Instant::now();
+        for _ in 0..256 {
+            disk.read_at(0, &mut bytes).unwrap();
+        }
+        let warm_reads_us = started.elapsed().as_micros();
+        let started = Instant::now();
+        for _ in 0..16 {
+            disk.write_at(0, &[7; 4096]).unwrap();
+        }
+        disk.sync().unwrap();
+        let write_us = started.elapsed().as_micros();
+        println!(
+            "REOPEN_PERF {}",
+            serde_json::json!({
+                "gib": gib,
+                "frameKiB": frame / 1024,
+                "trial": trial,
+                "journalLogicalBytes": logical,
+                "journalAllocatedBytes": physical,
+                "openUs": open_us,
+                "openCpuUs": open_cpu_us,
+                "openReadBytes": open_read_bytes,
+                "coldReadUs": cold_read_us,
+                "warmReads256Us": warm_reads_us,
+                "writes16AndSyncUs": write_us,
+                "remoteEncodedBytes": 0
+            })
+        );
+    }
+}
+
 struct Source {
     reads: AtomicUsize,
 }
@@ -315,6 +432,71 @@ fn crash_writer() {
     loop {
         std::thread::park();
     }
+}
+
+#[test]
+fn reopening_indexes_headers_and_verifies_payload_only_when_used() {
+    use std::os::unix::fs::FileExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let source = Arc::new(Source {
+        reads: AtomicUsize::new(0),
+    });
+    let disk = LazyDisk::create(
+        root.path(),
+        &single_block(4096, BLOCK, &Value::Null),
+        source.clone(),
+    )
+    .unwrap();
+    disk.write_at(0, b"retained").unwrap();
+    disk.sync().unwrap();
+    drop(disk);
+
+    let segment = std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.path().join("payload-1-1.segment"))
+        .unwrap();
+    segment.write_all_at(b"damaged!", 112).unwrap();
+    segment.sync_all().unwrap();
+
+    let disk = LazyDisk::open(root.path(), source).expect("opening must not read frame payloads");
+    let mut output = [0; 8];
+    assert!(disk.read_at(0, &mut output).is_err());
+    let generation = disk.seal().unwrap();
+    assert!(disk.capture(generation).is_err());
+}
+
+#[test]
+fn recovery_does_not_read_obsolete_overwritten_payloads() {
+    use std::os::unix::fs::FileExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let source = Arc::new(Source {
+        reads: AtomicUsize::new(0),
+    });
+    let disk = LazyDisk::create(
+        root.path(),
+        &single_block(4096, BLOCK, &Value::Null),
+        source.clone(),
+    )
+    .unwrap();
+    disk.write_at(0, b"obsolete").unwrap();
+    disk.write_at(0, b"current!").unwrap();
+    disk.sync().unwrap();
+    drop(disk);
+
+    let segment = std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.path().join("payload-1-1.segment"))
+        .unwrap();
+    segment.write_all_at(b"damaged!", 112).unwrap();
+    segment.sync_all().unwrap();
+
+    let disk = LazyDisk::open(root.path(), source).unwrap();
+    let mut output = [0; 8];
+    disk.read_at(0, &mut output).unwrap();
+    assert_eq!(&output, b"current!");
+    assert_eq!(disk.accounting().unwrap()["dirtyBytes"], 16);
 }
 
 #[test]
