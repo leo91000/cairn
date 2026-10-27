@@ -3,7 +3,9 @@ package build.cairn.contracts
 
 import build.cairn.app.data.CairnApi
 import build.cairn.app.data.segment
-import kotlinx.serialization.json.encodeToJsonElement
 
 suspend fun CairnApi.readRunHistory(input: ReadRunHistoryInput): HistoryPage =
-    send("POST", "/runs/${segment(input.runId)}/history", contractJson.encodeToJsonElement(input))
+    send(
+        "GET",
+        "/runs/${segment(input.runId)}/history?before=${segment(input.before.toString())}&history=${segment(input.history.toString())}",
+    )

@@ -424,9 +424,46 @@ mod nullable {
     }
 }
 
+// Temporary JSON adapters are owned by the unconverted node/chat domains. They
+// cannot persist arbitrary checkpoint fields or create a second source of truth.
+impl Db<'_> {
+    pub fn checkpoint_boundary(&self, run_id: &str) -> Result<Option<Value>> {
+        RunCheckpoint::load_in(self, run_id)?
+            .map(|state| state.to_value())
+            .transpose()
+    }
+
+    pub fn save_checkpoint_boundary(&self, run_id: &str, value: &Value) -> Result<()> {
+        RunCheckpoint::from_value(value.clone())?.store_in(self, run_id)
+    }
+
+    pub fn delete_checkpoint(&self, run_id: &str) -> Result<()> {
+        self.0
+            .execute("DELETE FROM run_checkpoints WHERE run_id=?", [run_id])?;
+        Ok(())
+    }
+}
+
+impl Store {
+    pub async fn checkpoint_boundary(&self, run_id: &str) -> Result<Option<Value>> {
+        let run_id = run_id.to_owned();
+        self.read(move |db| db.checkpoint_boundary(&run_id)).await
+    }
+
+    pub async fn save_checkpoint_boundary(&self, run_id: &str, value: Value) -> Result<()> {
+        RunCheckpoint::from_value(value)?.store(self, run_id).await
+    }
+
+    pub async fn delete_checkpoint(&self, run_id: &str) -> Result<()> {
+        let run_id = run_id.to_owned();
+        self.write(move |db| db.delete_checkpoint(&run_id)).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::run_fixture::DbRunFixture;
     use serde_json::json;
 
     #[test]
@@ -467,7 +504,6 @@ mod tests {
     async fn pause_credit_is_monotonic_per_attempt_and_survives_checkpoint_recovery() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
-        use crate::run_fixture::DbRunFixture;
         store
             .transaction(|db| {
                 db.add_run_fixture(
@@ -521,41 +557,5 @@ mod tests {
         checkpoint.account_pause("attempt", 30_000);
         assert_eq!(checkpoint.deadline(), None);
         assert!(!checkpoint.expired());
-    }
-}
-
-// Temporary JSON adapters are owned by the unconverted node/chat domains. They
-// cannot persist arbitrary checkpoint fields or create a second source of truth.
-impl Db<'_> {
-    pub fn checkpoint_boundary(&self, run_id: &str) -> Result<Option<Value>> {
-        RunCheckpoint::load_in(self, run_id)?
-            .map(|state| state.to_value())
-            .transpose()
-    }
-
-    pub fn save_checkpoint_boundary(&self, run_id: &str, value: &Value) -> Result<()> {
-        RunCheckpoint::from_value(value.clone())?.store_in(self, run_id)
-    }
-
-    pub fn delete_checkpoint(&self, run_id: &str) -> Result<()> {
-        self.0
-            .execute("DELETE FROM run_checkpoints WHERE run_id=?", [run_id])?;
-        Ok(())
-    }
-}
-
-impl Store {
-    pub async fn checkpoint_boundary(&self, run_id: &str) -> Result<Option<Value>> {
-        let run_id = run_id.to_owned();
-        self.read(move |db| db.checkpoint_boundary(&run_id)).await
-    }
-
-    pub async fn save_checkpoint_boundary(&self, run_id: &str, value: Value) -> Result<()> {
-        RunCheckpoint::from_value(value)?.store(self, run_id).await
-    }
-
-    pub async fn delete_checkpoint(&self, run_id: &str) -> Result<()> {
-        let run_id = run_id.to_owned();
-        self.write(move |db| db.delete_checkpoint(&run_id)).await
     }
 }

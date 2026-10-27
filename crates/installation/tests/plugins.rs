@@ -1587,7 +1587,7 @@ async fn replies_answer_a_retried_turn_with_its_last_attempt() {
             store
                 .event(&run_id, &EventKind::from_adapter(kind), text, payload)
                 .await
-                .unwrap()
+                .unwrap();
         }
     };
 
@@ -1649,7 +1649,7 @@ async fn replies_answer_a_retried_turn_stopped_by_cairn_with_its_last_attempt() 
             store
                 .event(&run_id, &EventKind::from_adapter(kind), text, payload)
                 .await
-                .unwrap()
+                .unwrap();
         }
     };
 
@@ -1941,7 +1941,7 @@ async fn replies_do_not_follow_a_retry_stopped_before_it_ran() {
             store
                 .event(&run_id, &EventKind::from_adapter(kind), text, payload)
                 .await
-                .unwrap()
+                .unwrap();
         }
     };
 
@@ -2018,7 +2018,7 @@ async fn replies_to_a_stopped_turn_do_not_carry_the_next_answer() {
                 store
                     .event(&run_id, &EventKind::from_adapter(kind), text, payload)
                     .await
-                    .unwrap()
+                    .unwrap();
             }
         };
 

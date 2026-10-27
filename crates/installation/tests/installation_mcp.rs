@@ -1181,13 +1181,12 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     let history = call(&s, &configuration, "get_run", json!({ "runId": run["id"] })).await;
     assert_eq!(result(&history)["run"]["run"]["id"], run["id"]);
     let events = result(&history)["events"].as_array().unwrap().clone();
-    let first = events[0]["event"]["id"].as_i64().unwrap();
     let window = call(
         &s,
         &configuration,
         "read_run_history",
         json!({
-            "runId": run["id"], "history": format!("v1:{}:{first}", run["id"].as_str().unwrap()),
+            "runId": run["id"], "history": result(&history)["history"],
         }),
     )
     .await;
@@ -1197,7 +1196,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|event| event["type"] == "engine.retry")
+            .any(|record| record["event"]["type"] == "engine.retry")
     );
 
     assert!(
@@ -2153,7 +2152,7 @@ async fn mission_conversion_matches_public_mcp_and_installation_tools() {
         let original = s.store.run(run_id).await.unwrap();
         s.store
             .save_checkpoint_boundary(
-                &run_id,
+                run_id,
                 json!({
                     "prepared": {}, "completed": true,
                 }),
@@ -2851,7 +2850,7 @@ async fn chat_recovery_tools_preserve_confirmation_and_retention_rules() {
         .await
         .unwrap();
     s.store
-        .save_checkpoint_boundary(&run_id, json!({ "launched": true }))
+        .save_checkpoint_boundary(run_id, json!({ "launched": true }))
         .await
         .unwrap();
     let mut chat = s.chat_create(json!({})).await.unwrap();
@@ -3434,7 +3433,7 @@ async fn chat_compaction_matches_public_mcp_and_installation_tools() {
             .await
             .unwrap();
         s.store
-            .save_checkpoint_boundary(&run_id, json!({ "launched": true, "completed": true }))
+            .save_checkpoint_boundary(run_id, json!({ "launched": true, "completed": true }))
             .await
             .unwrap();
         let mut chat = s.chat_create(json!({})).await.unwrap();
@@ -3586,7 +3585,7 @@ async fn resume_run_is_one_capability_on_http_public_and_installation() {
         }
         assert_eq!(after["status"], "queued");
         assert!(after["retry"].is_null());
-        let checkpoint = s.store.checkpoint_boundary(&id).await.unwrap().unwrap();
+        let checkpoint = s.store.checkpoint_boundary(id).await.unwrap().unwrap();
         assert_eq!(
             checkpoint["prepared"],
             json!({ "cwd": "/saved/workspace", "marker": "retained" })

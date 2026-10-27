@@ -344,7 +344,7 @@ pub(super) async fn record(
         if !conversation && !activity_item {
             *log_total = log_total.saturating_add(serialized.len());
         }
-        store_event(s, id, &serialized, &stored, checkpoint, secrets).await?;
+        store_event(s, id, &serialized, &event, &stored, checkpoint, secrets).await?;
     }
     if event["type"] == "turn.completed" {
         // Title failures cannot change the outcome of the user's turn.
@@ -401,6 +401,7 @@ async fn handle_chat_control(s: &Service, id: &str, event: &Value) -> Result<boo
 async fn apply_event(
     s: &Service,
     event: &Value,
+    stored: &Value,
     checkpoint: &Checkpoint,
     kind: EventKind,
     text_value: String,
@@ -445,7 +446,7 @@ async fn apply_event(
         .record_event(
             kind,
             text_value,
-            event.clone(),
+            stored.clone(),
             EventChanges {
                 run: changed.then_some(changes),
                 failure: failure.map(|(message, cause)| (message, cause, provider_failure)),
@@ -515,6 +516,7 @@ async fn store_event(
     s: &Service,
     id: &str,
     raw: &str,
+    source: &Value,
     event: &Value,
     checkpoint: &Checkpoint,
     secrets: &[String],
@@ -538,7 +540,7 @@ async fn store_event(
             "Unknown coding-agent event retained as redacted adapter data"
         );
     }
-    apply_event(s, event, checkpoint, kind, value, secrets).await
+    apply_event(s, source, event, checkpoint, kind, value, secrets).await
 }
 
 fn truncate(value: &str, limit: usize) -> String {

@@ -43,12 +43,12 @@ pub(crate) const RUN_OPERATIONS: &[RunOperation] = &[
     RunOperation {
         name: "get_run",
         scope: "read",
-        description: "Read byte-bounded run metadata and an event page. Follow nextAfter while hasMore is true. Read records marked truncated with read_run_content.",
+        description: "Read byte-bounded run metadata and an event page. Follow nextAfter while hasMore is true. Pass history to read_run_history for backwards windows. Read records marked truncated with read_run_content.",
     },
     RunOperation {
         name: "read_run_history",
         scope: "read",
-        description: "Read the previous byte-bounded window of a run's history. Pass its v1 history revision and use oldest as the next before cursor while hasOlder is true. Reconnect when the history revision changes.",
+        description: "Read the previous byte-bounded window of a run's history. Pass history from get_run and use oldest as the next before cursor while hasOlder is true. Reconnect when the history revision changes.",
     },
     RunOperation {
         name: "read_run_content",
@@ -80,7 +80,7 @@ impl RunOperation {
             "cleanup_run" => schema_for::<CleanupRunOutput>(Contract::Serialize),
             "list_runs" => schema_for::<Vec<Run>>(Contract::Serialize),
             "get_run" => schema_for::<RunHistoryOutput>(Contract::Serialize),
-            "read_run_history" => schema_for::<HistoryPage>(Contract::Serialize),
+            "read_run_history" => schema_for::<RunHistoryWindowOutput>(Contract::Serialize),
             "read_run_content" => schema_for::<RunContentOutput>(Contract::Serialize),
             _ => schema_for::<Run>(Contract::Serialize),
         };
@@ -212,12 +212,11 @@ impl RunOperation {
                         let run = input.run_id.to_string();
                         db.require_run(&run)?;
                         crate::conversation_lifecycle::require_active_run(&db, &run)?;
-                        Ok(serde_json::to_value(crate::live::history_page(
-                            &db,
-                            &run,
-                            input.before,
-                            &input.history,
-                        )?)?)
+                        let page =
+                            crate::live::history_page(&db, &run, input.before, &input.history)?;
+                        Ok(serde_json::to_value(
+                            crate::mcp_server::bounded_history_window(page)?,
+                        )?)
                     })
                     .await
             }

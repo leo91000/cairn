@@ -95,7 +95,7 @@ impl Projects {
         }
         let checkpoint = s
             .store
-            .checkpoint_boundary(&run_id)
+            .checkpoint_boundary(run_id)
             .await?
             .unwrap_or_default();
         let prepared = &checkpoint["prepared"];

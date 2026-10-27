@@ -166,6 +166,17 @@ pub struct HistoryPage {
     pub has_older: bool,
 }
 
+/// Agent windows use bounded previews; UI history retains its full event frames.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunHistoryWindowOutput {
+    pub events: Vec<RunEventPage>,
+    pub history: String,
+    #[ts(type = "number")]
+    pub oldest: i64,
+    pub has_older: bool,
+}
+
 /// An oversized event retains its cursor, while its exact JSON remains available
 /// through read_run_content. No success-shaped partial event is returned.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
@@ -242,6 +253,12 @@ mod tests {
             let event: RunEvent = serde_json::from_value(value.clone()).unwrap();
             assert_eq!(serde_json::to_value(event).unwrap(), *value);
         }
+        let window: RunHistoryWindowOutput =
+            serde_json::from_value(corpus["windowOutput"].clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(window).unwrap(),
+            corpus["windowOutput"]
+        );
         let history: HistoryPage = serde_json::from_value(corpus["history"].clone()).unwrap();
         assert_eq!(serde_json::to_value(history).unwrap(), corpus["history"]);
         let input: ReadRunHistoryInput = serde_json::from_value(corpus["window"].clone()).unwrap();

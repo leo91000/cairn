@@ -679,11 +679,7 @@ pub async fn authorize_request(s: &Service, input: &crate::http::Input) -> Resul
             ["chats", _, "pause"] => input.body["paused"] == true,
             _ => false,
         };
-    // The generated history client uses POST to carry typed cursors. It reads
-    // retained work and must not require permission to start native execution.
-    let reads_history =
-        input.method == "POST" && matches!(parts.as_slice(), ["runs", _, "history"]);
-    if reduces_execution || reads_history {
+    if reduces_execution {
         return Ok(());
     }
     let agent = match parts.as_slice() {

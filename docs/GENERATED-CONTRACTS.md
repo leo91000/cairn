@@ -549,8 +549,11 @@ Chat, wait and artifact payloads are explicit boundaries of A7/A8/A16 and C1–C
 this ticket does not change timeline interpretation or presentation.
 
 The existing registry adds `read_run_history` with the same `read` scope and
-transactional installation-grant checks. HTTP GET history and the generated POST
-client share its snapshot/page implementation. `get_run.events` is now an explicit
+transactional installation-grant checks. HTTP GET history and its generated query client retain full UI frames. Agent
+windows share the same snapshot/page reader, then apply the explicit
+complete/truncated event projection before crossing the 1 MiB tool-result limit.
+`get_run.history` supplies the revision for these windows. Their oldest cursor covers the newest contiguous suffix and never skips rows;
+full event content remains readable in digest-pinned chunks. `get_run.events` is now an explicit
 `kind: complete` (`event`) or `kind: truncated` (`preview`, `totalBytes`) union.
 Event identity and forward cursors survive previews; full redacted JSON remains
 available through `read_run_content`, pinned by digest and UTF-8 byte offsets.

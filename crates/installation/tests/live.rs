@@ -1385,7 +1385,7 @@ async fn profile_conversation_opening() {
 }
 
 #[tokio::test]
-async fn typed_history_post_keeps_native_history_readable_to_members_after_agent_deletion() {
+async fn typed_history_get_keeps_native_history_readable_to_members_after_agent_deletion() {
     use common::run_fixture::RunFixture;
     let fixture = Fixture::new().await;
     let missing_agent = id();
@@ -1409,9 +1409,11 @@ async fn typed_history_post_keeps_native_history_readable_to_members_after_agent
         .await
         .unwrap();
     let response = reqwest::Client::new()
-        .post(format!("{}/api/runs/{}/history", fixture.url, fixture.run))
+        .get(format!(
+            "{}/api/runs/{}/history?history=v1:{}:{first}",
+            fixture.url, fixture.run, fixture.run
+        ))
         .header("x-test-relay-token", text(&token, "value"))
-        .json(&json!({"runId":fixture.run,"history":format!("v1:{}:{first}",fixture.run)}))
         .send()
         .await
         .unwrap();

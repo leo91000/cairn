@@ -44,7 +44,7 @@ fn write(db: &Connection, reference: bool, n: usize) {
             .event(RUN, &EventKind::from_adapter(kind), "", Some(&payload))
             .unwrap();
     }
-    if n % 20 == 0 {
+    if n.is_multiple_of(20) {
         let checkpoint = json!({"launched": false, "remainingMs": null});
         if reference {
             db.execute(

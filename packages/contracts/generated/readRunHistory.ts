@@ -3,5 +3,5 @@ import type { HistoryPage } from './typescript/HistoryPage'
 import type { ReadRunHistoryInput } from './typescript/ReadRunHistoryInput'
 
 export function readRunHistory(request: <T>(path: string, options: RequestInit) => Promise<T>, input: ReadRunHistoryInput): Promise<HistoryPage> {
-  return request<HistoryPage>(`/runs/${encodeURIComponent(input.runId)}/history`, { method: 'POST', body: JSON.stringify(input) })
+  return request<HistoryPage>(`/runs/${encodeURIComponent(input.runId)}/history?${new URLSearchParams({ before: String(input.before), history: String(input.history) }).toString()}`, { method: 'GET' })
 }

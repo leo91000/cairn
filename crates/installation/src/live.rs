@@ -139,7 +139,7 @@ struct Request {
 }
 
 /// Oldest and newest retained event IDs of a run, 0 when it has none.
-fn event_bounds(db: &Db<'_>, run: &str) -> Result<(i64, i64)> {
+pub(crate) fn event_bounds(db: &Db<'_>, run: &str) -> Result<(i64, i64)> {
     Ok(db.0.query_row(
         "SELECT COALESCE((SELECT id FROM events WHERE run_id=?1 ORDER BY id LIMIT 1),0),
                 COALESCE((SELECT id FROM events WHERE run_id=?1 ORDER BY id DESC LIMIT 1),0)",

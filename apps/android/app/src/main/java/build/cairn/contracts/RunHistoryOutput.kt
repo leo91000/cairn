@@ -8,6 +8,7 @@ import kotlinx.serialization.Serializable
 data class RunHistoryOutput(
     val events: List<RunEventPage>,
     val hasMore: Boolean,
+    val history: String,
     val nextAfter: Long,
     val run: kotlinx.serialization.json.JsonElement?,
 ) {

@@ -1,9 +1,50 @@
 {
   "events": [
-    { "id": 1, "createdAt": 1700000000000, "type": "turn.started", "text": "", "runId": "00000000-0000-4000-8000-000000000001" },
-    { "id": 2, "createdAt": 1700000000001, "type": "item.updated", "text": "Réponse 🦊 [redacted]", "payload": { "item": { "id": "answer", "type": "agent_message", "text": "Réponse 🦊 [redacted]" } }, "runId": "00000000-0000-4000-8000-000000000001" },
-    { "id": 3, "createdAt": 1700000000002, "type": "engine.future", "text": "", "payload": { "extension": { "nested": [true, null, 17] } }, "runId": "00000000-0000-4000-8000-000000000001" },
-    { "id": 9007199254740991, "createdAt": 1700000000003, "type": "item.completed", "text": "Cached answer", "displayId": 2, "runId": "00000000-0000-4000-8000-000000000001" }
+    {
+      "id": 1,
+      "createdAt": 1700000000000,
+      "type": "turn.started",
+      "text": "",
+      "runId": "00000000-0000-4000-8000-000000000001"
+    },
+    {
+      "id": 2,
+      "createdAt": 1700000000001,
+      "type": "item.updated",
+      "text": "Réponse 🦊 [redacted]",
+      "payload": {
+        "item": {
+          "id": "answer",
+          "type": "agent_message",
+          "text": "Réponse 🦊 [redacted]"
+        }
+      },
+      "runId": "00000000-0000-4000-8000-000000000001"
+    },
+    {
+      "id": 3,
+      "createdAt": 1700000000002,
+      "type": "engine.future",
+      "text": "",
+      "payload": {
+        "extension": {
+          "nested": [
+            true,
+            null,
+            17
+          ]
+        }
+      },
+      "runId": "00000000-0000-4000-8000-000000000001"
+    },
+    {
+      "id": 9007199254740991,
+      "createdAt": 1700000000003,
+      "type": "item.completed",
+      "text": "Cached answer",
+      "displayId": 2,
+      "runId": "00000000-0000-4000-8000-000000000001"
+    }
   ],
   "history": {
     "events": [],
@@ -11,10 +52,55 @@
     "oldest": 1,
     "hasOlder": false
   },
-  "window": { "runId": "00000000-0000-4000-8000-000000000001", "before": 100, "history": "v1:00000000-0000-4000-8000-000000000001:1" },
+  "window": {
+    "runId": "00000000-0000-4000-8000-000000000001",
+    "before": 100,
+    "history": "v1:00000000-0000-4000-8000-000000000001:1"
+  },
   "invalidEvents": [
-    { "id": 1.5, "createdAt": 0, "type": "output", "text": "" },
-    { "id": 9007199254740992, "createdAt": 0, "type": "output", "text": "" },
-    { "id": 1, "createdAt": 0, "type": false, "text": "" }
-  ]
+    {
+      "id": 1.5,
+      "createdAt": 0,
+      "type": "output",
+      "text": ""
+    },
+    {
+      "id": 9007199254740992,
+      "createdAt": 0,
+      "type": "output",
+      "text": ""
+    },
+    {
+      "id": 1,
+      "createdAt": 0,
+      "type": false,
+      "text": ""
+    }
+  ],
+  "windowOutput": {
+    "events": [
+      {
+        "kind": "complete",
+        "event": {
+          "id": 1,
+          "createdAt": 1700000000000,
+          "type": "turn.started",
+          "text": "",
+          "runId": "00000000-0000-4000-8000-000000000001"
+        }
+      },
+      {
+        "kind": "truncated",
+        "preview": {
+          "id": 2,
+          "runId": "00000000-0000-4000-8000-000000000001",
+          "createdAt": 1700000000001
+        },
+        "totalBytes": 1200000
+      }
+    ],
+    "history": "v1:00000000-0000-4000-8000-000000000001:1",
+    "oldest": 1,
+    "hasOlder": false
+  }
 }

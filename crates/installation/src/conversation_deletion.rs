@@ -67,7 +67,7 @@ async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -
         return Ok(());
     }
     let credential = crate::execution::secret(&s.config.data_dir, "runner-secret").await?;
-    let checkpoint = s.store.checkpoint_boundary(&run).await?.unwrap_or_default();
+    let checkpoint = s.store.checkpoint_boundary(run).await?.unwrap_or_default();
     let node = destination
         .or(checkpoint["nodeId"].as_str())
         .unwrap_or(crate::nodes::LOCAL_NODE_ID);

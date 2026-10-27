@@ -734,6 +734,36 @@ fn event_preview(event: cairn_contracts::RunEvent) -> Result<cairn_contracts::Ru
     Ok(preview)
 }
 
+/// Keep the newest contiguous suffix of the UI window. A preview retains its
+/// event ID for read_run_content; trimming sets hasOlder and never skips a cursor.
+pub(crate) fn bounded_history_window(
+    page: cairn_contracts::HistoryPage,
+) -> Result<cairn_contracts::RunHistoryWindowOutput> {
+    let mut events = Vec::new();
+    let mut bytes = 2;
+    let mut has_older = page.has_older;
+    let mut oldest = page.oldest;
+    for event in page.events.into_iter().rev() {
+        let id = event.id;
+        let preview = event_preview(event)?;
+        let size = encoded_size(&preview)? + usize::from(!events.is_empty());
+        if !events.is_empty() && bytes + size > RUN_PAGE_BYTES {
+            has_older = true;
+            break;
+        }
+        bytes += size;
+        oldest = id;
+        events.push(preview);
+    }
+    events.reverse();
+    Ok(cairn_contracts::RunHistoryWindowOutput {
+        events,
+        history: page.history,
+        oldest,
+        has_older,
+    })
+}
+
 pub(crate) fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
     let run = required(db.run_view(id)?, "Run not found")?;
     let total_bytes = encoded_size(&run)? as u64;
@@ -769,16 +799,13 @@ pub(crate) fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
         events.push(page);
         next = event_id;
     }
-    let more: bool = db.0.query_row(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE run_id=? AND id>?)",
-        rusqlite::params![id, next],
-        |row| row.get(0),
-    )?;
+    let (first, newest) = crate::live::event_bounds(db, id)?;
     let history = cairn_contracts::RunHistoryOutput {
         run,
         events,
+        history: format!("v1:{id}:{first}"),
         next_after: next,
-        has_more: more,
+        has_more: newest > next,
     };
     Ok(serde_json::to_value(history)?)
 }

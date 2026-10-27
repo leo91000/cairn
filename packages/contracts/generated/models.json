@@ -5247,6 +5247,10 @@
         "hasMore": {
           "type": "boolean"
         },
+        "history": {
+          "description": "Retained-history revision for read_run_history windows.",
+          "type": "string"
+        },
         "nextAfter": {
           "format": "int64",
           "type": "integer"
@@ -5263,8 +5267,37 @@
       "required": [
         "run",
         "events",
+        "history",
         "nextAfter",
         "hasMore"
+      ],
+      "type": "object"
+    },
+    "RunHistoryWindowOutput": {
+      "description": "Agent windows use bounded previews; UI history retains its full event frames.",
+      "properties": {
+        "events": {
+          "items": {
+            "$ref": "#/definitions/RunEventPage"
+          },
+          "type": "array"
+        },
+        "hasOlder": {
+          "type": "boolean"
+        },
+        "history": {
+          "type": "string"
+        },
+        "oldest": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "events",
+        "history",
+        "oldest",
+        "hasOlder"
       ],
       "type": "object"
     },

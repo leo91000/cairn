@@ -1159,3 +1159,55 @@ async fn unknown_engine_events_remain_redacted_data_without_changing_checkpoint_
     assert!(encoded.contains("[redacted]"));
     assert!(!fixture.checkpoint.snapshot().await.completed());
 }
+
+#[tokio::test]
+async fn display_redaction_cannot_change_engine_lifecycle_or_session_identity() {
+    let mut fixture = Fixture::new().await;
+    let frames = [
+        json!({"type":"thread.started","thread_id":"session-original"}),
+        json!({"type":"context.usage","usage":{"contextTokens":400,"contextWindow":200000}}),
+        json!({"type":"item.completed","item":{"id":"reply","type":"agent_message","text":"session private text"}}),
+        json!({"type":"turn.completed","usage":{"input_tokens":42}}),
+    ];
+    for frame in frames {
+        let output = Output::new(false, frame.to_string());
+        record(
+            &fixture.service,
+            &output,
+            &fixture.checkpoint,
+            false,
+            &["completed".into(), "text".into(), "session".into()],
+            &mut fixture.log_total,
+            &mut fixture.activity,
+        )
+        .await
+        .unwrap();
+    }
+    let run = fixture.service.store.run(&fixture.id).await.unwrap();
+    assert_eq!(run["sessionId"], "session-original");
+    assert_eq!(run["contextUsage"]["contextTokens"], 400);
+    assert_eq!(run["usage"]["input_tokens"], 42);
+    let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saved.completed());
+    assert_eq!(saved.last_message(), "[redacted] private [redacted]");
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events_fixture(&id, 0, 100))
+        .await
+        .unwrap();
+    let session = events
+        .iter()
+        .find(|event| event["payload"]["thread_id"].is_string())
+        .unwrap();
+    assert_eq!(session["payload"]["thread_id"], "[redacted]-original");
+    assert!(
+        events
+            .iter()
+            .any(|event| event["payload"]["type"] == "turn.[redacted]")
+    );
+}

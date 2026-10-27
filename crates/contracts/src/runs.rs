@@ -317,6 +317,8 @@ pub struct RunHistoryOutput {
     /// Existing byte-bounded preview; full metadata is read through read_run_content.
     pub run: RunMetadataPage,
     pub events: Vec<RunEventPage>,
+    /// Retained-history revision for read_run_history windows.
+    pub history: String,
     #[ts(type = "number")]
     pub next_after: i64,
     pub has_more: bool,

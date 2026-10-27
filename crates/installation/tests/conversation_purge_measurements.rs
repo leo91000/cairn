@@ -108,7 +108,7 @@ async fn populate(service: &Service, count: usize) -> Value {
                     }),
                     None,
                 )?;
-                db.save_checkpoint_boundary(&run, &json!({ "completed": true }))?;
+                db.save_checkpoint_boundary(run, &json!({ "completed": true }))?;
                 db.put("chats", &chat)?;
             }
             Ok(())

@@ -22,6 +22,11 @@ class ContractsTest {
                 json.encodeToJsonElement(json.decodeFromJsonElement<RunEvent>(event)),
             )
         }
+        val window = corpus.getValue("windowOutput")
+        assertEquals(
+            window,
+            json.encodeToJsonElement(json.decodeFromJsonElement<RunHistoryWindowOutput>(window)),
+        )
         val history = corpus.getValue("history")
         assertEquals(
             history,

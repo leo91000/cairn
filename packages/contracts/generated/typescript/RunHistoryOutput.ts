@@ -8,6 +8,10 @@ export interface RunHistoryOutput {
  */
   run: RunMetadataPage
   events: Array<RunEventPage>
+  /**
+   * Retained-history revision for read_run_history windows.
+   */
+  history: string
   nextAfter: number
   hasMore: boolean
 

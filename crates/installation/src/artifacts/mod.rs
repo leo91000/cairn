@@ -267,7 +267,7 @@ impl Artifacts {
         let publication = Publication::parse(args, visibility)?;
         let run_id = text(&run, "id");
         let checkpoint = required(
-            s.store.checkpoint_boundary(&run_id).await?,
+            s.store.checkpoint_boundary(run_id).await?,
             "Workspace is not ready",
         )?;
         let attempt = text(&checkpoint, "runnerId");
@@ -279,7 +279,7 @@ impl Artifacts {
         let current = crate::project_workspaces::authorize(s, bearer).await?;
         let current_checkpoint = s
             .store
-            .checkpoint_boundary(&run_id)
+            .checkpoint_boundary(run_id)
             .await?
             .unwrap_or_default();
         let message_id = crate::waits::execution_id(&run);

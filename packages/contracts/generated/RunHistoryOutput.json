@@ -1458,6 +1458,10 @@
     "hasMore": {
       "type": "boolean"
     },
+    "history": {
+      "description": "Retained-history revision for read_run_history windows.",
+      "type": "string"
+    },
     "nextAfter": {
       "format": "int64",
       "type": "integer"
@@ -1474,6 +1478,7 @@
   "required": [
     "run",
     "events",
+    "history",
     "nextAfter",
     "hasMore"
   ],

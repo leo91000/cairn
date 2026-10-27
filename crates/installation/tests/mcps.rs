@@ -267,7 +267,8 @@ async fn run_history_includes_the_engine_retries_limits_and_notices() {
     let first = result(&response)["events"][0]["event"]["id"]
         .as_i64()
         .unwrap();
-    let revision = format!("v1:{run_id}:{first}");
+    let revision = result(&response)["history"].as_str().unwrap().to_owned();
+    assert_eq!(revision, format!("v1:{run_id}:{first}"));
     let window = mcp
         .call(
             "read_run_history",
@@ -337,6 +338,52 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     let event = &page["events"][0];
     assert_eq!(event["kind"], "truncated");
     let event_id = event["preview"]["id"].as_i64().unwrap();
+    let expected_run = run_id.to_owned();
+    let expected = s
+        .store
+        .read(move |db| {
+            Ok(db
+                .event_page(&expected_run, 0, 1000)?
+                .into_iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>())
+        })
+        .await
+        .unwrap();
+    let revision = page["history"].as_str().unwrap().to_owned();
+    assert_eq!(revision, format!("v1:{run_id}:{}", expected[0]));
+    let mut before = 9_007_199_254_740_991_i64;
+    let mut backwards = Vec::new();
+    let mut saw_preview = false;
+    loop {
+        let response = mcp
+            .bounded(
+                "read_run_history",
+                json!({"runId":run_id,"before":before,"history":revision}),
+            )
+            .await;
+        assert_ne!(response["result"]["isError"], true);
+        let page = result(&response);
+        assert!(serde_json::to_vec(&page["events"]).unwrap().len() <= 256 * 1024);
+        for record in page["events"].as_array().unwrap() {
+            let event = if record["kind"] == "truncated" {
+                saw_preview = true;
+                &record["preview"]
+            } else {
+                &record["event"]
+            };
+            backwards.push(event["id"].as_i64().unwrap());
+        }
+        let next = page["oldest"].as_i64().unwrap();
+        assert!(next < before);
+        before = next;
+        if page["hasOlder"] == false {
+            break;
+        }
+    }
+    assert!(saw_preview);
+    backwards.sort_unstable();
+    assert_eq!(backwards, expected);
     let (original, digest) = read_whole_event(&mcp, run_id, event_id).await;
     assert_eq!(
         serde_json::from_str::<Value>(&original).unwrap()["payload"],
