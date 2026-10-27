@@ -128,7 +128,7 @@ test('shows disk accounting and keeps the storage draft revision through invento
   await expect(editor.getByRole('alert')).toContainText('The node configuration changed')
   expect(requests[0]?.revision).toBe('fixture')
   expect(node.storage.reservePercent).toBe(10)
-  await editor.getByRole('button', { name: 'Close', exact: true }).click()
+  await editor.getByRole('button', { name: 'Close dialog', exact: true }).click()
   await page.getByRole('button', { name: 'Storage', exact: true }).click()
   await expect(editor.getByLabel('Minimum free disk (%)', { exact: true })).toHaveValue('10')
   await editor.getByLabel('Shared memory cache (MiB)', { exact: true }).fill('1024')
