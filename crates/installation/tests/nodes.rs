@@ -6514,3 +6514,70 @@ async fn node_configuration_conflicts_are_atomic_and_heartbeats_keep_the_configu
         "No records mirror remains"
     );
 }
+
+#[tokio::test]
+async fn incompatible_local_health_keeps_the_configuration_committed_while_its_writer_waits() {
+    let observed = Arc::new(tokio::sync::Notify::new());
+    let health_seen = observed.clone();
+    let controller = Router::new().route(
+        "/health",
+        axum::routing::get(move || {
+            let health_seen = health_seen.clone();
+            async move {
+                health_seen.notify_one();
+                Json(json!({ "runtimeId": "incompatible-controller", "nodeProtocol": 2 }))
+            }
+        }),
+    );
+    let (url, server) = common::serve_locally(controller).await;
+    let owner = Owner::with_runner(common::HOST.into(), url).await;
+    owner
+        .put_node_fixture(json!({
+            "id": LOCAL_NODE_ID,
+            "name": "Before",
+            "revision": "r1",
+            "local": true,
+            "executionReady": true,
+            "capabilities": capabilities(true, 8, 16384, 131072),
+        }))
+        .await;
+    let service = owner.service.clone();
+    let (entered, holding) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let configuration = tokio::spawn(async move {
+        service
+            .store
+            .transaction(move |db| {
+                let mut node = db.node(LOCAL_NODE_ID)?.unwrap();
+                entered.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(10)).unwrap();
+                node.name = "Concurrent configuration".into();
+                node.tags = vec!["configured".into()];
+                node.limits.memory_mi_b = 2048;
+                node.revision = "r2".into();
+                db.save_node(&node)
+            })
+            .await
+            .unwrap()
+    });
+    holding.await.unwrap();
+    let service = owner.service.clone();
+    let refresh =
+        tokio::spawn(async move { cairn_installation::nodes::refresh_local(&service).await });
+    observed.notified().await;
+    // Allow the rejected observation to wait behind the held configuration writer.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    release.send(()).unwrap();
+    let configured = configuration.await.unwrap();
+    assert_eq!(
+        refresh.await.unwrap().unwrap_err().status,
+        StatusCode::CONFLICT
+    );
+    let fenced = owner.service.get_node(LOCAL_NODE_ID).await.unwrap();
+    assert_eq!(fenced.name, configured.name);
+    assert_eq!(fenced.tags, configured.tags);
+    assert_eq!(fenced.limits, configured.limits);
+    assert_eq!(fenced.revision, configured.revision);
+    assert!(!fenced.execution_ready);
+    server.abort();
+}

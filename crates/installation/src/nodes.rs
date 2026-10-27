@@ -1342,10 +1342,15 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
         .await
         .map_err(Error::internal)?;
     if health["runtimeId"] != component_runtime() || health["nodeProtocol"] != 2 {
-        if let Some(mut node) = s.store.node(LOCAL_NODE_ID).await? {
-            node.execution_ready = false;
-            s.store.transaction(move |db| db.save_node(&node)).await?;
-        }
+        s.store
+            .transaction(|db| {
+                if let Some(mut node) = db.node(LOCAL_NODE_ID)? {
+                    node.execution_ready = false;
+                    db.save_node(&node)?;
+                }
+                Ok(())
+            })
+            .await?;
         return Err(Error::conflict(
             "Local controller version mismatch; deploy all components at the same version.",
         ));
