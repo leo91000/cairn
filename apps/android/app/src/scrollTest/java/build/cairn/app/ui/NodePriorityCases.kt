@@ -14,6 +14,22 @@ abstract class NodePriorityCases {
     @get:Rule val compose = createComposeRule()
 
     @Test
+    fun fastDragUsesThePointerPositionWithoutCountingMovementTwice() {
+        var order by mutableStateOf(listOf("Alpha", "Beta", "Gamma"))
+        compose.setContent {
+            MaterialTheme {
+                Column {
+                    NodePriorityList(order, { it }, true, { order = it }, {})
+                }
+            }
+        }
+        drag("Alpha", "Gamma", sparse = true)
+        compose.runOnIdle { assertEquals(listOf("Beta", "Gamma", "Alpha"), order) }
+        drag("Alpha", "Beta", sparse = true)
+        compose.runOnIdle { assertEquals(listOf("Alpha", "Beta", "Gamma"), order) }
+    }
+
+    @Test
     fun dragMovesAcrossRowsInBothDirectionsAndCancelKeepsTheDraft() {
         var order by mutableStateOf(listOf("Alpha", "Beta", "Gamma"))
         compose.setContent {
@@ -50,7 +66,7 @@ abstract class NodePriorityCases {
         compose.onNodeWithContentDescription("Descendre Alpha").assertIsNotEnabled()
     }
 
-    private fun drag(from: String, to: String, cancel: Boolean = false) {
+    private fun drag(from: String, to: String, cancel: Boolean = false, sparse: Boolean = false) {
         val source = compose.onNodeWithContentDescription("Déplacer $from")
         val destination = compose.onNodeWithContentDescription("Déplacer $to")
         val delta =
@@ -62,6 +78,10 @@ abstract class NodePriorityCases {
                 moveBy(Offset(0f, delta / 2))
                 moveBy(Offset(0f, delta / 2))
                 cancel()
+            } else if (sparse) {
+                down(center)
+                moveTo(center + Offset(0f, delta))
+                up()
             } else {
                 swipe(center, center + Offset(0f, delta), durationMillis = 500)
             }

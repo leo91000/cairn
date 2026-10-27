@@ -42,7 +42,6 @@ internal fun NodePriorityList(
         key(id) {
             val label = name(id)
             var handleTop by remember { mutableFloatStateOf(0f) }
-            var pointerY by remember { mutableFloatStateOf(0f) }
             val highlight = target == id && dragged != id
             Column(
                 Modifier.fillMaxWidth()
@@ -63,10 +62,9 @@ internal fun NodePriorityList(
                             .pointerInput(ids, enabled) {
                                 if (!enabled || ids.size < 2) return@pointerInput
                                 detectDragGestures(
-                                    onDragStart = { offset ->
+                                    onDragStart = {
                                         dragged = id
                                         target = id
-                                        pointerY = handleTop + offset.y
                                     },
                                     onDragCancel = {
                                         dragged = null
@@ -83,9 +81,9 @@ internal fun NodePriorityList(
                                             latestReorder(order)
                                         }
                                     },
-                                ) { event, amount ->
+                                ) { event, _ ->
                                     event.consume()
-                                    pointerY += amount.y
+                                    val pointerY = handleTop + event.position.y
                                     target = ids.find { candidate ->
                                         val row = bounds[candidate]
                                         row != null && pointerY >= row.top && pointerY < row.bottom

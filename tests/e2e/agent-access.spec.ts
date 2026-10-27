@@ -102,6 +102,8 @@ test('automatic placement saves ordered node priorities on the agent', async ({ 
   await openAgentSection(page, 'Nodes')
   await expect(page.getByText('1. Priority machine two', { exact: true })).toBeVisible()
   await expect(page.getByText('2. Priority machine three', { exact: true })).toBeVisible()
+  // This longer gesture journey must not spend the following tests' shared request budget.
+  await workspace.restart()
 })
 
 async function signIn(page: Page) {
