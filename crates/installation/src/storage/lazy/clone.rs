@@ -98,7 +98,7 @@ impl LazyDisk {
     pub(crate) fn verify_sealed(source: &Path) -> io::Result<()> {
         let (_lock, db) = offline(source)?;
         let (size, _) = base_metadata(source, &db)?;
-        let _journal = journal::Journal::open(source, &db, size)?;
+        let _journal = journal::Journal::open_verified(source, &db, size)?;
         Ok(())
     }
 

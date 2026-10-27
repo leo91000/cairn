@@ -33,7 +33,7 @@ const SHARED_V1: &str = "shared-v1";
 
 /// Running executions and stopped on-demand disks with unpublished writes or an
 /// unfinished publication, including a mission parked before demand was saved.
-const SYNC_CANDIDATES: &str =
+pub(super) const SYNC_CANDIDATES: &str =
     "SELECT data FROM runs WHERE status='running'
         OR json_extract(data,'$.backup.requestedRevision') > COALESCE(json_extract(data,'$.backup.acknowledgedRevision'),0)
         OR (status IN ('succeeded','failed','cancelled','interrupted','queued','waiting')

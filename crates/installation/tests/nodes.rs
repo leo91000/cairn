@@ -2969,6 +2969,135 @@ async fn retained_completed_disk_monitor_discovers_late_writes() {
 }
 
 #[tokio::test]
+async fn completed_disk_monitor_reconciles_lost_ack_without_a_retained_vm() {
+    use cairn_installation::nodes::storage;
+
+    let response = Arc::new(Mutex::new(json!({})));
+    let served = response.clone();
+    let runner = Router::new().fallback(move || {
+        let value = served.lock().unwrap().clone();
+        async move { Json(value) }
+    });
+    let (runner_url, server) = common::serve_locally(runner).await;
+    let owner = Owner::with_runner(common::HOST.into(), runner_url).await;
+    let run = id();
+    let point = published_point(&run, LOCAL_NODE_ID, 1);
+    let mut record = run_record(&run, RunStatus::Succeeded);
+    record["nodeId"] = LOCAL_NODE_ID.into();
+    record["storage"] = json!({ "mode": "on-demand", "dirtyBytes": 973082624 });
+    record["backup"] = json!({
+        "id": point["id"],
+        "status": "error",
+        "error": "Node could not acknowledge the published disk.",
+        "requestedRevision": 1,
+        "acknowledgedRevision": 0
+    });
+    owner.add_run_fixture(&record).await;
+    owner.put("node-backups", point.clone()).await;
+    owner
+        .put("nodes", json!({ "id": LOCAL_NODE_ID, "retainedRuns": [] }))
+        .await;
+    let credential = disk_grants::new_disk(&owner.service, &record, LOCAL_NODE_ID)
+        .await
+        .unwrap();
+    *response.lock().unwrap() = json!({
+        "mode": "on-demand",
+        "dirtyBytes": 0,
+        "dirtySince": null,
+        "localBytes": 4096,
+        "activeLocalBytes": 4096,
+        "grantId": auth::digest(&credential),
+        "completedGeneration": 1,
+        "published": { "backupId": point["id"], "generation": 1 }
+    });
+
+    let monitor = tokio::spawn(storage::monitor(owner.service.clone()));
+    let result = common::eventually(
+        Duration::from_secs(8),
+        Duration::from_millis(25),
+        async || {
+            let current = owner.run(&run).await;
+            (current["backup"]["status"] == "ready"
+                && current["backup"]["acknowledgedRevision"] == 1
+                && current["storage"]["dirtyBytes"] == 0)
+                .then_some(current)
+        },
+    )
+    .await;
+    assert_eq!(result["backup"]["id"], point["id"]);
+    assert!(result["backup"]["error"].is_null());
+    assert_eq!(result["status"], RunStatus::Succeeded);
+    monitor.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn storage_receipt_reconciliation_preserves_newer_requests_and_requires_completion() {
+    use cairn_installation::nodes::storage;
+
+    for (completed, newer_request, expected_ack) in
+        [(Some(1), true, 1), (Some(2), false, 0), (None, false, 0)]
+    {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let response = Arc::new(Mutex::new(json!({})));
+        let (arrived, wait, served) = (entered.clone(), release.clone(), response.clone());
+        let runner = Router::new().fallback(move || {
+            let (arrived, wait, served) = (arrived.clone(), wait.clone(), served.clone());
+            async move {
+                arrived.notify_one();
+                wait.notified().await;
+                let value = served.lock().unwrap().clone();
+                Json(value)
+            }
+        });
+        let (runner_url, server) = common::serve_locally(runner).await;
+        let owner = Owner::with_runner(common::HOST.into(), runner_url).await;
+        let run = id();
+        let point = published_point(&run, LOCAL_NODE_ID, 1);
+        let mut record = run_record(&run, RunStatus::Succeeded);
+        record["nodeId"] = LOCAL_NODE_ID.into();
+        record["storage"] = json!({ "mode": "on-demand", "dirtyBytes": 123 });
+        record["backup"] = json!({
+            "id": point["id"],
+            "status": "error",
+            "requestedRevision": 1,
+            "acknowledgedRevision": 0
+        });
+        owner.add_run_fixture(&record).await;
+        owner.put("node-backups", point.clone()).await;
+        let credential = disk_grants::new_disk(&owner.service, &record, LOCAL_NODE_ID)
+            .await
+            .unwrap();
+        *response.lock().unwrap() = json!({
+            "mode": "on-demand",
+            "dirtyBytes": 0,
+            "localBytes": 4096,
+            "grantId": auth::digest(&credential),
+            "completedGeneration": completed,
+            "published": { "backupId": point["id"], "generation": 1 }
+        });
+        let service = owner.service.clone();
+        let refresh = tokio::spawn(async move { storage::refresh(&service, &record).await });
+        entered.notified().await;
+        if newer_request {
+            publication::request(&owner.service, &run).await.unwrap();
+        }
+        release.notify_one();
+        refresh.await.unwrap().unwrap();
+        let current = owner.run(&run).await;
+        assert_eq!(
+            current["backup"]["requestedRevision"],
+            if newer_request { 2 } else { 1 }
+        );
+        assert_eq!(current["backup"]["acknowledgedRevision"], expected_ack);
+        assert_eq!(current["backup"]["status"], "pending");
+        assert_eq!(current["status"], RunStatus::Succeeded);
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn completed_run_storage_refresh_clears_stale_dirty_counts() {
     use cairn_installation::nodes::storage;
 

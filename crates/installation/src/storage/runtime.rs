@@ -7,7 +7,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, OnceLock, RwLock, Weak,
+        Arc, Mutex, OnceLock, RwLock, TryLockError, Weak,
         atomic::{AtomicBool, AtomicI64, Ordering},
     },
 };
@@ -21,11 +21,22 @@ enum Entry {
     Replacing,
 }
 
-type Registry = Mutex<HashMap<PathBuf, Entry>>;
+type DiskEntry = Arc<Mutex<Option<Entry>>>;
+
+type Registry = Mutex<HashMap<PathBuf, DiskEntry>>;
 
 fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(Default::default)
+}
+
+fn entry(directory: &Path) -> Result<DiskEntry> {
+    Ok(registry()
+        .lock()
+        .map_err(Error::internal)?
+        .entry(directory.to_owned())
+        .or_insert_with(|| Arc::new(Mutex::new(None)))
+        .clone())
 }
 
 #[cfg(test)]
@@ -37,19 +48,29 @@ pub(crate) fn with_registry_locked(operation: impl FnOnce()) {
 /// Apply node limits without policy-file reads in the CPU safety path.
 pub(crate) fn configure(state: &Path, policy: &Policy) -> Result<()> {
     super::NodeBlockCache::new(state)?.resize(policy.memory_cache_mi_b as usize * 1024 * 1024)?;
-    let registry = registry().lock().map_err(Error::internal)?;
-    for (directory, entry) in registry.iter() {
+    let entries: Vec<_> = registry()
+        .lock()
+        .map_err(Error::internal)?
+        .iter()
+        .map(|(directory, entry)| (directory.clone(), entry.clone()))
+        .collect();
+    for (directory, entry) in entries {
         if directory.parent().and_then(Path::parent) != Some(state) {
             continue;
         }
-        let Entry::Open { volume, .. } = entry else {
+        let entry = match entry.try_lock() {
+            Ok(entry) => entry,
+            Err(TryLockError::WouldBlock) => continue,
+            Err(error) => return Err(Error::internal(error)),
+        };
+        let Some(Entry::Open { volume, .. }) = entry.as_ref() else {
             continue;
         };
         let Some(volume) = volume.upgrade() else {
             continue;
         };
         *volume.control_policy.write().map_err(Error::internal)? = policy.clone();
-        let (total, free) = super::policy::space(directory)?;
+        let (total, free) = super::policy::space(&directory)?;
         volume
             .space_pressure
             .store(free <= policy.reserve(total), Ordering::Release);
@@ -132,8 +153,9 @@ pub fn exists(directory: &Path) -> bool {
 }
 
 pub fn live(directory: &Path) -> Option<Arc<Volume>> {
-    let registry = registry().try_lock().ok()?;
-    match registry.get(directory)? {
+    let entry = registry().try_lock().ok()?.get(directory)?.clone();
+    let entry = entry.try_lock().ok()?;
+    match entry.as_ref()? {
         Entry::Open { volume, .. } => volume.upgrade(),
         Entry::Replacing => None,
     }
@@ -150,8 +172,22 @@ pub fn open(directory: &Path) -> Result<Arc<Volume>> {
 }
 
 fn try_open(directory: &Path) -> Result<Option<Arc<Volume>>> {
-    let mut registry = registry().lock().map_err(Error::internal)?;
-    match registry.get(directory) {
+    try_open_with(directory, open_volume)
+}
+
+fn try_open_with(
+    directory: &Path,
+    open: impl FnOnce(&Path) -> Result<Arc<Volume>>,
+) -> Result<Option<Arc<Volume>>> {
+    let entry = entry(directory)?;
+    // Do not occupy the bounded I/O pool while another task opens this disk.
+    // The async loader retries without delaying any other conversation.
+    let mut entry = match entry.try_lock() {
+        Ok(entry) => entry,
+        Err(TryLockError::WouldBlock) => return Ok(None),
+        Err(error) => return Err(Error::internal(error)),
+    };
+    match entry.as_ref() {
         Some(Entry::Open { volume, disk }) => {
             if let Some(volume) = volume.upgrade() {
                 if volume.stop.is_cancelled() {
@@ -168,6 +204,15 @@ fn try_open(directory: &Path) -> Result<Option<Arc<Volume>>> {
         Some(Entry::Replacing) => return Err(Error::conflict("Disk replacement is in progress.")),
         None => {}
     }
+    let volume = open(directory)?;
+    *entry = Some(Entry::Open {
+        volume: Arc::downgrade(&volume),
+        disk: Arc::downgrade(&volume.disk),
+    });
+    Ok(Some(volume))
+}
+
+fn open_volume(directory: &Path) -> Result<Arc<Volume>> {
     let root = directory.join("lazy");
     let context = LazyDisk::context(&root)?;
     let stop = CancellationToken::new();
@@ -219,14 +264,7 @@ fn try_open(directory: &Path) -> Result<Option<Arc<Volume>>> {
         transition: Mutex::new(None),
     });
     volume.health()?;
-    registry.insert(
-        directory.to_owned(),
-        Entry::Open {
-            volume: Arc::downgrade(&volume),
-            disk: Arc::downgrade(&volume.disk),
-        },
-    );
-    Ok(Some(volume))
+    Ok(volume)
 }
 
 /// The caller also holds the conversation disk lock. Existing inspections must
@@ -237,8 +275,10 @@ pub struct Replacement {
 
 impl Drop for Replacement {
     fn drop(&mut self) {
-        if let Ok(mut registry) = registry().lock() {
-            registry.remove(&self.directory);
+        if let Ok(entry) = entry(&self.directory)
+            && let Ok(mut entry) = entry.lock()
+        {
+            *entry = None;
         }
     }
 }
@@ -246,8 +286,15 @@ impl Drop for Replacement {
 pub async fn replacement(directory: &Path) -> Result<Replacement> {
     let directory = directory.to_owned();
     blocking(move || {
-        let mut registry = registry().lock().map_err(Error::internal)?;
-        match registry.get(&directory) {
+        let entry = entry(&directory)?;
+        let mut entry = match entry.try_lock() {
+            Ok(entry) => entry,
+            Err(TryLockError::WouldBlock) => {
+                return Err(Error::conflict("Disk is opening; retry restoration."));
+            }
+            Err(error) => return Err(Error::internal(error)),
+        };
+        match entry.as_ref() {
             Some(Entry::Replacing) => {
                 return Err(Error::conflict("Disk replacement is in progress."));
             }
@@ -258,7 +305,7 @@ pub async fn replacement(directory: &Path) -> Result<Replacement> {
             }
             _ => {}
         }
-        registry.insert(directory.clone(), Entry::Replacing);
+        *entry = Some(Entry::Replacing);
         Ok(Replacement { directory })
     })
     .await
@@ -636,6 +683,11 @@ impl Volume {
         status["localBytes"] = allocated(&self.directory)?.into();
         status["activeLocalBytes"] = allocated(&self.directory.join("lazy"))?.into();
         status["performance"] = self.disk.performance();
+        status["completedGeneration"] = self
+            .disk
+            .completed()?
+            .and_then(|receipt| receipt["generation"].as_i64())
+            .into();
         Ok(status)
     }
 
@@ -897,6 +949,45 @@ mod tests {
 
     fn prepared_context() -> Value {
         json!({ "unassigned": true, "policy": { "reserveMiB": 64, "reservePercent": 1 } })
+    }
+
+    #[tokio::test]
+    async fn slow_disk_open_does_not_block_another_conversation_or_fill_the_io_pool() {
+        let root = tempfile::tempdir().unwrap();
+        let slow = root.path().join("disks/slow");
+        let other_root = tempfile::tempdir().unwrap();
+        let (other, _, _api) = controller_fixture(other_root.path()).await;
+        let (entered, opening) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let opening_path = slow.clone();
+        let worker = std::thread::spawn(move || {
+            try_open_with(&opening_path, |_| {
+                entered.send(()).unwrap();
+                wait.recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                Err(Error::unavailable("Synthetic slow opening finished."))
+            })
+        });
+        opening.await.unwrap();
+
+        let mut waiters = Vec::new();
+        for _ in 0..16 {
+            let path = slow.clone();
+            waiters.push(tokio::spawn(async move {
+                load_with_wait(&path, std::time::Duration::from_millis(100)).await
+            }));
+        }
+        let loaded = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            load(&other_root.path().join("disks/conversation")),
+        )
+        .await;
+        for waiter in waiters {
+            assert!(waiter.await.unwrap().err().unwrap().is_unavailable());
+        }
+        release.send(()).unwrap();
+        assert!(worker.join().unwrap().err().unwrap().is_unavailable());
+        assert!(Arc::ptr_eq(&loaded.unwrap().unwrap(), &other));
     }
 
     #[tokio::test]

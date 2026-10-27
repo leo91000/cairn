@@ -1,5 +1,9 @@
 # Prepared native project bases use sealed journal segments
 
+Ordinary journal-open payload checks are superseded by
+[ADR-0072](0072-fast-journal-recovery-and-receipt-reconciliation.md). The full
+sealed-prefix verification required before offering a prepared base is retained.
+
 The [project archive cache](../PROJECT-ARCHIVES.md) removes repeated network
 transfer and per-file synchronization. Expanding and taking ownership of the
 same repository still creates thousands of inodes for every new conversation.

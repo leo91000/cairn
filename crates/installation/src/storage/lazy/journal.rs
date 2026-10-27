@@ -168,6 +168,21 @@ pub(super) struct Journal {
 
 impl Journal {
     pub fn open(directory: &Path, db: &Connection, size: u64) -> io::Result<Self> {
+        Self::recover(directory, db, size, false)
+    }
+
+    /// Shared prepared bases must be checked before they are offered to a
+    /// conversation, including payloads that a normal lazy open does not read.
+    pub fn open_verified(directory: &Path, db: &Connection, size: u64) -> io::Result<Self> {
+        Self::recover(directory, db, size, true)
+    }
+
+    fn recover(
+        directory: &Path,
+        db: &Connection,
+        size: u64,
+        verify_payloads: bool,
+    ) -> io::Result<Self> {
         let (generation, next): (i64, i64) = db
             .query_row(
                 "SELECT generation,next_sequence FROM state WHERE id=1",
@@ -285,7 +300,14 @@ impl Journal {
                     position,
                     header,
                 };
-                record.zero = record.read()?.iter().all(|byte| *byte == 0);
+                // The authenticated header and file length suffice to recover
+                // this frame's location. Record::read authenticates its payload
+                // before serving or publishing bytes. Re-reading obsolete
+                // payloads here makes every status query scan the whole backlog.
+                // Recovered frames carry no trusted zero-range hint.
+                if verify_payloads {
+                    record.zero = record.read()?.iter().all(|byte| *byte == 0);
+                }
                 journal.insert(record);
                 previous = sequence;
                 journal.next = journal.next.max(
@@ -429,8 +451,8 @@ impl Journal {
             .collect()
     }
 
-    /// Metadata-only no-op detection. Every recovered frame was authenticated
-    /// before indexing; this hint is in memory and changes no persisted format.
+    /// Metadata-only no-op detection. Only live, known-zero writes carry this
+    /// hint; recovered frames conservatively require a new write or data read.
     pub fn zeroed(&self, start: u64, end: u64, base_zero: bool) -> bool {
         let mut records = self.overlapping(i64::MAX, start, end);
         if records.iter().any(|record| !record.zero) {
