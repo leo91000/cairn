@@ -7,7 +7,10 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -23,6 +26,7 @@ struct Pool {
     writer: mpsc::Sender<Job>,
     readers: mpsc::Sender<Job>,
     changes: watch::Sender<u64>,
+    discarded_changes: Arc<AtomicU64>,
 }
 
 /// Read connections. WAL readers do not block each other or the writer; a few
@@ -106,6 +110,20 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS records_chat_slug ON records(json_extract(data,'$.slug')) WHERE kind='chats';")?;
             tx.commit()?;
         }
+        // total_changes also counts rows undone by a transition savepoint. Keep
+        // their count on this writer connection so committed work alone wakes readers.
+        let discarded_changes = Arc::new(AtomicU64::new(0));
+        let discarded = discarded_changes.clone();
+        writer.create_scalar_function(
+            "cairn_discarded_changes",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            move |context| {
+                let rows = context.get::<i64>(0)?;
+                discarded.fetch_add(rows as u64, Ordering::Relaxed);
+                Ok(0_i64)
+            },
+        )?;
         let mut readers = Vec::new();
         for _ in 0..READERS {
             let connection = Connection::open(&file)?;
@@ -118,6 +136,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             writer: actors(vec![writer]),
             readers: actors(readers),
             changes: watch::channel(0).0,
+            discarded_changes,
         })))
     }
 
@@ -148,16 +167,22 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let changes = self.0.changes.clone();
+        let discarded = self.0.discarded_changes.clone();
         let preparation = crate::plugins::operations::publication_cancellation();
         self.call(&self.0.writer, move |db| {
             if preparation.is_some_and(|token| token.is_cancelled()) {
                 return Err(Error::conflict("Preparation was cancelled."));
             }
             let before = db.0.total_changes();
+            let discarded_before = discarded.load(Ordering::Relaxed);
             let result = f(db);
             // Notify on the database actor, after commit, even if the caller was cancelled.
             // Empty scheduler transactions must not wake every live UI subscriber.
-            if db.0.total_changes() != before {
+            if db.0.total_changes() - before
+                > discarded
+                    .load(Ordering::Relaxed)
+                    .wrapping_sub(discarded_before)
+            {
                 changes.send_modify(|revision| *revision = revision.wrapping_add(1));
             }
             result
@@ -179,21 +204,26 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let changes = self.0.changes.clone();
+        let discarded = self.0.discarded_changes.clone();
         let preparation = crate::plugins::operations::publication_cancellation();
         self.call(&self.0.writer, move |db| {
             if preparation.is_some_and(|token| token.is_cancelled()) {
                 return Err(Error::conflict("Preparation was cancelled."));
             }
             let before = db.0.total_changes();
+            let discarded_before = discarded.load(Ordering::Relaxed);
             let tx = rusqlite::Transaction::new_unchecked(
                 db.0,
                 rusqlite::TransactionBehavior::Immediate,
             )?;
             let value = f(&mut Db(&tx))?;
             tx.commit()?;
-            // SQLite total_changes includes rolled-back rows. Only a successful
-            // commit may publish a revision; a failed/empty transaction stays quiet.
-            if db.0.total_changes() != before {
+            // Notify only after commit, excluding rows undone at run savepoints.
+            if db.0.total_changes() - before
+                > discarded
+                    .load(Ordering::Relaxed)
+                    .wrapping_sub(discarded_before)
+            {
                 changes.send_modify(|revision| *revision = revision.wrapping_add(1));
             }
             Ok(value)

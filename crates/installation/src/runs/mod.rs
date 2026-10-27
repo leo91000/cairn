@@ -351,6 +351,7 @@ impl Db<'_> {
         // Callers may catch a failed transition and still commit their outer
         // transaction. A savepoint keeps scalar, snapshot and boundary writes atomic.
         self.0.execute_batch("SAVEPOINT run_transition")?;
+        let before = self.0.total_changes();
         let result = (|| {
             let mut state = required(self.run_state(id)?, "Run not found")?;
             let (snapshot, boundary) = change.apply(&mut state);
@@ -374,6 +375,20 @@ impl Db<'_> {
             Err(error) => {
                 self.0
                     .execute_batch("ROLLBACK TO run_transition; RELEASE run_transition")?;
+                let discarded = self.0.total_changes() - before;
+                // Standalone Db connections have no live subscribers. Store's writer
+                // registers this connection-local counter for rolled-back rows.
+                if discarded > 0 && self.0.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='cairn_discarded_changes')",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )? {
+                    self.0.query_row(
+                        "SELECT cairn_discarded_changes(?)",
+                        [i64::try_from(discarded).unwrap_or(i64::MAX)],
+                        |_| Ok(()),
+                    )?;
+                }
                 Err(error)
             }
         }
