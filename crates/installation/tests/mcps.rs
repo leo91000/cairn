@@ -122,6 +122,7 @@ async fn read_every_page(mcp: &Mcp, run: &str, output: &str) -> i64 {
             .await;
         assert_ne!(response["result"]["isError"], true);
         let page = result(&response);
+        assert!(serde_json::to_vec(&page["events"]).unwrap().len() <= 256 * 1024);
         for record in page["events"].as_array().unwrap() {
             let event = &record["event"];
             if event["type"] == "item.completed" {

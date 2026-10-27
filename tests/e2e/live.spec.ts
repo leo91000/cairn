@@ -184,8 +184,8 @@ for (const kind of ['chat', 'task'] as const) {
     workspace.service.store.event(run.id, 'item.completed', 'Latest short answer', { item: { id: 'latest-short', type: 'agent_message', text: 'Latest short answer' } })
     const requests: string[] = []
     page.on('request', (request) => {
-      if (request.url().includes('/history?'))
-        requests.push(request.url())
+      if (/\/history(?:\?|$)/.test(request.url()))
+        requests.push(`${request.method()} ${request.url()} ${request.postData() ?? ''}`)
     })
     await page.goto(workspacePath(`${workspace.url}${path}`))
     await authenticateWorkspace(page)
@@ -225,7 +225,7 @@ test('an older page preserves expanded newer tools and their open detail sheet',
     release = resolve
   })
   let requested = false
-  await page.route('**/history?**', async (route) => {
+  await page.route(/\/history(?:\?|$)/, async (route) => {
     requested = true
     await gate
     await route.continue()
@@ -274,7 +274,7 @@ test('automatic history pauses on errors and resumes only after retry', async ({
 
   let requests = 0
   let fail = true
-  await page.route('**/history?**', async (route) => {
+  await page.route(/\/history(?:\?|$)/, async (route) => {
     requests++
     if (fail)
       await route.fulfill({ status: 503, json: { error: 'History temporarily unavailable' } })
@@ -708,7 +708,7 @@ test('recent history loads older pages without moving the reader and survives a 
     release = resolve
   })
   let requested = false
-  await page.route('**/history?**', async (route) => {
+  await page.route(/\/history(?:\?|$)/, async (route) => {
     requested = true
     await gate
     await route.continue()
@@ -764,7 +764,7 @@ test('recent history loads older pages without moving the reader and survives a 
   }))).toBeGreaterThanOrEqual(350)
   let repeatedHistoryReads = 0
   page.on('request', (request) => {
-    if (request.url().includes(`/runs/${run.id}/history?`) || request.url().includes(`/runs/${run.id}/events?`))
+    if (request.url().includes(`/runs/${run.id}/history`) || request.url().includes(`/runs/${run.id}/events?`))
       repeatedHistoryReads++
   })
   await page.route(`**/api/runs/${run.id}/stream?**`, route => route.abort())

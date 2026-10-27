@@ -675,11 +675,30 @@ pub(crate) async fn operation(
     invoke(s, name, args, None).await
 }
 
+/// Count wire bytes without allocating a second buffer for large raw engine
+/// payloads. Sizing a page must not decode or copy those payloads again.
+fn encoded_size(value: &impl Serialize) -> Result<usize> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}
+
 fn event_preview(event: cairn_contracts::RunEvent) -> Result<cairn_contracts::RunEventPage> {
     use cairn_contracts::{EventPreview, RunEventPage};
-    let total_bytes = serde_json::to_vec(&event)?.len() as u64;
+    let total_bytes = encoded_size(&event)? as u64;
     let complete = RunEventPage::Complete { event };
-    if serde_json::to_vec(&complete)?.len() <= RUN_PAGE_BYTES - 2 {
+    if encoded_size(&complete)? <= RUN_PAGE_BYTES - 2 {
         return Ok(complete);
     }
     let RunEventPage::Complete { event } = complete else {
@@ -703,8 +722,8 @@ fn event_preview(event: cairn_contracts::RunEvent) -> Result<cairn_contracts::Ru
         // remains addressable by ID; omit fields that do not fit the preview.
         let marker = event.kind.as_str().to_owned();
         let remaining = RUN_PAGE_BYTES - 1024;
-        let marker_bytes = serde_json::to_vec(&marker)?.len();
-        let text_bytes = serde_json::to_vec(&event.text)?.len();
+        let marker_bytes = encoded_size(&marker)?;
+        let text_bytes = encoded_size(&event.text)?;
         if marker_bytes <= remaining {
             fields.kind = Some(marker);
         }
@@ -717,7 +736,7 @@ fn event_preview(event: cairn_contracts::RunEvent) -> Result<cairn_contracts::Ru
 
 pub(crate) fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
     let run = required(db.run_view(id)?, "Run not found")?;
-    let total_bytes = serde_json::to_vec(&run)?.len() as u64;
+    let total_bytes = encoded_size(&run)? as u64;
     let run = if total_bytes <= RUN_PAGE_BYTES as u64 {
         cairn_contracts::RunMetadataPage::Complete { run: Box::new(run) }
     } else {
@@ -742,7 +761,7 @@ pub(crate) fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
     for event in db.event_batch(id, after, 100, RUN_PAGE_BYTES)? {
         let event_id = event.id;
         let page = event_preview(event)?;
-        let size = serde_json::to_vec(&page)?.len() + usize::from(!events.is_empty());
+        let size = encoded_size(&page)? + usize::from(!events.is_empty());
         if !events.is_empty() && bytes + size > RUN_PAGE_BYTES {
             break;
         }

@@ -1383,3 +1383,40 @@ async fn profile_conversation_opening() {
     });
     println!("CONVERSATION_OPEN_PROFILE {profile}");
 }
+
+#[tokio::test]
+async fn typed_history_post_keeps_native_history_readable_to_members_after_agent_deletion() {
+    use common::run_fixture::RunFixture;
+    let fixture = Fixture::new().await;
+    let missing_agent = id();
+    fixture
+        .service
+        .store
+        .change_run_fixture(
+            &fixture.run,
+            json!({
+                "snapshot": {"task": {"agentId": missing_agent}, "agent": {"id": missing_agent, "access": {"backend": "native"}}},
+            }),
+        )
+        .await
+        .unwrap();
+    let token = common::relay_fixture::member_context(&fixture.service, "history-reader").await;
+    let run = fixture.run.clone();
+    let first = fixture
+        .service
+        .store
+        .read(move |db| Ok(db.event_page(&run, 0, 1)?[0].id))
+        .await
+        .unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/runs/{}/history", fixture.url, fixture.run))
+        .header("x-test-relay-token", text(&token, "value"))
+        .json(&json!({"runId":fixture.run,"history":format!("v1:{}:{first}",fixture.run)}))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let page: Value = response.json().await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["events"][0]["id"], first);
+}

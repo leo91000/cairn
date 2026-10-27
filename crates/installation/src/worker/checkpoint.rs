@@ -235,6 +235,15 @@ impl RunCheckpoint {
     }
 }
 
+/// Effects of one redacted engine frame. A streamed message changes only its
+/// last-message field; it never clones the prepared workspace per token.
+pub struct EventChanges {
+    pub run: Option<crate::runs::RunChanges>,
+    pub failure: Option<(String, Option<crate::run_retry::Cause>, bool)>,
+    pub completed: bool,
+    pub last_message: Option<String>,
+}
+
 /// Live checkpoint of the run this worker is executing.
 pub struct Checkpoint {
     store: Store,
@@ -331,32 +340,53 @@ impl Checkpoint {
         kind: cairn_contracts::EventKind,
         text: String,
         payload: Value,
-        change: impl FnOnce(&mut RunCheckpoint) -> (Option<crate::runs::RunChanges>, bool),
+        changes: EventChanges,
     ) -> Result<()> {
         let mut state = self.state.lock().await;
-        let mut next = state.clone();
-        let (changes, persist) = change(&mut next);
-        if persist {
+        let failure = changes.failure.filter(|_| state.last_error().is_empty());
+        let persist = changes.completed || failure.is_some();
+        let mut last_message = changes.last_message;
+        let mut saved = persist.then(|| state.clone());
+        if let Some(saved) = &mut saved {
+            if let Some((message, cause, provider_failure)) = failure {
+                saved.last_error = Some(Some(message));
+                saved.retry_cause = Some(cause);
+                if provider_failure {
+                    saved.completed = Some(false);
+                }
+            }
+            if let Some(message) = last_message.take() {
+                saved.last_message = Some(message);
+            }
+            if changes.completed {
+                saved.completed = Some(true);
+            }
             let previous = self.pause_observation.lock().unwrap();
-            next.administrative_pause_observation = Some(AdministrativePauseObservation {
+            saved.administrative_pause_observation = Some(AdministrativePauseObservation {
                 attempt: previous.0.clone(),
                 total_ms: previous.1,
             });
-            next.remaining_ms = Some(self.deadline().map(|deadline| (deadline - now()).max(0)));
+            saved.remaining_ms = Some(self.deadline().map(|deadline| (deadline - now()).max(0)));
         }
-        let (id, saved) = (self.id.clone(), persist.then(|| next.clone()));
-        self.store
+        let id = self.id.clone();
+        let saved = self
+            .store
             .transaction(move |db| {
-                if let Some(changes) = changes {
+                if let Some(changes) = changes.run {
                     db.change_run(&id, changes)?;
                 }
-                if let Some(saved) = saved {
+                if let Some(saved) = &saved {
                     saved.store_in(db, &id)?;
                 }
-                db.event(&id, &kind, &text, Some(&payload))
+                db.event(&id, &kind, &text, Some(&payload))?;
+                Ok(saved)
             })
             .await?;
-        *state = next;
+        if let Some(saved) = saved {
+            *state = saved;
+        } else if let Some(message) = last_message {
+            state.last_message = Some(message);
+        }
         Ok(())
     }
 

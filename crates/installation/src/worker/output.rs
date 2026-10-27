@@ -1,4 +1,4 @@
-use super::checkpoint::{Checkpoint, RunCheckpoint};
+use super::checkpoint::{Checkpoint, EventChanges, RunCheckpoint};
 use crate::{config::now, error::Result, run_output, service::Service, validation::text};
 use cairn_contracts::EventKind;
 use serde_json::{Value, json};
@@ -442,26 +442,17 @@ async fn apply_event(
         changed = true;
     }
     checkpoint
-        .record_event(kind, text_value, event.clone(), |state| {
-            let mut persist = completed;
-            if let Some((message, cause)) = failure
-                && state.last_error().is_empty()
-            {
-                state.last_error = Some(Some(message));
-                state.retry_cause = Some(cause);
-                if provider_failure {
-                    state.completed = Some(false);
-                }
-                persist = true;
-            }
-            if let Some(message) = message {
-                state.last_message = Some(message);
-            }
-            if completed {
-                state.completed = Some(true);
-            }
-            (changed.then_some(changes), persist)
-        })
+        .record_event(
+            kind,
+            text_value,
+            event.clone(),
+            EventChanges {
+                run: changed.then_some(changes),
+                failure: failure.map(|(message, cause)| (message, cause, provider_failure)),
+                completed,
+                last_message: message,
+            },
+        )
         .await?;
     if completed {
         let run = s.store.run(&checkpoint.id).await?;

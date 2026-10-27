@@ -1061,6 +1061,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "cleanup_run",
         "list_runs",
         "get_run",
+        "read_run_history",
         "read_run_content",
     ]);
     public_names.insert(cairn_contracts::RESUME_RUN_ID);

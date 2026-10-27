@@ -37,14 +37,15 @@ class HistoryCacheTest {
 
     @Test
     fun `warm reads and neighboring saves reuse retained payload sizes`() = runBlocking {
-        val strings = AtomicInteger()
+        val traversals = AtomicInteger()
         val contents = mapOf<String, JsonElement>("output" to JsonPrimitive("retained output"))
         val payload =
             object : Map<String, JsonElement> by contents {
-                override fun toString(): String {
-                    strings.incrementAndGet()
-                    return contents.toString()
-                }
+                override val entries: Set<Map.Entry<String, JsonElement>>
+                    get() {
+                        traversals.incrementAndGet()
+                        return contents.entries
+                    }
             }
         val cache = cache()
         cache.save(
@@ -65,16 +66,16 @@ class HistoryCacheTest {
                 ),
             true,
         )
-        val initial = strings.get()
+        val initial = traversals.get()
         assertTrue(initial > 0)
         repeat(10) {
             assertNotNull(cache.read("retained"))
             cache.save("neighbor", record())
         }
         assertEquals(
-            "Unchanged payloads must not be stringified for each cache access",
+            "Unchanged payloads must not be traversed for each cache access",
             initial,
-            strings.get(),
+            traversals.get(),
         )
     }
 
