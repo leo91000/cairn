@@ -17,6 +17,12 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+const RECEIPT_TTL_MS: i64 = 7 * 86_400_000;
+
+fn request_key(chat: &str, request: &str) -> String {
+    format!("chat-coding-agent-request:{chat}:{request}")
+}
+
 pub(crate) fn key(chat: &str) -> String {
     format!("chat-coding-agent:{chat}")
 }
@@ -207,21 +213,24 @@ impl Service {
                 policy::authorize_chat_in(db, id, &origin)?;
                 let chat = chat(db, id)?;
                 super::require_active(&chat)?;
-                if let Some(previous) = db.kv(&key(id))? {
-                    if previous["requestId"] == saved["requestId"] {
-                        if previous["provider"] != saved["provider"]
-                            || previous["runId"] != saved["runId"]
-                            || previous["turnId"] != saved["turnId"]
-                        {
-                            return Err(Error::conflict("This switch identity was already used."));
-                        }
-                        return Ok((view(db, chat)?, previous["pending"] == true));
+                let current = db.kv(&key(id))?;
+                let receipt = db.kv(&request_key(id, text(&saved, "requestId")))?.or_else(|| {
+                    current.as_ref().filter(|value| value["requestId"] == saved["requestId"]).cloned()
+                });
+                if let Some(previous) = receipt {
+                    if previous["provider"] != saved["provider"]
+                        || previous["runId"] != saved["runId"]
+                        || previous["turnId"] != saved["turnId"]
+                    {
+                        return Err(Error::conflict("This switch identity was already used."));
                     }
-                    if previous["pending"] == true {
-                        return Err(Error::conflict(
-                            "A coding agent switch is already in progress.",
-                        ));
-                    }
+                    let stopping_previous = current.as_ref().is_some_and(|value| {
+                        value["requestId"] == saved["requestId"] && value["pending"] == true
+                    });
+                    return Ok((view(db, chat)?, stopping_previous));
+                }
+                if current.is_some_and(|value| value["pending"] == true) {
+                    return Err(Error::conflict("A coding agent switch is already in progress."));
                 }
                 let Some(choice) = available.iter().find(|choice| choice.provider == target) else {
                     return Err(Error::conflict(
@@ -241,12 +250,14 @@ impl Service {
                 if Provider::of_run(&run)? == target {
                     return Err(Error::bad("Choose a different coding agent."));
                 }
-                target.adapter().validate_agent(&selection(&run["snapshot"]["agent"], target, &choice.model))?;
+                let replacement = selection(&run["snapshot"]["agent"], target, &choice.model);
+                target.adapter().validate_agent(&replacement)?;
                 let mut pending = saved.clone();
                 pending["model"] = choice.model.clone().into();
                 pending["pending"] = true.into();
                 pending["error"] = Value::Null;
                 db.set(&key(id), &pending, None)?;
+                db.set(&request_key(id, text(&saved, "requestId")), &saved, Some(now() + RECEIPT_TTL_MS))?;
                 db.change_run(
                     text(&run, "id"),
                     crate::runs::RunChanges {
@@ -400,7 +411,7 @@ async fn advance(s: &Service, id: &str, pending: &Value) -> Result<()> {
             db.put("chats", &chat)?;
             current["pending"] = false.into();
             current["error"] = Value::Null;
-            db.set(&key(&id), &current, Some(now() + 7 * 86_400_000))?;
+            db.set(&key(&id), &current, Some(now() + RECEIPT_TTL_MS))?;
             db.event(run_id, &EventKind::Status, "queued", None)?;
             Ok(())
         })
@@ -422,7 +433,7 @@ pub(crate) fn cancel_in(db: &Db<'_>, run: &str) -> Result<()> {
         if let Some(mut receipt) = db.kv(&key)? {
             receipt["pending"] = false.into();
             receipt["error"] = Value::Null;
-            db.set(&key, &receipt, Some(now() + 7 * 86_400_000))?;
+            db.set(&key, &receipt, Some(now() + RECEIPT_TTL_MS))?;
         }
     }
     Ok(())

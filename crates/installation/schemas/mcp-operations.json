@@ -1374,7 +1374,7 @@
   },
   {
     "name": "switch_chat_coding_agent",
-    "description": "Continue the quota-blocked turn with another connected coding agent, preserving the chat, pending request and files. Read get_chat_coding_agent_options first. Supply a fresh requestId UUID, runId, turnId and provider. Retrying the same requestId is idempotent. The old execution is stopped before a fresh engine session receives the visible transcript. Never grants access or changes the agent profile; stop_chat cancels a pending switch.",
+    "description": "Continue the quota-blocked turn with another connected coding agent, preserving the chat, pending request and files. Read get_chat_coding_agent_options first. Supply a fresh requestId UUID, runId, turnId and provider. Retrying the same requestId within seven days is idempotent. The old execution is stopped before a fresh engine session receives the visible transcript. Never grants access or changes the agent profile; stop_chat cancels a pending switch.",
     "scope": "run",
     "destructive": true,
     "inputSchema": {

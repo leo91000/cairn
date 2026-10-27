@@ -1385,33 +1385,53 @@ async fn completed_quota_switch_replay_does_not_cancel_the_replacement_or_a_late
         app.request("POST", &endpoint, input.clone()).await.0,
         StatusCode::OK
     );
-    let mut completed = input.clone();
-    completed["pending"] = false.into();
-    app.service
-        .store
-        .set(
-            &format!("chat-coding-agent:{}", path.rsplit('/').next().unwrap()),
-            completed,
-            None,
-        )
-        .await
-        .unwrap();
-    let token = tokio_util::sync::CancellationToken::new();
-    app.service
-        .worker
-        .active
-        .lock()
-        .await
-        .insert(text(&input, "runId").to_owned(), token.clone());
-    assert_eq!(
-        app.request("POST", &endpoint, input).await.0,
-        StatusCode::OK
-    );
-    assert!(
-        !token.is_cancelled(),
-        "An idempotent replay must not cancel the replacement run"
-    );
-    app.service.worker.active.lock().await.clear();
+    // The same turn can return to its original engine after another quota switch.
+    // Both the latest receipt and an older receipt must leave active work untouched.
+    for latest_request in [
+        input["requestId"].clone(),
+        uuid::Uuid::new_v4().to_string().into(),
+    ] {
+        let mut completed = input.clone();
+        completed["requestId"] = latest_request.clone();
+        completed["pending"] = false.into();
+        let key = format!("chat-coding-agent:{}", path.rsplit('/').next().unwrap());
+        app.service
+            .store
+            .set(&key, completed.clone(), None)
+            .await
+            .unwrap();
+        app.service
+            .store
+            .change_run(
+                text(&input, "runId"),
+                cairn_installation::runs::RunChanges {
+                    cancel_requested_at: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let token = tokio_util::sync::CancellationToken::new();
+        app.service
+            .worker
+            .active
+            .lock()
+            .await
+            .insert(text(&input, "runId").to_owned(), token.clone());
+        assert_eq!(
+            app.request("POST", &endpoint, input.clone()).await.0,
+            StatusCode::OK
+        );
+        assert!(
+            !token.is_cancelled(),
+            "An idempotent replay must not cancel the replacement run"
+        );
+        assert_eq!(
+            app.service.store.kv(&key).await.unwrap().unwrap(),
+            completed
+        );
+        app.service.worker.active.lock().await.clear();
+    }
 }
 
 #[tokio::test]
