@@ -59,8 +59,12 @@ impl ResumeRun {
                 {
                     return Err(Error::forbidden("The run scope is required."));
                 }
-                // An MCP scope is not a human native-execution proof.
-                (Origin::Unknown, None)
+                // Scopes alone grant no native authority; only the verified
+                // public transport can supply the originating person's identity.
+                (
+                    policy::caller().map_or(Origin::Unknown, Origin::Human),
+                    None,
+                )
             }
             ResumeContext::Installation(bearer) => {
                 let run = crate::installation_mcp::authorize(s, &bearer).await?;

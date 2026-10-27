@@ -449,7 +449,17 @@ async fn management(
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            call(s, identity, text(params, "name"), args).await
+            let owner = identity
+                .filter(|identity| identity.role == crate::auth::InstallationRole::Owner)
+                .map(|identity| identity.account_id.clone());
+            // Keep verified public callers separate from run-scoped delegation.
+            // Box the dispatcher so nested task-local scopes keep a bounded stack.
+            crate::native::policy::CALLER
+                .scope(
+                    owner,
+                    Box::pin(call(s, identity, text(params, "name"), args)),
+                )
+                .await
         }
         _ => Err(Error::not_found("Method not found")),
     }
