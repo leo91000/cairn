@@ -333,7 +333,7 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
         ("POST", ["chats", id, "coding-agent"]) => {
             let mut args = input.body.clone();
             args["chatId"] = (*id).into();
-            s.switch_chat_coding_agent(args, crate::native::policy::chat_authorization(id))
+            s.switch_chat_coding_agent(args, crate::native::policy::chat_proof(id))
                 .await?
         }
         ("POST", ["chats", id, "messages"]) => s.chat_send(id, input.body.clone()).await?,

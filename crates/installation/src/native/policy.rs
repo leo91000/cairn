@@ -603,6 +603,15 @@ pub(crate) fn authorize_chat_in(db: &Db<'_>, id: &str, source: &Origin) -> Resul
     Ok(())
 }
 
+/// Prove directing authority without recording a historical director.
+pub(crate) fn chat_proof(id: &str) -> impl Fn(&Db<'_>) -> Result<()> + Clone + Send + 'static {
+    let (id, source) = (id.to_owned(), origin());
+    move |db| {
+        let chat = crate::error::required(db.get("chats", &id)?, "Chat not found")?;
+        chat_grant(db, &chat, &source).map(|_| ())
+    }
+}
+
 pub(crate) fn chat_authorization(
     id: &str,
 ) -> impl Fn(&Db<'_>) -> Result<()> + Clone + Send + 'static {

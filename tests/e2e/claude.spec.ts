@@ -68,6 +68,9 @@ test('the quota card continues the pending request with Codex once, preserving f
   const before = (await workspace.api(`/api/chats/${chat.id}`)).run
   const marker = path.join(before.workspace, 'keep-quota-work.txt')
   await writeFile(marker, 'Work done before quota')
+  await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: true })
+  const followupId = crypto.randomUUID()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: followupId, text: 'Keep this follow-up paused', mode: 'queue' })
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
   const card = page.getByRole('status', { name: 'Coding agent quota reached' })
@@ -88,6 +91,8 @@ test('the quota card continues the pending request with Codex once, preserving f
   const after = await workspace.api(`/api/chats/${chat.id}`)
   expect(after.run.id).toBe(before.id)
   expect(after.run.workspace).toBe(before.workspace)
+  expect(after.paused).toBe(true)
+  expect(after.messages.find((m: { id: string }) => m.id === followupId)?.status).toBe('queued')
   expect(after.run.chatExecution.messageId).toBe(messageId)
   expect(await readFile(marker, 'utf8')).toBe('Work done before quota')
   expect(workspace.service.store.chatMessages(chat.id).filter((m: { id: string }) => m.id === messageId)).toHaveLength(1)
@@ -118,7 +123,8 @@ for (const state of ['queued', 'failed'] as const) {
       await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.accountWaitReason).toContain('account with available usage.')
     }
     else {
-      workspace.service.store.updateRun(before.id, { status: 'failed', error: 'Claude AI usage limit reached' })
+      workspace.service.store.updateRun(before.id, { status: 'failed', error: 'Account usage is exhausted.' })
+      workspace.service.store.event(before.id, 'turn.failed', 'Account usage is exhausted.', { type: 'turn.failed', error: { code: 'usage_limit_reached', message: 'Account usage is exhausted.' } })
     }
 
     const endpoint = `/api/chats/${chat.id}/coding-agent`

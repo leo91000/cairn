@@ -1334,46 +1334,84 @@ async fn quota_switch_is_revision_checked_idempotent_and_cancellable() {
 }
 
 #[tokio::test]
-async fn accepted_quota_switch_recovers_after_manager_restart_before_initial_admission() {
-    let app = App::new().await;
-    let (path, input) = quota_switch_fixture(&app).await;
-    let endpoint = format!("{path}/coding-agent");
-    assert_eq!(
-        app.request("POST", &endpoint, input.clone()).await.0,
-        StatusCode::OK
-    );
-    // Keep the new execution queued so this test observes recovery without invoking a CLI.
-    for mut account in app.service.store.list("agentAccounts").await.unwrap() {
-        account["enabled"] = false.into();
-        app.service
-            .store
-            .put("agentAccounts", account)
+async fn accepted_quota_switch_recovers_after_restart_without_releasing_paused_followups() {
+    for pause_before_acceptance in [true, false] {
+        let app = App::new().await;
+        let (path, input) = quota_switch_fixture(&app).await;
+        let endpoint = format!("{path}/coding-agent");
+        if pause_before_acceptance {
+            assert_eq!(
+                app.request("POST", &format!("{path}/pause"), json!({"paused":true}))
+                    .await
+                    .0,
+                StatusCode::OK
+            );
+        }
+
+        assert_eq!(
+            app.request("POST", &endpoint, input.clone()).await.0,
+            StatusCode::OK
+        );
+        if !pause_before_acceptance {
+            assert_eq!(
+                app.request("POST", &format!("{path}/pause"), json!({"paused":true}))
+                    .await
+                    .0,
+                StatusCode::OK
+            );
+        }
+        let followup_id = id();
+        assert_eq!(
+            app.request(
+                "POST",
+                &format!("{path}/messages"),
+                json!({"id":followup_id,"text":"Keep this follow-up paused","mode":"queue"})
+            )
             .await
-            .unwrap();
+            .0,
+            StatusCode::OK
+        );
+        // Keep the new execution queued so this test observes recovery without invoking a CLI.
+        for mut account in app.service.store.list("agentAccounts").await.unwrap() {
+            account["enabled"] = false.into();
+            app.service
+                .store
+                .put("agentAccounts", account)
+                .await
+                .unwrap();
+        }
+        let restarted = Service::new(app.service.config.clone()).await.unwrap();
+        restarted.worker.tick(&restarted).await.unwrap();
+        common::eventually(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(20),
+            async || {
+                let run = restarted.store.run(text(&input, "runId")).await.unwrap();
+                (run["snapshot"]["agent"]["provider"] == "claude").then_some(())
+            },
+        )
+        .await;
+        let resumed = app.get(&path).await.1;
+        assert_eq!(resumed["run"]["id"], input["runId"]);
+        assert_eq!(
+            resumed["run"]["chatExecution"]["messageId"],
+            input["turnId"]
+        );
+        assert_eq!(resumed["run"]["status"], "queued");
+        assert!(resumed["run"]["cancelRequestedAt"].is_null());
+        assert!(resumed["codingAgentSwitch"].is_null());
+        assert_eq!(resumed["paused"], true);
+        assert_eq!(resumed["messages"].as_array().unwrap().len(), 2);
+        assert!(
+            resumed["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["id"] == followup_id && message["status"] == "queued")
+        );
+        restarted.shutdown.cancel();
+        restarted.worker.close().await;
     }
-    let restarted = Service::new(app.service.config.clone()).await.unwrap();
-    restarted.worker.tick(&restarted).await.unwrap();
-    common::eventually(
-        std::time::Duration::from_secs(5),
-        std::time::Duration::from_millis(20),
-        async || {
-            let run = restarted.store.run(text(&input, "runId")).await.unwrap();
-            (run["snapshot"]["agent"]["provider"] == "claude").then_some(())
-        },
-    )
-    .await;
-    let resumed = app.get(&path).await.1;
-    assert_eq!(resumed["run"]["id"], input["runId"]);
-    assert_eq!(
-        resumed["run"]["chatExecution"]["messageId"],
-        input["turnId"]
-    );
-    assert_eq!(resumed["run"]["status"], "queued");
-    assert!(resumed["run"]["cancelRequestedAt"].is_null());
-    assert!(resumed["codingAgentSwitch"].is_null());
-    assert_eq!(resumed["messages"].as_array().unwrap().len(), 1);
-    restarted.shutdown.cancel();
-    restarted.worker.close().await;
 }
 
 #[tokio::test]
@@ -1492,4 +1530,67 @@ async fn quota_switch_does_not_offer_or_accept_an_engine_that_cannot_preserve_th
             .cancel_requested_at
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn quota_switch_recognizes_current_structured_limits_without_reusing_recovered_failures() {
+    for (field, code) in [
+        ("code", "usage_limit_reached"),
+        ("codexErrorInfo", "usageLimitExceeded"),
+    ] {
+        let app = App::new().await;
+        let (path, input) = quota_switch_fixture(&app).await;
+        let run_id = text(&input, "runId");
+        let message = "Account usage is exhausted.";
+        app.service
+            .store
+            .change_run(
+                run_id,
+                cairn_installation::runs::RunChanges {
+                    status: Some(RunStatus::Failed),
+                    error: Some(Some(message.into())),
+                    account_wait_reason: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut payload = json!({"type":"turn.failed","error":{"message":message}});
+        payload["error"][field] = code.into();
+        app.service
+            .store
+            .event(
+                run_id,
+                &EventKind::TurnFailed,
+                message,
+                Some(payload.clone()),
+            )
+            .await
+            .unwrap();
+        // A recovered failure in an earlier attempt is insufficient for switching this one.
+        app.service
+            .store
+            .event(run_id, &EventKind::TurnStarted, "", None)
+            .await
+            .unwrap();
+        let endpoint = format!("{path}/coding-agent");
+        assert_eq!(app.get(&endpoint).await.1["choices"], json!([]));
+        assert_eq!(
+            app.request("POST", &endpoint, input.clone()).await.0,
+            StatusCode::CONFLICT
+        );
+        app.service
+            .store
+            .event(run_id, &EventKind::TurnFailed, message, Some(payload))
+            .await
+            .unwrap();
+        assert_eq!(
+            app.get(&endpoint).await.1["choices"],
+            json!([{"provider":"claude","label":"Claude Code"}])
+        );
+        assert_eq!(
+            app.request("POST", &endpoint, input).await.0,
+            StatusCode::OK
+        );
+    }
 }

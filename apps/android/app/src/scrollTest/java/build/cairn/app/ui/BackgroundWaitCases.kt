@@ -48,6 +48,22 @@ abstract class BackgroundWaitCases {
             assertTrue(body["runId"] == JsonPrimitive(SAVED_RUN_ID))
             assertTrue(body["turnId"] == JsonPrimitive("quota-turn"))
             assertTrue(body["requestId"]!!.jsonPrimitive.content.isNotBlank())
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodesWithText("Annuler le changement")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Annuler le changement").performScrollTo().performClick()
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodes(hasText("Continuer avec Codex") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose.onNodeWithText("Claude Code").assertIsSelected()
+            compose.onNodeWithText("Codex").assertIsNotSelected()
         }
 
     @Test
@@ -628,15 +644,27 @@ abstract class BackgroundWaitCases {
                 )
             server.dispatcher =
                 object : Dispatcher() {
+                    @Volatile var switching = false
+
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
+                        if (codingAgentChoices && path.endsWith("/stop")) {
+                            switching = false
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody("{}")
+                        }
                         if (codingAgentChoices && path.endsWith("/coding-agent")) {
+                            if (request.method == "POST") switching = true
+                            val progress =
+                                if (switching) ""","switching":{"provider":"codex","error":null}"""
+                                else ""
                             return MockResponse()
                                 .setHeader("Content-Type", "application/json")
                                 .setBody(
                                     if (request.method == "POST") "{}"
                                     else
-                                        """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"claude","choices":[{"provider":"codex","label":"Codex"}]}"""
+                                        """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"claude","choices":[{"provider":"codex","label":"Codex"}]$progress}"""
                                 )
                         }
 

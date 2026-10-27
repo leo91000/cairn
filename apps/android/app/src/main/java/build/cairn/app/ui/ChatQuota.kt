@@ -284,7 +284,7 @@ internal fun ChatQuotaRecovery(
     busy: Boolean,
     openConnections: () -> Unit,
     resume: () -> Unit,
-    switched: (String) -> Unit,
+    followConversation: () -> Unit,
 ) {
     var options by remember(chat.id) { mutableStateOf<CodingAgentOptions?>(null) }
     var pending by remember(chat.id) { mutableStateOf<String?>(null) }
@@ -303,10 +303,9 @@ internal fun ChatQuotaRecovery(
                 options = result
                 if (result.switching != null && pending == null) {
                     pending = result.switching.provider
-                    switched(result.switching.provider)
+                    followConversation()
                 }
                 if (pending != null && result.switching == null && !sending) {
-                    if (result.provider == pending) switched(pending!!)
                     pending = null
                 }
                 failure = null
@@ -356,7 +355,7 @@ internal fun ChatQuotaRecovery(
                                 put("provider", provider)
                             },
                         )
-                        switched(provider)
+                        followConversation()
                         pending = provider
                     } catch (cancel: kotlinx.coroutines.CancellationException) {
                         throw cancel

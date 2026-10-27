@@ -1325,7 +1325,7 @@ internal fun ChatPage(
                                                     vm,
                                                     currentChat,
                                                     quota,
-                                                    switched = ::chooseProvider,
+                                                    followConversation = { chooseProvider("") },
                                                     canManage = state.isOwner,
                                                     busy = state.busy,
                                                     openConnections = openConnections,

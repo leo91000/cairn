@@ -215,7 +215,7 @@ pub(super) async fn invoke(
         return chats::coding_agent::options(s, text(&args, "chatId"), authorize).await;
     }
     if name == "switch_chat_coding_agent" {
-        return s.switch_chat_coding_agent(args, commit_authority).await;
+        return s.switch_chat_coding_agent(args, authorize).await;
     }
     if matches!(
         name,

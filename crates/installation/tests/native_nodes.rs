@@ -1265,6 +1265,12 @@ async fn rejected_native_mutations_do_not_become_historical_directors() {
     let mutations = [
         (
             "POST",
+            format!("/api/chats/{chat_id}/coding-agent"),
+            json!({ "requestId": id(), "runId": run_id, "turnId": "stale-turn", "provider": "claude" }),
+            StatusCode::CONFLICT,
+        ),
+        (
+            "POST",
             format!("/api/chats/{chat_id}/messages"),
             json!({ "id": "invalid", "text": "Rejected" }),
             StatusCode::BAD_REQUEST,

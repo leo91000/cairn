@@ -12,10 +12,7 @@ use crate::{
 };
 use cairn_contracts::EventKind;
 use serde_json::{Value, json};
-use std::{
-    collections::HashSet,
-    sync::{Arc, OnceLock},
-};
+use std::{collections::HashSet, sync::Arc};
 
 const RECEIPT_TTL_MS: i64 = 7 * 86_400_000;
 
@@ -37,23 +34,77 @@ pub(crate) fn progress(db: &Db<'_>, chat: &str) -> Result<Value> {
         ))
 }
 
-pub(crate) fn quota_blocked(run: &Value) -> bool {
-    static QUOTA: OnceLock<regex::Regex> = OnceLock::new();
+pub(crate) fn quota_blocked(db: &Db<'_>, run: &Value) -> Result<bool> {
     if is_compaction(run)
         || run["backendMigration"].is_object()
         || !run["cancelRequestedAt"].is_null()
     {
-        return false;
+        return Ok(false);
     }
     let reason = text(run, "accountWaitReason");
     if matches!(text(run, "status"), "queued" | "running") {
-        return reason.starts_with("Usage exhausted.")
+        return Ok(reason.starts_with("Usage exhausted.")
             || reason.starts_with("Waiting for a ")
-                && reason.contains(" account with available usage.");
+                && reason.contains(" account with available usage."));
     }
-    run["status"] == "failed" && QUOTA.get_or_init(|| regex::Regex::new(
-        r"(?i)^(?:you['’]ve hit your (?:(?:usage|session|weekly|spend|individual spend) )?limit|you have hit your (?:usage )?limit|usage limit (?:has been )?(?:reached|exceeded)|claude ai usage limit reached|(?:5-hour|session|weekly|opus) limit reached)\b"
-    ).unwrap()).is_match(text(run,"error").trim())
+    if run["status"] != "failed" {
+        return Ok(false);
+    }
+    if crate::run_output::exhausted(&json!({
+        "type": "error",
+        "message": text(run, "error").trim(),
+    })) {
+        return Ok(true);
+    }
+    // Inspect the same bounded recent history as the conversation card. A new
+    // turn or recovery boundary prevents an old structured quota from resurfacing.
+    let (events, _) = db.events_before(text(run, "id"), i64::MAX)?;
+    for event in events.into_iter().rev() {
+        let kind = event.kind.as_str();
+        let turn_boundary = matches!(kind, "chat.user" | "turn.started" | "turn.completed");
+        let execution_boundary = kind == "status"
+            && matches!(
+                event.text.as_str(),
+                "queued" | "succeeded" | "cancelled" | "interrupted"
+            );
+        if turn_boundary || execution_boundary {
+            return Ok(false);
+        }
+        if !matches!(kind, "turn.failed" | "error") {
+            continue;
+        }
+        let mut payload: Value = event
+            .payload
+            .as_ref()
+            .map(|raw| serde_json::from_str(raw.get()))
+            .transpose()?
+            .unwrap_or_else(|| json!({}));
+        if !payload.is_object() {
+            continue;
+        }
+        payload["type"] = kind.into();
+        if !crate::run_output::exhausted(&payload) {
+            continue;
+        }
+        let error = if kind == "turn.failed" {
+            &payload["error"]
+        } else {
+            &payload
+        };
+        let message = text(error, "message");
+        let message = if message.is_empty() {
+            event.text.as_str()
+        } else {
+            message
+        };
+        let message = if message.is_empty() {
+            "Usage limit reached"
+        } else {
+            message
+        };
+        return Ok(message == text(run, "error"));
+    }
+    Ok(false)
 }
 
 struct Choice {
@@ -141,19 +192,18 @@ where
     F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
 {
     let id = id.to_owned();
-    let (run, pending) = s
+    let (run, pending, eligible) = s
         .store
         .read(move |db| {
             authorize(db)?;
             let chat = chat(db, &id)?;
             super::require_active(&chat)?;
-            Ok((
-                db.run(text(&chat, "runId"))?.unwrap_or(Value::Null),
-                progress(db, &id)?,
-            ))
+            let run = db.run(text(&chat, "runId"))?.unwrap_or(Value::Null);
+            let eligible = quota_blocked(db, &run)?;
+            Ok((run, progress(db, &id)?, eligible))
         })
         .await?;
-    let available = if quota_blocked(&run) {
+    let available = if eligible {
         choices(s, &run["snapshot"]["agent"]).await?
     } else {
         Vec::new()
@@ -195,7 +245,7 @@ impl Service {
         let chat_id = text(&input, "chatId").to_owned();
         let agent = self
             .store
-            .transaction(move |db| {
+            .read(move |db| {
                 check(db)?;
                 let chat = chat(db, &chat_id)?;
                 let run = required(db.run(text(&chat, "runId"))?, "Run not found")?;
@@ -210,7 +260,6 @@ impl Service {
             .transaction(move |db| {
                 authorize(db)?;
                 let id = text(&saved, "chatId");
-                policy::authorize_chat_in(db, id, &origin)?;
                 let chat = chat(db, id)?;
                 super::require_active(&chat)?;
                 let current = db.kv(&key(id))?;
@@ -241,7 +290,7 @@ impl Service {
                 if run["id"] != saved["runId"]
                     || run["chatExecution"]["messageId"] != saved["turnId"]
                     || !saved["turnId"].is_string()
-                    || !quota_blocked(&run)
+                    || !quota_blocked(db, &run)?
                 {
                     return Err(Error::conflict(
                         "This turn is no longer waiting for quota. Refresh the conversation.",
@@ -252,6 +301,7 @@ impl Service {
                 }
                 let replacement = selection(&run["snapshot"]["agent"], target, &choice.model);
                 target.adapter().validate_agent(&replacement)?;
+                policy::authorize_chat_in(db, id, &origin)?;
                 let mut pending = saved.clone();
                 pending["model"] = choice.model.clone().into();
                 pending["pending"] = true.into();
@@ -271,7 +321,7 @@ impl Service {
                     &format!("Switching coding agent to {}", target.label()),
                     None,
                 )?;
-                Ok((view(db, chat)?, true))
+                Ok((view(db, super::chat(db, id)?)?, true))
             })
             .await?;
         if result.1
@@ -356,7 +406,7 @@ async fn advance(s: &Service, id: &str, pending: &Value) -> Result<()> {
             else {
                 return Ok(());
             };
-            let mut chat = chat(db, &id)?;
+            let chat = chat(db, &id)?;
             super::require_active(&chat)?;
             if chat["runId"] != pending["runId"] || chat["cancelledByDeletion"] == true {
                 return Err(Error::conflict("The conversation changed while switching."));
@@ -407,8 +457,6 @@ async fn advance(s: &Service, id: &str, pending: &Value) -> Result<()> {
                     ..Default::default()
                 },
             )?;
-            chat["paused"] = false.into();
-            db.put("chats", &chat)?;
             current["pending"] = false.into();
             current["error"] = Value::Null;
             db.set(&key(&id), &current, Some(now() + RECEIPT_TTL_MS))?;
