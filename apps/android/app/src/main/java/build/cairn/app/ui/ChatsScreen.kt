@@ -1317,33 +1317,40 @@ internal fun ChatPage(
                                             )
                                         }
                                     }
-                                    quota?.let { notice ->
-                                        item(key = "quota:${chat?.run?.id}") {
-                                            ChatQuotaCard(
-                                                notice,
-                                                canManage = state.isOwner,
-                                                busy = state.busy,
-                                                openConnections = openConnections,
-                                                resume = {
-                                                    chat?.let { current ->
-                                                        vm.perform {
-                                                            if (current.run?.status == "failed")
-                                                                api.resumeRun(
-                                                                    ResumeRunInput(current.run.id)
+                                    chat
+                                        ?.takeIf { quota != null || it.codingAgentSwitch != null }
+                                        ?.let { currentChat ->
+                                            item(key = "quota:${chat?.run?.id}") {
+                                                ChatQuotaRecovery(
+                                                    vm,
+                                                    currentChat,
+                                                    quota,
+                                                    switched = ::chooseProvider,
+                                                    canManage = state.isOwner,
+                                                    busy = state.busy,
+                                                    openConnections = openConnections,
+                                                    resume = {
+                                                        chat?.let { current ->
+                                                            vm.perform {
+                                                                if (current.run?.status == "failed")
+                                                                    api.resumeRun(
+                                                                        ResumeRunInput(
+                                                                            current.run.id
+                                                                        )
+                                                                    )
+                                                                api.request(
+                                                                    "POST",
+                                                                    "/chats/${segment(current.id)}/pause",
+                                                                    buildJsonObject {
+                                                                        put("paused", false)
+                                                                    },
                                                                 )
-                                                            api.request(
-                                                                "POST",
-                                                                "/chats/${segment(current.id)}/pause",
-                                                                buildJsonObject {
-                                                                    put("paused", false)
-                                                                },
-                                                            )
+                                                            }
                                                         }
-                                                    }
-                                                },
-                                            )
+                                                    },
+                                                )
+                                            }
                                         }
-                                    }
                                     if (!active && delivery.sending.isEmpty() && !live.catchingUp)
                                         chat?.run?.outcome?.let { outcome ->
                                             item(

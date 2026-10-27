@@ -63,6 +63,7 @@ impl Worker {
                 authorize(db)?;
                 let chat = crate::chats::pause_in(db, &id, true)?;
                 if let Some(run_id) = chat["runId"].as_str() {
+                    crate::chats::coding_agent::cancel_in(db, run_id)?;
                     crate::chats::continuation::cancel_for_run(db, run_id)?;
                     let run = required(db.run_state(run_id)?, "Run not found")?;
                     if run.status.is_active() {
@@ -191,6 +192,7 @@ impl Worker {
 }
 
 fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
+    crate::chats::coding_agent::cancel_in(db, id)?;
     let run = required(db.run_state(id)?, "Run not found")?;
     let waiting = crate::chats::continuation::cancel_for_run(db, id)?;
     if !run.status.is_active() {
@@ -468,14 +470,7 @@ async fn pause_chat(s: &Service, input: &crate::http::Input, id: &str) -> Result
 }
 
 async fn stop_chat(s: &Service, id: &str) -> Result<Value> {
-    let chat = s.get("chats", id).await?;
-    s.chat_pause(id, true).await?;
-    s.chat_cancel_wait(id).await?;
-    if let Some(run_id) = chat["runId"].as_str()
-        && s.store.run_state(run_id).await?.status.is_active()
-    {
-        s.worker.cancel(s, run_id).await?;
-    }
+    s.worker.stop_chat_authorized(s, id, |_| Ok(())).await?;
     Ok(json!({ "stopped": true }))
 }
 

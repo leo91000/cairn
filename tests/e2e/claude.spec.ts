@@ -1,4 +1,6 @@
-import { connectClaude } from './accounts'
+import { readFile, writeFile } from 'node:fs/promises'
+import path from 'node:path'
+import { connectClaude, limits, seedCodexAccount } from './accounts'
 import {
   signIn as authenticateWorkspace,
   createAgent,
@@ -53,6 +55,94 @@ test('a Claude spend limit waits automatically and appears once in the real conv
     await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
   }
 })
+
+test('the quota card continues the pending request with Codex once, preserving files and history', async ({ page, workspace }, testInfo) => {
+  test.setTimeout(120000)
+  await connectClaude(workspace, 'Exhausted for switching', 'fixture-code:switch-running@example.test')
+  await seedCodexAccount(workspace, 'Available', limits(10, 20))
+  await workspace.api('/api/accounts/refresh', 'POST')
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const messageId = crypto.randomUUID()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: messageId, text: 'Inspect the workspace and preserve my work. fixture:spend-limit', provider: 'claude' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.accountWaitReason, { timeout: 30000 }).toContain('Usage exhausted.')
+  const before = (await workspace.api(`/api/chats/${chat.id}`)).run
+  const marker = path.join(before.workspace, 'keep-quota-work.txt')
+  await writeFile(marker, 'Work done before quota')
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const card = page.getByRole('status', { name: 'Coding agent quota reached' })
+  const continueButton = card.getByRole('button', { name: 'Continue with Codex', exact: true })
+  await expect(continueButton).toBeVisible()
+  for (const [width, theme] of [[390, 'dark'], [390, 'light'], [1440, 'dark']] as const) {
+    await page.setViewportSize({ width, height: 900 })
+    await page.emulateMedia({ colorScheme: theme })
+    await expectSingleScroll(page)
+    await page.screenshot({ path: testInfo.outputPath(`quota-switch-${width}-${theme}.png`), animations: 'disabled' })
+  }
+
+  await continueButton.click()
+  await expect.poll(async () => {
+    const current = await workspace.api(`/api/chats/${chat.id}`)
+    return current.run?.snapshot.agent.provider === 'codex' && current.run.status === 'succeeded'
+  }, { timeout: 30000 }).toBe(true)
+  const after = await workspace.api(`/api/chats/${chat.id}`)
+  expect(after.run.id).toBe(before.id)
+  expect(after.run.workspace).toBe(before.workspace)
+  expect(after.run.chatExecution.messageId).toBe(messageId)
+  expect(await readFile(marker, 'utf8')).toBe('Work done before quota')
+  expect(workspace.service.store.chatMessages(chat.id).filter((m: { id: string }) => m.id === messageId)).toHaveLength(1)
+  await expect(card).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^Agent, model, reasoning and speed: Codex/ })).toBeVisible()
+  await page.reload()
+  await expect(card).toHaveCount(0)
+})
+
+for (const state of ['queued', 'failed'] as const) {
+  test(`a ${state} quota switches the same request through the API and rejects stale identities`, async ({ workspace }) => {
+    test.setTimeout(120000)
+    await connectClaude(workspace, `Initially available ${state}`, `fixture-code:${state}@example.test`)
+    const codex = await seedCodexAccount(workspace, 'Available', limits(10, 20))
+    await workspace.api('/api/accounts/refresh', 'POST')
+    const chat = await workspace.api('/api/chats', 'POST', {})
+    if (state === 'queued') {
+      const accounts = await workspace.api('/api/accounts')
+      for (const claude of accounts.accounts.filter((a: { provider: string }) => a.provider === 'claude'))
+        workspace.service.store.put('agentAccounts', { ...workspace.service.store.get('agentAccounts', claude.id), exhausted: { at: Date.now(), model: '', usage: null } })
+    }
+
+    const messageId = crypto.randomUUID()
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: messageId, text: 'Preserve this request', provider: 'claude' })
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe(state === 'queued' ? 'queued' : 'succeeded')
+    const before = (await workspace.api(`/api/chats/${chat.id}`)).run
+    if (state === 'queued') {
+      await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.accountWaitReason).toContain('account with available usage.')
+    }
+    else {
+      workspace.service.store.updateRun(before.id, { status: 'failed', error: 'Claude AI usage limit reached' })
+    }
+
+    const endpoint = `/api/chats/${chat.id}/coding-agent`
+    const options = await workspace.api(endpoint)
+    expect(options.choices.map((c: { provider: string }) => c.provider)).toEqual(['codex'])
+    const request = {
+      runId: options.runId,
+      turnId: options.turnId,
+      requestId: crypto.randomUUID(),
+      provider: 'codex',
+    }
+    await expect(workspace.api(endpoint, 'POST', { ...request, turnId: 'stale-turn' })).rejects.toThrow()
+    await workspace.api(endpoint, 'POST', request)
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.snapshot.agent.provider, { timeout: 30000 }).toBe('codex')
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+    await workspace.api(`/api/accounts/${codex.id}`, 'PATCH', { enabled: false })
+    await workspace.api(endpoint, 'POST', request)
+    const after = await workspace.api(`/api/chats/${chat.id}`)
+    expect(after.run.id).toBe(before.id)
+    expect(after.run.chatExecution.messageId).toBe(messageId)
+    expect(after.run.snapshot.agent.provider).toBe('codex')
+    expect(after.codingAgentSwitch).toBeNull()
+  })
+}
 
 test('a saved quota failure really resumes its session from the inline card', async ({ page, workspace }) => {
   test.setTimeout(120000)
@@ -338,4 +428,34 @@ test('Claude default names follow available metadata without pinning the model',
   await createAgent(page)
   const saved = (await workspace.api('/api/agents')).find((agent: { name: string }) => agent.name === 'Claude default labels')
   expect(saved).toMatchObject({ provider: 'claude', model: '', reasoning: '' })
+})
+
+test('the quota card switches to OpenCode with an available model and preserves the sandbox', async ({ page, workspace }) => {
+  test.setTimeout(120000)
+  await connectClaude(workspace, 'OpenCode handoff', 'fixture-code:switch-opencode@example.test')
+  await workspace.api('/api/accounts', 'POST', {
+    provider: 'opencode',
+    name: 'Quota alternative Zen',
+    modelProvider: 'opencode',
+    apiKey: 'synthetic-quota-zen-key',
+  })
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const messageId = crypto.randomUUID()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: messageId, text: 'Continue my work. fixture:spend-limit', provider: 'claude' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.accountWaitReason, { timeout: 30000 }).toContain('Usage exhausted.')
+  const before = (await workspace.api(`/api/chats/${chat.id}`)).run
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const card = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await card.getByRole('button', { name: 'Continue with OpenCode', exact: true }).click()
+  await expect.poll(async () => {
+    const run = (await workspace.api(`/api/chats/${chat.id}`)).run
+    return run?.snapshot.agent.provider === 'opencode' && run.status === 'succeeded'
+  }, { timeout: 30000 }).toBe(true)
+  const after = (await workspace.api(`/api/chats/${chat.id}`)).run
+  expect(after.snapshot.agent.model).toMatch(/^auto\/.+/)
+  expect(after.snapshot.agent.access).toEqual(before.snapshot.agent.access)
+  expect(after.chatExecution.messageId).toBe(messageId)
+  expect(after.workspace).toBe(before.workspace)
+  await expect(card).toHaveCount(0)
 })

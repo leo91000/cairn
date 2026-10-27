@@ -117,7 +117,7 @@ Une conversation supprimée par l’utilisateur, masquée pendant l’effacement
 Retour d’une conversation à l’état actif, sans relancer l’agent, les envois annulés ni les liens publics révoqués.
 
 **Agent de code** :
-Le moteur qui exécute le travail d’un agent : Codex (OpenAI), Claude Code (Anthropic) ou OpenCode. Chaque agent en choisit un, et une conversation peut en changer d’un message à l’autre.
+Le moteur qui exécute le travail d’un agent : Codex (OpenAI), Claude Code (Anthropic) ou OpenCode. Chaque agent en choisit un, et une conversation peut en changer d’un message à l’autre. Quand un quota bloque la demande en cours, l’utilisateur peut choisir un autre agent de code disposant d’un compte disponible pour reprendre cette même demande avec son historique et ses fichiers.
 _À éviter_ : fournisseur, driver, assistant de code.
 
 **Compte d’agent de code** :

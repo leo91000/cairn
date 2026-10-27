@@ -4421,3 +4421,76 @@ async fn expired_installation_authorization_cannot_publish_a_prepared_package() 
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn quota_coding_agent_switch_has_equivalent_public_and_builtin_tools() {
+    for internal in [false, true] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        let main = enabled_main(&s).await;
+        let (_, configuration) = active_run(&s, &main).await;
+        let invoke = |name, args| {
+            let s = s.clone();
+            let configuration = configuration.clone();
+            async move {
+                if internal {
+                    call(&s, &configuration, name, args).await
+                } else {
+                    public_call(&s, &["read", "manage", "run"], name, args).await
+                }
+            }
+        };
+        let created = invoke("create_chat", json!({})).await;
+        let chat_id = result(&created)["id"].as_str().unwrap();
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let sent = invoke(
+            "send_chat_message",
+            json!({"chatId":chat_id,"message":{"id":message_id,"text":"Keep this request"}}),
+        )
+        .await;
+        result(&sent);
+        s.chat_tick(&std::collections::HashSet::new())
+            .await
+            .unwrap();
+        let detail = s.chat_detail(chat_id).await.unwrap();
+        let run_id = text(&detail, "runId");
+        s.store
+            .change_run(
+                run_id,
+                cairn_installation::runs::RunChanges {
+                    account_wait_reason: Some(Some(
+                        "Waiting for a Codex account with available usage.".into(),
+                    )),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut account = s
+            .accounts
+            .create(
+                &s,
+                cairn_installation::provider::Provider::Claude,
+                "Alternative",
+            )
+            .await
+            .unwrap();
+        account["state"] = "ready".into();
+        s.store.put("agentAccounts", account).await.unwrap();
+        let options = invoke("get_chat_coding_agent_options", json!({"chatId":chat_id})).await;
+        assert_eq!(
+            result(&options)["choices"],
+            json!([{"provider":"claude","label":"Claude Code"}])
+        );
+        let input = json!({"chatId":chat_id,"runId":run_id,"turnId":message_id,"requestId":uuid::Uuid::new_v4(),"provider":"claude"});
+        let denied = public_call(&s, &["read"], "switch_chat_coding_agent", input.clone()).await;
+        assert_eq!(denied["result"]["isError"], true);
+        let switched = invoke("switch_chat_coding_agent", input.clone()).await;
+        assert_eq!(result(&switched)["codingAgentSwitch"]["provider"], "claude");
+        let retried = invoke("switch_chat_coding_agent", input).await;
+        assert_eq!(result(&retried)["codingAgentSwitch"]["provider"], "claude");
+        let stopped = invoke("stop_chat", json!({"chatId":chat_id})).await;
+        result(&stopped);
+        assert!(s.chat_detail(chat_id).await.unwrap()["codingAgentSwitch"].is_null());
+    }
+}

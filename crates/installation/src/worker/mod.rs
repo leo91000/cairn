@@ -47,6 +47,14 @@ struct Admission {
 }
 
 impl Worker {
+    /// Keep durable conversation recovery alive until graceful shutdown completes.
+    pub(crate) fn spawn_recovery(
+        &self,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        self.tasks.spawn(task);
+    }
+
     /// Coordinates admission/recovery filesystem writes with permanent run cleanup.
     pub(crate) async fn run_preparation_lock(&self, run_id: &str) -> Arc<Mutex<()>> {
         let mut locks = self.run_preparation_locks.lock().await;

@@ -67,6 +67,19 @@ data class ChatCompaction(
 /** The conversation whose agent delegated a conversation. */
 @Serializable data class ChatRequester(val chatId: String, val title: String = "")
 
+@Serializable data class CodingAgentSwitch(val provider: String, val error: String? = null)
+
+@Serializable data class CodingAgentChoice(val provider: String, val label: String)
+
+@Serializable
+data class CodingAgentOptions(
+    val runId: String? = null,
+    val turnId: String? = null,
+    val provider: String = "codex",
+    val choices: List<CodingAgentChoice> = emptyList(),
+    val switching: CodingAgentSwitch? = null,
+)
+
 @Serializable
 data class Chat(
     val id: String,
@@ -106,6 +119,7 @@ data class Chat(
     val suspendedByExclusive: ExclusiveReservation? = null,
     /** The conversation that delegated this one, while it still exists. */
     val requester: ChatRequester? = null,
+    val codingAgentSwitch: CodingAgentSwitch? = null,
 ) {
     val exclusiveSuspended
         get() =

@@ -183,7 +183,7 @@ pub(super) async fn invoke(
     let origin = crate::native::policy::origin();
     let control = matches!(
         name,
-        "restore_chat" | "resume_chat" | "restart_chat_session"
+        "restore_chat" | "resume_chat" | "restart_chat_session" | "switch_chat_coding_agent"
     ) || (name == "set_chat_paused" && args["paused"] != true);
     if control && origin.known() {
         crate::native::policy::refresh_chat(s, text(&args, "chatId")).await?;
@@ -211,6 +211,12 @@ pub(super) async fn invoke(
             Ok(())
         }
     };
+    if name == "get_chat_coding_agent_options" {
+        return chats::coding_agent::options(s, text(&args, "chatId"), authorize).await;
+    }
+    if name == "switch_chat_coding_agent" {
+        return s.switch_chat_coding_agent(args, commit_authority).await;
+    }
     if matches!(
         name,
         "list_chats" | "get_chat" | "list_chat_questions" | "read_chat_content"

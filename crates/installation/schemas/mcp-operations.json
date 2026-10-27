@@ -1352,5 +1352,68 @@
       ],
       "additionalProperties": false
     }
+  },
+  {
+    "name": "get_chat_coding_agent_options",
+    "description": "List connected coding agents with available usage for a quota-blocked conversation. Returns the runId and turnId required to switch, and any pending switch. Account credentials and details are never returned.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "chatId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "switch_chat_coding_agent",
+    "description": "Continue the quota-blocked turn with another connected coding agent, preserving the chat, pending request and files. Read get_chat_coding_agent_options first. Supply a fresh requestId UUID, runId, turnId and provider. Retrying the same requestId is idempotent. The old execution is stopped before a fresh engine session receives the visible transcript. Never grants access or changes the agent profile; stop_chat cancels a pending switch.",
+    "scope": "run",
+    "destructive": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "runId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "requestId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "codex",
+            "claude",
+            "opencode"
+          ]
+        }
+      },
+      "required": [
+        "chatId",
+        "runId",
+        "requestId",
+        "turnId",
+        "provider"
+      ],
+      "additionalProperties": false
+    }
   }
 ]

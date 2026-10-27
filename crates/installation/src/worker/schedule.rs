@@ -47,6 +47,7 @@ impl Worker {
             .keys()
             .cloned()
             .collect::<HashSet<_>>();
+        crate::chats::coding_agent::tick(s, &active).await?;
         // Parked missions must release any pre-crash execution independently
         // of their wakeup and of admission capacity for new processes.
         for state in s.store.read(|db| db.active_run_states()).await? {
@@ -129,6 +130,15 @@ impl Worker {
             return Ok(());
         }
 
+        if state.cancel_requested_at.is_some() {
+            let pending_id = run_id.clone();
+            if s.store
+                .read(move |db| crate::chats::coding_agent::pending_for_run(db, &pending_id))
+                .await?
+            {
+                return Ok(());
+            }
+        }
         let run_preparation = self.run_preparation_lock(&run_id).await;
         let _run_preparation = run_preparation.lock_owned().await;
         let current_id = run_id.clone();

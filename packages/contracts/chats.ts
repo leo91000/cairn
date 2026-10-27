@@ -145,6 +145,7 @@ export interface ChatCompaction {
   reason: string | null
 }
 export interface ChatView extends Chat {
+  codingAgentSwitch?: { provider: Provider, error: string | null } | null
   suspendedByExclusive?: Run['suspendedByExclusive']
   pendingQuestions: number
   agentName: string
