@@ -1,3 +1,4 @@
+pub(crate) mod coding_agent;
 pub(crate) mod continuation;
 
 use crate::worker::checkpoint::RunCheckpoint;
@@ -181,6 +182,7 @@ fn record_name(db: &Db<'_>, chat: &Value, kind: &str, key: &str, deleted: &str) 
 }
 
 pub(crate) fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
+    chat["codingAgentSwitch"] = coding_agent::progress(db, text(&chat, "id"))?;
     chat["lifecycle"] = crate::conversation_lifecycle::state(&chat).into();
     chat["pendingQuestions"] = questions(db, text(&chat, "id"))?
         .iter()
@@ -1354,6 +1356,14 @@ impl Service {
     pub async fn chat_tick(&self, active: &HashSet<String>) -> Result<()> {
         for chat in self.store.list("chats").await? {
             if !is_active(&chat) {
+                continue;
+            }
+            if self
+                .store
+                .kv(&coding_agent::key(text(&chat, "id")))
+                .await?
+                .is_some_and(|value| value["pending"] == true)
+            {
                 continue;
             }
             let run = match chat["runId"].as_str() {

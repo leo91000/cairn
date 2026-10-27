@@ -881,6 +881,8 @@ pub(crate) async fn invoke(
         | "read_chat_attachment"
         | "upload_chat_attachment" => chat_files::invoke(s, name, args, bearer).await,
         "read_chat_content"
+        | "get_chat_coding_agent_options"
+        | "switch_chat_coding_agent"
         | "list_chat_questions"
         | "answer_chat_question"
         | "restore_chat"

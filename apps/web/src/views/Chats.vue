@@ -1095,6 +1095,8 @@ function key(event: KeyboardEvent) {
             :sending="delivery.sending"
             :events="events"
             :quota="quota"
+            :chat-id="detail?.id"
+            :coding-agent-switch="detail?.codingAgentSwitch"
             :can-manage-accounts="state.installationRole === 'owner'"
             :busy="busy"
             :wakeup="liveWait"
@@ -1113,6 +1115,7 @@ function key(event: KeyboardEvent) {
             compact-toolbar
             chat
             @resume-quota="resumeQuota"
+            @coding-agent-switched="chosenProvider = $event"
             @load="live.loadOlder"
             @position="live.savePosition"
             @pause-wait="busy || action('pause', { paused: true })"

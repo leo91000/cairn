@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { Provider } from '../../../../packages/contracts/accounts'
 import type { Deliverable } from '../../../../packages/contracts/artifacts'
 import type { ChatWakeup } from '../../../../packages/contracts/chats'
 import type { RunEvent, TaskOutcome } from '../../../../packages/contracts/contracts'
@@ -36,7 +37,7 @@ import ArtifactRail from './ArtifactRail.vue'
 import ArtifactViewer from './ArtifactViewer.vue'
 import ChatNotice from './ChatNotice.vue'
 import ChatOutcome from './ChatOutcome.vue'
-import ChatQuotaCard from './ChatQuotaCard.vue'
+import ChatQuotaRecovery from './ChatQuotaRecovery.vue'
 import ChatWaitCard from './ChatWaitCard.vue'
 import ContextCompaction from './ContextCompaction.vue'
 import Icon from './Icon.vue'
@@ -72,6 +73,8 @@ const props = defineProps<{
   /** The conversation's pending wakeup, which keeps its wait card live. */
   wakeup?: LiveWait
   quota?: ChatQuota | null
+  chatId?: string
+  codingAgentSwitch?: { provider: Provider, error: string | null } | null
   canManageAccounts?: boolean
   busy?: boolean
 }>()
@@ -80,6 +83,7 @@ const emit = defineEmits<{
   position: [value: ReadingPosition, key?: string]
   pauseWait: []
   resumeQuota: []
+  codingAgentSwitched: [provider: Provider]
 }>()
 const skillNames = computed(() => new Set(props.skills ?? []))
 const messageTimes = new MessageTimes()
@@ -467,12 +471,15 @@ defineExpose({
                 </ChatOutcome>
               </template>
 
-              <ChatQuotaCard
-                v-if="chat && quota"
+              <ChatQuotaRecovery
+                v-if="chat && chatId"
+                :chat-id="chatId"
                 :quota="quota"
+                :progress="codingAgentSwitch"
                 :can-manage="!!canManageAccounts"
                 :busy="busy"
                 @resume="emit('resumeQuota')"
+                @switched="emit('codingAgentSwitched', $event)"
               />
 
               <ChatOutcome

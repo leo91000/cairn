@@ -13,6 +13,9 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import java.util.UUID
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 
 private val quotaMessage =
@@ -179,6 +182,11 @@ internal fun ChatQuotaCard(
     busy: Boolean,
     openConnections: () -> Unit,
     resume: () -> Unit,
+    choices: List<CodingAgentChoice> = emptyList(),
+    switching: String? = null,
+    switchError: String? = null,
+    switch: (String) -> Unit = {},
+    cancelSwitch: () -> Unit = {},
 ) {
     var expanded by rememberSaveable(quota.message) { mutableStateOf(false) }
     val tone = signal.warning
@@ -221,21 +229,34 @@ internal fun ChatQuotaCard(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (canManage)
+            choices.forEach { choice ->
                 Button(
+                    onClick = { switch(choice.provider) },
+                    enabled = !busy && switching == null,
+                ) {
+                    Text("Continuer avec ${choice.label}")
+                }
+            }
+            if (switching != null) {
+                Text("Passage à $switching… La conversation et les fichiers sont conservés.")
+                TextButton(onClick = cancelSwitch, enabled = !busy) {
+                    Text("Annuler le changement")
+                }
+            }
+            switchError?.let { Text(it, color = tone) }
+            if (canManage)
+                OutlinedButton(
                     onClick = openConnections,
                     enabled = !busy,
-                    colors =
-                        ButtonDefaults.buttonColors(containerColor = tone, contentColor = surface),
                 ) {
                     Text("Gérer les comptes")
                 }
-            else
+            else if (choices.isEmpty() && switching == null)
                 Text(
                     "Demandez au propriétaire de l’installation de vérifier les comptes.",
                     style = MaterialTheme.typography.bodySmall,
                 )
-            if (!quota.automatic)
+            if (!quota.automatic && switching == null)
                 TextButton(onClick = resume, enabled = !busy) { Text("Reprendre la conversation") }
             if (quota.message.isNotBlank()) {
                 TextButton(onClick = { expanded = !expanded }) {
@@ -251,4 +272,113 @@ internal fun ChatQuotaCard(
             }
         }
     }
+}
+
+/** One explicit choice, with the manager retaining a switch across disconnects/restarts. */
+@Composable
+internal fun ChatQuotaRecovery(
+    vm: CairnViewModel,
+    chat: Chat,
+    quota: ChatQuota?,
+    canManage: Boolean,
+    busy: Boolean,
+    openConnections: () -> Unit,
+    resume: () -> Unit,
+    followConversation: () -> Unit,
+) {
+    var options by remember(chat.id) { mutableStateOf<CodingAgentOptions?>(null) }
+    var pending by remember(chat.id) { mutableStateOf<String?>(null) }
+    var failure by remember(chat.id) { mutableStateOf<String?>(null) }
+    var sending by remember(chat.id) { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val switching = pending ?: options?.switching?.provider ?: chat.codingAgentSwitch?.provider
+    LaunchedEffect(chat.id, quota != null, chat.codingAgentSwitch, pending) {
+        if (quota == null && switching == null) return@LaunchedEffect
+        do {
+            try {
+                val result =
+                    wireJson.decodeFromString<CodingAgentOptions>(
+                        vm.api.request("GET", "/chats/${segment(chat.id)}/coding-agent")
+                    )
+                options = result
+                if (result.switching != null && pending == null) {
+                    pending = result.switching.provider
+                    followConversation()
+                }
+                if (pending != null && result.switching == null && !sending) {
+                    pending = null
+                }
+                failure = null
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (error: Exception) {
+                failure = error.message
+            }
+            if (pending == null && options?.switching == null) break
+            delay(1000)
+        } while (true)
+    }
+    val shown =
+        quota
+            ?: if (switching != null)
+                ChatQuota(
+                    codingAgent(options?.provider ?: "codex").label,
+                    "",
+                    false,
+                    null,
+                    true,
+                )
+            else null
+    if (shown == null) return
+    ChatQuotaCard(
+        shown,
+        canManage,
+        busy || sending,
+        openConnections,
+        resume,
+        choices = options?.choices.orEmpty(),
+        switching = switching?.let { codingAgent(it).label },
+        switchError = failure ?: options?.switching?.error,
+        switch = { provider ->
+            val selected = options
+            if (selected?.runId != null && selected.turnId != null && !sending) {
+                sending = true
+                scope.launch {
+                    try {
+                        vm.api.request(
+                            "POST",
+                            "/chats/${segment(chat.id)}/coding-agent",
+                            buildJsonObject {
+                                put("requestId", UUID.randomUUID().toString())
+                                put("runId", selected.runId)
+                                put("turnId", selected.turnId)
+                                put("provider", provider)
+                            },
+                        )
+                        followConversation()
+                        pending = provider
+                    } catch (cancel: kotlinx.coroutines.CancellationException) {
+                        throw cancel
+                    } catch (error: Exception) {
+                        failure = error.message
+                    } finally {
+                        sending = false
+                    }
+                }
+            }
+        },
+        cancelSwitch = {
+            scope.launch {
+                try {
+                    vm.api.request("POST", "/chats/${segment(chat.id)}/stop")
+                    pending = null
+                    options = null
+                } catch (cancel: kotlinx.coroutines.CancellationException) {
+                    throw cancel
+                } catch (error: Exception) {
+                    failure = error.message
+                }
+            }
+        },
+    )
 }

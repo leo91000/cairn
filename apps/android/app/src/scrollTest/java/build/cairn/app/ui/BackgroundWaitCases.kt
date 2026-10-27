@@ -28,6 +28,45 @@ abstract class BackgroundWaitCases {
     protected open fun capture(name: String) {}
 
     @Test
+    fun quotaOffersOneClickCodingAgentSwitchForTheCurrentTurn() =
+        conversation("running", quota = true, codingAgentChoices = true) { server ->
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Continuer avec Codex").performScrollTo().assertIsDisplayed()
+            capture("quota-switch-android")
+            compose.onNodeWithText("Continuer avec Codex").performClick()
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first { it.method == "POST" && it.path?.endsWith("/coding-agent") == true }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            assertTrue(body["provider"] == JsonPrimitive("codex"))
+            assertTrue(body["runId"] == JsonPrimitive(SAVED_RUN_ID))
+            assertTrue(body["turnId"] == JsonPrimitive("quota-turn"))
+            assertTrue(body["requestId"]!!.jsonPrimitive.content.isNotBlank())
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodesWithText("Annuler le changement")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Annuler le changement").performScrollTo().performClick()
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodes(hasText("Continuer avec Codex") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose.onNodeWithText("Claude Code").assertIsSelected()
+            compose.onNodeWithText("Codex").assertIsNotSelected()
+        }
+
+    @Test
     fun recoveredQuotaDoesNotRestoreDuplicateErrors() =
         conversation("succeeded", quota = true) {
             compose.onNodeWithTag("chat-quota").assertDoesNotExist()
@@ -498,6 +537,7 @@ abstract class BackgroundWaitCases {
         sleeping: Boolean = false,
         conditional: Boolean = false,
         quota: Boolean = false,
+        codingAgentChoices: Boolean = false,
         paused: Boolean = false,
         reason: String = "Attendre la CI",
         history: ((ChatWakeup?, Long) -> List<RunEvent>)? = null,
@@ -604,8 +644,30 @@ abstract class BackgroundWaitCases {
                 )
             server.dispatcher =
                 object : Dispatcher() {
+                    @Volatile var switching = false
+
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
+                        if (codingAgentChoices && path.endsWith("/stop")) {
+                            switching = false
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody("{}")
+                        }
+                        if (codingAgentChoices && path.endsWith("/coding-agent")) {
+                            if (request.method == "POST") switching = true
+                            val progress =
+                                if (switching) ""","switching":{"provider":"codex","error":null}"""
+                                else ""
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody(
+                                    if (request.method == "POST") "{}"
+                                    else
+                                        """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"claude","choices":[{"provider":"codex","label":"Codex"}]$progress}"""
+                                )
+                        }
+
                         if (path == "/api/installations/fixture/api/chats/chat/stream")
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")

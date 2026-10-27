@@ -6,7 +6,7 @@ mod common;
 use common::relay_fixture::router;
 
 use axum::{Router, body::Body, http::StatusCode};
-use cairn_installation::{config::id, run_status::RunStatus, service::Service};
+use cairn_installation::{config::id, run_status::RunStatus, service::Service, validation::text};
 use common::RelayContext;
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc};
@@ -1190,6 +1190,407 @@ async fn measure_retention_storage() {
                 "cpuSeconds": cpu_seconds() - before_cpu,
                 "remainingChats": app.service.store.list("chats").await.unwrap().len()
             })
+        );
+    }
+}
+
+/// Admission can reach quota before there is a checkpoint or an engine session.
+async fn quota_switch_fixture(app: &App) -> (String, Value) {
+    std::fs::create_dir_all(&app.service.config.home).unwrap();
+    common::relay_fixture::claimed(&app.service).await.unwrap();
+    let chat = app.create_chat().await;
+    let path = chat_path(&chat);
+    let message = json!({"id":uuid::Uuid::new_v4(),"text":"Keep my pending request"});
+    assert_eq!(
+        app.request("POST", &format!("{path}/messages"), message)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    app.tick().await;
+    let detail = app.get(&path).await.1;
+    let run = detail["run"].clone();
+    assert!(run["id"].is_string(), "{detail}");
+    app.service
+        .store
+        .change_run(
+            text(&run, "id"),
+            cairn_installation::runs::RunChanges {
+                account_wait_reason: Some(Some(
+                    "Waiting for a Codex account with available usage.".into(),
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut account = app
+        .service
+        .accounts
+        .create(
+            &app.service,
+            cairn_installation::provider::Provider::Claude,
+            "Alternative",
+        )
+        .await
+        .unwrap();
+    account["state"] = "ready".into();
+    app.service
+        .store
+        .put("agentAccounts", account)
+        .await
+        .unwrap();
+    let input = json!({"requestId":uuid::Uuid::new_v4(),"runId":run["id"],"turnId":run["chatExecution"]["messageId"],"provider":"claude"});
+    (path, input)
+}
+
+#[tokio::test]
+async fn quota_switch_is_revision_checked_idempotent_and_cancellable() {
+    for failed in [false, true] {
+        let app = App::new().await;
+        let (path, input) = quota_switch_fixture(&app).await;
+        if failed {
+            app.service
+                .store
+                .change_run(
+                    text(&input, "runId"),
+                    cairn_installation::runs::RunChanges {
+                        status: Some(RunStatus::Failed),
+                        error: Some(Some("Claude AI usage limit reached".into())),
+                        account_wait_reason: Some(None),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let endpoint = format!("{path}/coding-agent");
+        let (status, options) = app.get(&endpoint).await;
+        assert_eq!(status, StatusCode::OK, "{options}");
+        assert_eq!(
+            options["choices"],
+            json!([{"provider":"claude","label":"Claude Code"}])
+        );
+        assert_eq!(options["turnId"], input["turnId"]);
+        let mut stale = input.clone();
+        stale["turnId"] = "different-turn".into();
+        assert_eq!(
+            app.request("POST", &endpoint, stale).await.0,
+            StatusCode::CONFLICT
+        );
+        let mut malformed = input.clone();
+        malformed["turnId"] = "".into();
+        assert_eq!(
+            app.request("POST", &endpoint, malformed).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        let (status, accepted) = app.request("POST", &endpoint, input.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{accepted}");
+        assert_eq!(accepted["codingAgentSwitch"]["provider"], "claude");
+        assert!(
+            app.service
+                .store
+                .run_state(text(&input, "runId"))
+                .await
+                .unwrap()
+                .cancel_requested_at
+                .is_some()
+        );
+        // Accepted identities remain idempotent even if the account is paused meanwhile.
+        for mut account in app.service.store.list("agentAccounts").await.unwrap() {
+            account["enabled"] = false.into();
+            app.service
+                .store
+                .put("agentAccounts", account)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            app.request("POST", &endpoint, input.clone()).await.0,
+            StatusCode::OK
+        );
+        let mut reused = input.clone();
+        reused["provider"] = "opencode".into();
+        assert_eq!(
+            app.request("POST", &endpoint, reused).await.0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            app.request("POST", &format!("{path}/stop"), json!({}))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        app.service.worker.tick(&app.service).await.unwrap();
+        let stopped = app.get(&path).await.1;
+        assert!(stopped["codingAgentSwitch"].is_null());
+        assert_eq!(stopped["run"]["snapshot"]["agent"]["provider"], "codex");
+        assert_eq!(stopped["paused"], true);
+        assert_eq!(
+            stopped["run"]["status"],
+            if failed { "failed" } else { "cancelled" }
+        );
+    }
+}
+
+#[tokio::test]
+async fn accepted_quota_switch_recovers_after_restart_without_releasing_paused_followups() {
+    for pause_before_acceptance in [true, false] {
+        let app = App::new().await;
+        let (path, input) = quota_switch_fixture(&app).await;
+        let endpoint = format!("{path}/coding-agent");
+        if pause_before_acceptance {
+            assert_eq!(
+                app.request("POST", &format!("{path}/pause"), json!({"paused":true}))
+                    .await
+                    .0,
+                StatusCode::OK
+            );
+        }
+
+        assert_eq!(
+            app.request("POST", &endpoint, input.clone()).await.0,
+            StatusCode::OK
+        );
+        if !pause_before_acceptance {
+            assert_eq!(
+                app.request("POST", &format!("{path}/pause"), json!({"paused":true}))
+                    .await
+                    .0,
+                StatusCode::OK
+            );
+        }
+        let followup_id = id();
+        assert_eq!(
+            app.request(
+                "POST",
+                &format!("{path}/messages"),
+                json!({"id":followup_id,"text":"Keep this follow-up paused","mode":"queue"})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        // Keep the new execution queued so this test observes recovery without invoking a CLI.
+        for mut account in app.service.store.list("agentAccounts").await.unwrap() {
+            account["enabled"] = false.into();
+            app.service
+                .store
+                .put("agentAccounts", account)
+                .await
+                .unwrap();
+        }
+        let restarted = Service::new(app.service.config.clone()).await.unwrap();
+        restarted.worker.tick(&restarted).await.unwrap();
+        common::eventually(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(20),
+            async || {
+                let run = restarted.store.run(text(&input, "runId")).await.unwrap();
+                (run["snapshot"]["agent"]["provider"] == "claude").then_some(())
+            },
+        )
+        .await;
+        let resumed = app.get(&path).await.1;
+        assert_eq!(resumed["run"]["id"], input["runId"]);
+        assert_eq!(
+            resumed["run"]["chatExecution"]["messageId"],
+            input["turnId"]
+        );
+        assert_eq!(resumed["run"]["status"], "queued");
+        assert!(resumed["run"]["cancelRequestedAt"].is_null());
+        assert!(resumed["codingAgentSwitch"].is_null());
+        assert_eq!(resumed["paused"], true);
+        assert_eq!(resumed["messages"].as_array().unwrap().len(), 2);
+        assert!(
+            resumed["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["id"] == followup_id && message["status"] == "queued")
+        );
+        restarted.shutdown.cancel();
+        restarted.worker.close().await;
+    }
+}
+
+#[tokio::test]
+async fn completed_quota_switch_replay_does_not_cancel_the_replacement_or_a_later_turn() {
+    let app = App::new().await;
+    let (path, input) = quota_switch_fixture(&app).await;
+    let endpoint = format!("{path}/coding-agent");
+    assert_eq!(
+        app.request("POST", &endpoint, input.clone()).await.0,
+        StatusCode::OK
+    );
+    // The same turn can return to its original engine after another quota switch.
+    // Both the latest receipt and an older receipt must leave active work untouched.
+    for latest_request in [
+        input["requestId"].clone(),
+        uuid::Uuid::new_v4().to_string().into(),
+    ] {
+        let mut completed = input.clone();
+        completed["requestId"] = latest_request.clone();
+        completed["pending"] = false.into();
+        let key = format!("chat-coding-agent:{}", path.rsplit('/').next().unwrap());
+        app.service
+            .store
+            .set(&key, completed.clone(), None)
+            .await
+            .unwrap();
+        app.service
+            .store
+            .change_run(
+                text(&input, "runId"),
+                cairn_installation::runs::RunChanges {
+                    cancel_requested_at: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let token = tokio_util::sync::CancellationToken::new();
+        app.service
+            .worker
+            .active
+            .lock()
+            .await
+            .insert(text(&input, "runId").to_owned(), token.clone());
+        assert_eq!(
+            app.request("POST", &endpoint, input.clone()).await.0,
+            StatusCode::OK
+        );
+        assert!(
+            !token.is_cancelled(),
+            "An idempotent replay must not cancel the replacement run"
+        );
+        assert_eq!(
+            app.service.store.kv(&key).await.unwrap().unwrap(),
+            completed
+        );
+        app.service.worker.active.lock().await.clear();
+    }
+}
+
+#[tokio::test]
+async fn quota_switch_does_not_offer_or_accept_an_engine_that_cannot_preserve_the_sandbox() {
+    let app = App::new().await;
+    let (path, mut input) = quota_switch_fixture(&app).await;
+    let mut run = app.service.store.run(text(&input, "runId")).await.unwrap();
+    run["snapshot"]["agent"]["access"]["sandbox"] = "workspace-write".into();
+    app.service
+        .store
+        .change_run(
+            text(&input, "runId"),
+            cairn_installation::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(run["snapshot"].clone()).unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut account = app
+        .service
+        .accounts
+        .create(
+            &app.service,
+            cairn_installation::provider::Provider::Opencode,
+            "Alternative",
+        )
+        .await
+        .unwrap();
+    account["state"] = "ready".into();
+    account["modelProvider"] = "opencode".into();
+    app.service
+        .store
+        .put("agentAccounts", account)
+        .await
+        .unwrap();
+    let endpoint = format!("{path}/coding-agent");
+    let (status, options) = app.get(&endpoint).await;
+    assert_eq!(status, StatusCode::OK, "{options}");
+    assert!(
+        options["choices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|choice| choice["provider"] != "opencode")
+    );
+    input["provider"] = "opencode".into();
+    assert_eq!(
+        app.request("POST", &endpoint, input.clone()).await.0,
+        StatusCode::CONFLICT
+    );
+    assert!(
+        app.service
+            .store
+            .run_state(text(&input, "runId"))
+            .await
+            .unwrap()
+            .cancel_requested_at
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn quota_switch_recognizes_current_structured_limits_without_reusing_recovered_failures() {
+    for (field, code) in [
+        ("code", "usage_limit_reached"),
+        ("codexErrorInfo", "usageLimitExceeded"),
+    ] {
+        let app = App::new().await;
+        let (path, input) = quota_switch_fixture(&app).await;
+        let run_id = text(&input, "runId");
+        let message = "Account usage is exhausted.";
+        app.service
+            .store
+            .change_run(
+                run_id,
+                cairn_installation::runs::RunChanges {
+                    status: Some(RunStatus::Failed),
+                    error: Some(Some(message.into())),
+                    account_wait_reason: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut payload = json!({"type":"turn.failed","error":{"message":message}});
+        payload["error"][field] = code.into();
+        app.service
+            .store
+            .event(
+                run_id,
+                &EventKind::TurnFailed,
+                message,
+                Some(payload.clone()),
+            )
+            .await
+            .unwrap();
+        // A recovered failure in an earlier attempt is insufficient for switching this one.
+        app.service
+            .store
+            .event(run_id, &EventKind::TurnStarted, "", None)
+            .await
+            .unwrap();
+        let endpoint = format!("{path}/coding-agent");
+        assert_eq!(app.get(&endpoint).await.1["choices"], json!([]));
+        assert_eq!(
+            app.request("POST", &endpoint, input.clone()).await.0,
+            StatusCode::CONFLICT
+        );
+        app.service
+            .store
+            .event(run_id, &EventKind::TurnFailed, message, Some(payload))
+            .await
+            .unwrap();
+        assert_eq!(
+            app.get(&endpoint).await.1["choices"],
+            json!([{"provider":"claude","label":"Claude Code"}])
+        );
+        assert_eq!(
+            app.request("POST", &endpoint, input).await.0,
+            StatusCode::OK
         );
     }
 }

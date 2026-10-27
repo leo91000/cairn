@@ -109,7 +109,11 @@ coverage used, not a claim that every production account/provider was exercised.
   spending from usage limits, keeps any announced reset time and zone without
   inventing a date, and offers account management to owners. An active account
   wait promises automatic recovery even while the follow-up queue is paused;
-  an older failed execution offers manual resume. Android uses native Material
+  an older failed execution offers manual resume. Available alternatives appear as
+  “Continue with Codex / Claude Code / OpenCode” buttons. A switch stops the previous
+  execution and resumes the same pending message with bounded conversation history
+  and preserved files; a pending switch survives a manager restart and can be stopped.
+  Android uses native Material
   controls and French copy; web uses its existing English copy and a native HTML
   disclosure for technical details.
   Coverage: `chat-quota.test.ts`, the Claude spend-limit browser journey,
