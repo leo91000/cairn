@@ -370,6 +370,14 @@ async fn native_claude_plan_turn_blocks_writes_network_and_subagent_effects() {
             .any(|call| call["id"] == tool_id("sub", 0)),
         "the subagent did not run, so its effects were not exercised"
     );
+    // The proxy refuses the unlisted host (403); any other status means it let the
+    // request through, as a command's own `allowed_domains` could.
+    for call in transcript(&requests) {
+        let output = call["content"].to_string();
+        for status in output.split("proxy status ").skip(1) {
+            assert!(status.starts_with("403"), "{}: {output}", call["id"]);
+        }
+    }
 }
 
 /// One Responses API turn streamed as Server-Sent Events.
