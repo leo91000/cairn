@@ -56,6 +56,22 @@ pub(crate) fn validate(
         .map(|saved| saved.settings.plugins.as_slice())
         .unwrap_or_default();
     let settings = &agent.settings;
+    for id in &settings.node_priorities {
+        if settings
+            .access
+            .nodes
+            .as_ref()
+            .is_some_and(|nodes| !nodes.contains(id))
+        {
+            return Err(Error::bad("Only authorized nodes can be prioritized."));
+        }
+        if id != crate::nodes::LOCAL_NODE_ID {
+            let node = required(db.get("nodes", id)?, "Priority node not found")?;
+            if node["revoked"] == true {
+                return Err(Error::bad("A revoked node cannot be prioritized."));
+            }
+        }
+    }
     for project in settings.access.projects.as_ref().into_iter().flatten() {
         required(db.project(project)?, "Project no longer exists")?;
     }
@@ -154,10 +170,10 @@ pub(crate) fn save_profile(
 ) -> Result<cairn_contracts::Agent> {
     let current = db.agent(&agent.id.to_string())?;
     let access = &agent.settings.access;
-    // Keep previously selected nodes only while the execution backend is unchanged.
+    // Automatic placement can retain both kinds of node without converting old runs.
     let previous_nodes = current
         .as_ref()
-        .filter(|saved| saved.settings.access.backend == access.backend)
+        .filter(|saved| access.backend == "auto" || saved.settings.access.backend == access.backend)
         .and_then(|saved| saved.settings.access.nodes.as_ref());
     let held = |node: &String| previous_nodes.is_some_and(|nodes| nodes.contains(node));
     for node in access.nodes.as_ref().into_iter().flatten() {
@@ -173,7 +189,8 @@ pub(crate) fn save_profile(
         if record["revoked"] == true {
             return Err(Error::bad("A revoked node cannot be authorized."));
         }
-        if !held(node)
+        if access.backend != "auto"
+            && !held(node)
             && crate::native::policy::node_native(&record) != (access.backend == "native")
         {
             return Err(Error::bad(
@@ -226,7 +243,7 @@ pub(crate) fn covers(
         "workspace-write" => 1,
         _ => 0,
     };
-    current.backend == granted.backend
+    (current.backend == "auto" || current.backend == granted.backend)
         && scopes
         && tools
         && (current.installation || !granted.installation)
@@ -243,7 +260,7 @@ pub(crate) fn selection_covers(current: Option<&[String]>, granted: Option<&[Str
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE agent_permissions(
  agent_id TEXT PRIMARY KEY NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
- backend TEXT NOT NULL CHECK(backend IN ('firecracker','native')),
+ backend TEXT NOT NULL CHECK(backend IN ('auto','firecracker','native')),
  sandbox TEXT NOT NULL CHECK(sandbox IN ('yolo','workspace-write','read-only')),
  installation INTEGER NOT NULL CHECK(installation IN (0,1)),
  delegation INTEGER NOT NULL CHECK(delegation IN (0,1)),
@@ -272,6 +289,12 @@ CREATE TABLE agent_nodes(
  PRIMARY KEY(agent_id,node_id), UNIQUE(agent_id,position)
 ) WITHOUT ROWID;
 CREATE INDEX agent_nodes_resource ON agent_nodes(node_id,agent_id);
+CREATE TABLE agent_node_priorities(
+ agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+ node_id TEXT NOT NULL,
+ position INTEGER NOT NULL CHECK(position>=0),
+ PRIMARY KEY(agent_id,node_id), UNIQUE(agent_id,position)
+) WITHOUT ROWID;
 CREATE TABLE agent_mcps(
  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
  mcp_id TEXT NOT NULL REFERENCES mcp_servers(id) ON DELETE RESTRICT CHECK(length(mcp_id)=36),
@@ -311,6 +334,7 @@ CREATE INDEX agent_exclusive_nodes_resource ON agent_exclusive_nodes(node_id,age
 pub(crate) struct Permissions {
     pub access: cairn_contracts::AccessPolicy,
     pub exclusive_nodes: Vec<String>,
+    pub node_priorities: Vec<String>,
     pub plugins: Vec<String>,
 }
 
@@ -346,6 +370,7 @@ fn permission_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, Permissi
                 mcp_tools: std::collections::BTreeMap::new(),
             },
             exclusive_nodes: Vec::new(),
+            node_priorities: Vec::new(),
             plugins: Vec::new(),
         },
     ))
@@ -415,6 +440,13 @@ impl Db<'_> {
             .query_map([id], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         permissions.exclusive_nodes = exclusive;
+        permissions.node_priorities = self
+            .0
+            .prepare_cached(
+                "SELECT node_id FROM agent_node_priorities WHERE agent_id=? ORDER BY position",
+            )?
+            .query_map([id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
         permissions.plugins = plugins;
         Ok(permissions)
     }
@@ -433,7 +465,7 @@ impl Db<'_> {
             ))?
             .query_map([], permission_row)?
             .collect::<rusqlite::Result<std::collections::BTreeMap<_, _>>>()?;
-        let selections: [(&str, Selection); 6] = [
+        let selections: [(&str, Selection); 7] = [
             (
                 "SELECT agent_id,project_id FROM agent_projects ORDER BY agent_id,position",
                 |p| p.access.projects.as_mut(),
@@ -457,6 +489,10 @@ impl Db<'_> {
             (
                 "SELECT agent_id,node_id FROM agent_exclusive_nodes ORDER BY agent_id,position",
                 |p| Some(&mut p.exclusive_nodes),
+            ),
+            (
+                "SELECT agent_id,node_id FROM agent_node_priorities ORDER BY agent_id,position",
+                |p| Some(&mut p.node_priorities),
             ),
         ];
         for (sql, selection) in selections {
@@ -547,6 +583,11 @@ impl Db<'_> {
                 "DELETE FROM agent_exclusive_nodes WHERE agent_id=?",
                 "INSERT INTO agent_exclusive_nodes VALUES(?,?,?)",
                 &agent.settings.exclusive_nodes,
+            ),
+            (
+                "DELETE FROM agent_node_priorities WHERE agent_id=?",
+                "INSERT INTO agent_node_priorities VALUES(?,?,?)",
+                &agent.settings.node_priorities,
             ),
         ] {
             self.0.prepare_cached(delete)?.execute([&id])?;

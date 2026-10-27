@@ -6,6 +6,14 @@ It does not assert pixel equality between a browser and Material components.
 
 ## Feature map
 
+Automatic agent placement: both apps offer VM only, native only and automatic
+placement, with an ordered node preference list per agent (move up/down, remove,
+add an authorized node). Preferences do not grant access; unavailable preferred
+nodes fall back to other authorized capacity. Existing conversations retain their
+environment until explicit migration. Web uses English buttons; Android uses
+French Material controls. Public MCP and `cairn_installation` expose the same
+generated `access.backend` and `nodePriorities` through agent create/replace.
+
 Native disk capacity: web and Android show the same `list_nodes` disk-accounting
 breakdown (local usage, unused grants, host free space and reserves, reclaimable
 acknowledged backing, and last-reported unpublished journal bytes). Android uses

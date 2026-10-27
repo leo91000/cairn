@@ -806,9 +806,20 @@ pub(crate) fn select_agent(
     let inherited_reasoning = text(previous, "reasoning").to_owned();
     let inherited_speed = text(previous, "speed").to_owned();
     let continues = provider == Provider::of_agent(previous)?.as_str();
+    let execution_backend = run.map(|run| {
+        run["snapshot"]["agent"]["access"]["backend"]
+            .as_str()
+            .unwrap_or("firecracker")
+            .to_owned()
+    });
 
     let switched = provider != Provider::of_run(snapshot)?.as_str();
     let agent = &mut snapshot["snapshot"]["agent"];
+    if agent["access"]["backend"] == "auto"
+        && let Some(backend) = execution_backend
+    {
+        agent["access"]["backend"] = backend.into();
+    }
     if implicit_provider || switched {
         // An implicit follow-up keeps the conversation's qualified selection,
         // even when its profile changed or now has different defaults.
@@ -1200,8 +1211,7 @@ impl Service {
         let origin = crate::native::policy::origin();
         if origin.known() {
             let run = self.store.run(run_id).await?;
-            crate::native::policy::refresh_agent(self, text(&run["snapshot"]["agent"], "id"))
-                .await?;
+            crate::native::policy::refresh_for(self, &run["snapshot"]["agent"]).await?;
         }
 
         let active = self.worker.active.lock().await;
@@ -1485,6 +1495,18 @@ use crate::run_fixture::DbRunFixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_profiles_keep_the_conversations_environment_on_follow_up_turns() {
+        for backend in ["firecracker", "native"] {
+            for message in [json!({}), json!({ "provider": "claude" })] {
+                let previous = json!({ "snapshot": { "agent": { "provider": "codex", "access": { "backend": backend } } } });
+                let mut next = json!({ "snapshot": { "agent": { "provider": "codex", "access": { "backend": "auto" } } } });
+                select_agent(&mut next, Some(&previous), &message).unwrap();
+                assert_eq!(next["snapshot"]["agent"]["access"]["backend"], backend);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn a_merge_during_preparation_keeps_queued_work_unpaused() {

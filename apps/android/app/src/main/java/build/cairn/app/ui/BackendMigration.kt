@@ -17,6 +17,8 @@ import kotlinx.serialization.json.put
 @Serializable
 private data class BackendMigrationState(
     val required: Boolean = false,
+    val optional: Boolean = false,
+    val fromBackend: String = "firecracker",
     val toBackend: String = "firecracker",
     val nodes: List<MigrationNode> = emptyList(),
     val pending: Boolean = false,
@@ -25,7 +27,7 @@ private data class BackendMigrationState(
 )
 
 @Composable
-fun BackendMigration(vm: CairnViewModel, runId: String) {
+fun BackendMigration(vm: CairnViewModel, runId: String, onCompleted: () -> Unit = {}) {
     var state by remember(runId) { mutableStateOf<BackendMigrationState?>(null) }
     var destination by remember(runId) { mutableStateOf("") }
     var confirm by remember(runId) { mutableStateOf(false) }
@@ -36,7 +38,15 @@ fun BackendMigration(vm: CairnViewModel, runId: String) {
         try {
             val value: BackendMigrationState =
                 vm.api.get("/nodes/placement/$runId/backend-migration")
-            if (state?.pending == true && !value.pending && !value.required) completed = true
+            if (
+                state?.pending == true &&
+                    !value.pending &&
+                    value.fromBackend == state?.toBackend &&
+                    value.fromBackend != state?.fromBackend
+            ) {
+                completed = true
+                onCompleted()
+            }
             state = value
             if (value.nodes.none { it.id == destination })
                 destination = value.nodes.firstOrNull()?.id.orEmpty()
@@ -56,7 +66,7 @@ fun BackendMigration(vm: CairnViewModel, runId: String) {
         }
     }
     val value = state ?: return
-    if (!value.required && !value.pending && !completed) return
+    if (!value.required && !value.optional && !value.pending && !completed) return
     val target = if (value.toBackend == "native") "l’exécution native" else "une VM Firecracker"
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         HorizontalDivider()
@@ -72,7 +82,10 @@ fun BackendMigration(vm: CairnViewModel, runId: String) {
                 )
             else -> {
                 Text(
-                    "L’agent utilise maintenant $target. Migrez cette conversation pour garder son historique et ses fichiers."
+                    if (value.optional)
+                        "Vous pouvez choisir explicitement $target pour cette conversation. Son environnement actuel est conservé jusqu’à votre confirmation."
+                    else
+                        "L’agent utilise maintenant $target. Migrez cette conversation pour garder son historique et ses fichiers."
                 )
                 if (value.reason != null) Text(value.reason)
                 else if (value.nodes.isEmpty())
@@ -96,6 +109,10 @@ fun BackendMigration(vm: CairnViewModel, runId: String) {
                 }
             }
         }
+        if (completed && value.optional)
+            OutlinedButton(onClick = { completed = false }) {
+                Text("Changer encore l’environnement")
+            }
         (error ?: value.error)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     }
     if (confirm)

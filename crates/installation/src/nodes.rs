@@ -431,8 +431,14 @@ impl Usage<'_> {
             .filter(|agent| {
                 agent_allows(agent, id)
                     && native_mode::reviewed(node, agent)
-                    && crate::native::policy::native(agent)
-                        == crate::native::policy::node_native(node)
+                    && crate::native::policy::supports(
+                        agent,
+                        if crate::native::policy::node_native(node) {
+                            "native"
+                        } else {
+                            "firecracker"
+                        },
+                    )
             })
             .map(|agent| AgentGrant {
                 id: &agent["id"],
@@ -937,8 +943,14 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
                     continue;
                 }
                 if granted
-                    && crate::native::policy::native(&agent)
-                        != crate::native::policy::node_native(&record)
+                    && !crate::native::policy::supports(
+                        &agent,
+                        if crate::native::policy::node_native(&record) {
+                            "native"
+                        } else {
+                            "firecracker"
+                        },
+                    )
                 {
                     return Err(Error::bad(
                         "Choose agents configured for this node's execution backend.",
@@ -998,6 +1010,7 @@ fn set_node_grant(
     } else {
         nodes.retain(|id| id != node);
         agent.settings.exclusive_nodes.retain(|id| id != node);
+        agent.settings.node_priorities.retain(|id| id != node);
     }
     agent.revision = crate::config::id();
     db.save_agent(&agent)?;
@@ -1050,6 +1063,9 @@ pub(crate) async fn revoke(
                 let before = agent.settings.exclusive_nodes.len();
                 agent.settings.exclusive_nodes.retain(|id| id != &node);
                 changed |= before != agent.settings.exclusive_nodes.len();
+                let before = agent.settings.node_priorities.len();
+                agent.settings.node_priorities.retain(|id| id != &node);
+                changed |= before != agent.settings.node_priorities.len();
                 if changed {
                     agent.revision = crate::config::id();
                     db.save_agent(&agent)?;

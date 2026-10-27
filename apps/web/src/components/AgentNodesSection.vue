@@ -16,6 +16,7 @@ import {
   runsOn,
   supportsExclusive,
   unknownNode,
+  withAllNodes,
   withBackend,
   withRun,
 } from '../agent-access'
@@ -31,11 +32,12 @@ const props = defineProps<{ nodes: ExecutionNode[], agentId?: string }>()
 const access = defineModel<AgentAccess>('access', { required: true })
 // Nodes the agent may reserve exclusively, a live grant kept beside `access`.
 const exclusiveNodes = defineModel<string[]>('exclusiveNodes', { required: true })
+const nodePriorities = defineModel<string[]>('nodePriorities', { default: () => [] })
 const query = ref('')
 const selectedOnly = ref(false)
 const unavailableOnly = ref(false)
 const backend = computed(() => backendOf(access.value))
-// Only nodes of the agent's backend: the server never grants an agent a node of another backend.
+// Automatic placement offers both execution kinds within the agent's grants.
 const available = computed(() => nodesFor(props.nodes, backend.value))
 const searchable = computed(() => available.value.length >= 8)
 const visible = computed(() => {
@@ -64,10 +66,12 @@ const backendChoice = computed({
   set: (value: string) => {
     if (value === backend.value)
       return
-    const next = withBackend()
+    const next = value === 'auto' ? { nodes: access.value.nodes, exclusiveNodes: exclusiveNodes.value } : withBackend()
     access.value.backend = value as Backend
     access.value.nodes = next.nodes
     exclusiveNodes.value = next.exclusiveNodes
+    if (value !== 'auto')
+      nodePriorities.value = []
   },
 })
 
@@ -75,7 +79,9 @@ const allNodes = computed({
   get: () => access.value.nodes === null,
   // "Choose" starts from the nodes it can use today, so turning "All" off only stops future nodes.
   set: (value: boolean) => {
-    access.value.nodes = value ? null : available.value.filter(node => node.nativeModeRequest?.mode !== 'administrator' || node.nativeReviewedAgents?.includes(props.agentId ?? '')).map(node => node.id)
+    const next = withAllNodes(access.value, nodePriorities.value, props.nodes, value, props.agentId)
+    access.value.nodes = next.nodes
+    nodePriorities.value = next.nodePriorities
   },
 })
 
@@ -96,6 +102,26 @@ function setRun(node: string, on: boolean) {
   const next = withRun(access.value, exclusiveNodes.value, node, on)
   access.value.nodes = next.nodes
   exclusiveNodes.value = next.exclusiveNodes
+  if (!on)
+    nodePriorities.value = nodePriorities.value.filter(id => id !== node)
+}
+
+const priorityNodes = computed(() => nodePriorities.value.map(id => ({ id, node: props.nodes.find(node => node.id === id) })))
+
+function movePriority(index: number, direction: number) {
+  const order = [...nodePriorities.value]
+  const other = index + direction
+  if (other < 0 || other >= order.length) {
+    return
+  }
+
+  [order[index], order[other]] = [order[other]!, order[index]!]
+  nodePriorities.value = order
+}
+
+function prioritize(node: string) {
+  if (!nodePriorities.value.includes(node))
+    nodePriorities.value = [...nodePriorities.value, node]
 }
 
 function setExclusive(node: string, on: boolean) {
@@ -118,9 +144,40 @@ function exclusiveBlocked(node: ExecutionNode) {
   <div class="grid min-w-0 gap-5">
     <div class="grid gap-2">
       <VirtualSelect v-model="backendChoice" label="Agent execution backend" :options="[...backendOptions]" />
-      <p v-if="backend === 'native'" class="rounded-xl bg-power-surface px-5 py-3 text-xs text-power" role="note">
+      <p v-if="backend !== 'firecracker'" class="rounded-xl bg-power-surface px-5 py-3 text-xs text-power" role="note">
         {{ nativeHelp }}
       </p>
+    </div>
+
+    <div class="grid gap-2">
+      <p class="text-sm font-semibold">
+        This agent’s node priorities
+      </p>
+      <p class="text-xs text-muted">
+        First available authorized node wins. Other authorized nodes remain a fallback. Existing conversations keep their environment.
+      </p>
+      <div v-for="(item, index) in priorityNodes" :key="item.id" class="flex items-center gap-2">
+        <span class="min-w-0 flex-1 text-sm">{{ index + 1 }}. {{ nodeName(item.node, item.id) }}</span>
+        <UiButton :disabled="index === 0" :aria-label="`Move ${nodeName(item.node, item.id)} up`" @click="movePriority(index, -1)">
+          Up
+        </UiButton>
+        <UiButton :disabled="index === priorityNodes.length - 1" :aria-label="`Move ${nodeName(item.node, item.id)} down`" @click="movePriority(index, 1)">
+          Down
+        </UiButton>
+        <UiButton :aria-label="`Remove priority for ${nodeName(item.node, item.id)}`" @click="nodePriorities = nodePriorities.filter(id => id !== item.id)">
+          Remove
+        </UiButton>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <UiButton
+          v-for="node in available.filter(node => !nodePriorities.includes(node.id))"
+          :key="node.id"
+          :disabled="!runsOn(access, node.id)"
+          @click="prioritize(node.id)"
+        >
+          Prioritize {{ nodeName(node, node.id) }}
+        </UiButton>
+      </div>
     </div>
 
     <div class="flex items-center justify-between gap-4 rounded-xl border border-line bg-surface px-5 py-4 phone:px-4">
@@ -129,7 +186,7 @@ function exclusiveBlocked(node: ExecutionNode) {
           All nodes, including future
         </p>
         <p class="text-xs text-muted">
-          {{ backend === 'native' ? 'Native machines must also enable execution and trust everyone directing the conversation. Administrator nodes require explicit owner review on that node; all-node grants never silently grant host root.' : 'New VM machines become usable by this agent as soon as they are enrolled.' }}
+          {{ backend !== 'firecracker' ? 'Native machines must also enable execution and trust everyone directing the conversation. Administrator nodes require explicit owner review on that node; all-node grants never silently grant host root.' : 'New VM machines become usable by this agent as soon as they are enrolled.' }}
         </p>
       </div>
       <UiSwitch v-model="allNodes" label="All nodes, including future" />

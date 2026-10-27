@@ -83,15 +83,26 @@ pub(crate) fn candidate(run: &Value) -> Value {
     candidate
 }
 
-fn chat_run(db: &Db<'_>, chat_id: &str) -> Result<(Value, Value, Value)> {
+fn chat_run(db: &Db<'_>, chat_id: &str) -> Result<(Value, Value, Value, bool)> {
     let chat = required(db.get("chats", chat_id)?, "Chat not found")?;
     require_active(&chat)?;
     let run = required(db.run(text(&chat, "runId"))?, "Run not found")?;
-    let agent = required(
+    let mut agent = required(
         db.agent_snapshot(text(&chat, "agentId"))?,
         "Agent not found",
     )?;
-    Ok((chat, run, agent))
+    // Automatic profiles retain explicit conversion: the preview offers the
+    // other environment, never an implicit move of existing files.
+    let automatic = access(&agent)["backend"] == "auto";
+    if automatic {
+        agent["access"]["backend"] = if policy::native(&run["snapshot"]["agent"]) {
+            "firecracker"
+        } else {
+            "native"
+        }
+        .into();
+    }
+    Ok((chat, run, agent, automatic))
 }
 
 fn prospective(db: &Db<'_>, run: &Value, agent: &Value, origin: &Origin) -> Result<Value> {
@@ -229,7 +240,7 @@ pub(crate) async fn chat_id(s: &Service, run: &str) -> Result<String> {
 async fn refresh_authority(s: &Service, chat: &Value) -> Result<()> {
     let run = s.store.run(text(chat, "runId")).await?;
     let agent = s.agent_snapshot(text(chat, "agentId")).await?;
-    if policy::native(&run["snapshot"]["agent"]) || policy::native(&agent) {
+    if policy::native(&run["snapshot"]["agent"]) || policy::supports(&agent, "native") {
         policy::refresh(s).await?;
     }
     Ok(())
@@ -248,7 +259,7 @@ pub(crate) async fn preview(
     let (chat_id, origin) = (chat_id.to_owned(), origin());
     s.store.read(move |db| {
         authorize(db)?;
-        let (chat, run, agent) = chat_run(db, &chat_id)?;
+        let (chat, run, agent, automatic) = chat_run(db, &chat_id)?;
         let from = backend(&run["snapshot"]["agent"]);
         let to = backend(&agent);
         let mut nodes = Vec::new();
@@ -267,7 +278,8 @@ pub(crate) async fn preview(
             "chatId": chat["id"],
             "fromBackend": from,
             "toBackend": to,
-            "required": from != to,
+            "required": !automatic && from != to,
+            "optional": automatic && from != to,
             "nodes": nodes,
             "reason": reason,
             "pending": run["backendMigration"]["process"] == PROCESS.as_str(),
@@ -296,7 +308,7 @@ impl Service {
         let request_authorization = authorize.clone();
         self.store.transaction(move |db| {
             request_authorization(db)?;
-            let (mut chat, run, agent) = chat_run(db, text(&args, "chatId"))?;
+            let (mut chat, run, agent, _) = chat_run(db, text(&args, "chatId"))?;
             if backend(&agent) != text(&args, "backend") || backend(&agent) == backend(&run["snapshot"]["agent"]) {
                 return Err(Error::conflict("Choose the backend currently configured on this conversation's agent."));
             }
@@ -545,7 +557,7 @@ impl Service {
         let (chat_id, operation) = (chat_id.to_owned(), operation.to_owned());
         self.store.transaction(move |db| {
             authorize(db)?;
-            let (mut chat, current, agent) = chat_run(db, &chat_id)?;
+            let (mut chat, current, agent, _) = chat_run(db, &chat_id)?;
             let migration = &current["backendMigration"];
             if migration["id"] != operation || migration["agentRevision"] != agent["revision"]
                 || backend(&agent) != text(&args, "backend") {

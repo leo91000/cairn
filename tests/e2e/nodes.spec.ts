@@ -648,52 +648,61 @@ test('switching a machine to native enrolls it again and retires the previous no
   expect((await workspace.api(`/api/nodes/placement/${detail.run.id}`)).pinnedNodeId).toBeNull()
 })
 
-test('existing conversation explicitly confirms backend migration and follows its progress', async ({ page, workspace }) => {
-  test.setTimeout(60000)
-  await useRelayForHttpMocks(page)
-  // Earlier enrollment journeys may change Main's backend or allowed nodes.
-  const agent = workspace.service.agent({ name: 'Migration source', provider: 'codex' })
-  const chat = await workspace.api('/api/chats', 'POST', { agentId: agent.id })
-  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Keep this conversation' })
-  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
-  await page.route('**/nodes/placement/*', route => route.fulfill({ json: { nodes: [{ id: 'native-fixture', name: 'Desktop GPU' }], pinnedNodeId: null, preferredNodeId: null } }))
-  let phase = 'ready'
-  let requestBody: unknown
-  await page.route('**/nodes/placement/*/backend-migration', async (route) => {
-    if (route.request().method() === 'POST') {
-      requestBody = route.request().postDataJSON()
-      phase = 'pending'
-      await route.fulfill({ json: { status: 'migrating' } })
-      return
+for (const automatic of [false, true]) {
+  test(`existing conversation explicitly confirms backend migration and follows its progress (${automatic ? 'automatic' : 'fixed'})`, async ({ page, workspace }) => {
+    test.setTimeout(60000)
+    await useRelayForHttpMocks(page)
+    // Earlier enrollment journeys may change Main's backend or allowed nodes.
+    const agent = workspace.service.agent({ name: 'Migration source', provider: 'codex' })
+    const chat = await workspace.api('/api/chats', 'POST', { agentId: agent.id })
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Keep this conversation' })
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
+    await page.route('**/nodes/placement/*', route => route.fulfill({ json: { nodes: [{ id: 'native-fixture', name: 'Desktop GPU' }], pinnedNodeId: null, preferredNodeId: null } }))
+    let phase = 'ready'
+    let requestBody: unknown
+    await page.route('**/nodes/placement/*/backend-migration', async (route) => {
+      if (route.request().method() === 'POST') {
+        requestBody = route.request().postDataJSON()
+        phase = 'pending'
+        await route.fulfill({ json: { status: 'migrating' } })
+        return
+      }
+
+      await route.fulfill({
+        json: {
+          chatId: chat.id,
+          required: !automatic && phase !== 'complete',
+          optional: automatic,
+          fromBackend: phase === 'complete' ? 'native' : 'firecracker',
+          toBackend: automatic && phase === 'complete' ? 'firecracker' : 'native',
+          pending: phase === 'pending',
+          nodes: [{ id: 'native-fixture', name: 'Desktop GPU' }],
+        },
+      })
+    })
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    await page.getByRole('button', { name: 'Execution node', exact: true }).click()
+    await page.getByRole('button', { name: 'Migrate this conversation…', exact: true }).click()
+    const confirm = page.getByRole('dialog', { name: 'Migrate this conversation?', exact: true })
+    await expect(confirm).toContainText('fresh engine session')
+    await expect(confirm).toContainText('original environment is retained')
+    expect(requestBody).toBeUndefined()
+    await page.screenshot({ path: 'test-results/backend-migration-confirm.png' })
+    await confirm.getByRole('button', { name: 'Stop and migrate', exact: true }).click()
+    await expect(page.getByRole('status').filter({ hasText: 'Migrating to native execution' })).toBeVisible()
+    expect(requestBody).toEqual({ nodeId: 'native-fixture', backend: 'native', confirm: true })
+    phase = 'complete'
+    await expect(page.getByRole('status').filter({ hasText: 'Migration complete' })).toBeVisible()
+    if (automatic) {
+      await expect(page.getByRole('button', { name: 'Migrate this conversation…', exact: true })).toHaveCount(0)
+      await page.getByRole('button', { name: 'Change environment again', exact: true }).click()
+      await expect(page.getByText('You can explicitly change this conversation to a Firecracker VM.', { exact: false })).toBeVisible()
     }
 
-    await route.fulfill({
-      json: {
-        chatId: chat.id,
-        required: phase !== 'complete',
-        fromBackend: 'firecracker',
-        toBackend: 'native',
-        pending: phase === 'pending',
-        nodes: [{ id: 'native-fixture', name: 'Desktop GPU' }],
-      },
-    })
+    await expect(page).toHaveURL(/\/chats\//)
   })
-  await page.goto(workspacePath(`/chats/${chat.id}`))
-  await authenticateWorkspace(page)
-  await page.getByRole('button', { name: 'Execution node', exact: true }).click()
-  await page.getByRole('button', { name: 'Migrate this conversation…', exact: true }).click()
-  const confirm = page.getByRole('dialog', { name: 'Migrate this conversation?', exact: true })
-  await expect(confirm).toContainText('fresh engine session')
-  await expect(confirm).toContainText('original environment is retained')
-  expect(requestBody).toBeUndefined()
-  await page.screenshot({ path: 'test-results/backend-migration-confirm.png' })
-  await confirm.getByRole('button', { name: 'Stop and migrate', exact: true }).click()
-  await expect(page.getByRole('status').filter({ hasText: 'Migrating to native execution' })).toBeVisible()
-  expect(requestBody).toEqual({ nodeId: 'native-fixture', backend: 'native', confirm: true })
-  phase = 'complete'
-  await expect(page.getByRole('status').filter({ hasText: 'Migration complete' })).toBeVisible()
-  await expect(page).toHaveURL(/\/chats\//)
-})
+}
 
 test('previews node administrator powers and keeps failed transitions visibly blocked', async ({ page, workspace: _workspace }) => {
   await useRelayForHttpMocks(page)

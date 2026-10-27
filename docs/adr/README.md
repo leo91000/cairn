@@ -81,6 +81,7 @@ for current behavior.
 | 0070 | [Automatic bounded native disk growth](0070-automatic-native-disk-growth.md) |
 | 0071 | [Managed plugin program caches](0071-managed-plugin-program-caches.md) |
 | 0072 | [Fast journal recovery and receipt reconciliation](0072-fast-journal-recovery-and-receipt-reconciliation.md) |
+| 0073 | [Automatic placement with per-agent node priorities](0073-automatic-agent-placement.md) |
 
 ## Renumbered collisions
 

@@ -33,7 +33,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-const DATABASE_VERSION: i64 = 10;
+const DATABASE_VERSION: i64 = 11;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -925,6 +925,53 @@ mod schema_tests {
     use crate::agent_fixture::StoreAgentFixture;
 
     #[tokio::test]
+    async fn offline_v11_migration_preserves_profiles_and_refuses_other_layouts() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let id = "00000000-0000-4000-8000-000000000099";
+        let before = store
+            .put_agent_fixture(json!({ "id": id, "name": "Saved VM" }))
+            .await
+            .unwrap();
+        drop(store);
+        let connection = Connection::open(root.path().join("manager.db")).unwrap();
+        let old_permissions = crate::agent_grants::SCHEMA
+            .split("CREATE TABLE agent_projects")
+            .next()
+            .unwrap()
+            .replace("'auto',", "");
+        connection.execute_batch("DROP TABLE agent_node_priorities; ALTER TABLE agent_permissions RENAME TO old_permissions;").unwrap();
+        connection.execute_batch(&old_permissions).unwrap();
+        connection.execute_batch("INSERT INTO agent_permissions SELECT * FROM old_permissions; DROP TABLE old_permissions; PRAGMA user_version=10;").unwrap();
+        let migration = include_str!("../../../docs/migrations/0011-mixed-node-agents.sql");
+        connection.execute_batch(migration).unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        assert!(
+            !connection
+                .prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        );
+        let store = Store::open(root.path()).unwrap();
+        let after = store.agent_snapshot(id).await.unwrap().unwrap();
+        assert_eq!(before, after);
+        assert!(connection.execute_batch(migration).is_err());
+        connection.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            11
+        );
+    }
+
+    #[tokio::test]
     async fn initial_schema_reopens_with_events_and_records_intact() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
@@ -955,7 +1002,7 @@ mod schema_tests {
 
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 12, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 99] {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();

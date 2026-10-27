@@ -1077,21 +1077,42 @@ async fn node_credentials_cannot_administer_nodes_and_owner_sessions_cannot_impe
 
 #[tokio::test]
 async fn revocation_removes_node_grants_without_blocking_later_agent_edits() {
+    for wildcard in [false, true] {
+        revocation_clears_agent_preferences(wildcard).await;
+    }
+}
+
+async fn revocation_clears_agent_preferences(wildcard: bool) {
     let owner = Owner::new().await;
     let identity = owner
         .enroll("Revocation", &capabilities(true, 2, 4096, 32768))
         .await;
     let node = identity["nodeId"].as_str().unwrap();
     let main = format!("/api/agents/{MAIN_AGENT_ID}");
-    let grant = json!({ "name": "Main", "access": { "nodes": [LOCAL_NODE_ID, node] } });
+    let selection = if wildcard {
+        Value::Null
+    } else {
+        json!([LOCAL_NODE_ID, node])
+    };
+    let grant = json!({ "name": "Main", "access": { "nodes": selection }, "nodePriorities": [node, LOCAL_NODE_ID] });
     assert_eq!(owner.send("PUT", &main, grant).await.0, StatusCode::OK);
+    let before = owner.service.agent_snapshot(MAIN_AGENT_ID).await.unwrap()["revision"].clone();
     let (status, _) = owner
         .send("POST", &format!("/api/nodes/{node}/revoke"), json!({}))
         .await;
     assert_eq!(status, StatusCode::OK);
     let (_, agents) = owner.get("/api/agents").await;
     let mut main_agent = find_by_id(&agents, MAIN_AGENT_ID);
-    assert_eq!(main_agent["access"]["nodes"], json!([LOCAL_NODE_ID]));
+    assert_eq!(
+        main_agent["access"]["nodes"],
+        if wildcard {
+            Value::Null
+        } else {
+            json!([LOCAL_NODE_ID])
+        }
+    );
+    assert_eq!(main_agent["nodePriorities"], json!([LOCAL_NODE_ID]));
+    assert_ne!(main_agent["revision"], before);
     main_agent["name"] = "Renamed after revocation".into();
     assert_eq!(owner.send("PUT", &main, main_agent).await.0, StatusCode::OK);
 }

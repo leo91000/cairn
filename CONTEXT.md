@@ -4,6 +4,12 @@ Cairn permet de conduire des conversations avec des agents et de retrouver leur 
 
 ## Language
 
+**Placement automatique** :
+Le choix d’un node autorisé et disponible pour une nouvelle conversation, qu’il exécute des VM ou des processus natifs. Le type d’environnement choisi est conservé pendant la conversation, sauf migration explicite.
+
+**Priorité de nodes d’un agent** :
+L’ordre de préférence propre à un agent pour placer ses nouvelles conversations. Un node prioritaire indisponible laisse la place au suivant, puis aux autres nodes autorisés. Une préférence ne donne aucun droit d’accès.
+
 **Beacon** :
 Le service hébergé par Cairn qui fournit l’interface web et mobile, les comptes Cairn et l’accès à toutes les installations d’un compte. Il ne conserve pas le travail des agents.
 Il peut conserver les diagnostics techniques de l’application, sans contenu des conversations, pour améliorer ses performances.

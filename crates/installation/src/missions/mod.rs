@@ -161,8 +161,8 @@ impl Missions {
         }
         let agent = s.agent_snapshot(&settings.agent_id.to_string()).await?;
         let origin = crate::native::policy::origin();
-        if !reduces && crate::native::policy::native(&agent) {
-            crate::native::policy::refresh(s).await?;
+        if !reduces {
+            crate::native::policy::refresh_for(s, &agent).await?;
         }
         let mut mission = Mission {
             id: mission_id,

@@ -603,6 +603,44 @@ abstract class AgentPageCases {
     }
 
     @Test
+    fun nodePrioritiesAreOrderedPerAgentAndNeverGrantExecutionAccess() {
+        journey("d3153f9f-724b-59c3-9614-ab78f231c4d3") { fixture ->
+            open(AgentSection.Nodes)
+            waitForText("Prioriser gpu-box")
+            compose.onNodeWithText("Prioriser gpu-box").performScrollTo().assertIsNotEnabled()
+            compose
+                .onNodeWithContentDescription("Exécuter ses conversations sur gpu-box")
+                .performScrollTo()
+                .performClick()
+            compose.onNodeWithText("Prioriser gpu-box").performScrollTo().performClick()
+            compose.onNodeWithText("Prioriser Runner actuel").performScrollTo().performClick()
+            compose
+                .onNodeWithContentDescription("Descendre gpu-box")
+                .performScrollTo()
+                .performClick()
+            compose.onNodeWithText("1. Runner actuel").assertExists()
+            compose.onNodeWithText("2. gpu-box").assertExists()
+            back()
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(15000) {
+                fixture.saved.isNotEmpty() ||
+                    compose.onAllNodesWithTag("agent-review").fetchSemanticsNodes().isNotEmpty()
+            }
+            if (fixture.saved.isEmpty()) confirmReview()
+            compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
+            val settings = fixture.saved.single().second["settings"]!!.jsonObject
+            assertEquals(
+                JsonArray(listOf(JsonPrimitive(LOCAL_NODE_ID), JsonPrimitive("gpu"))),
+                settings["nodePriorities"],
+            )
+            assertEquals(
+                VM_BACKEND,
+                settings["access"]!!.jsonObject["backend"]!!.jsonPrimitive.content,
+            )
+        }
+    }
+
+    @Test
     fun onePasswordAccountIsGrantedFromTheAgentWithReadableSkills() {
         journey("d3153f9f-724b-59c3-9614-ab78f231c4d3") { fixture ->
             open(AgentSection.Skills)

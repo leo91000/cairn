@@ -1035,10 +1035,18 @@ fn native_authority(
     agent: &Value,
     origin: &crate::native::policy::Origin,
 ) -> Result<Option<NativeAuthority>> {
-    if !crate::native::policy::native(agent) {
+    if !crate::native::policy::supports(agent, "native") {
         return Ok(None);
     }
     let mut grant = crate::native::policy::authorize_origin(db, agent, origin)?;
+    if !crate::native::policy::native(agent)
+        && (grant["nativeProvenanceUnknown"] != false
+            || grant["nativeAuthorityNodes"]
+                .as_array()
+                .is_none_or(Vec::is_empty))
+    {
+        return Ok(None);
+    }
     let authority = db.kv("native-authority")?.unwrap_or_default();
     let owner_access = connection
         .owner_access_id
@@ -1049,8 +1057,15 @@ fn native_authority(
         .into_iter()
         .flatten()
         .find(|(_, account)| account["accessId"].as_str() == Some(owner_access))
-        .map(|(id, _)| id.clone())
-        .ok_or_else(|| Error::forbidden("The bot's owner has no current native authority."))?;
+        .map(|(id, _)| id.clone());
+    let Some(owner) = owner else {
+        if !crate::native::policy::native(agent) {
+            return Ok(None);
+        }
+        return Err(Error::forbidden(
+            "The bot's owner has no current native authority.",
+        ));
+    };
     grant["pluginOwnerAccountId"] = owner.into();
     Ok(Some(serde_json::from_value(grant)?))
 }

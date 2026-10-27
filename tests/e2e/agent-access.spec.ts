@@ -16,6 +16,29 @@ import {
 
 const MAIN_AGENT_ID = '00000000-0000-4000-8000-000000000001'
 
+test('automatic placement saves ordered node priorities on the agent', async ({ page, workspace }) => {
+  await signIn(page)
+  const first = await enroll(page, workspace, 'Priority machine one', false)
+  const second = await enroll(page, workspace, 'Priority machine two', false)
+  await page.goto(workspacePath('/agents/new'))
+  await page.getByLabel('Name', { exact: true }).fill('Automatic placement')
+  const id = await createAgent(page)
+  await openAgentSection(page, 'Nodes')
+  await expect(page.getByRole('button', { name: 'Prioritize Priority machine one', exact: true })).toBeDisabled()
+  await page.getByRole('switch', { name: 'Can run its conversations on Priority machine one', exact: true }).check()
+  await page.getByRole('switch', { name: 'Can run its conversations on Priority machine two', exact: true }).check()
+  await page.getByRole('button', { name: 'Prioritize Priority machine one', exact: true }).click()
+  await page.getByRole('button', { name: 'Prioritize Priority machine two', exact: true }).click()
+  await page.getByRole('button', { name: 'Move Priority machine two up', exact: true }).click()
+  await saveAgent(page)
+  const saved = await workspace.api(`/api/agents/${id}`)
+  expect(saved.access.backend).toBe('auto')
+  expect(saved.nodePriorities).toEqual([second, first])
+  await page.reload()
+  await openAgentSection(page, 'Nodes')
+  await expect(page.getByText('1. Priority machine two', { exact: true })).toBeVisible()
+})
+
 async function signIn(page: Page) {
   await page.goto(workspacePath('/'))
   await authenticateWorkspace(page)

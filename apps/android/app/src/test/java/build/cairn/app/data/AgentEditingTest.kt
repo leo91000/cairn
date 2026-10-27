@@ -730,6 +730,29 @@ class AgentEditingTest {
     }
 
     @Test
+    fun automaticPlacementKeepsBothKindsAndOrderedAgentPriorities() {
+        val desk =
+            ExecutionNode(
+                "desk",
+                "desk-native",
+                status = "online",
+                capabilities = NodeCapabilities(backend = NATIVE_BACKEND),
+            )
+        val auto = agent.withBackend("auto").copy(nodePriorities = listOf("gpu", LOCAL_NODE_ID))
+        assertEquals(
+            listOf(LOCAL_NODE_ID, "gpu", "mac", "desk"),
+            auto.nodeChoices(nodes + desk).map { it.id },
+        )
+        val mine = auto.copy(nodePriorities = auto.nodePriorities.reversed())
+        assertTrue(AgentSection.Nodes in agentChanges(auto, AgentDraft(mine)))
+        assertEquals(
+            mine.nodePriorities,
+            rebaseAgent(auto, mine, auto.copy(description = "new")).nodePriorities,
+        )
+        assertEquals(mine.nodePriorities, agentSettings(mine).nodePriorities)
+    }
+
+    @Test
     fun nativeExecutionUsesOnlyNativeNodesAndIsReviewed() {
         val desk =
             ExecutionNode(
@@ -741,8 +764,8 @@ class AgentEditingTest {
         val all = nodes + desk
         val reserved = agent.withExclusive("gpu", true)
 
-        // New agents and existing ones default to a VM.
-        assertEquals(VM_BACKEND, newAgent().access.backend)
+        // New agents choose automatically; saved fixed-backend profiles stay fixed.
+        assertEquals("auto", newAgent().access.backend)
         assertEquals(listOf(LOCAL_NODE_ID, "gpu", "mac"), reserved.nodeChoices(all).map { it.id })
 
         // Switching starts again from no node and no exclusive reservation.
@@ -777,6 +800,102 @@ class AgentEditingTest {
             NATIVE_BACKEND,
             rebaseAgent(agent, running, agent.copy(revision = "r2")).access.backend,
         )
+    }
+
+    @Test
+    fun rebasingPriorityOrderNeverRestoresRevokedPreferences() {
+        for (wildcard in listOf(false, true)) {
+            val base =
+                agent.copy(
+                    access =
+                        agent.access.copy(nodes = if (wildcard) null else listOf("gpu", "mac")),
+                    nodePriorities = listOf("gpu", "mac"),
+                )
+            val mine = base.copy(nodePriorities = listOf("mac", "gpu"))
+            val theirs =
+                base.copy(
+                    access = base.access.copy(nodes = if (wildcard) null else listOf("mac")),
+                    nodePriorities = listOf("mac"),
+                )
+            assertEquals(listOf("mac"), rebaseAgent(base, mine, theirs).nodePriorities)
+            val switched = theirs.copy(access = theirs.access.copy(backend = NATIVE_BACKEND))
+            assertEquals(listOf("mac"), rebaseAgent(base, mine, switched).nodePriorities)
+        }
+    }
+
+    @Test
+    fun explicitNodeSelectionsDropExcludedAdministratorPriorities() {
+        val administrator =
+            ExecutionNode(
+                "desk",
+                "desk",
+                status = "online",
+                capabilities = NodeCapabilities(backend = NATIVE_BACKEND),
+                nativeModeRequest = NativeModeState("administrator", "g"),
+            )
+        val auto =
+            agent
+                .withBackend("auto")
+                .copy(
+                    access = agent.access.copy(backend = "auto", nodes = null),
+                    nodePriorities = listOf("desk", "gpu"),
+                )
+        val next = auto.withAllNodes(false, nodes + administrator)
+        assertFalse("desk" in next.access.nodes.orEmpty())
+        assertEquals(listOf("gpu"), next.nodePriorities)
+    }
+
+    @Test
+    fun switchingToAutomaticRetainsConcurrentPriorityRemovals() {
+        for (backend in listOf(VM_BACKEND, NATIVE_BACKEND)) {
+            val base =
+                agent.copy(
+                    access = agent.access.copy(backend = backend, nodes = null),
+                    nodePriorities = listOf("gpu"),
+                )
+            val mine = base.withBackend("auto")
+            val theirs = base.copy(nodePriorities = emptyList())
+            val rebased = rebaseAgent(base, mine, theirs)
+            assertEquals("auto", rebased.access.backend)
+            assertNull(rebased.access.nodes)
+            assertTrue(rebased.nodePriorities.isEmpty())
+        }
+    }
+
+    @Test
+    fun automaticBackendMergesCompatibleExecutionAndExclusiveGrants() {
+        for (ownSwitch in listOf(false, true)) {
+            val base =
+                agent.copy(
+                    access =
+                        agent.access.copy(backend = VM_BACKEND, nodes = listOf("gpu", "removed")),
+                    exclusiveNodes = listOf("removed"),
+                    nodePriorities = listOf("removed"),
+                )
+            val mine =
+                base.copy(
+                    access =
+                        base.access.copy(
+                            backend = if (ownSwitch) "auto" else VM_BACKEND,
+                            nodes = listOf("gpu", "removed", "added"),
+                        )
+                )
+            val theirs =
+                base.copy(
+                    access =
+                        base.access.copy(
+                            backend = if (ownSwitch) VM_BACKEND else "auto",
+                            nodes = listOf("gpu"),
+                        ),
+                    exclusiveNodes = emptyList(),
+                    nodePriorities = emptyList(),
+                )
+            val rebased = rebaseAgent(base, mine, theirs)
+            assertEquals("auto", rebased.access.backend)
+            assertEquals(listOf("gpu", "added"), rebased.access.nodes)
+            assertTrue(rebased.exclusiveNodes.isEmpty())
+            assertTrue(rebased.nodePriorities.isEmpty())
+        }
     }
 
     @Test

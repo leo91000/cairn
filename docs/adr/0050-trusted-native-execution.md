@@ -1,5 +1,8 @@
 # Trusted native execution alongside Firecracker
 
+Update: [ADR-0073](0073-automatic-agent-placement.md) permits automatic per-agent
+placement across both backends while retaining the native authority rules below.
+
 Date: 2026-10-18.
 
 Cairn supports an explicit Linux native backend for selected agents directed by

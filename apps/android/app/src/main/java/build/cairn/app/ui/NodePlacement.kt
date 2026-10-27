@@ -49,7 +49,8 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
     var saved by remember(run.id) { mutableStateOf<String?>(null) }
     var privilegeError by remember(run.id) { mutableStateOf(false) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(run.id) {
+    var placementRevision by remember(run.id) { mutableIntStateOf(0) }
+    LaunchedEffect(run.id, placementRevision) {
         try {
             placement = vm.api.get("/nodes/placement/${run.id}")
             mode =
@@ -266,7 +267,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                     "Node fixe : aucune bascule automatique ailleurs.",
                     style = MaterialTheme.typography.bodySmall,
                 )
-            BackendMigration(vm, run.id)
+            BackendMigration(vm, run.id) { placementRevision++ }
             Text("Où elle tournera la prochaine fois", style = MaterialTheme.typography.titleSmall)
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                 listOf("automatic" to "Automatique", "preferred" to "Préférer", "fixed" to "Fixer")

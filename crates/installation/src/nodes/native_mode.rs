@@ -127,7 +127,8 @@ pub(crate) fn review_agent(
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let allowed = crate::native::policy::native(agent) && super::agent_allows(agent, &id);
+        let allowed =
+            crate::native::policy::supports(agent, "native") && super::agent_allows(agent, &id);
         reviewed.retain(|saved| saved != &agent["id"] || allowed);
         let explicit = access["nodes"]
             .as_array()
@@ -175,7 +176,7 @@ fn snapshot(db: &Db<'_>, node: &Value, mode: Mode) -> Result<Value> {
     let agents = db
         .agent_snapshots()?
         .into_iter()
-        .filter(|agent| crate::native::policy::native(agent) && super::agent_allows(agent, node_id))
+        .filter(|agent| crate::native::policy::supports(agent, "native") && super::agent_allows(agent, node_id))
         .map(|agent| json!({ "id": agent["id"], "name": agent["name"], "revision": agent["revision"], "access": policy(&agent) }))
         .collect::<Vec<_>>();
     let authority = db.kv("native-authority")?.unwrap_or_default();
@@ -217,7 +218,7 @@ fn snapshot(db: &Db<'_>, node: &Value, mode: Mode) -> Result<Value> {
             && agents
                 .iter()
                 .any(|agent| agent["id"] == super::run_agent(&run));
-        if crate::native::policy::native(&run["snapshot"]["agent"])
+        if crate::native::policy::supports(&run["snapshot"]["agent"], "native")
             && (already_associated || unplaced_candidate)
         {
             conversations.push(json!({

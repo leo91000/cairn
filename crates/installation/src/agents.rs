@@ -57,6 +57,7 @@ fn row(
     let crate::agent_grants::Permissions {
         access,
         exclusive_nodes,
+        node_priorities,
         plugins,
     } = permissions;
     Ok(Agent {
@@ -72,6 +73,7 @@ fn row(
             timeout_minutes: row.get(8)?,
             access,
             exclusive_nodes,
+            node_priorities,
             plugins,
         },
         revision: row.get(9)?,

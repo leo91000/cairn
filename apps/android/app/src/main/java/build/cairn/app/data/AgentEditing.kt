@@ -63,7 +63,7 @@ fun newAgent() =
                 mcpTools = build.cairn.contracts.McpTools(emptyMap()),
                 installation = false,
                 sandbox = "yolo",
-                backend = VM_BACKEND,
+                backend = "auto",
             ),
         exclusiveNodes = emptyList(),
         plugins = emptyList(),
@@ -145,6 +145,7 @@ fun agentChanges(original: Agent, draft: AgentDraft): List<AgentSection> {
         if (after.nodes?.toSet() != before.nodes?.toSet()) add(AgentSection.Nodes)
         if (edited.exclusiveNodes.toSet() != original.exclusiveNodes.toSet())
             add(AgentSection.Nodes)
+        if (edited.nodePriorities != original.nodePriorities) add(AgentSection.Nodes)
         if (after.sandbox != before.sandbox) add(AgentSection.Sandbox)
         if (after.installation != before.installation) add(AgentSection.Powers)
         if ((after.delegation == true) != (before.delegation == true)) add(AgentSection.Powers)
@@ -231,6 +232,7 @@ fun agentNodeChoices(nodes: List<ExecutionNode>, backend: String? = null): List<
                 it.id != LOCAL_NODE_ID &&
                 !it.revoked &&
                 (backend == null ||
+                    backend == "auto" ||
                     (it.capabilities.backend == NATIVE_BACKEND) == (backend == NATIVE_BACKEND))
         }
 }
@@ -261,17 +263,29 @@ fun Agent.nodeChoices(nodes: List<ExecutionNode>) = agentNodeChoices(nodes, acce
  * Switches between a VM and native execution on the host. Nodes of the other backend no longer
  * apply, so node execution and exclusive reservations start again from none.
  */
-fun Agent.withBackend(native: Boolean): Agent {
-    val backend = if (native) NATIVE_BACKEND else VM_BACKEND
+fun Agent.withBackend(native: Boolean): Agent =
+    withBackend(if (native) NATIVE_BACKEND else VM_BACKEND)
+
+fun Agent.withBackend(backend: String): Agent {
     if (backend == access.backend) return this
     return copy(
-        access = access.copy(backend = backend, nodes = emptyList()),
-        exclusiveNodes = emptyList(),
+        access =
+            access.copy(
+                backend = backend,
+                nodes = if (backend == "auto") access.nodes else emptyList(),
+            ),
+        exclusiveNodes = if (backend == "auto") exclusiveNodes else emptyList(),
+        nodePriorities = if (backend == "auto") nodePriorities else emptyList(),
     )
 }
 
 /** "VM" or "Native", as the overview shows the execution backend. */
-fun backendLabel(backend: String) = if (backend == NATIVE_BACKEND) "Exécution native" else "VM"
+fun backendLabel(backend: String) =
+    when (backend) {
+        "auto" -> "Automatique · VM ou natif"
+        NATIVE_BACKEND -> "Exécution native"
+        else -> "VM"
+    }
 
 fun AccessPolicy.runsOn(node: String) = nodes == null || node in nodes
 
@@ -287,7 +301,13 @@ fun Agent.withNodeRun(node: String, run: Boolean): Agent {
     return copy(
         access = access.copy(nodes = if (run) (current + node).distinct() else current - node),
         exclusiveNodes = if (run) exclusiveNodes else exclusiveNodes - node,
+        nodePriorities = if (run) nodePriorities else nodePriorities - node,
     )
+}
+
+fun Agent.withAllNodes(all: Boolean, nodes: List<ExecutionNode>): Agent {
+    val updated = access.withAllNodes(all, nodes, id)
+    return copy(access = updated, nodePriorities = nodePriorities.filter { updated.runsOn(it) })
 }
 
 /**
@@ -417,7 +437,7 @@ fun nodesSummary(agent: Agent, nodes: List<ExecutionNode>): String {
         }
     val exclusive = agent.effectiveExclusive(nodes).size
     val summary = if (exclusive > 0) "$run · exclusivité sur $exclusive" else run
-    return if (access.backend == NATIVE_BACKEND) "${backendLabel(access.backend)} · $summary"
+    return if (access.backend != VM_BACKEND) "${backendLabel(access.backend)} · $summary"
     else summary
 }
 
@@ -435,7 +455,7 @@ fun agentAccessSummary(
     return buildList {
             add(access.projects?.let { plural(it.size, "projet") } ?: "Tous les projets")
             add(access.nodes?.let { plural(it.size, "node") } ?: "Toutes les nodes")
-            if (access.backend == NATIVE_BACKEND) add(backendLabel(access.backend))
+            if (access.backend != VM_BACKEND) add(backendLabel(access.backend))
             if (agent.plugins.isNotEmpty())
                 if (catalog == null) add(plural(agent.plugins.size, "plugin"))
                 else
@@ -676,7 +696,7 @@ fun agentReductions(
         .forEach { id -> add(pluginGrantLabel(id, resources.catalog)) }
     if (before.installation && !after.installation) add("gestion de l’installation")
     if (before.delegation == true && after.delegation != true) add("délégation de tâches")
-    if (before.backend == NATIVE_BACKEND && after.backend != NATIVE_BACKEND) add("exécution native")
+    if (before.backend != VM_BACKEND && after.backend == VM_BACKEND) add("exécution native")
     if ((sandboxStrictness[after.sandbox] ?: 0) > (sandboxStrictness[before.sandbox] ?: 0))
         add("mode d’exécution « ${sandboxLabel(after.sandbox)} »")
 }
@@ -705,7 +725,7 @@ private fun runsSentence(runs: AgentPreviewRuns): String {
 
 /** The review shown before saving: powers and secrets added, and work a reduction stops. */
 fun Agent.nativeReviewNodes(resources: AgentResources): List<String> =
-    if (access.backend != NATIVE_BACKEND || access.nodes == null) emptyList()
+    if (access.backend == VM_BACKEND || access.nodes == null) emptyList()
     else
         resources.nodes
             .filter {
@@ -733,7 +753,7 @@ fun agentReview(
             )
         )
     }
-    if (after.backend == NATIVE_BACKEND && before.backend != NATIVE_BACKEND)
+    if (after.backend != VM_BACKEND && before.backend == VM_BACKEND)
         add(
             ReviewLine(
                 ReviewKind.Power,
@@ -825,16 +845,18 @@ fun rebaseAgent(
     val a = base.access
     val m = mine.access
     val t = theirs.access
+    val backend = pick(a.backend, m.backend, t.backend)
+    val compatibleNodes = backend == "auto"
     val tools =
         mergeToolChoices(a.mcpTools, m.mcpTools, t.mcpTools).filterKeys {
             mcpIds == null || it in mcpIds
         }
-    // Node lists only make sense for one backend: a side that switched backend wins them whole,
-    // the owner first, so entries of the other backend are never merged in.
+    // Fixed backends take the switching side's selection. Automatic placement
+    // merges both kinds while preserving concurrent grant removals.
     val (nodes, exclusive) =
         when {
-            m.backend != a.backend -> m.nodes to mine.exclusiveNodes
-            t.backend != a.backend -> t.nodes to theirs.exclusiveNodes
+            !compatibleNodes && m.backend != a.backend -> m.nodes to mine.exclusiveNodes
+            !compatibleNodes && t.backend != a.backend -> t.nodes to theirs.exclusiveNodes
             else ->
                 mergeList(a.nodes, m.nodes, t.nodes) to
                     mergeList(base.exclusiveNodes, mine.exclusiveNodes, theirs.exclusiveNodes)
@@ -850,6 +872,16 @@ fun rebaseAgent(
         instructions = pick(base.instructions, mine.instructions, theirs.instructions),
         timeoutMinutes = pick(base.timeoutMinutes, mine.timeoutMinutes, theirs.timeoutMinutes),
         exclusiveNodes = exclusive,
+        nodePriorities =
+            when {
+                !compatibleNodes && m.backend != a.backend -> mine.nodePriorities
+                !compatibleNodes && t.backend != a.backend -> theirs.nodePriorities
+                else ->
+                    mergePriorities(base.nodePriorities, mine.nodePriorities, theirs.nodePriorities)
+            }.filter {
+                (it !in base.nodePriorities || it in theirs.nodePriorities) &&
+                    (nodes == null || it in nodes)
+            },
         plugins = mergeList(base.plugins, mine.plugins, theirs.plugins).orEmpty(),
         access =
             AccessPolicy(
@@ -861,9 +893,20 @@ fun rebaseAgent(
                 installation = pick(a.installation, m.installation, t.installation),
                 delegation = pick(a.delegation, m.delegation, t.delegation),
                 sandbox = pick(a.sandbox, m.sandbox, t.sandbox),
-                backend = pick(a.backend, m.backend, t.backend),
+                backend = backend,
             ),
     )
+}
+
+/** Preserve local ordering without restoring concurrently removed preferences. */
+private fun mergePriorities(
+    base: List<String>,
+    mine: List<String>,
+    theirs: List<String>,
+): List<String> {
+    if (base == mine) return theirs
+    return mine.filter { it !in base || it in theirs } +
+        theirs.filter { it !in base && it !in mine }
 }
 
 /**
@@ -943,5 +986,6 @@ fun agentSettings(agent: Agent, mcpIds: Set<String>? = null): build.cairn.contra
         timeoutMinutes = agent.timeoutMinutes,
         access = agent.access.withGrantedTools(mcpIds),
         exclusiveNodes = agent.exclusiveNodes,
+        nodePriorities = agent.nodePriorities,
         plugins = agent.plugins,
     )

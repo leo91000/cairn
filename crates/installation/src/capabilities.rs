@@ -69,8 +69,8 @@ impl ResumeRun {
             }
         };
         let run = s.store.run(&id).await?;
-        if origin.known() && policy::native(&run["snapshot"]["agent"]) {
-            policy::refresh_agent(s, crate::nodes::run_agent(&run)).await?;
+        if origin.known() && policy::supports(&run["snapshot"]["agent"], "native") {
+            policy::refresh_for(s, &run["snapshot"]["agent"]).await?;
         }
         let commit_id = id.clone();
         s.worker
@@ -296,12 +296,12 @@ pub(crate) const AGENT_OPERATIONS: &[AgentOperation] = &[
     AgentOperation {
         name: "save_agent",
         scope: "manage",
-        description: "Create an agent with a stable optional creationId. Expanding permissions requires the owner.",
+        description: "Create an agent with a stable optional creationId. access.backend=auto chooses an available authorized VM or native node; nodePriorities lists preferred authorized nodes in order. Existing conversations keep their environment. Expanding permissions requires the owner.",
     },
     AgentOperation {
         name: "replace_agent",
         scope: "manage",
-        description: "Replace all settings at the expected revision. Agents cannot expand permissions or approve sensitive rights.",
+        description: "Replace all settings at the expected revision, including access.backend (auto, firecracker or native) and ordered nodePriorities. Priorities confer no access. Agents cannot expand permissions or approve sensitive rights.",
     },
     AgentOperation {
         name: "delete_agent",

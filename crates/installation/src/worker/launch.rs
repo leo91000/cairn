@@ -77,10 +77,12 @@ async fn execute_inner(
         checkpoint,
         sensitive,
         attempt_id: String::new(),
+        reservation: None,
     };
     execution.mark_running().await?;
     timing.next("access");
     execution.refresh_access().await?;
+    execution.resolve_backend().await?;
     timing.next("workspace");
     let mut workspace = execution.prepare(existing).await?;
     timing.next("session_lookup");
@@ -133,6 +135,7 @@ struct Execution<'a> {
     provider: Provider,
     directory: PathBuf,
     attempt_id: String,
+    reservation: Option<(String, Value)>,
 }
 
 /// The prepared execution environment shared by every launch attempt.
@@ -207,6 +210,30 @@ struct RunnerStorage<'a> {
 }
 
 impl Execution<'_> {
+    /// Reserve before preparing paths: VM and native environments differ. Binding
+    /// the concrete backend shares the atomic admission transaction, so retries
+    /// cannot turn an already-created environment into another execution kind.
+    async fn resolve_backend(&mut self) -> Result<()> {
+        if policy(&self.run["snapshot"]["agent"])["backend"] != "auto" {
+            return Ok(());
+        }
+        let runner = crate::config::id();
+        let placement = placement::reserve(self.s, self.run, &runner).await?;
+        let saved_runner = runner.clone();
+        let node = placement["nodeId"].as_str().map(str::to_owned);
+        let runtime = placement["runtimeId"].clone();
+        self.checkpoint
+            .update(|checkpoint| {
+                checkpoint.runner_id = Some(Some(saved_runner));
+                checkpoint.node_id = Some(node);
+                checkpoint.runtime_id = Some(Some(runtime));
+            })
+            .await?;
+        self.reservation = Some((runner, placement));
+        *self.run = self.s.store.run(&self.id).await?;
+        Ok(())
+    }
+
     fn stopping(&self) -> bool {
         self.cancel.is_cancelled() || self.s.shutdown.is_cancelled()
     }
@@ -706,8 +733,15 @@ impl Execution<'_> {
         let s = self.s;
         crate::object_storage::Storage::configured(s)?;
         let mut timing = Operation::new("runner_prepare", &self.id, "placement");
-        let runner = crate::config::id();
-        let placement = placement::reserve(s, &s.store.run(&self.id).await?, &runner).await?;
+        let (runner, placement) = match self.reservation.take() {
+            Some(reservation) => reservation,
+            None => {
+                let runner = crate::config::id();
+                let placement =
+                    placement::reserve(s, &s.store.run(&self.id).await?, &runner).await?;
+                (runner, placement)
+            }
+        };
         timing.next("materialize");
         placement::materialize(s, &runner).await?;
         let node_id = placement["nodeId"].as_str().map(str::to_owned);
