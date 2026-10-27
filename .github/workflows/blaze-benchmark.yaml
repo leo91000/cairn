@@ -1,0 +1,60 @@
+name: Blaze build experiment
+on:
+  pull_request:
+    paths:
+      - .github/workflows/blaze-benchmark.yaml
+      - scripts/benchmark-blaze.py
+      - scripts/tests/test_benchmark_blaze.py
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: blaze-benchmark-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  benchmark:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the build prerequisites and both Rust toolchains
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libclang-dev time
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup toolchain install 1.99.0 --profile minimal --component rust-src
+      - name: Install the pinned Blaze binary
+        # The upstream nightly tag moves. Refuse any bytes other than this release asset.
+        run: |
+          mkdir -p .data/blaze-tool
+          curl --fail --location --retry 3 --output .data/blaze-tool/release.tar.gz \
+            https://github.com/indexable-inc/blaze/releases/download/nightly/ra-jit-x86_64-unknown-linux-gnu.tar.gz
+          echo 'c5202bfb3c29920831149db9b7060c58e9876972aba3cbcd73e9e4ccaf818330  .data/blaze-tool/release.tar.gz' | sha256sum --check
+          tar -xzf .data/blaze-tool/release.tar.gz -C .data/blaze-tool --strip-components=1
+          echo "$PWD/.data/blaze-tool" >> "$GITHUB_PATH"
+      - name: Check measurement and correctness handling
+        run: python3 -m unittest discover -s scripts/tests -p test_benchmark_blaze.py -v
+      - name: Fetch dependencies outside the build measurements
+        run: cargo +1.97.1 fetch --locked
+      - name: Compare Cargo and Blaze on the same host
+        run: python3 scripts/benchmark-blaze.py
+      - name: Publish the experiment summary
+        if: always()
+        run: |
+          if test -f .data/blaze-benchmark/summary.md; then
+            cat .data/blaze-benchmark/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: blaze-benchmark-${{ github.sha }}
+          path: .data/blaze-benchmark/
+          if-no-files-found: warn
+          retention-days: 14
