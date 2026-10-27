@@ -238,6 +238,12 @@ consent screen. Tools execute on that installation through its outbound relay.
 Its local `/mcp`, OAuth endpoints and personal tokens have been removed.
 An offline installation returns 503 without replaying a tool call.
 
+The verified owner's identity follows public MCP operations into native execution
+authorization. Creating or directing work uses that person's current native node
+grants; automatic placement applies the agent's priorities among eligible nodes.
+OAuth scopes, trusted people, node permissions and administrator reviews still
+apply. Run-scoped installation tools retain their originating run's bounded
+delegation instead.
 
 The application advertises protected-resource metadata at
 `/.well-known/oauth-protected-resource/mcp` and authorization-server metadata at

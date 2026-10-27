@@ -529,6 +529,139 @@ struct Fixture {
     node: Value,
 }
 
+async fn public_mcp_call(
+    f: &Fixture,
+    account: &str,
+    scopes: &[&str],
+    operation: &str,
+    args: Value,
+) -> Value {
+    f.service
+        .code_mode
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    let mut identity = auth::InstallationIdentity::trusted(auth::InstallationRole::Owner, account);
+    identity.mcp_scopes = Some(scopes.iter().map(|scope| (*scope).to_owned()).collect());
+    let mut request = common::request("POST", "/api/mcp")
+        .body(Body::from(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": common::mcp_arguments(operation, &args),
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    request.extensions_mut().insert(identity);
+    let response = common::send(&f.router, request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    read_json(response).await
+}
+
+#[tokio::test]
+async fn public_mcp_preserves_the_trusted_native_caller_and_automatic_priority() {
+    for backend in ["native", "auto"] {
+        let mut f = Fixture::new().await;
+        let vm = f.vm_node().await;
+        let nodes = if backend == "auto" {
+            json!([f.node["id"], vm["id"]])
+        } else {
+            json!([f.node["id"]])
+        };
+        f.agent = f
+            .service
+            .agent_fixture(
+                json!({
+                    "access": { "backend": backend, "nodes": nodes },
+                    "nodePriorities": nodes,
+                }),
+                f.agent["id"].as_str(),
+            )
+            .await
+            .unwrap();
+        let response = public_mcp_call(
+            &f,
+            TRUSTED,
+            &["manage"],
+            "create_chat",
+            json!({ "agentId": f.agent["id"], "projectId": null }),
+        )
+        .await;
+        assert_ne!(response["result"]["isError"], true, "{backend}: {response}");
+        let chat = &response["result"]["structuredContent"]["result"];
+        assert_eq!(
+            chat["nativePrincipals"],
+            json!([TRUSTED]),
+            "{backend}: {chat}"
+        );
+        assert_eq!(chat["nativeAuthorityNodes"], json!([f.node["id"]]));
+        assert_eq!(chat["nativeProvenanceUnknown"], false);
+
+        let response = public_mcp_call(
+            &f, TRUSTED, &["run"], "send_chat_message",
+            json!({ "chatId": chat["id"], "message": { "id": id(), "text": "Continue the authorized work" } }),
+        ).await;
+        assert_ne!(response["result"]["isError"], true, "{backend}: {response}");
+        f.service.chat_tick(&HashSet::new()).await.unwrap();
+        let chat = f.service.get("chats", text(chat, "id")).await.unwrap();
+        let run = f.service.store.run(text(&chat, "runId")).await.unwrap();
+        assert_eq!(run["nativePrincipals"], json!([TRUSTED]));
+        assert_eq!(run["nativeProvenanceUnknown"], false);
+        let placed = placement::reserve(&f.service, &run, &id()).await.unwrap();
+        assert_eq!(placed["nodeId"], f.node["id"], "{backend}: {placed}");
+    }
+}
+
+#[tokio::test]
+async fn public_mcp_native_execution_keeps_caller_and_oauth_scope_restrictions() {
+    let f = Fixture::new().await;
+    for (account, scopes) in [(OTHER, vec!["manage"]), (TRUSTED, vec!["read"])] {
+        let response = public_mcp_call(
+            &f,
+            account,
+            &scopes,
+            "create_chat",
+            json!({ "agentId": f.agent["id"], "projectId": null }),
+        )
+        .await;
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        assert!(f.service.chat_list().await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn public_mcp_rechecks_the_native_caller_when_directing_existing_work() {
+    let f = Fixture::new().await;
+    let (status, chat) = f
+        .call(
+            &f.trusted,
+            "POST",
+            "/api/chats",
+            json!({ "agentId": f.agent["id"] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{chat}");
+    let args = json!({
+        "chatId": chat["id"],
+        "message": { "id": id(), "text": "Continue the authorized work" },
+    });
+    for (account, scopes) in [(OTHER, vec!["run"]), (TRUSTED, vec!["manage"])] {
+        let response =
+            public_mcp_call(&f, account, &scopes, "send_chat_message", args.clone()).await;
+        assert_eq!(response["result"]["isError"], true, "{response}");
+    }
+    let mut node = f.node.clone();
+    node["nativeAccounts"] = json!([]);
+    f.service.store.put("nodes", node).await.unwrap();
+    let response = public_mcp_call(&f, TRUSTED, &["run"], "send_chat_message", args).await;
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    let saved = f.service.get("chats", text(&chat, "id")).await.unwrap();
+    assert_eq!(
+        saved, chat,
+        "Rejected calls must not change the conversation"
+    );
+}
+
 #[tokio::test]
 async fn automatic_placement_uses_agent_priorities_and_falls_back_without_converting_existing_work()
 {
@@ -3327,6 +3460,26 @@ async fn saved_native_mission(f: &Fixture) -> Value {
     )
     .await;
     f.service.store.run(text(&run, "id")).await.unwrap()
+}
+
+#[tokio::test]
+async fn public_mcp_resumes_native_missions_with_verified_owner_authority() {
+    let f = Fixture::new().await;
+    let run = saved_native_mission(&f).await;
+    let run_id = text(&run, "id");
+    let args = json!({ "runId": run_id });
+    for (account, scopes) in [(OTHER, vec!["run"]), (TRUSTED, vec!["read"])] {
+        let response = public_mcp_call(&f, account, &scopes, "resume_run", args.clone()).await;
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        assert_eq!(f.service.store.run(run_id).await.unwrap(), run);
+    }
+    let response = public_mcp_call(&f, TRUSTED, &["run"], "resume_run", args).await;
+    assert_ne!(response["result"]["isError"], true, "{response}");
+    let resumed = f.service.store.run(run_id).await.unwrap();
+    assert_eq!(resumed["nativePrincipals"], json!([TRUSTED]));
+    assert_eq!(resumed["nativeProvenanceUnknown"], false);
+    assert_eq!(resumed["sessionId"], "retained-session");
+    f.service.worker.cancel(&f.service, run_id).await.unwrap();
 }
 
 async fn resume_coordinator(f: &Fixture, traced: bool) -> (Value, Value) {
