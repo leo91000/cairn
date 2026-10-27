@@ -403,7 +403,7 @@ async fn package_activation_interrupts_a_read_from_the_previous_approved_version
     "#;
         let mut next_digest = String::new();
         for version in ["1.0.0", "1.0.1"] {
-            let package = registry::install(
+            let package = common::package_install(
                 &f.s,
                 &json!({
                     "manifest": {
