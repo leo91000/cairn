@@ -5,6 +5,8 @@
 
 package build.cairn.app.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -40,9 +42,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import build.cairn.app.data.*
+import build.cairn.contracts.ActivatePluginPackageInput
+import build.cairn.contracts.ApprovePluginPackageInput
+import build.cairn.contracts.ListPluginPackagesInput
+import build.cairn.contracts.activatePluginPackage
+import build.cairn.contracts.approvePluginPackage
+import build.cairn.contracts.installPluginPackage
+import build.cairn.contracts.listPluginPackages
 import kotlinx.serialization.json.*
 
-/** The installation's web page for steps that stay on the web: package uploads. */
+/** Resolve an authenticated installation page for external links. */
 internal fun webPage(api: CairnApi, path: String): String =
     api.origin
         .newBuilder()
@@ -55,9 +64,20 @@ internal fun webPage(api: CairnApi, path: String): String =
 fun PluginsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) {
     var catalog by remember { mutableStateOf<PluginCatalog?>(null) }
     val context = LocalContext.current
+    val upload =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { folder ->
+            if (folder != null)
+                vm.perform {
+                    val version = api.installPluginPackage(readPluginPackage(context, folder))
+                    catalog = api.listPluginPackages(ListPluginPackagesInput())
+                    notify(
+                        "${version.manifest?.name ?: version.version} installé · examinez-le avant activation"
+                    )
+                }
+        }
     Poll("plugins", 10_000) {
         try {
-            catalog = vm.api.get("/plugins")
+            catalog = vm.api.listPluginPackages(ListPluginPackagesInput())
         } catch (e: Exception) {
             vm.report(e)
         }
@@ -88,20 +108,20 @@ fun PluginsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) 
         SignalCard(Modifier.fillMaxWidth().padding(top = 8.dp)) {
             Text("Installer un package", style = MaterialTheme.typography.titleSmall)
             Text(
-                "Un plugin est un manifest.json ou manifest.toml et un main.luau. L’envoi des fichiers se fait sur le web, puis vous l’approuvez ici ou sur le web.",
+                "Choisissez le dossier contenant manifest.json ou manifest.toml et main.luau, puis examinez le package avant de l’activer.",
                 Modifier.padding(top = 4.dp, bottom = 12.dp),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             SignalButton(
-                "Continuer sur le web",
+                "Choisir le dossier",
                 icon = CairnIcons.External,
                 container = MaterialTheme.colorScheme.surface,
                 content = MaterialTheme.colorScheme.onSurface,
                 border = true,
                 height = 40.dp,
             ) {
-                runCatching { browse(context, webPage(vm.api, "/plugins")) }
+                upload.launch(null)
             }
         }
     }
@@ -198,7 +218,7 @@ private fun PluginInstances(
     var reviewing by remember { mutableStateOf(false) }
     val context = LocalContext.current
     suspend fun load() {
-        catalog = vm.api.get<PluginCatalog>("/plugins")
+        catalog = vm.api.listPluginPackages(ListPluginPackagesInput())
     }
     Poll("plugin-$id", 5000) {
         if (editing == null && !reviewing && !state.busy)
@@ -480,7 +500,7 @@ private fun InstanceCard(
                 }
             }
             // Packages with their own panel describe the instance there; secrets show as set.
-            manifest.settings
+            manifest.settingFields
                 .filter { !it.hidden && (!manifest.instanceView || it.type == "secret") }
                 .forEach { field ->
                     if (field.type == "secret")
@@ -1075,13 +1095,11 @@ private fun PluginReview(
     val added =
         manifest?.capabilities.orEmpty().filter { active != null && it !in active.capabilities }
     fun act(operation: String) = vm.perform {
-        api.pluginOperation(
-            "/plugins/packages/${segment(entry.id)}/$operation",
-            buildJsonObject {
-                put("version", selected)
-                version?.digest?.let { put("digest", it) }
-            },
-        )
+        if (operation == "approve")
+            api.approvePluginPackage(
+                ApprovePluginPackageInput(requireNotNull(version?.digest), entry.id, selected)
+            )
+        else api.activatePluginPackage(ActivatePluginPackageInput(entry.id, selected))
         notify("${manifest?.name ?: entry.name} $selected est actif")
         close()
         changed()

@@ -1841,3 +1841,119 @@ async fn native_mcp_callback_uses_beacon_account_authentication_instead_of_local
     );
     relay.close().await;
 }
+
+#[tokio::test]
+async fn public_plugin_upload_rechecks_its_grant_after_compilation() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+    for invalidation in ["none", "revoke", "expire"] {
+        let relay = RelayedInstallation::new(axum::Router::new()).await;
+        let worker = code_worker();
+        relay.installation.code_mode.use_worker(worker.clone());
+        let id = relay.session["installations"][0]["id"].as_str().unwrap();
+        let tokens = format!("/api/installations/{id}/tokens");
+        let response = owner_post(
+            &relay,
+            &tokens,
+            json!({"label":"Plugin uploader","scopes":["manage"]}),
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let grant: Value = response.json().await.unwrap();
+        let token = grant["token"].as_str().unwrap().to_owned();
+        let started = relay.root.path().join("public-plugin-started");
+        let resume = relay.root.path().join("public-plugin-resume");
+        let wrapper = relay.root.path().join("public-plugin-worker");
+        let quote =
+            |path: &std::path::Path| format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"));
+        std::fs::write(&wrapper,format!("#!/bin/sh\n: > {}\ni=0\nwhile [ ! -f {} ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i+1)); done\nexec {} \"$@\"\n",quote(&started),quote(&resume),quote(&worker))).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        relay.installation.plugins.use_worker(wrapper);
+        let request = relay
+            .app
+            .client
+            .post(format!("{}/mcp", relay.app.url))
+            .bearer_auth(&token)
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "execute",
+                    "arguments": {
+                        "code": "return await cairn.call('install_plugin_package', input);",
+                        "input": {
+                            "manifest": {
+                                "id": "public-upload", "name": "Public upload", "version": "1",
+                                "apiVersion": 2, "capabilities": [],
+                            },
+                            "source": "return {}",
+                            "modules": {},
+                        },
+                    },
+                },
+            }));
+        let pending = tokio::spawn(async move { request.send().await.unwrap() });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !started.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        match invalidation {
+            "revoke" => {
+                let response = relay
+                    .app
+                    .client
+                    .delete(format!(
+                        "{}{tokens}/{}",
+                        relay.app.url,
+                        grant["id"].as_str().unwrap()
+                    ))
+                    .header("cookie", &relay.cookie)
+                    .header("origin", &relay.app.url)
+                    .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+            "expire" => {
+                sqlx_core::query::query("UPDATE mcp_tokens SET expires_at = now() - interval '1 second' WHERE digest = $1")
+                    .bind(hex::encode(Sha256::digest(token.as_bytes()))).execute(&relay.app.pool).await.unwrap();
+            }
+            _ => {}
+        }
+        std::fs::write(&resume, "").unwrap();
+        let response = pending.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let result: Value = response.json().await.unwrap();
+        let published = relay
+            .installation
+            .store
+            .read(|db| db.plugin_package("public-upload"))
+            .await
+            .unwrap()
+            .revision
+            .is_some();
+        assert_eq!(published, invalidation == "none", "{result}");
+        if invalidation == "none" {
+            assert_ne!(result["result"]["isError"], true, "{result}");
+        } else {
+            assert_eq!(result["result"]["isError"], true, "{result}");
+            assert!(result.to_string().contains("MCP authorization"), "{result}");
+            assert!(
+                !relay
+                    .installation
+                    .config
+                    .data_dir
+                    .join("plugins/public-upload")
+                    .exists()
+            );
+        }
+        relay.close().await;
+    }
+}

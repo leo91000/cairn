@@ -365,7 +365,7 @@ async fn merge_keeps_preapproved_live_grants_and_rolls_back_a_failed_delete() {
             let mut account = cairn_installation::plugins::connections::Connection::draft(&instance,"fixture",json!({}),Vec::new());
             account.name = "Fixture".into();
             account.revision = "r1".into();
-            db.save_plugin_instance(&account)?;
+            { db.save_plugin_version(&account.plugin_id,"fixture",&"0".repeat(64))?; db.save_plugin_instance(&account) }?;
             db.save_agent(&serde_json::from_value(source.clone())?)?;
             db.save_agent(&serde_json::from_value(target.clone())?)?;
             db.0.execute_batch("CREATE TRIGGER reject_merge BEFORE DELETE ON agents BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;")?;

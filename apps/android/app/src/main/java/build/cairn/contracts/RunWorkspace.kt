@@ -9,6 +9,7 @@ data class RunWorkspace(
     val kind: String,
     val path: String,
     val projectId: String,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val revision: String? = null,
 ) {
     init {}

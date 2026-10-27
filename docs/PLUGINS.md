@@ -745,9 +745,9 @@ instance falls back to another enabled one.
 Keep exactly one `manifest.json` or `manifest.toml` at the package root. Both
 formats use the same field names, defaults, validation and approval digest. The
 upload endpoint accepts a JSON manifest object as before, or manifest text with
-`manifestFormat: "json" | "toml"`; it persists canonical JSON. The web accepts
-both formats. Android reviews both formats through the normalized interface;
-package file uploads continue to use the web.
+`manifestFormat: "json" | "toml"`; it persists canonical JSON. Both apps accept and review both formats through the normalized interface.
+The web selects package files; Android uses the system folder picker. Cancelling
+the picker does not upload anything.
 
 For a managed executable, declare:
 
@@ -812,33 +812,46 @@ active version. Bundled programs prepare on first use. Preparation is shared by
 all instances and serialized; no instance secrets are available. Web and Android
 show installed/candidate versions and offer Check, Install and Restore. Package
 and program updates are independent. There is no periodic check or automatic
-upgrade in this initial implementation. Owner-only routes are:
+upgrade in this initial implementation. The owner controls approval of executable
+code and explicit program changes; installation access alone cannot grant that
+system authority. Program commands are:
 
 - `GET /api/plugins/<id>/programs`: installed, previous and candidate releases.
-- `POST …/programs/<name>/check`: resolve and save a candidate and its digest.
-- `POST …/programs/<name>/install` with `{ digest }`: install that candidate.
-- `POST …/programs/<name>/rollback`: restore the retained previous executable.
+- `POST /api/plugins/programs/prepare` with a closed command containing `pluginId`,
+  `program` and `kind`: `check` resolves a candidate, `install` also requires its
+  reviewed `digest`, and `rollback` restores the retained previous executable.
 
-These program actions return `{ operation: ID }` immediately. Poll
-`GET /api/plugins/packages/operations/ID` for `{ state, result?, error? }`, where
-state is `running`, `completed` or `failed`. Approval/activation of an uploaded
-installer-backed package uses the same operation response; ordinary packages keep
-their synchronous summary response. This keeps downloads independent of the
-30-second HTTP relay deadline. Operations have a nine-minute total budget, four
-concurrent slots, and 64 recent in-memory results. A server restart loses operation
-status, not the atomic program/package locks; refresh the plugin and retry if
-needed. Web and Android perform this polling, including approval failures. Cold instance tests, views/actions and form handlers
-also use this response when they may prepare an executable; once prepared, their
-ordinary synchronous responses are unchanged. Instance saves without a form
-handler remain synchronous and do not download programs.
+All package approval and activation commands, including packages without an
+installer, and all explicit program preparations return `{ operation: ID }`
+immediately. Poll `GET /api/plugins/packages/operations/ID` for
+`{ id, state, result, error }`. State is `running`, `completed`, `failed` or
+`cancelled`; pending results and errors are null. A completed result is tagged:
+`{ kind: "package", version }`, `{ kind: "program", program }` or
+`{ kind: "management", output, wrapped }`, using the generated contracts.
+`DELETE /api/plugins/packages/operations/ID` cancels a pending preparation and
+returns its status. Cancellation fences publication still queued on the database
+writer; it does not undo an already admitted publication or external effect.
+
+This keeps downloads independent of the 30-second HTTP relay deadline.
+Operations have a nine-minute total budget, four concurrent slots and 64 recent
+in-memory results. A server restart loses operation status, not the atomic
+program/package locks; refresh the plugin and retry if needed. Web and Android
+perform this polling, including approval failures. The public MCP and
+`cairn_installation` expose the same package/program/status/cancellation commands
+with their scope, installation grant and owner checks. Agents cannot inspect owner
+instance preparations or operations belonging to another installation bearer.
+
+Cold instance tests, views/actions and form handlers also use this operation
+response when they may prepare an executable; once prepared, their ordinary
+synchronous responses are unchanged. Instance saves without a form handler remain
+synchronous and do not download programs.
 
 ## 1Password
 
 The bundled 1Password package is an ordinary package (`plugins/onepassword/`):
 service accounts are instances with a secret token and agent grants, `op` is a
 declared program, and its commands, `onepassword` tool, instructions, panel and test
-are declared in its manifest. Accounts saved before plugins existed move into instances at
-startup with the same IDs, grants and tokens. Metadata is available through the tool;
+are declared in its manifest. Metadata is available through the tool;
 secret reads only through the CLI, consumed inside a pipe or script:
 
 ```sh

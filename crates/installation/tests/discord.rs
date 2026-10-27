@@ -16,7 +16,7 @@ use axum::{
     routing::get,
 };
 use cairn_installation::{
-    plugins::{connections::Connection, panels, registry, socket, work},
+    plugins::{connections::Connection, panels, registry, socket},
     service::Service,
     validation::text,
 };
@@ -471,7 +471,7 @@ async fn gateway_identifies_heartbeats_admits_mentions_and_resumes_in_luau() {
     // A new session asks Discord for its URL and session budget; a resume does not.
     assert_eq!(gateway.calls(), 1);
     server.abort();
-    let events = s.store.list(work::EVENTS).await.unwrap();
+    let events = common::plugin_events(&s.store).await.unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["payload"]["content"], "<@400> hello");
     assert_eq!(events[0]["payload"]["botId"], "400");
@@ -988,7 +988,7 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
     .unwrap();
     upstream.await.unwrap();
     assert_eq!(result.unwrap_err().status, 403);
-    let events = s.store.list(work::EVENTS).await.unwrap();
+    let events = common::plugin_events(&s.store).await.unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["payload"]["threadId"], "700");
     server.abort();

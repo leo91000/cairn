@@ -8,6 +8,7 @@ import kotlinx.serialization.Serializable
 data class Cause(
     val kind: String,
     val message: String,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val startup: Boolean = false,
 ) {
     init {

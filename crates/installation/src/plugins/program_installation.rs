@@ -26,24 +26,7 @@ use tokio::io::AsyncWriteExt;
 const MAX_DOWNLOAD: u64 = 64 * 1024 * 1024;
 const MAX_EXECUTABLE: u64 = 128 * 1024 * 1024;
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Release {
-    version: String,
-    url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    sha256: Option<String>,
-    format: String,
-    executable: String,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Installed {
-    release: Release,
-    archive_sha256: String,
-    binary_sha256: String,
-}
+use cairn_contracts::{InstalledProgram as Installed, ProgramRelease as Release};
 
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -77,7 +60,6 @@ fn validate(s: &Service, manifest: &Manifest, release: &Release) -> Result<()> {
         || release.version.chars().any(char::is_control)
         || release.url.len() > 2048
         || !relative(&release.executable)
-        || !matches!(release.format.as_str(), "zip" | "binary")
         || release.sha256.as_ref().is_some_and(|value| !hash(value))
     {
         return Err(Error::bad("The installer returned an invalid release."));
@@ -119,6 +101,7 @@ fn read_lock(directory: &Path) -> Result<Lock> {
 }
 
 fn write_lock(directory: &Path, lock: &Lock) -> Result<()> {
+    super::operations::check_publication()?;
     std::fs::create_dir_all(directory)?;
     let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
     temporary.write_all(&serde_json::to_vec_pretty(lock)?)?;
@@ -331,47 +314,48 @@ impl Preparation {
             || self.extracted
             || text(args, "archive") != "archive"
             || text(args, "path") != release.executable
-            || text(args, "format") != release.format
+            || text(args, "format") != release.format.as_str()
         {
             return Err(Error::bad("Extract the executable declared by resolve."));
         }
         let archive = std::fs::File::open(self.directory.path().join("archive"))?;
-        let mut input: Box<dyn Read> = if release.format == "zip" {
-            let mut zip = zip::ZipArchive::new(archive)
-                .map_err(|_| Error::bad("Invalid ZIP program archive."))?;
-            if zip.len() > 256 {
-                return Err(Error::too_large(
-                    "The program archive has too many entries.",
-                ));
-            }
-            for index in 0..zip.len() {
-                let entry = zip
-                    .by_index(index)
-                    .map_err(|_| Error::bad("Invalid ZIP entry."))?;
-                let name = entry.name().trim_end_matches('/');
-                let kind = entry.unix_mode().unwrap_or(0) & 0o170000;
-                if !relative(name) || !matches!(kind, 0 | 0o100000 | 0o040000) {
-                    return Err(Error::bad(
-                        "Program archives cannot contain links or unsafe paths.",
+        let mut input: Box<dyn Read> =
+            if release.format == cairn_contracts::ProgramArchiveFormat::Zip {
+                let mut zip = zip::ZipArchive::new(archive)
+                    .map_err(|_| Error::bad("Invalid ZIP program archive."))?;
+                if zip.len() > 256 {
+                    return Err(Error::too_large(
+                        "The program archive has too many entries.",
                     ));
                 }
-            }
-            let mut entry = zip
-                .by_name(&release.executable)
-                .map_err(|_| Error::bad("The executable is missing from the archive."))?;
-            if entry.is_dir() || entry.size() > MAX_EXECUTABLE {
-                return Err(Error::too_large("The executable is invalid or too large."));
-            }
-            // Only the selected regular file is read; archive paths never become disk paths.
-            let mut bytes = Vec::new();
-            entry
-                .by_ref()
-                .take(MAX_EXECUTABLE + 1)
-                .read_to_end(&mut bytes)?;
-            Box::new(std::io::Cursor::new(bytes))
-        } else {
-            Box::new(archive)
-        };
+                for index in 0..zip.len() {
+                    let entry = zip
+                        .by_index(index)
+                        .map_err(|_| Error::bad("Invalid ZIP entry."))?;
+                    let name = entry.name().trim_end_matches('/');
+                    let kind = entry.unix_mode().unwrap_or(0) & 0o170000;
+                    if !relative(name) || !matches!(kind, 0 | 0o100000 | 0o040000) {
+                        return Err(Error::bad(
+                            "Program archives cannot contain links or unsafe paths.",
+                        ));
+                    }
+                }
+                let mut entry = zip
+                    .by_name(&release.executable)
+                    .map_err(|_| Error::bad("The executable is missing from the archive."))?;
+                if entry.is_dir() || entry.size() > MAX_EXECUTABLE {
+                    return Err(Error::too_large("The executable is invalid or too large."));
+                }
+                // Only the selected regular file is read; archive paths never become disk paths.
+                let mut bytes = Vec::new();
+                entry
+                    .by_ref()
+                    .take(MAX_EXECUTABLE + 1)
+                    .read_to_end(&mut bytes)?;
+                Box::new(std::io::Cursor::new(bytes))
+            } else {
+                Box::new(archive)
+            };
         let mut output = std::fs::File::create(self.directory.path().join("executable"))?;
         let size = std::io::copy(&mut input.by_ref().take(MAX_EXECUTABLE + 1), &mut output)?;
         if size == 0 || size > MAX_EXECUTABLE {
@@ -391,7 +375,9 @@ async fn install(
     directory: &Path,
     lock: &mut Lock,
     release: Release,
+    authority: &crate::capabilities::plugin_packages::Authority,
 ) -> Result<()> {
+    authority.recheck(s).await?;
     validate(s, &package.manifest, &release)?;
     if let Some(installed) = &lock.installed
         && installed.release == release
@@ -449,6 +435,7 @@ async fn install(
             "The installer must return its prepared executable.",
         ));
     }
+    authority.recheck(s).await?;
     let binary = preparation.directory.path().join("executable");
     let binary_sha256 = sha256(&std::fs::read(&binary)?);
     let installed = Installed {
@@ -457,6 +444,7 @@ async fn install(
         binary_sha256,
     };
     let target = directory.join(&installed.binary_sha256);
+    super::operations::check_publication()?;
     std::fs::rename(binary, target)?;
     lock.previous = lock.installed.take();
     lock.installed = Some(installed);
@@ -467,6 +455,21 @@ async fn install(
 /// First use of a bundled program installs it once. Explicit paths and test doubles
 /// keep their existing behavior; later calls always reuse the locked release.
 pub async fn executable(s: &Service, manifest: &Manifest, program: &Program) -> Result<PathBuf> {
+    executable_authorized(
+        s,
+        manifest,
+        program,
+        &crate::capabilities::plugin_packages::Authority::default(),
+    )
+    .await
+}
+
+pub(crate) async fn executable_authorized(
+    s: &Service,
+    manifest: &Manifest,
+    program: &Program,
+    authority: &crate::capabilities::plugin_packages::Authority,
+) -> Result<PathBuf> {
     if let Some(path) = s.plugins.program_override(&manifest.id, program) {
         return Ok(path);
     }
@@ -487,8 +490,12 @@ pub async fn executable(s: &Service, manifest: &Manifest, program: &Program) -> 
     let _guard = s.plugins.program_installation.lock().await;
     let mut lock = read_lock(&directory)?;
     if lock.installed.is_none() {
+        authority.recheck(s).await?;
         let release = resolve(s, &package, program).await?;
-        install(s, &package, program, &directory, &mut lock, release).await?;
+        install(
+            s, &package, program, &directory, &mut lock, release, authority,
+        )
+        .await?;
     }
     installed_path(
         &directory,
@@ -510,6 +517,19 @@ pub(crate) fn needs_preparation(s: &Service, package: &Package) -> bool {
 
 /// Prepare before activating an uploaded version; failure leaves the old version active.
 pub async fn prepare(s: &Service, package: &Package) -> Result<()> {
+    prepare_authorized(
+        s,
+        package,
+        &crate::capabilities::plugin_packages::Authority::default(),
+    )
+    .await
+}
+
+pub(crate) async fn prepare_authorized(
+    s: &Service,
+    package: &Package,
+    authority: &crate::capabilities::plugin_packages::Authority,
+) -> Result<()> {
     if !package
         .manifest
         .programs
@@ -530,8 +550,12 @@ pub async fn prepare(s: &Service, package: &Package) -> Result<()> {
         if let Some(installed) = &lock.installed {
             installed_path(&directory, installed)?;
         } else {
+            authority.recheck(s).await?;
             let release = resolve(s, package, program).await?;
-            install(s, package, program, &directory, &mut lock, release).await?;
+            install(
+                s, package, program, &directory, &mut lock, release, authority,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -558,6 +582,25 @@ pub async fn action(
     action: &str,
     input: &Value,
 ) -> Result<Value> {
+    action_authorized(
+        s,
+        id,
+        name,
+        action,
+        input,
+        &crate::capabilities::plugin_packages::Authority::default(),
+    )
+    .await
+}
+
+pub(crate) async fn action_authorized(
+    s: &Service,
+    id: &str,
+    name: &str,
+    action: &str,
+    input: &Value,
+    authority: &crate::capabilities::plugin_packages::Authority,
+) -> Result<Value> {
     let package = registry::active(s, id).await?;
     let program = package
         .manifest
@@ -567,9 +610,11 @@ pub async fn action(
     let _guard = s.plugins.program_installation.lock().await;
     let directory = root(s, &package, program);
     let mut lock = read_lock(&directory)?;
+    authority.recheck(s).await?;
     match action {
         "check" => {
             lock.candidate = Some(resolve(s, &package, program).await?);
+            authority.recheck(s).await?;
             write_lock(&directory, &lock)?;
         }
         "install" => {
@@ -582,7 +627,10 @@ pub async fn action(
                     "The candidate release changed. Check for updates again.",
                 ));
             }
-            install(s, &package, program, &directory, &mut lock, release).await?;
+            install(
+                s, &package, program, &directory, &mut lock, release, authority,
+            )
+            .await?;
         }
         "rollback" => {
             let previous = lock
@@ -593,6 +641,7 @@ pub async fn action(
             lock.previous = lock.installed.take();
             lock.installed = Some(previous);
             lock.candidate = None;
+            authority.recheck(s).await?;
             write_lock(&directory, &lock)?;
         }
         _ => return Err(Error::not_found("Unknown program action.")),

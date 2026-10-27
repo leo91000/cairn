@@ -403,7 +403,7 @@ async fn package_activation_interrupts_a_read_from_the_previous_approved_version
     "#;
         let mut next_digest = String::new();
         for version in ["1.0.0", "1.0.1"] {
-            let package = registry::install(
+            let package = common::package_install(
                 &f.s,
                 &json!({
                     "manifest": {
@@ -1216,7 +1216,10 @@ async fn manifest_constraints_are_checked_before_install_and_defaults_can_be_sav
         let mut invalid = package.clone();
         invalid["manifest"]["settings"][0][key] = value;
         assert_eq!(
-            registry::install(s, &invalid).await.unwrap_err().status,
+            common::package_install(s, &invalid)
+                .await
+                .unwrap_err()
+                .status,
             400
         );
         assert!(!f.root.path().join("data/plugins/statusboard").exists());
@@ -1284,8 +1287,8 @@ async fn manifest_constraints_are_checked_before_install_and_defaults_can_be_sav
     // A corrected version restores access under the same plugin and instance IDs.
     package["manifest"]["version"] = json!("1.0.1");
     package["manifest"]["settings"][0]["maxLength"] = json!(10000);
-    let installed = registry::install(s, &package).await.unwrap();
-    registry::approve(s, "statusboard", "1.0.1", text(&installed, "digest"))
+    let installed = common::package_install(s, &package).await.unwrap();
+    common::package_approve(s, "statusboard", "1.0.1", text(&installed, "digest"))
         .await
         .unwrap();
     let repaired = registry::active(s, "statusboard").await.unwrap();
@@ -1517,10 +1520,9 @@ async fn live_form_completion_preserves_cleared_defaulted_fields() {
 }
 
 async fn registry_install_and_approve(s: &Service, package: Value) {
-    use cairn_installation::plugins::registry;
-    let installed = registry::install(s, &package).await.unwrap();
+    let installed = common::package_install(s, &package).await.unwrap();
     let id = text(&installed["manifest"], "id").to_owned();
-    let catalog = registry::catalog(s).await.unwrap();
+    let catalog = common::package_catalog(s).await.unwrap();
     let entry = catalog["packages"]
         .as_array()
         .unwrap()
@@ -1528,7 +1530,7 @@ async fn registry_install_and_approve(s: &Service, package: Value) {
         .find(|item| item["id"] == id)
         .unwrap()
         .clone();
-    registry::approve(s, &id, "1.0.0", text(&entry["versions"][0], "digest"))
+    common::package_approve(s, &id, "1.0.0", text(&entry["versions"][0], "digest"))
         .await
         .unwrap();
 }

@@ -15,8 +15,8 @@ sealed interface ManagePluginOutput {
     data class A(
         val callbackUrl: String?,
         val managementUrl: String?,
-        val manifest: kotlinx.serialization.json.JsonElement?,
-        val setup: kotlinx.serialization.json.JsonElement?,
+        val manifest: PluginManifest,
+        val setup: PluginSetup,
     ) : ManagePluginOutput {
         init {}
     }

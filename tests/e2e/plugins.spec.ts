@@ -436,10 +436,22 @@ test('program releases can be checked, installed and restored independently of p
   const actions: string[] = []
   let polls = 0
   await page.route('**/api/plugins/packages/operations/program-job', route => route.fulfill({
-    json: ++polls % 2 ? { state: 'running' } : { state: 'completed', result: program },
+    json: ++polls % 2
+      ? {
+          id: 'program-job',
+          state: 'running',
+          result: null,
+          error: null,
+        }
+      : {
+          id: 'program-job',
+          state: 'completed',
+          result: { kind: 'program', program },
+          error: null,
+        },
   }))
-  await page.route('**/api/plugins/onepassword/programs**', async (route) => {
-    const action = new URL(route.request().url()).pathname.split('/').at(-1)
+  await page.route(/\/api\/plugins\/(onepassword\/programs|programs\/prepare)(\/.*)?$/, async (route) => {
+    const action = route.request().method() === 'POST' ? route.request().postDataJSON().kind : undefined
     if (route.request().method() === 'POST') {
       actions.push(action!)
       if (action === 'check') {
@@ -447,7 +459,12 @@ test('program releases can be checked, installed and restored independently of p
         program.digest = 'reviewed-release'
       }
       else if (action === 'install') {
-        expect(route.request().postDataJSON()).toEqual({ digest: 'reviewed-release' })
+        expect(route.request().postDataJSON()).toEqual({
+          kind: 'install',
+          pluginId: 'onepassword',
+          program: 'op',
+          digest: 'reviewed-release',
+        })
         program.previous = program.installed
         program.installed = installed('2.41.0')
         program.candidate = null

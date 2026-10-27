@@ -477,3 +477,51 @@ typed snapshot. They are derived automatically on snapshot writes, including an
 agent merge, and have no independent writer. The measured list regression from
 repeated snapshot extraction motivated this projection. The full `data` and
 `summary_data` documents remain virtual projections for unconverted SQL callers.
+
+
+## Plugin packages, programs and asynchronous requests (A13)
+
+Canonical manifest and setup structs remain in `cairn-plugin-api`; contracts
+re-export them rather than maintaining another model. Rust derives feed the same
+registry and generators for packages, versions, approvals, catalog, programs,
+closed preparation commands and tagged operation results. Web and Android remove
+their handwritten outer models. Manifest-defined setting/contribution JSON remains
+an extension boundary: the clients keep their existing native field presenters.
+Optional generated Kotlin properties omit defaults on encoding, preserving the
+canonical manifest bytes used for approval digests; the shared corpus checks this.
+
+Fresh SQLite v9 replaces plugin records with `plugin_packages`, `plugin_versions`,
+`plugin_approvals`, `plugin_requests`, `plugin_activity`, `plugin_timers`,
+`plugin_events`, `plugin_deliveries`, `plugin_http_receipts` and `plugin_storage`.
+Foreign keys connect instances and package versions, with checked lifecycle states
+and indexes for bounded queue ordering. Package point reads use a joined primary
+key lookup; catalog metadata uses batched reads in one snapshot. Files still own
+package sources and exact program binaries/locks. Opaque plugin payloads stay JSON
+inside named columns. Run-owned TTL dedupe, rate and question keys remain at A6's
+run boundary. No historical reader or migration is included; records reject the
+converted kinds and their dynamic input/MCP descriptors disappear.
+
+HTTP, public MCP and `cairn_installation` dispatch the same typed package commands.
+Installation grants and scopes remain checked; agents cannot approve executable
+code or explicitly replace system programs. Asynchronous preparations retain the
+owner account/access proof, installation bearer or verified public MCP credential
+reference and recheck it before publication. Deferred instance handlers retain the
+same owner proof through their first program installation and their returned result.
+Tunnel protocol v6 carries the public credential digest as trusted metadata, never
+an ordinary HTTP header or JavaScript worker input. The installation revalidates it
+through Beacon's installation-authenticated plugin authorization endpoint, which
+checks expiry, revocation, ownership, installation binding and the manage scope.
+Program preparation rechecks before publishing its binary and lock. Operation
+results remain bounded, cancellable and ephemeral; restart never replays them.
+Queued preparation writes carry their cancellation token to the SQLite writer,
+which refuses publication after cancellation even when the awaiting future was
+dropped. Program file publication checks the same preparation context. Ordinary
+store writes retain their existing commit-after-caller-cancellation behavior.
+Package revisions fence concurrent activation. The four embedded packages and
+owner-approved native bot authority retain their existing execution paths.
+
+The A1/A2 `project_measurement` harness compares the frozen A12 records layout at
+`40d25b07` with these typed tables, using identical bounded workloads and alternating
+repetitions. Measurements include encoded bytes, physical DB/WAL/pages, CPU and
+cold-connection/warm latency. Raw artifacts stay outside Git; local SQLite timings
+are not production network latency.

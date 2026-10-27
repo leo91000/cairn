@@ -28,6 +28,7 @@ import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { createAgent } from '../../../../packages/contracts/generated/createAgent'
 import { deleteAgent } from '../../../../packages/contracts/generated/deleteAgent'
 import { listAgents } from '../../../../packages/contracts/generated/listAgents'
+import { listPluginPackages } from '../../../../packages/contracts/generated/listPluginPackages'
 import { previewAgent } from '../../../../packages/contracts/generated/previewAgent'
 import { replaceAgent } from '../../../../packages/contracts/generated/replaceAgent'
 import { LOCAL_NODE_ID } from '../../../../packages/contracts/nodes'
@@ -408,7 +409,7 @@ async function retryWorkspace() {
 // An installation without plugins still edits every other permission.
 async function loadCatalog() {
   try {
-    const loadedCatalog = await api<Catalog>('/plugins')
+    const loadedCatalog = await listPluginPackages(api, {})
     catalogError.value = ''
     return loadedCatalog
   }

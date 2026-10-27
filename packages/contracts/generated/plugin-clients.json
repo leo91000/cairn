@@ -1,5 +1,71 @@
 [
   {
+    "input": "ListPluginPackagesInput",
+    "method": "GET",
+    "name": "listPluginPackages",
+    "output": "PluginCatalog",
+    "path": "/plugins"
+  },
+  {
+    "input": "InstallPluginPackageInput",
+    "method": "POST",
+    "name": "installPluginPackage",
+    "output": "PackageVersion",
+    "path": "/plugins/packages"
+  },
+  {
+    "deferred": true,
+    "input": "ApprovePluginPackageInput",
+    "method": "POST",
+    "name": "approvePluginPackage",
+    "output": "PackageVersion",
+    "path": "/plugins/packages/{pluginId}/approve"
+  },
+  {
+    "deferred": true,
+    "input": "ActivatePluginPackageInput",
+    "method": "POST",
+    "name": "activatePluginPackage",
+    "output": "PackageVersion",
+    "path": "/plugins/packages/{pluginId}/activate"
+  },
+  {
+    "input": "ListPluginProgramsInput",
+    "method": "GET",
+    "name": "listPluginPrograms",
+    "output": "ListPluginProgramsOutput",
+    "path": "/plugins/{pluginId}/programs"
+  },
+  {
+    "input": "PluginOperationInput",
+    "method": "GET",
+    "name": "getPluginOperation",
+    "output": "PluginOperation",
+    "path": "/plugins/packages/operations/{operationId}"
+  },
+  {
+    "deferred": true,
+    "input": "PluginProgramInput",
+    "method": "POST",
+    "name": "preparePluginProgram",
+    "output": "ProgramState",
+    "path": "/plugins/programs/prepare"
+  },
+  {
+    "input": "PluginPackageInput",
+    "method": "DELETE",
+    "name": "deletePluginPackage",
+    "output": "DeletePluginPackageOutput",
+    "path": "/plugins/packages/{pluginId}"
+  },
+  {
+    "input": "PluginOperationInput",
+    "method": "DELETE",
+    "name": "cancelPluginOperation",
+    "output": "PluginOperation",
+    "path": "/plugins/packages/operations/{operationId}"
+  },
+  {
     "deferred": true,
     "input": "ManagePluginInput",
     "method": "POST",

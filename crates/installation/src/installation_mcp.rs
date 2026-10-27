@@ -171,6 +171,15 @@ pub(crate) async fn operation(
             "This operation changes the installation, which a plan turn cannot do. Include it in your plan; the user starts implementation explicitly.",
         ));
     }
+    if let Some(operation) = crate::capabilities::plugin_package_operation(name) {
+        return operation
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
     if name == "manage_plugin" {
         return crate::capabilities::MANAGE_PLUGIN
             .invoke(

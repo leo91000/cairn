@@ -20,16 +20,38 @@ class PluginSetupTest {
     @Test
     fun `uses the setup resolved by the installation`() {
         val mail = corpus.getValue("derivation").jsonArray.first().jsonObject
-        val signIn = SetupStep("connect", "credential", "Sign in with Google")
+        val signIn = SetupStep(id = "connect", kind = "credential", title = "Sign in with Google")
         val resolved =
             PluginEntry(
                     manifest = manifest(mail.getValue("manifest")),
-                    setup = PluginSetup("app", "Create an app once.", steps = listOf(signIn)),
+                    setup =
+                        PluginSetup(
+                            effort = "app",
+                            summary = "Create an app once.",
+                            steps = listOf(signIn),
+                        ),
+                    id = "fixture",
+                    builtin = false,
+                    status = "active",
+                    active = null,
+                    versions = emptyList(),
                 )
                 .resolvedSetup()
         assertEquals("Create an app once.", resolved.summary)
         assertEquals(listOf("Sign in with Google"), resolved.steps.map { it.title })
-        assertEquals(PluginSetup(), PluginEntry().resolvedSetup())
+        assertEquals(
+            PluginSetup(),
+            PluginEntry(
+                    id = "fixture",
+                    builtin = false,
+                    status = "active",
+                    active = null,
+                    manifest = null,
+                    setup = null,
+                    versions = emptyList(),
+                )
+                .resolvedSetup(),
+        )
 
         // The catalogue announces what connecting takes until the first instance exists.
         val entry =
@@ -38,6 +60,9 @@ class PluginSetupTest {
                 active = "1",
                 manifest = manifest(mail.getValue("manifest")),
                 setup = PluginSetup(effort = "app", steps = listOf(signIn)),
+                builtin = false,
+                status = "active",
+                versions = emptyList(),
             )
         assertEquals("app", entry.summary(emptyList()).effort)
         assertEquals(
@@ -122,7 +147,7 @@ class PluginSetupTest {
         assertEquals(
             emptyList<SharedSource>(),
             sharedSources(
-                listOf(SetupStep("connect", "credential", "Sign in")),
+                listOf(SetupStep(id = "connect", kind = "credential", title = "Sign in")),
                 emptyList(),
                 connections,
             ),

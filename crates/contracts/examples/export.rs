@@ -297,6 +297,27 @@ fn main() {
         serde_json::to_string_pretty(&clients).unwrap() + "\n",
     )
     .unwrap();
+    export::<ListPluginPackagesInput>(root, &mut generator, Contract::Deserialize);
+    export::<DeletePluginPackageOutput>(root, &mut generator, Contract::Serialize);
+    export::<PluginManifest>(root, &mut generator, Contract::Serialize);
+    export::<PluginSetup>(root, &mut generator, Contract::Serialize);
+    export::<PackageVersion>(root, &mut generator, Contract::Serialize);
+    export::<PluginEntry>(root, &mut generator, Contract::Serialize);
+    export::<PluginCatalog>(root, &mut generator, Contract::Serialize);
+    export::<ProgramRelease>(root, &mut generator, Contract::Serialize);
+    export::<InstalledProgram>(root, &mut generator, Contract::Serialize);
+    export::<ProgramState>(root, &mut generator, Contract::Serialize);
+    export::<ListPluginProgramsInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListPluginProgramsOutput>(root, &mut generator, Contract::Serialize);
+    export::<InstallPluginPackageInput>(root, &mut generator, Contract::Deserialize);
+    export::<ApprovePluginPackageInput>(root, &mut generator, Contract::Deserialize);
+    export::<ActivatePluginPackageInput>(root, &mut generator, Contract::Deserialize);
+    export::<PluginPackageInput>(root, &mut generator, Contract::Deserialize);
+    export::<PluginOperationInput>(root, &mut generator, Contract::Deserialize);
+    export::<PluginProgramInput>(root, &mut generator, Contract::Deserialize);
+    export::<PluginOperationResult>(root, &mut generator, Contract::Serialize);
+    export::<PluginOperation>(root, &mut generator, Contract::Serialize);
+    export::<PluginOperationStarted>(root, &mut generator, Contract::Serialize);
     export::<PluginConnection>(root, &mut generator, Contract::Serialize);
     export::<PluginConfiguration>(root, &mut generator, Contract::Deserialize);
     export::<PluginFormInput>(root, &mut generator, Contract::Deserialize);
@@ -333,8 +354,8 @@ fn main() {
     };
     let plugin_outputs = vec![
         ManagePluginOutput::Setup {
-            manifest: serde_json::json!({ "id": "fixture" }),
-            setup: serde_json::json!({ "steps": [] }),
+            manifest: Box::new(PluginManifest::parse("json",r#"{"id":"fixture","name":"Fixture","version":"1.0.0","apiVersion":2,"capabilities":[]}"#).unwrap()),
+            setup: PluginSetup::default(),
             callback_url: None,
             management_url: None,
         },
@@ -388,6 +409,15 @@ fn main() {
     )
     .unwrap();
     fs::write(root.join("plugin-clients.json"), serde_json::to_string_pretty(&serde_json::json!([
+        {"name": "listPluginPackages", "input": "ListPluginPackagesInput", "output": "PluginCatalog", "method": "GET", "path": "/plugins"},
+        {"name": "installPluginPackage", "input": "InstallPluginPackageInput", "output": "PackageVersion", "method": "POST", "path": "/plugins/packages"},
+        {"deferred": true, "name": "approvePluginPackage", "input": "ApprovePluginPackageInput", "output": "PackageVersion", "method": "POST", "path": "/plugins/packages/{pluginId}/approve"},
+        {"deferred": true, "name": "activatePluginPackage", "input": "ActivatePluginPackageInput", "output": "PackageVersion", "method": "POST", "path": "/plugins/packages/{pluginId}/activate"},
+        {"name": "listPluginPrograms", "input": "ListPluginProgramsInput", "output": "ListPluginProgramsOutput", "method": "GET", "path": "/plugins/{pluginId}/programs"},
+        {"name": "getPluginOperation", "input": "PluginOperationInput", "output": "PluginOperation", "method": "GET", "path": "/plugins/packages/operations/{operationId}"},
+        { "name": "preparePluginProgram", "input": "PluginProgramInput", "output": "ProgramState", "method": "POST", "path": "/plugins/programs/prepare", "deferred": true },
+        { "name": "deletePluginPackage", "input": "PluginPackageInput", "output": "DeletePluginPackageOutput", "method": "DELETE", "path": "/plugins/packages/{pluginId}" },
+        { "name": "cancelPluginOperation", "input": "PluginOperationInput", "output": "PluginOperation", "method": "DELETE", "path": "/plugins/packages/operations/{operationId}" },
         { "name": "managePlugin", "input": "ManagePluginInput", "output": "ManagePluginOutput", "method": "POST", "path": "/plugins/manage", "deferred": true }
     ])).unwrap() + "\n").unwrap();
     let clients = serde_json::json!([

@@ -84,18 +84,25 @@ abstract class AgentPageCases {
             packages =
                 listOf(
                     PluginEntry(
-                        "onepassword",
+                        id = "onepassword",
                         builtin = true,
                         manifest =
                             PluginManifest(
                                 id = "onepassword",
                                 name = "1Password",
-                                agentAccess = PluginAgentAccess("Read-only secrets"),
+                                agentAccess = PluginAgentAccess(description = "Read-only secrets"),
+                                version = "1.0.0",
+                                apiVersion = 2,
+                                capabilities = emptyList(),
                             ),
+                        status = "active",
+                        active = null,
+                        setup = null,
+                        versions = emptyList(),
                     ),
                     // GitHub accounts are plugin instances granted like any other.
                     PluginEntry(
-                        "github",
+                        id = "github",
                         builtin = true,
                         manifest =
                             PluginManifest(
@@ -103,20 +110,35 @@ abstract class AgentPageCases {
                                 name = "GitHub",
                                 agentAccess =
                                     PluginAgentAccess(
-                                        "Granted agents' runs push and use the GitHub CLI as this account."
+                                        description =
+                                            "Granted agents' runs push and use the GitHub CLI as this account."
                                     ),
-                                instances = PluginInstances("Account", "Accounts"),
+                                instances =
+                                    PluginInstances(singular = "Account", plural = "Accounts"),
+                                version = "1.0.0",
+                                apiVersion = 2,
+                                capabilities = emptyList(),
                             ),
+                        status = "active",
+                        active = null,
+                        setup = null,
+                        versions = emptyList(),
                     ),
                     PluginEntry(
-                        "discord",
+                        id = "discord",
                         builtin = true,
                         manifest =
                             PluginManifest(
                                 id = "discord",
                                 name = "Discord",
                                 capabilities = listOf("conversations.submit"),
+                                version = "1.0.0",
+                                apiVersion = 2,
                             ),
+                        status = "active",
+                        active = null,
+                        setup = null,
+                        versions = emptyList(),
                     ),
                 ),
             connections =
@@ -168,6 +190,7 @@ abstract class AgentPageCases {
                         enabled = true,
                     ),
                 ),
+            capabilities = emptyList(),
         )
 
     /** The server's refusal of two accounts of a package whose runs use their credentials. */

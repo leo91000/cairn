@@ -308,4 +308,38 @@ class ContractsTest {
             assertFails(value.toString()) { json.decodeFromJsonElement<ManagePluginInput>(value) }
         }
     }
+
+    @Test
+    fun packageCommandsAndAsyncResultsMatchTheRustCorpus() {
+        val root = File(System.getProperty("cairn.contractWire")).parentFile
+        val corpus =
+            json
+                .parseToJsonElement(
+                    File(
+                            root.parentFile.parentFile.parentFile,
+                            "tests/fixtures/plugin-package-contracts.json",
+                        )
+                        .readText()
+                )
+                .jsonObject
+        for (value in corpus.getValue("installs").jsonArray) {
+            json.decodeFromJsonElement<InstallPluginPackageInput>(value)
+        }
+        for (value in corpus.getValue("invalidInstalls").jsonArray) {
+            assertFails(value.toString()) {
+                json.decodeFromJsonElement<InstallPluginPackageInput>(value)
+            }
+        }
+        for (value in corpus.getValue("programs").jsonArray) {
+            val model = json.decodeFromJsonElement<PluginProgramInput>(value)
+            assertEquals(value, json.encodeToJsonElement(model))
+        }
+        for (value in corpus.getValue("invalidPrograms").jsonArray) {
+            assertFails(value.toString()) { json.decodeFromJsonElement<PluginProgramInput>(value) }
+        }
+        for (value in corpus.getValue("operations").jsonArray) {
+            val model = json.decodeFromJsonElement<PluginOperation>(value)
+            assertEquals(value, json.encodeToJsonElement(model))
+        }
+    }
 }

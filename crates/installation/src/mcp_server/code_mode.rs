@@ -31,21 +31,23 @@ const DEADLINE: Duration = Duration::from_secs(30);
 /// Execution identity stays in the manager and never enters the JavaScript worker.
 #[derive(Clone)]
 pub(crate) enum Authorization {
-    Public(Vec<String>),
+    Public(Vec<String>, Option<String>),
     Installation(String),
 }
 
 impl Authorization {
     async fn operations(&self, s: &Service) -> Result<Vec<Value>> {
         match self {
-            Self::Public(_) => Ok(operations()),
+            Self::Public(..) => Ok(operations()),
             Self::Installation(token) => crate::installation_mcp::operations(s, token).await,
         }
     }
 
     async fn invoke(&self, s: &Arc<Service>, name: &str, args: Value) -> Result<Value> {
         match self {
-            Self::Public(scopes) => super::operation(s, scopes, name, args).await,
+            Self::Public(scopes, credential) => {
+                super::operation(s, scopes, credential.as_deref(), name, args).await
+            }
             Self::Installation(token) => {
                 crate::installation_mcp::operation(s, token, name, args).await
             }
@@ -141,7 +143,7 @@ impl CodeMode {
                         let reply = match auth.invoke(s, &name, args).await {
                             Ok(value) => Frame::Reply { value },
                             Err(error) => {
-                                if matches!(auth, Authorization::Public(_))
+                                if matches!(auth, Authorization::Public(..))
                                     && matches!(error.status, 401 | 403)
                                 {
                                     *denied_scope = operations()
