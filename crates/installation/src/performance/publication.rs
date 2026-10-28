@@ -40,9 +40,12 @@ pub(crate) enum Stage {
     NodeBaseRequest,
     NodeRetryWait,
     NodeCacheWait,
+    JournalHash,
+    NodeIoAdmission,
+    NodeOpenRetry,
 }
 
-const NAMES: [&str; 30] = [
+const NAMES: [&str; 33] = [
     "inventory",
     "nodeHeaders",
     "nodeBody",
@@ -73,6 +76,9 @@ const NAMES: [&str; 30] = [
     "nodeBaseRequest",
     "nodeRetryWait",
     "nodeCacheWait",
+    "journalHash",
+    "nodeIoAdmission",
+    "nodeOpenRetry",
 ];
 
 #[derive(Default, Clone, Copy)]
@@ -698,5 +704,99 @@ mod remote_tests {
                 >= 90_000
         );
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod journal_tests {
+    use super::*;
+    use crate::{
+        nodes::snapshots,
+        storage::{Disk, environment, runtime},
+    };
+
+    #[tokio::test]
+    async fn stopped_journal_transfer_attributes_recovery_and_record_authentication() {
+        let root = tempfile::tempdir().unwrap();
+        let run = crate::config::id();
+        let snapshot = crate::config::id();
+        let environment_id = crate::config::id();
+        let directory = root.path().join("environments").join(&environment_id);
+        let base = json!({
+            "version": 1,
+            "size": 4096,
+            "blockSize": snapshots::BLOCK,
+            "blocks": [{ "offset": 0, "size": 4096, "hash": null }]
+        });
+        let source = json!({ "master": "http://127.0.0.1:9/", "grant": "fixture" });
+        let disk = runtime::create(&directory.join("lazy"), &base, &source)
+            .await
+            .unwrap();
+        let bytes = vec![42; 4096];
+        disk.write_at(0, &bytes).unwrap();
+        let generation = disk.seal().unwrap();
+        let mut manifest = disk.capture(generation).unwrap();
+        manifest["onDemand"] = true.into();
+        manifest["generation"] = generation.into();
+        drop(disk);
+        let physical = crate::file_lock::exclusive(&directory.join("lock"), "busy").unwrap();
+        let owner = environment::assign(root.path(), &environment_id, &run)
+            .await
+            .unwrap();
+        drop((owner, physical));
+        let captured = root.path().join("snapshots").join(&snapshot);
+        tokio::fs::create_dir_all(&captured).await.unwrap();
+        tokio::fs::write(captured.join("run"), &run).await.unwrap();
+        tokio::fs::write(captured.join("manifest.json"), manifest.to_string())
+            .await
+            .unwrap();
+        let hash = manifest["blocks"][0]["hash"].as_str().unwrap().to_owned();
+        let attempt = crate::config::id();
+        let (_, body) = snapshots::served_publication_observed(
+            &captured,
+            vec![hash],
+            Some(Request {
+                attempt: attempt.clone(),
+                run,
+                final_batch: true,
+            }),
+            &snapshot,
+        )
+        .await
+        .unwrap();
+        let metrics = registry()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|entry| entry.metrics.attempt == attempt)
+            .unwrap()
+            .metrics
+            .clone();
+        assert_eq!(
+            axum::body::to_bytes(body, 4096).await.unwrap().as_ref(),
+            bytes
+        );
+        let value = metrics.snapshot();
+        let stages = &value["stages"];
+        assert!(
+            stages["journalHash"]["completed"].as_u64().unwrap() >= 2,
+            "{value}"
+        );
+        assert!(
+            stages["journalHash"]["bytes"].as_u64().unwrap() >= 4096 + 128,
+            "{value}"
+        );
+        assert!(
+            stages["nodeIoAdmission"]["completed"].as_u64().unwrap() >= 1,
+            "{value}"
+        );
+        assert!(
+            stages["blockingQueue"]["completed"].as_u64().unwrap() >= 2,
+            "{value}"
+        );
+        assert_eq!(stages["nodeProduce"]["completed"], 1);
+        assert_eq!(stages["nodeProduce"]["bytes"], 4096);
+        assert_eq!(stages["hash"]["completed"], 1);
+        assert_eq!(stages["nodeBaseRead"]["started"], 0);
     }
 }

@@ -63,10 +63,14 @@ impl Record {
 }
 
 pub(super) fn digest(header: &[u8], data: &[u8]) -> [u8; 32] {
+    let sample =
+        crate::performance::publication::start(crate::performance::publication::Stage::JournalHash);
     let mut hasher = blake3::Hasher::new();
     hasher.update(header);
     hasher.update(data);
-    *hasher.finalize().as_bytes()
+    let digest = *hasher.finalize().as_bytes();
+    sample.finish(header.len() + data.len());
+    digest
 }
 
 fn integer(header: &[u8], offset: usize) -> i64 {

@@ -71,6 +71,8 @@ observation, not proof of completion or a final byte total.
 | `blockingQueue` | Spawn-to-entry wall delay in blocking pool, separately from worker execution; bytes zero. |
 | `compress`, `decompress` | zstd call wall time; plaintext input/output bytes respectively. Raw fallback still pays compression. Raw reads have no decompression call. |
 | `encrypt`, `decrypt` | Vault call wall time; codec payload input bytes / ciphertext input bytes. Envelope construction/copying outside the call is residual unless inside an inclusive envelope. |
+| `journalHash` | BLAKE3 journal header/payload authentication computation, including cold reader recovery; bytes hashed (headers plus payloads). This is distinct from content identity and can count the same payload again. |
+| `nodeIoAdmission`, `nodeOpenRetry` | Existing bounded runtime I/O permit wait and retry sleep while an earlier disk open/close drains; bytes zero. Permit counts, retry cadence and deadlines are unchanged. |
 | `hash` | BLAKE3 content identity computation/verification; plaintext bytes. Multiple integrity checks legitimately count the same bytes multiple times. |
 | `putSlot`, `getSlot` | Shared S3 admission wait; bytes zero. |
 | `s3Client` | SDK client lookup/initialization; bytes zero. |
