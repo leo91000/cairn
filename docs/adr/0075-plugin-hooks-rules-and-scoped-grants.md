@@ -37,14 +37,15 @@ Un plugin ne fait que déclarer ; le propriétaire et les membres décident du r
 ### Ce qu’un plugin déclare
 
 - **Hooks** : les événements qu’il émet et leur payload (par exemple `message` avec
-  auteur, salon et fil). Son transport émet ces hooks ; les capacités `inbound` et
-  `conversations.submit` disparaissent. Cairn garde une file bornée par instance et
-  déduplique les événements, comme pour l’admission qu’il remplace.
+  auteur, salon et fil). Son transport émet ces hooks ; les capacités `inbound`,
+  `conversations.submit` et `conversations.control` disparaissent : les règles
+  répondent aux questions et arrêtent les conversations. Cairn garde une file bornée
+  par instance et déduplique les événements, comme pour l’admission qu’il remplace.
 - **Outils et commandes** : leur schéma d’entrée, comme aujourd’hui.
 - **Ressources** : ce sur quoi portent ses hooks et ses outils (serveurs, salons,
   fils, personnes, dépôts…), de quoi les lister, leur hiérarchie (un fil appartient à
-  un salon, qui appartient à un serveur) et les entrées d’outil et champs de payload
-  qui les désignent.
+  un salon, qui appartient à un serveur) et les entrées d’outil, arguments de commande
+  et champs de payload qui les désignent.
 - **Modèles de règles** : des ensembles de règles prêts à l’emploi (« Bot
   conversationnel », « Support »). Installer un modèle demande ses paramètres (agent,
   salon…) puis crée des règles ordinaires appartenant à celui qui l’installe, sans
@@ -58,18 +59,18 @@ d’abord puis émet le hook ; les règles, asynchrones, modifient ensuite ce qu
 
 Le propriétaire accorde à un agent, pour une instance, soit l’accès complet, sans
 limite et y compris ce qu’une version suivante du plugin ajoutera, soit ses
-contributions une par une. Une mise à jour du plugin qui ajoute des identifiants de
-run à un package dont l’agent a l’accès complet à plusieurs instances ne les lui donne
-que pour celle que le propriétaire choisit en la revoyant. Les outils, commandes et
-hooks accordés un par un peuvent être restreints à des ressources : `discord.post`
-seulement dans #support, le hook `message` seulement pour #support. Un droit sur une
-ressource couvre ses descendants (un salon couvre ses fils). Cairn applique la
-restriction avant le plugin, à chaque appel d’outil, et ne livre pas à une règle un
-événement dont la payload désigne une autre ressource. Une restriction porte sur un
-type de ressource et sur ses descendants : chaque ressource de ce type, ou d’un type
-descendant, que désigne l’entrée ou la payload doit se trouver sous une ressource
-couverte, d’après la hiérarchie que Cairn résout lui-même (un fil de #general est
-refusé quand seul
+contributions une par une. L’accès complet comprend les identifiants de run, sauf
+quand l’agent les reçoit déjà d’une autre instance du même package : le propriétaire
+choisit l’instance qui les donne, en accordant le droit ou en revoyant une mise à jour
+du plugin qui en ajoute. Les outils, commandes et hooks accordés un par un peuvent
+être restreints à des ressources : `discord.post` seulement dans #support, le hook
+`message` seulement pour #support. Un droit sur une ressource couvre ses descendants
+(un salon couvre ses fils). Cairn applique la restriction avant le plugin, à chaque
+appel d’outil ou de commande, et ne livre pas à une règle un événement dont la payload
+désigne une autre ressource. Une restriction porte sur un type de ressource et sur ses
+descendants : chaque ressource de ce type, ou d’un type descendant, que désigne
+l’entrée ou la payload doit se trouver sous une ressource couverte, d’après la
+hiérarchie que Cairn résout lui-même (un fil de #general est refusé quand seul
 #support est accordé). Les autres types restent libres : restreindre le hook `message`
 à #support n’empêche pas son auteur d’être n’importe qui. Une entrée ou une payload
 qui ne désigne aucune ressource identifiable d’un type restreint, ou des ressources
@@ -138,7 +139,8 @@ une règle qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l�
   [CEL](https://cel.dev) (Common Expression Language), complétée par des fonctions de
   Cairn (tronquer, découper en morceaux, formater une date…). Une formule est pure,
   sans effet de bord ni boucle, et son coût d’évaluation est borné.
-- **Actions** : démarrer un agent, orienter une conversation, appeler un outil,
+- **Actions** : démarrer un agent, orienter une conversation, appeler un outil de
+  plugin (jamais un outil de Cairn comme `cairn_installation` ou la délégation),
   annuler la conversation d’une clé, répondre à la question d’un agent, mémoriser une
   valeur, attendre puis reprendre (sept jours au plus, avec un nombre borné de
   déclenchements en attente par règle). Chaque action peut utiliser la payload et le
@@ -190,17 +192,17 @@ Une règle s’exécute avec l’autorité de son créateur, revérifiée à cha
 droit manquant pour une action la fait échouer. Seul le créateur modifie sa règle. Les
 autres membres la voient sans pouvoir la modifier ; ils peuvent la dupliquer s’ils ont
 tous les droits qu’elle utilise, le duplicata leur appartenant. Le propriétaire peut
-supprimer n’importe quelle règle. Comme les tâches
-([ADR-0029](0029-sharing-whole-installations.md)), une règle appartient à une
-adhésion, et un déclenchement exige une adhésion vérifiée récemment ; si elle ne peut
-pas l’être, il attend.
+supprimer n’importe quelle règle ; supprimer une règle arrête ses déclenchements en
+cours. Comme les tâches ([ADR-0029](0029-sharing-whole-installations.md)), une règle
+appartient à une adhésion, et un déclenchement exige une adhésion vérifiée récemment ;
+si elle ne peut pas l’être, il attend.
 
 Une règle ne se déclenche que si rien ne l’en empêche. Chaque empêchement se lève
 indépendamment des autres :
 
 | Empêchement | Cause | Levé par |
 | --- | --- | --- |
-| Désactivée | son créateur, ou une duplication (le duplicata démarre ainsi) | son créateur |
+| Désactivée | son créateur, ou une duplication (le duplicata démarre ainsi) ; arrête les déclenchements en cours | son créateur |
 | Pause d’urgence | le propriétaire ; arrête aussi les déclenchements en cours | le propriétaire |
 | Budget épuisé | un plafond horaire dépassé ; le créateur est prévenu | son créateur ou le propriétaire |
 | Droits perdus | le créateur perd l’accès à l’agent d’exécution, ou cet agent le hook de plugin écouté | le retour du droit, de lui-même |
@@ -208,16 +210,16 @@ indépendamment des autres :
 
 Un agent qui a l’accès à l’installation n’écrit des règles que dans un tour dont
 toutes les entrées viennent de personnes : des messages, orientations et réponses
-écrits sur le web, Android ou le MCP public, dans une conversation sans clé qui n’est
-ni une tâche (planifiée, lancée à la main ou déléguée) ni une mission. Dès qu’une
-autre entrée atteint le tour (une règle, un agent, `cairn_installation`, un réveil
-sans message), il ne peut plus en écrire. Il écrit alors au nom de l’auteur de la
-dernière de ces entrées : il crée des règles à son nom, et ne modifie, désactive,
-réactive ou supprime que les règles de cette personne. Il ne peut accorder de droits à
-aucun agent ni à aucun compte, ni toucher à la règle d’un autre compte, ni lever une
-pause d’urgence, ni réduire un droit dont dépend la règle active d’un autre compte.
-Une règle créée par le MCP public a pour créateur le propriétaire qui a autorisé ce
-client.
+écrits sur le web, Android ou le MCP public, toutes par le même compte, dans une
+conversation qu’aucune règle n’a démarrée ni atteinte et qui n’est ni une tâche
+(planifiée, lancée à la main ou déléguée) ni une mission. Dès qu’une autre entrée
+atteint le tour (une règle, un agent, `cairn_installation`, un réveil sans message),
+il ne peut plus en écrire. Il écrit alors au nom de ce compte : il crée des règles à
+son nom, et ne modifie, désactive, réactive ou supprime que les règles de ce compte.
+Il ne peut accorder de droits à aucun agent ni à aucun compte, ni toucher à la règle
+d’un autre compte, ni lever une pause d’urgence, ni réduire un droit dont dépend la
+règle active d’un autre compte. Une règle créée par le MCP public a pour créateur le
+propriétaire qui a autorisé ce client.
 
 Une règle n’atteint un agent dont la politique autorise l’exécution native, ou une
 conversation qui s’exécute en natif, que si son créateur détenait l’autorité native

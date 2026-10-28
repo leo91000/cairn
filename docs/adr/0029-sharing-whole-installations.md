@@ -1,4 +1,4 @@
-> Statut : remplacée en partie par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) pour le rôle de membre : un membre ne fait travailler, ne lance à la main et ne poursuit que les agents auxquels le propriétaire lui donne accès ; ses tâches planifiées sur un agent auquel il perd l’accès sont suspendues ; ses règles de hook appartiennent à son adhésion comme ses tâches.
+> Statut : remplacée en partie par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) pour le rôle de membre : un membre ne fait travailler, ne lance à la main et ne poursuit que les agents auxquels le propriétaire lui donne accès ; l’accès à l’agent de la conversation demandeuse suffit pour une tâche déléguée ; ses tâches planifiées sur un agent auquel il perd l’accès sont suspendues ; ses règles de hook appartiennent à son adhésion comme ses tâches.
 
 # Partage d’une installation entière, sans conversations privées
 

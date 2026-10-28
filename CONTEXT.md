@@ -169,7 +169,7 @@ Le choix d’un compte de retirer de « Pour vous » le résultat bloqué d’un
 _Avoid_ : archivage (qui retire la mission elle-même)
 
 **Auteur d’une tâche** :
-Le compte Cairn qui a créé une tâche. Le retrait de cet auteur met fin aux déclenchements planifiés de ses tâches, et la perte de son accès à l’agent d’une tâche les suspend ; leur travail reste partagé avec toute l’installation.
+Le compte Cairn qui a créé une tâche. Le retrait de cet auteur met fin aux lancements planifiés de ses tâches, et la perte de son accès à l’agent d’une tâche les suspend ; leur travail reste partagé avec toute l’installation.
 
 **Skill** :
 Un savoir-faire réutilisable que les agents appliquent : ses instructions et les fichiers qui les accompagnent (références, modèles, scripts, images). Une skill est globale ou propre à un projet ; une conversation ou une exécution reçoit les skills sélectionnées telles qu’elles étaient à sa création.
@@ -182,9 +182,8 @@ L’emplacement d’où une skill a été importée par la source de skills d’
 Une configuration d’un plugin par le propriétaire, par exemple un bot Discord, un
 compte de service 1Password ou un compte GitHub : ses réglages et ses secrets
 chiffrés. Les droits des agents sur l’instance, complets ou contribution par
-contribution, se
-choisissent sur la page de chaque agent, ou à la dernière étape de sa création, qui
-ne fait qu’ajouter des droits. Aucun agent n’est autorisé par défaut.
+contribution, se choisissent sur la page de chaque agent, ou à la dernière étape de
+sa création, qui ne fait qu’ajouter des droits. Aucun agent n’est autorisé par défaut.
 _Avoid_ : connexion (réservé aux comptes des agents de code)
 
 **Assistant de configuration d’un plugin** :
@@ -192,8 +191,8 @@ Les étapes que le propriétaire suit pour ajouter ou modifier une instance, dan
 l’ordre où chacune devient possible : ce qu’il crée d’abord chez le service (par
 exemple une app Google Cloud), les réglages, la connexion et les agents. Le catalogue
 annonce ce que la connexion demande : se connecter, coller un jeton ou créer sa propre
-app. Une étape partagée, comme le client OAuth d’une app,
-se configure une fois et se réutilise pour les instances suivantes du même plugin.
+app. Une étape partagée, comme le client OAuth d’une app, se configure une fois et se
+réutilise pour les instances suivantes du même plugin.
 _Avoid_ : wizard, onboarding
 
 **Contribution d’un plugin** :
@@ -270,7 +269,7 @@ Ce sur quoi portent les hooks et les outils d’un plugin, et que le plugin sait
 un serveur ou un salon Discord, une personne, un dépôt GitHub. Le droit d’un agent sur
 un outil, une commande ou un hook peut être limité à certaines ressources et à ce
 qu’elles contiennent.
-_Avoid_ : scope, portée, ressource seul (réservé aux ressources d’une node)
+_Avoid_ : scope, portée
 
 **Clé de conversation** :
 L’identifiant externe, tiré d’un hook, auquel une règle rattache une conversation, par
