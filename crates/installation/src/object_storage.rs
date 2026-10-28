@@ -1,5 +1,6 @@
 //! S3 operations stay server-side. Recovery blocks use a shared SDK client;
 //! bucket administration and purge operations use the AWS CLI.
+use crate::performance::publication::{self as diagnostic, Stage};
 use crate::{
     error::{Error, Result},
     service::Service,
@@ -600,7 +601,10 @@ impl Storage {
 
     pub async fn upload_bytes(&self, bytes: Vec<u8>, key: &str) -> Result<()> {
         let sample = self.hot.put_metrics.start();
+        let slot = diagnostic::start(Stage::PutSlot);
         let _permit = self.hot.writes.acquire().await.map_err(Error::internal)?;
+        slot.finish(0);
+        let client_sample = diagnostic::start(Stage::S3Client);
         let client = self
             .hot
             .client(
@@ -609,10 +613,14 @@ impl Storage {
                 self.credentials.as_ref(),
             )
             .await;
+        client_sample.finish(0);
         let bytes = bytes::Bytes::from(bytes);
         // MD5 detects transfer corruption; block identity and encryption retain
         // their existing cryptographic checks on recovery reads.
+        let checksum_sample = diagnostic::start(Stage::PutChecksum);
         let checksum = base64::engine::general_purpose::STANDARD.encode(Md5::digest(&bytes));
+        checksum_sample.finish(bytes.len());
+        let request_sample = diagnostic::start(Stage::PutRequest);
         client
             .put_object()
             .content_md5(checksum)
@@ -625,6 +633,7 @@ impl Storage {
             .map_err(|_| {
                 Error::unavailable("Recovery block upload failed; local data is retained.")
             })?;
+        request_sample.finish(bytes.len());
         sample.finish(bytes.len());
         Ok(())
     }
@@ -658,6 +667,7 @@ impl Storage {
                     pending
                 })
         };
+        let wait_sample = diagnostic::start(Stage::GetCoalesced);
         let result = pending
             .get_or_init(|| async { self.fetch_bytes(key, limit).await.map(bytes::Bytes::from) })
             .await
@@ -669,12 +679,18 @@ impl Storage {
         {
             reads.remove(&request);
         }
+        if let Ok(bytes) = &result {
+            wait_sample.finish(bytes.len());
+        }
         result.map(|bytes| bytes.to_vec())
     }
 
     async fn fetch_bytes(&self, key: &str, limit: u64) -> Result<Vec<u8>> {
         let sample = self.hot.get_metrics.start();
+        let slot = diagnostic::start(Stage::GetSlot);
         let _permit = self.hot.reads.acquire().await.map_err(Error::internal)?;
+        slot.finish(0);
+        let client_sample = diagnostic::start(Stage::S3Client);
         let client = self
             .hot
             .client(
@@ -683,7 +699,9 @@ impl Storage {
                 self.credentials.as_ref(),
             )
             .await;
+        client_sample.finish(0);
         let bytes = tokio::time::timeout(Duration::from_secs(60), async {
+            let headers = diagnostic::start(Stage::GetHeaders);
             let output = client
                 .get_object()
                 .bucket(&self.bucket)
@@ -691,6 +709,8 @@ impl Storage {
                 .send()
                 .await
                 .map_err(|error| read_error(&error))?;
+            headers.finish(0);
+            let body_sample = diagnostic::start(Stage::GetBody);
             if output
                 .content_length()
                 .is_some_and(|length| length < 0 || length as u64 > limit)
@@ -708,6 +728,7 @@ impl Storage {
                 }
                 bytes.extend_from_slice(&chunk);
             }
+            body_sample.finish(bytes.len());
             Ok(bytes)
         })
         .await
@@ -872,10 +893,19 @@ impl Storage {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    async fn fixture_storage(endpoint: &str, bucket: &str, hot: Arc<HotS3>) -> Storage {
+    pub(crate) async fn fixture_storage(endpoint: &str, bucket: &str, hot: Arc<HotS3>) -> Storage {
+        fixture_storage_at(endpoint, endpoint, bucket, hot).await
+    }
+
+    pub(crate) async fn fixture_storage_at(
+        endpoint: &str,
+        logical_endpoint: &str,
+        bucket: &str,
+        hot: Arc<HotS3>,
+    ) -> Storage {
         use aws_sdk_s3::config::{Credentials, Region, retry::RetryConfig};
 
         let sdk = aws_sdk_s3::Client::from_conf(
@@ -892,7 +922,7 @@ mod tests {
         );
         hot.clients.lock().await.insert(
             ClientKey {
-                endpoint: Some(endpoint.into()),
+                endpoint: Some(logical_endpoint.into()),
                 region: "us-east-1".into(),
                 environment_endpoint: std::env::var("AWS_ENDPOINT_URL_S3").ok(),
                 profile: std::env::var("AWS_PROFILE").ok(),
@@ -903,7 +933,7 @@ mod tests {
         Storage {
             bucket: bucket.into(),
             binary: "unused".into(),
-            endpoint: Some(endpoint.into()),
+            endpoint: Some(logical_endpoint.into()),
             region: "us-east-1".into(),
             credentials: None,
             integrated: false,
@@ -911,6 +941,56 @@ mod tests {
             server_side_encryption: Some(aws_sdk_s3::types::ServerSideEncryption::Aes256),
             hot,
         }
+    }
+
+    #[tokio::test]
+    async fn publication_diagnostics_record_real_slot_cancellation_and_later_put() {
+        use crate::config::id;
+        use crate::performance::publication::{Metrics, scope};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new().fallback(|| async { axum::http::StatusCode::OK });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let hot = Arc::new(HotS3::new());
+        let storage = fixture_storage(&endpoint, "fixture", hot.clone()).await;
+        let held = hot
+            .writes
+            .acquire_many(HOT_WRITE_CONCURRENCY as u32)
+            .await
+            .unwrap();
+        let metrics = Metrics::new(&id(), &id(), &id(), "manager");
+        let pending = storage.clone();
+        let caller = tokio::spawn(scope(Some(metrics.clone()), async move {
+            pending.upload_bytes(b"block".to_vec(), "fixture").await
+        }));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while metrics.snapshot()["stages"]["putSlot"]["inFlight"] != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            metrics.snapshot()["stages"]["putSlot"]["failedOrCancelled"],
+            1
+        );
+        assert_eq!(metrics.snapshot()["stages"]["putRequest"]["started"], 0);
+        drop(held);
+        scope(
+            Some(metrics.clone()),
+            storage.upload_bytes(b"block".to_vec(), "fixture"),
+        )
+        .await
+        .unwrap();
+        let value = metrics.snapshot();
+        assert_eq!(value["stages"]["putRequest"]["bytes"], 5);
+        assert_eq!(value["stages"]["putSlot"]["completed"], 1);
+        assert!(value["stages"]["putSlot"]["wallUsSum"].as_u64().unwrap() >= 15_000);
+        assert_eq!(hot.writes.available_permits(), HOT_WRITE_CONCURRENCY);
+        server.abort();
     }
 
     #[tokio::test]

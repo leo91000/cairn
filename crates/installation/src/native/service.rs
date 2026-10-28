@@ -1767,12 +1767,19 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             match (method.as_str(), *operation) {
                 ("DELETE", "discard") => {
                     tokio::fs::remove_dir_all(directory).await?;
+                    crate::performance::publication::discard_snapshot(snapshot);
                     json!({ "ok": true })
                 }
                 ("POST", "blocks" | "publication") => {
                     let value = input(request, snapshots::MAX_MANIFEST_BYTES).await?;
                     let hashes = serde_json::from_value(value["hashes"].clone())?;
-                    let (length, body) = snapshots::served_publication(&directory, hashes).await?;
+                    let diagnostic = value
+                        .get("diagnostic")
+                        .and_then(|value| serde_json::from_value(value.clone()).ok());
+                    let (length, body) = snapshots::served_publication_observed(
+                        &directory, hashes, diagnostic, snapshot,
+                    )
+                    .await?;
                     return Ok(([("content-length", length.to_string())], body).into_response());
                 }
                 ("GET", hash) => {
