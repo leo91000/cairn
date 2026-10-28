@@ -713,7 +713,7 @@ mod tests {
                 let pending = db.kv("chat-title-pending:chat")?.unwrap();
                 let mut newer = chat.clone();
                 newer["updatedAt"] = 2.into();
-                db.save_conversation_boundary(&newer)?;
+                newer = db.save_conversation_boundary(&newer)?;
                 assert!(!apply(db, &chat, &pending, "Old result")?);
                 assert_eq!(
                     db.conversation_boundary("chat")?.unwrap()["title"],
