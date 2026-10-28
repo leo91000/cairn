@@ -379,6 +379,7 @@ async fn block_where(
     hash: &str,
     available: impl Fn(u64) -> bool,
 ) -> Result<Vec<u8>> {
+    let metadata = diagnostic::start(Stage::NodeMetadata);
     if !valid_hash(hash) {
         return Err(Error::bad("Invalid block digest."));
     }
@@ -392,6 +393,8 @@ async fn block_where(
         .as_u64()
         .filter(|s| *s <= BLOCK)
         .ok_or_else(|| Error::bad("Invalid block size."))?;
+    metadata.finish(0);
+    let read = diagnostic::start(Stage::NodeLocalRead);
     let mut file = tokio::fs::File::open(path).await?;
     file.seek(std::io::SeekFrom::Start(
         block["offset"]
@@ -401,6 +404,7 @@ async fn block_where(
     .await?;
     let mut bytes = vec![0; size as usize];
     file.read_exact(&mut bytes).await?;
+    read.finish(bytes.len());
     if !crate::storage::digest::matches(hash, &bytes) {
         return Err(Error::conflict("Backup data changed."));
     }

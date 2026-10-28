@@ -1767,6 +1767,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             match (method.as_str(), *operation) {
                 ("DELETE", "discard") => {
                     tokio::fs::remove_dir_all(directory).await?;
+                    crate::performance::publication::discard_snapshot(snapshot);
                     json!({ "ok": true })
                 }
                 ("POST", "blocks" | "publication") => {

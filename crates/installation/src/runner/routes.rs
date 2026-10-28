@@ -195,6 +195,7 @@ async fn snapshot_file(
     let directory = broker.state.join("snapshots").join(snapshot);
     if request.method() == "DELETE" && hash == "discard" {
         tokio::fs::remove_dir_all(directory).await?;
+        crate::performance::publication::discard_snapshot(snapshot);
         return json_response(json!({ "ok": true }));
     }
     if request.method() == "POST" && matches!(hash, "blocks" | "publication") {

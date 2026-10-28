@@ -12,7 +12,8 @@ No disk content, hash, object key, path, endpoint, credential or grant is logged
 Each summary has a fixed set of stages. No per-block events or stored samples.
 The node aggregates successive batches under (attempt, run, snapshot), with at
 most 64 entries, ten minutes idle expiry checked on subsequent requests, and
-oldest-entry eviction. It logs at the final batch, on stream failure/drop, at most
+oldest-entry eviction. Snapshot discard also closes partial aggregates when the
+manager fails between successful batches. It logs at the final batch, on stream failure/drop, at most
 once per minute at intermediate batch boundaries, and on expiry/eviction. Partial
 entries can remain silently until the next request or process exit. Eviction or
 expiry produces a partial summary; later batches can start another segment with
@@ -58,6 +59,8 @@ observation, not proof of completion or a final byte total.
   from **both nesting and parallel execution**, not just parallel upload time.
   Neither the sum nor this overlap is an additive partition of phase wall time.
   The only partition is observed union plus unattributed time, separately per side.
+  Inclusive envelope coverage does not attribute all its internal work to child
+  stages; remaining reconstruction, copying and cache work stays in the envelope.
 
 | Stage | Meaning and byte unit |
 | --- | --- |
@@ -83,6 +86,8 @@ observation, not proof of completion or a final byte total.
 | `uploadBackpressure` | Producer blocked joining a PUT at the existing in-flight limit; bytes zero. |
 | `uploadDrain` | Final join of all started PUTs, including on error, before lock release; bytes zero. |
 | `nodeOpen` | Reader open/load, lease and journal/runtime coordination before headers; bytes zero. |
+| `nodeMetadata`, `nodeJournalLookup` | Captured manifest lookup/SQLite/JSON and journal index selection, including their existing locks; bytes zero. These expose producer coordination separately from payload reads/hashing. |
+| `nodeLocalRead` | Local snapshot block open/seek/read, or one journal record header/payload read pair, including buffer allocation; successful physical bytes read. Journal headers count here; hashes can count the same payload again. Cold journal recovery also reads headers within `nodeOpen`. |
 | `nodeProduce` | Inclusive reconstruction/read per block, with journal/base/cache work and integrity checks; plaintext bytes. |
 | `nodeBaseRequest`, `nodeRetryWait` | Each node-to-manager base request (including body/renewal) and retry sleep, separately; successful plaintext bytes / zero bytes. Failed responses count failed operations. |
 | `nodeCacheWait` | Wait for the existing same-block source coalescing lock; bytes zero. |
@@ -118,7 +123,8 @@ work. Summaries are bounded diagnostics, not a distributed profiler.
 `success` means transfer finished on the manager, or all requested plaintext was
 produced on the node; node success does not confirm network delivery or manifest
 commit. `error`, `cancelled`, `error_or_cancelled`, `progress`, `expired_partial`
-and `evicted_partial` preserve partial evidence. No summary survives process death.
+`evicted_partial` and `snapshot_discarded_partial` preserve partial evidence.
+No summary survives process death.
 The owned capture task still outlives an HTTP caller's cancellation, and started
 PUTs still drain on ordinary errors. No concurrency, cadence, timeout, format,
 durability or integrity policy changes.

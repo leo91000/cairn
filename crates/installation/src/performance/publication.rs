@@ -43,9 +43,12 @@ pub(crate) enum Stage {
     JournalHash,
     NodeIoAdmission,
     NodeOpenRetry,
+    NodeLocalRead,
+    NodeMetadata,
+    NodeJournalLookup,
 }
 
-const NAMES: [&str; 33] = [
+const NAMES: [&str; 36] = [
     "inventory",
     "nodeHeaders",
     "nodeBody",
@@ -79,6 +82,9 @@ const NAMES: [&str; 33] = [
     "journalHash",
     "nodeIoAdmission",
     "nodeOpenRetry",
+    "nodeLocalRead",
+    "nodeMetadata",
+    "nodeJournalLookup",
 ];
 
 #[derive(Default, Clone, Copy)]
@@ -461,6 +467,19 @@ pub(crate) fn restore_request(mut request: reqwest::RequestBuilder) -> reqwest::
     request
 }
 
+/// A manager can fail between successful batches. Snapshot discard closes that
+/// partial diagnostic without another RPC or retaining the entry until expiry.
+pub(crate) fn discard_snapshot(snapshot: &str) {
+    let mut entries = registry().lock().unwrap();
+    entries.retain(|entry| {
+        if entry.metrics.snapshot != snapshot {
+            return true;
+        }
+        entry.metrics.record("snapshot_discarded_partial");
+        false
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,6 +628,10 @@ mod node_tests {
         assert_eq!(value["stages"]["nodeProduce"]["completed"], 2);
         assert_eq!(value["stages"]["nodeProduce"]["bytes"], bytes.len());
         assert_eq!(value["stages"]["nodeOpen"]["completed"], 2);
+        assert_eq!(value["stages"]["nodeLocalRead"]["completed"], 2);
+        assert_eq!(value["stages"]["nodeLocalRead"]["bytes"], bytes.len());
+        assert_eq!(value["stages"]["nodeMetadata"]["completed"], 2);
+        assert_eq!(value["stages"]["journalHash"]["started"], 0);
         assert!(
             !registry()
                 .lock()
@@ -627,6 +650,35 @@ mod node_tests {
                 .unwrap()
                 .iter()
                 .any(|entry| entry.metrics.attempt == attempt)
+        );
+        let partial_attempt = crate::config::id();
+        let (_, body) = snapshots::served_publication_observed(
+            root.path(),
+            vec![manifest["blocks"][1]["hash"].as_str().unwrap().to_owned()],
+            Some(Request {
+                attempt: partial_attempt.clone(),
+                run: crate::config::id(),
+                final_batch: false,
+            }),
+            &snapshot,
+        )
+        .await
+        .unwrap();
+        assert_eq!(axum::body::to_bytes(body, 4096).await.unwrap().len(), 4096);
+        assert!(
+            registry()
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.metrics.attempt == partial_attempt)
+        );
+        discard_snapshot(&snapshot);
+        assert!(
+            !registry()
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.metrics.attempt == partial_attempt)
         );
         assert!(
             NodeSummary::begin(
@@ -794,6 +846,10 @@ mod journal_tests {
             stages["blockingQueue"]["completed"].as_u64().unwrap() >= 2,
             "{value}"
         );
+        assert_eq!(stages["nodeLocalRead"]["completed"], 1);
+        assert!(stages["nodeLocalRead"]["bytes"].as_u64().unwrap() > 4096);
+        assert_eq!(stages["nodeMetadata"]["completed"], 1);
+        assert_eq!(stages["nodeJournalLookup"]["completed"], 1);
         assert_eq!(stages["nodeProduce"]["completed"], 1);
         assert_eq!(stages["nodeProduce"]["bytes"], 4096);
         assert_eq!(stages["hash"]["completed"], 1);

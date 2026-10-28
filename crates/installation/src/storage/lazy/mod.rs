@@ -424,11 +424,15 @@ impl LazyDisk {
         let mut missing = vec![(0, bytes.len())];
         let manifest = self.base.lock().map_err(failure)?.clone();
         {
+            let lookup = crate::performance::publication::start(
+                crate::performance::publication::Stage::NodeJournalLookup,
+            );
             let records = self.journal.lock().map_err(failure)?.overlapping(
                 generation,
                 offset,
                 offset + bytes.len() as u64,
             );
+            lookup.finish(0);
             for record in records {
                 self.metrics
                     .journal_rows

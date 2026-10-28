@@ -40,11 +40,15 @@ pub(super) struct Record {
 
 impl Record {
     pub fn read(&self) -> io::Result<Vec<u8>> {
+        let sample = crate::performance::publication::start(
+            crate::performance::publication::Stage::NodeLocalRead,
+        );
         let mut actual = [0; HEADER];
         self.file.read_exact_at(&mut actual, self.position)?;
         let mut data = vec![0; (self.end - self.start) as usize];
         self.file
             .read_exact_at(&mut data, self.position + HEADER as u64)?;
+        sample.finish(actual.len() + data.len());
         if actual != self.header
             || digest(&actual[..48], &[]) != actual[48..80]
             || digest(&actual[..80], &data) != actual[80..]
