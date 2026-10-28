@@ -750,13 +750,10 @@ async fn native_agents_and_automatic_agents_can_hold_native_exclusive_grants() {
     owner
         .service
         .store
-        .put(
-            "nodes",
-            json!({
-                "id": desk, "name": "desk", "revoked": false,
-                "capabilities": { "backend": "native" }, "exclusiveReservations": true,
-            }),
-        )
+        .put_node_fixture(json!({
+            "id": desk, "name": "desk", "revoked": false,
+            "capabilities": { "backend": "native" }, "exclusiveReservations": true,
+        }))
         .await
         .unwrap();
     for backend in ["native", "auto"] {

@@ -364,16 +364,17 @@ async fn native_reservations_use_the_same_authorization_queue_and_revocation() {
     let f = Fixture::new().await;
     let mut node =
         f.s.store
-            .get("nodes", LOCAL_NODE_ID)
+            .node_boundary(LOCAL_NODE_ID)
             .await
             .unwrap()
             .unwrap();
     let mut local = node.clone();
     local["exclusiveReservations"] = false.into();
-    f.s.store.put("nodes", local).await.unwrap();
+    f.s.store.put_node_fixture(local).await.unwrap();
     node["id"] = NATIVE_NODE_ID.into();
+    node["local"] = false.into();
     node["capabilities"] = json!({ "backend": "native" });
-    f.s.store.put("nodes", node).await.unwrap();
+    f.s.store.put_node_fixture(node).await.unwrap();
     let agent =
         f.s.agent_fixture(
             json!({

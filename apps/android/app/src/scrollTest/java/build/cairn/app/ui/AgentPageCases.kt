@@ -885,7 +885,10 @@ abstract class AgentPageCases {
             val access =
                 fixture.saved.single().second["settings"]!!.jsonObject["access"]!!.jsonObject
             assertEquals(JsonPrimitive("native"), access["backend"])
-            assertEquals(JsonArray(listOf(JsonPrimitive("aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503"))), access["nodes"])
+            assertEquals(
+                JsonArray(listOf(JsonPrimitive("aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503"))),
+                access["nodes"],
+            )
             assertEquals(
                 JsonArray(listOf(JsonPrimitive("aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503"))),
                 fixture.saved.single().second["settings"]!!.jsonObject["exclusiveNodes"],
