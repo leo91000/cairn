@@ -888,7 +888,13 @@ test('the execution backend chooses which nodes an agent can be granted', async 
     },
   })
   expect(enrolled.ok()).toBe(true)
-  const native = (await enrolled.json()).nodeId as string
+  const nativeRegistration = await enrolled.json()
+  const native = nativeRegistration.nodeId as string
+  const heartbeat = await page.request.post(`${workspace.installationUrl}/internal/nodes/heartbeat`, {
+    headers: { authorization: `Bearer ${nativeRegistration.token}` },
+    data: { exclusiveReservations: true, runtimeId: 'development', nodeProtocol: 2 },
+  })
+  expect(heartbeat.ok()).toBe(true)
   const agent = await workspace.api('/api/agents', 'POST', { name: 'GPU renderer', access: { nodes: [vm] } })
   await page.goto(workspacePath(`/agents/${agent.id}?section=nodes`))
   await authenticateWorkspace(page)
@@ -913,7 +919,11 @@ test('the execution backend chooses which nodes an agent can be granted', async 
   await expect(nodes.getByRole('listitem', { name: 'Current runner' })).toHaveCount(0)
   const run = page.getByRole('switch', { name: 'Can run its conversations on native-box' })
   await expect(run).not.toBeChecked()
+  const exclusive = page.getByRole('switch', { name: 'Can reserve native-box exclusively' })
+  await expect(exclusive).toBeDisabled()
   await run.check()
+  await expect(exclusive).toBeEnabled()
+  await exclusive.check()
 
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
   const review = page.getByRole('dialog', { name: 'Review before saving' })
@@ -922,6 +932,7 @@ test('the execution backend chooses which nodes an agent can be granted', async 
   await expect(review).toHaveCount(0)
   const saved = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
   expect(saved.access).toMatchObject({ backend: 'native', nodes: [native] })
+  expect(saved.exclusiveNodes).toEqual([native])
   await page.getByRole('switch', { name: 'All nodes, including future' }).check()
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
   await expect(review).toHaveCount(0)

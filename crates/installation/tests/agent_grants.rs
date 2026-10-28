@@ -744,6 +744,33 @@ async fn grants_follow_the_agent_execution_backend() {
 }
 
 #[tokio::test]
+async fn native_agents_and_automatic_agents_can_hold_native_exclusive_grants() {
+    let owner = Owner::new().await;
+    let desk = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
+    owner
+        .service
+        .store
+        .put(
+            "nodes",
+            json!({
+                "id": desk, "name": "desk", "revoked": false,
+                "capabilities": { "backend": "native" }, "exclusiveReservations": true,
+            }),
+        )
+        .await
+        .unwrap();
+    for backend in ["native", "auto"] {
+        let mut agent = owner.create_agent(backend).await;
+        agent["access"]["backend"] = backend.into();
+        agent["access"]["nodes"] = json!([desk]);
+        agent["exclusiveNodes"] = json!([desk]);
+        let (status, saved) = owner.send("PUT", &path(&agent), agent).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["exclusiveNodes"], json!([desk]));
+    }
+}
+
+#[tokio::test]
 async fn an_incomplete_replacement_cannot_restore_a_concurrent_revocation() {
     let owner = Owner::new().await;
     let account = owner.add_service_account(json!([])).await;

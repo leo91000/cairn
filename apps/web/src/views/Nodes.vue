@@ -816,7 +816,7 @@ function statusLabel(node: ExecutionNode) {
           <p v-if="editing.exclusiveAgents?.length">
             {{ editing.exclusiveAgents.length }} can reserve it exclusively: {{ agentNames(editing.exclusiveAgents) }}
           </p>
-          <p v-if="!editing.exclusiveReservations && editing.capabilities.backend !== 'native'">
+          <p v-if="!editing.exclusiveReservations">
             This runtime needs an update before exclusive reservations can be acquired.
           </p>
           <p class="text-xs">

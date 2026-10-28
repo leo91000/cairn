@@ -1,5 +1,6 @@
 //! Attempt lifecycle on the VM controller.
 use super::{CONTROLLER_FAILED, CONTROLLER_INTERRUPTED};
+use crate::runner::exclusive::Reservations;
 use crate::{
     config::now,
     error::{Error, Result},

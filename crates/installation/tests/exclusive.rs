@@ -351,3 +351,65 @@ async fn nonblocking_requests_remain_queued_until_their_independent_acquisition_
         .await;
     assert_eq!(f.remote.lock().await["reservation"]["id"], queued["id"]);
 }
+
+#[tokio::test]
+async fn native_reservations_use_the_same_authorization_queue_and_revocation() {
+    let f = Fixture::new().await;
+    let agent =
+        f.s.agent_fixture(
+            json!({
+                "access": { "backend": "native", "nodes": [LOCAL_NODE_ID] },
+                "exclusiveNodes": [LOCAL_NODE_ID],
+            }),
+            Some(MAIN_AGENT_ID),
+        )
+        .await
+        .unwrap();
+    let mut node =
+        f.s.store
+            .get("nodes", LOCAL_NODE_ID)
+            .await
+            .unwrap()
+            .unwrap();
+    node["capabilities"] = json!({ "backend": "native" });
+    f.s.store.put("nodes", node).await.unwrap();
+    f.s.store
+        .transaction({
+            let run = f.run.clone();
+            move |db| {
+                common::run_fixture::change_run_fixture(
+                    db,
+                    &run,
+                    &json!({
+                        "executionBackend": "native", "snapshot": { "agent": agent },
+                    }),
+                )
+            }
+        })
+        .await
+        .unwrap();
+    let mut checkpoint =
+        f.s.store
+            .checkpoint_boundary(&f.run)
+            .await
+            .unwrap()
+            .unwrap();
+    checkpoint["prepared"]["backend"] = "native".into();
+    f.s.store
+        .save_checkpoint_boundary(&f.run, checkpoint)
+        .await
+        .unwrap();
+    let acquired = exclusive::acquire(&f.s, &f.token, &request())
+        .await
+        .unwrap();
+    assert_eq!(acquired["state"], "acquired");
+    f.s.agent_fixture(json!({ "exclusiveNodes": [] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
+    f.until(|record| record["state"] == "released").await;
+    assert!(
+        exclusive::acquire(&f.s, &f.token, &request())
+            .await
+            .is_err()
+    );
+}

@@ -1,5 +1,10 @@
 //! Native implementation of the existing authenticated node controller protocol.
+mod exclusive;
+#[cfg(test)]
+mod exclusive_tests;
+
 use super::{atomic_write, block, disk, mode, systemd, workspace};
+use crate::runner::exclusive::{Ledger, Reservations};
 use crate::{
     error::{Error, Result},
     microvm::{plan::Plan, protocol::Event, wire},
@@ -121,6 +126,7 @@ struct Attempt {
     stop: CancellationToken,
     started: bool,
     protection: Option<tokio::task::JoinHandle<()>>,
+    suspension: Arc<super::suspension::Suspension>,
 }
 
 #[derive(Clone)]
@@ -132,6 +138,7 @@ struct Controller {
     mounted: Arc<Mutex<HashMap<String, Arc<block::Handle>>>>,
     leases: Arc<Mutex<HashMap<String, u64>>>,
     admission: Arc<Mutex<()>>,
+    exclusive: Arc<Mutex<Ledger>>,
     base_warmer: Arc<super::bases_warmer::Warmer>,
     budget: Arc<Mutex<Value>>,
     storage_policy: crate::storage::policy::Control,
@@ -343,6 +350,7 @@ impl Controller {
 
     async fn start(&self, id: &str) -> Result<()> {
         let _admission = self.admission.lock().await;
+        self.allow_exclusive_admission(id).await?;
         if self.active.lock().await.contains_key(id) {
             return Ok(());
         }
@@ -389,6 +397,7 @@ impl Controller {
                 stop: stop.clone(),
                 started: false,
                 protection: None,
+                suspension: Arc::new(super::suspension::Suspension::new(&self.state, id)),
             },
         );
         self.capacity.lock().await.register(
@@ -488,6 +497,18 @@ impl Controller {
             drop(owner);
             let _ = atomic_write(&controller.file(&id, "exit"), code.to_string().as_bytes()).await;
             let _ = tokio::fs::remove_file(controller.file(&id, "active")).await;
+            let suspension = controller
+                .active
+                .lock()
+                .await
+                .get(&id)
+                .map(|attempt| attempt.suspension.clone());
+            if let Some(suspension) = suspension {
+                while let Err(error) = suspension.finish().await {
+                    tracing::error!(%error, "Native suspension accounting must finish before reporting completion");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
             controller.active.lock().await.remove(&id);
             controller.capacity.lock().await.attempts.remove(&id);
             controller.leases.lock().await.remove(&id);
@@ -649,14 +670,21 @@ impl Controller {
         }
     }
 
+    async fn expired(&self, id: &str, expires: Option<i64>) -> bool {
+        if expires.is_none() {
+            return false;
+        }
+        let paused = self.administrative_ms(id).await.unwrap_or(0);
+        expires.is_some_and(|until| {
+            crate::config::now() >= until.saturating_add(i64::try_from(paused).unwrap_or(i64::MAX))
+        })
+    }
+
     async fn cancellation_reason(&self, id: &str, plan: &Value) -> &'static str {
         if self.stop.is_cancelled() {
             return "controller_shutdown";
         }
-        if plan["expires"]
-            .as_i64()
-            .is_some_and(|until| crate::config::now() >= until)
-        {
+        if self.expired(id, plan["expires"].as_i64()).await {
             return "time_limit";
         }
         if !self.leased(id).await {
@@ -930,12 +958,24 @@ impl Controller {
             .get(text(&plan, "runId"))
             .cloned()
             .ok_or_else(|| Error::internal("Native disk ownership missing."))?;
+        let suspension = self
+            .active
+            .lock()
+            .await
+            .get(id)
+            .ok_or_else(|| Error::conflict("Native execution stopped during launch."))?
+            .suspension
+            .clone();
         let (protection_id, protection_stop) = (id.to_owned(), stop.clone());
         let protection_controller = self.clone();
         let protection = tokio::spawn(async move {
-            if let Err(error) =
-                super::protection::monitor(mounted.volume.clone(), &protection_id, storage_stop)
-                    .await
+            if let Err(error) = super::protection::monitor(
+                mounted.volume.clone(),
+                &protection_id,
+                suspension,
+                storage_stop,
+            )
+            .await
             {
                 tracing::error!(attempt = protection_id, %error, "Native storage CPU protection failed; fencing workload");
                 protection_controller
@@ -975,9 +1015,7 @@ impl Controller {
                 }
                 _ = timer.tick() => {
                     let leased = self.leased(id).await;
-                    let expired = plan["expires"]
-                        .as_i64()
-                        .is_some_and(|until| crate::config::now() >= until);
+                    let expired = self.expired(id, plan["expires"].as_i64()).await;
                     let workspace_bytes = block::used_bytes(&data)?;
                     let temporary_bytes = disk::bytes_if_present(&temporary).await?;
                     let conversation_bytes = workspace_bytes.saturating_add(temporary_bytes);
@@ -1254,7 +1292,7 @@ impl Controller {
             Some(attempt.expires)
         });
         if let Some(expires) = requested {
-            let reason = if expires.is_some_and(|until| crate::config::now() >= until) {
+            let reason = if self.expired(id, expires).await {
                 "time_limit"
             } else {
                 "cancelled"
@@ -1467,7 +1505,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             "dataRoot": controller.data, "capabilities": capabilities,
             "nativeMode": controller.mode.lock().await.clone(),
             "pool": { "capacity": budget["slots"] }, "activeRuns": controller.active.lock().await.len(),
-            "sharedResources": true, "exclusiveReservations": false, "budget": budget,
+            "sharedResources": true, "exclusiveReservations": true, "budget": budget,
             "usage": usage, "pressure": null, "diskGrowth": disk_growth,
             "storagePolicy": controller.storage_policy.current().await
         })).into_response());
@@ -1591,9 +1629,19 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             uuid(id)?;
             return Ok(controller.wait(id));
         }
+        ("GET", ["exclusive"]) => controller.inspect_exclusive().await?,
+        ("POST", ["exclusive", "acquire"]) => {
+            controller
+                .acquire_exclusive(serde_json::from_value(input(request, 16384).await?)?)
+                .await?
+        }
+        ("POST", ["exclusive", "release"]) => {
+            controller
+                .release_exclusive(serde_json::from_value(input(request, 16384).await?)?)
+                .await?
+        }
         ("GET", ["runs", id, "administrative-pause"]) => {
-            uuid(id)?;
-            json!({ "paused": false, "administrativePausedMs": 0 })
+            controller.administrative_pause(id).await?
         }
         ("GET", ["runs", id, "logs"]) => {
             uuid(id)?;
@@ -2055,6 +2103,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     block::recover_host_mounts(&state).await?;
     for (attempt, _, _) in &interrupted {
         systemd::stop(attempt).await?;
+        super::suspension::recover(&state, attempt).await?;
     }
 
     {
@@ -2095,6 +2144,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         mounted: Arc::default(),
         leases: Arc::default(),
         admission: Arc::default(),
+        exclusive: Arc::default(),
         base_warmer: Arc::default(),
         budget: Arc::new(Mutex::new(budget)),
         mode: Arc::new(Mutex::new(mode)),
@@ -2103,6 +2153,8 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         stop: stop.clone(),
         identity,
     };
+    controller.recover_exclusive().await?;
+    let exclusive_monitor = tokio::spawn(controller.clone().monitor_exclusive());
     let socket = controller.state.join("controller.sock");
     let listener = bind_controller(&socket).await?;
     let router = Router::new()
@@ -2125,6 +2177,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     while !controller.active.lock().await.is_empty() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    exclusive_monitor.await.map_err(Error::internal)?;
     controller.base_warmer.wait_idle().await;
     match result {
         Some(result) => result.map_err(Error::internal)??,
@@ -2280,7 +2333,7 @@ mod tests {
         assert!(readable);
     }
 
-    async fn fixture() -> (tempfile::TempDir, Controller) {
+    pub(super) async fn fixture() -> (tempfile::TempDir, Controller) {
         let root = tempfile::tempdir().unwrap();
         let data = root.path().join("data");
         let state = root.path().join("state");
@@ -2301,6 +2354,7 @@ mod tests {
             mounted: Arc::default(),
             leases: Arc::default(),
             admission: Arc::default(),
+            exclusive: Arc::default(),
             base_warmer: Arc::default(),
             mode: Arc::new(Mutex::new(
                 json!({ "mode": "protected", "generation": null, "status": "applied" }),
@@ -2894,6 +2948,10 @@ mod tests {
                 stop: CancellationToken::new(),
                 started: true,
                 protection: None,
+                suspension: Arc::new(super::super::suspension::Suspension::new(
+                    &controller.state,
+                    &attempt,
+                )),
             },
         );
         atomic_write(&controller.file(&attempt, "exit"), b"17")
@@ -2948,6 +3006,10 @@ mod tests {
                 stop: CancellationToken::new(),
                 started: true,
                 protection: None,
+                suspension: Arc::new(super::super::suspension::Suspension::new(
+                    &controller.state,
+                    &attempt,
+                )),
             },
         );
         let log = controller.file(&attempt, "log");
@@ -3059,6 +3121,10 @@ mod tests {
                 stop: CancellationToken::new(),
                 started: true,
                 protection: None,
+                suspension: Arc::new(super::super::suspension::Suspension::new(
+                    &controller.state,
+                    &attempt,
+                )),
             },
         );
         (fixture, controller, run, attempt, environment)
@@ -3380,17 +3446,24 @@ mod tests {
     #[tokio::test]
     async fn private_controller_routes_require_the_node_credential() {
         let (_root, controller) = fixture().await;
-        let response = route(
-            controller,
-            Request::builder()
-                .method("POST")
-                .uri("/node-budget")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(response.status, 401);
+        for (method, path) in [
+            ("POST", "/node-budget"),
+            ("GET", "/exclusive"),
+            ("POST", "/exclusive/acquire"),
+            ("POST", "/exclusive/release"),
+        ] {
+            let response = route(
+                controller.clone(),
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(response.status, 401);
+        }
     }
 
     #[tokio::test]
@@ -3576,6 +3649,10 @@ mod tests {
                     stop: CancellationToken::new(),
                     started: true,
                     protection: None,
+                    suspension: Arc::new(super::super::suspension::Suspension::new(
+                        &controller.state,
+                        &attempt,
+                    )),
                 },
             );
         }
@@ -3590,6 +3667,10 @@ mod tests {
                 stop: CancellationToken::new(),
                 started: true,
                 protection: None,
+                suspension: Arc::new(super::super::suspension::Suspension::new(
+                    &controller.state,
+                    &attempt,
+                )),
             },
         );
         assert_eq!(controller.start(&attempt).await.unwrap_err().status, 503);

@@ -376,3 +376,12 @@ An explicit owner may adopt the existing conversation into their native grant;
 installation agents retain their bounded parent grant. Web and Android expose the
 same confirmed operation from execution-node details. See
 [the migration decision](adr/0054-explicit-conversation-backend-migration.md).
+
+Native nodes can report `exclusiveReservations: true` after a runtime update.
+Both public management MCP and `cairn_installation` expose the same native node
+capability and agent `exclusiveNodes` grants. Only the owner can add those grants;
+installation agents retain the existing refusal for sensitive permission expansion.
+Run-scoped workspace tools (`acquire_exclusive`, `exclusive_status`,
+`renew_exclusive`, `release_exclusive`) now support matching native executions too.
+Native reservations freeze other Cairn workload cgroups and preserve storage
+suspensions. They do not release GPU allocations or stop external host applications.
