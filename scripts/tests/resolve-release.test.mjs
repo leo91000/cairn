@@ -98,9 +98,28 @@ describe('release validation reuse', () => {
   it('trusts this workflow on main or on a pull request from this repository', () => {
     expect(trustedRun(mainRun, config)).toBe(true)
     expect(trustedRun(pullRequestRun, config)).toBe(true)
+    expect(trustedRun({ ...mainRun, event: 'schedule' }, config)).toBe(true)
+    expect(trustedRun({ ...mainRun, event: 'schedule', head_branch: 'other' }, config)).toBe(false)
+    expect(trustedRun({ ...mainRun, path: '.github/workflows/pr.yaml' }, config)).toBe(false)
     for (const mutation of [{ event: 'workflow_dispatch' }, { head_branch: 'other' }, { head_repository: { full_name: 'other/repo' } }, { path: '.github/workflows/other.yaml' }])
       expect(trustedRun({ ...mainRun, ...mutation }, config)).toBe(false)
     expect(trustedRun({ ...pullRequestRun, head_repository: { full_name: 'fork/cairn-installation' } }, config)).toBe(false)
+  })
+
+  it('waits for nightly qualification of the exact commit and reuses its paired images', async () => {
+    const nightly = { ...mainRun, event: 'schedule' }
+    let polls = 0
+    const finished = () => polls > 0
+    const result = await resolveRelease(config, {
+      gh: github({
+        runs: () => finished() ? [nightly] : [],
+        evidence: { [nightly.id]: evidenceFor(nightly, config.commit) },
+        mainRuns: () => [{ ...nightly, status: finished() ? 'completed' : 'in_progress' }],
+      }),
+      sleep: async () => { polls++ },
+    })
+    expect(polls).toBe(1)
+    expect(result).toMatchObject({ digest, beaconDigest, runId: nightly.id })
   })
 
   it('requires the beacon digest alongside the installation before reusing a release', () => {

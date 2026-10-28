@@ -1,3 +1,8 @@
+> Current policy: PRs run targeted unit/lint checks; full device, release and
+> publication qualification runs nightly, manually and on version tags. Local
+> validation before merge is mandatory; see [PR validation](../../docs/agents/pr-validation.md).
+> The entries below are historical validation records.
+
 # Android 0.39.2 — inverted infinite history scroll
 
 `HistoryPagingCases` (Robolectric and Android 16) prepends real pages to the production lazy list

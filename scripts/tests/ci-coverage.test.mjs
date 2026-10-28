@@ -4,8 +4,28 @@ import { parse } from 'yaml'
 
 const quality = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
 const android = parse(readFileSync(new URL('../../.github/workflows/android.yaml', import.meta.url), 'utf8'))
+const pr = parse(readFileSync(new URL('../../.github/workflows/pr.yaml', import.meta.url), 'utf8'))
 
 describe('parallel CI coverage', () => {
+  it('keeps full qualification off PRs and branch pushes while preserving nightly and tag checks', () => {
+    for (const workflow of [quality, android]) {
+      expect(workflow.on.pull_request).toBeUndefined()
+      expect(workflow.on.push).toEqual({ tags: ['v*'] })
+      expect(workflow.on.schedule).toHaveLength(1)
+      expect(workflow.on.workflow_dispatch).toBeDefined()
+    }
+
+    expect(Object.keys(pr.on).sort()).toEqual(['pull_request', 'push'])
+    expect(pr.on.push.branches).toEqual(['main'])
+    expect(pr.jobs.required.if).toBe('always()')
+    expect(pr.jobs.required.needs).toEqual(['scope', 'quality', 'contracts', 'android'])
+    expect(pr.jobs.quality.steps.some(step => step.run === 'pnpm validate:pr quality')).toBe(true)
+    expect(pr.jobs.contracts.steps.some(step => step.run === 'pnpm validate:pr contracts')).toBe(true)
+    expect(pr.jobs.android.steps.some(step => step.run === 'pnpm validate:pr android')).toBe(true)
+    expect(quality.jobs.quality.steps.some(step => step.run === 'pnpm validate:pr quality')).toBe(true)
+    expect(quality.jobs.quality.steps.some(step => step.run === 'pnpm validate:pr contracts')).toBe(true)
+  })
+
   it('keeps every split validation in the image publication gate', () => {
     for (const name of ['build', 'quality', 'rust-check', 'backend', 'node-checks', 'browser', 'network-bench', 'native-runtime', 'android-direct-build', 'android-direct', 'image', 'beacon-image']) {
       expect(quality.jobs.publish.needs).toContain(name)
