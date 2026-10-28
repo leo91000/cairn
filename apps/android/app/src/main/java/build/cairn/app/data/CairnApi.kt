@@ -185,6 +185,7 @@ class CairnApi(
 
     internal val streamLock = Any()
     private var nativeDirect: NativeDirect? = null
+    internal var directDiagnostic: ((String) -> Unit)? = null
 
     fun startDirect(context: android.content.Context) =
         synchronized(streamLock) {

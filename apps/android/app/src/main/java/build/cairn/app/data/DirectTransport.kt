@@ -113,6 +113,7 @@ class DirectTransport(private val installationId: String?, private val switched:
                 if (current.get() === channel) observed.value = "direct"
                 return response
             } catch (error: IOException) {
+                channel.diagnostic?.invoke("request-error:${error.javaClass.simpleName}")
                 if (error is DirectLost) channel.close()
                 val transportFailure =
                     error is DirectLost || error is DirectNotSent || error is DirectRequestTimeout
@@ -209,6 +210,7 @@ class DirectChannel(
 
     private val pending = ConcurrentHashMap<String, Exchange>()
     internal var onClosed: () -> Unit = {}
+    internal var diagnostic: ((String) -> Unit)? = null
     internal var onProtocolMismatch: (ProtocolMismatch) -> Unit = {}
     private val closed = AtomicBoolean()
     private val transfers = AtomicInteger()
@@ -237,7 +239,8 @@ class DirectChannel(
             } catch (error: ProtocolMismatch) {
                 onProtocolMismatch(error)
                 close(error)
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                diagnostic?.invoke("decode-error:${error.javaClass.simpleName}")
                 // Malformed wire data keeps the existing connection-loss recovery rules.
                 close()
             }
@@ -246,6 +249,7 @@ class DirectChannel(
 
     fun close(reason: IOException = DirectLost("Connexion directe interrompue")) {
         if (!closed.compareAndSet(false, true)) return
+        diagnostic?.invoke("channel-close:${reason.javaClass.simpleName}")
         pending.values.forEach {
             it.failure = reason
         }

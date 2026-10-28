@@ -88,6 +88,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
         }
 
     private fun networkChanged(next: Network?) {
+        api.directDiagnostic?.invoke("network-changed:available=${next != null}")
         network = next
         synchronized(retry) {
             generation.incrementAndGet()
@@ -116,6 +117,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                 return@launch
             }
             ProcessLifecycleOwner.get().lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                api.directDiagnostic?.invoke("foreground")
                 if (manager.activeNetwork != network) networkChanged(manager.activeNetwork)
                 manager.registerDefaultNetworkCallback(callback)
                 try {
@@ -166,6 +168,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                         }
                     }
                 } finally {
+                    api.directDiagnostic?.invoke("background")
                     manager.unregisterNetworkCallback(callback)
                 }
             }
@@ -205,6 +208,10 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
         private var fingerprint = ""
 
         fun fail(error: Exception? = null) {
+            if (!failed.isCompleted)
+                api.directDiagnostic?.invoke(
+                    "attempt-fail:${error?.javaClass?.simpleName ?: "unspecified"}"
+                )
             // Renewal unavailability belongs to this network generation, even if a newer
             // default network was observed while the HTTP request was in flight.
             if (error is Unavailable) unavailableAt.set(attemptGeneration)
@@ -231,6 +238,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                         override fun onIceConnectionChange(
                             state: PeerConnection.IceConnectionState
                         ) {
+                            api.directDiagnostic?.invoke("ice-state:$state")
                             iceGrace.changed(
                                 disconnected =
                                     state == PeerConnection.IceConnectionState.DISCONNECTED,
@@ -283,7 +291,10 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                                 System.currentTimeMillis() < expires.get()
                         },
                     )
-                    .also { it.onProtocolMismatch = { error -> rememberDenial(error) } }
+                    .also {
+                        it.onProtocolMismatch = { error -> rememberDenial(error) }
+                        it.diagnostic = { event -> api.directDiagnostic?.invoke(event) }
+                    }
             data
                 .get()!!
                 .registerObserver(
@@ -297,6 +308,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                             // writes/disposal.
                             workers.launch {
                                 val state = synchronized(dataLock) { data.get()?.state() }
+                                api.directDiagnostic?.invoke("data-state:$state")
                                 when (state) {
                                     DataChannel.State.OPEN -> {
                                         if (
@@ -411,6 +423,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
             workers.launch {
                 while (isActive && !failed.isCompleted) {
                     if (System.currentTimeMillis() >= expires.get()) {
+                        api.directDiagnostic?.invoke("grant-expired")
                         fail()
                         break
                     }
@@ -463,6 +476,9 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
             )
             val deadline = claims["expires_at"]!!.jsonPrimitive.long * 1000
             require(deadline > System.currentTimeMillis())
+            api.directDiagnostic?.invoke(
+                "grant-update:remainingMs=${deadline - System.currentTimeMillis()}:advanced=${deadline > previousDeadline}"
+            )
             if (deadline <= previousDeadline) return false
             expires.set(deadline)
             return true
@@ -558,6 +574,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
+                api.directDiagnostic?.invoke("signal-error:${error.javaClass.simpleName}")
                 rememberDenial(error)
             } finally {
                 fail()

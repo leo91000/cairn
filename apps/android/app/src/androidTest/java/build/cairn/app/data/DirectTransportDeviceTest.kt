@@ -6,6 +6,7 @@ import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
+import android.os.Bundle
 import androidx.activity.compose.LocalActivity
 import androidx.compose.runtime.*
 import androidx.compose.ui.test.*
@@ -20,6 +21,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onEach
@@ -60,6 +62,20 @@ class DirectTransportDeviceTest {
             }
         // Observe control acknowledgement without retaining SDP, IDs, headers or credentials.
         val control = ConcurrentLinkedQueue<String>()
+        val diagnosticStarted = System.nanoTime()
+        val diagnosticCount = AtomicInteger()
+        val diagnosticPhase = AtomicReference("startup")
+        fun trace(source: String, event: String) {
+            if (diagnosticCount.incrementAndGet() > 150) return
+            val elapsed = (System.nanoTime() - diagnosticStarted) / 1_000_000
+            val message =
+                "[DIRECT-DIAG] ms=$elapsed phase=${diagnosticPhase.get()} source=$source event=$event authorize=${control.count { it == "authorize:200" }} renew=${control.count { it == "renew:200" }}"
+            instrumentation.sendStatus(0, Bundle().apply { putString("stream", "$message\n") })
+        }
+        fun phase(name: String) {
+            diagnosticPhase.set(name)
+            trace("test", name)
+        }
         val initialExpiry = AtomicLong()
         val refusedPeers = ConcurrentHashMap.newKeySet<String>()
         val refusedCandidates = AtomicInteger()
@@ -87,7 +103,12 @@ class DirectTransportDeviceTest {
                                 .build()
                         }
                     }
-                    chain.proceed(request)
+                    val response = chain.proceed(request)
+                    if (request.url.encodedPath.endsWith("/messages")) {
+                        val direct = response.request.tag(DirectChannel::class.java) != null
+                        trace("primary-http", "messages-response:${response.code}:direct=$direct")
+                    }
+                    response
                 }
                 .addNetworkInterceptor { chain ->
                     val response = chain.proceed(chain.request())
@@ -145,6 +166,11 @@ class DirectTransportDeviceTest {
         val api =
             CairnApi(origin, vault, client, configuration["installation"]!!.jsonPrimitive.content)
         api.csrf = configuration["csrf"]!!.jsonPrimitive.content
+        api.directDiagnostic = { trace("primary-native", it) }
+        val routeTrace =
+            launch(Dispatchers.Default) {
+                api.transport.route.collect { trace("primary-route", it) }
+            }
         var directReads = 0
         var ui = false
         var renewed = false
@@ -183,6 +209,7 @@ class DirectTransportDeviceTest {
             }
         }
         try {
+            phase("initial-read")
             read()
             assertEquals("relay", api.transport.route.value)
             api.startDirect(context)
@@ -199,6 +226,7 @@ class DirectTransportDeviceTest {
                 assertEquals(0, directReads)
             } else {
                 awaitDirect()
+                phase("initial-direct")
                 if (scenario == "same-lan") assertTrue(refusedCandidates.get() > 0)
                 primaryRoute = api.transport.route.value
                 assertTrue(control.contains("authorize:200"))
@@ -244,6 +272,7 @@ class DirectTransportDeviceTest {
                 }
 
                 if (scenario == "same-lan") {
+                    phase("background-load")
                     val authorizations = control.count { it == "authorize:200" }
                     val inFlight =
                         List(8) {
@@ -274,6 +303,8 @@ class DirectTransportDeviceTest {
                     awaitDirect()
                     assertTrue(control.count { it == "authorize:200" } > authorizations)
 
+                    phase("resumed-direct")
+
                     // A real foreground transition must retain the capacity-error deadline.
                     val capacityAttempts = AtomicInteger()
                     val rejectedAt = AtomicLong()
@@ -300,6 +331,8 @@ class DirectTransportDeviceTest {
                             .build()
                     val capacity = CairnApi(origin, vault, capacityClient, api.installationId)
                     capacity.csrf = api.csrf
+                    capacity.directDiagnostic = { trace("capacity-native", it) }
+                    phase("capacity-probe")
                     try {
                         capacity.startDirect(context)
                         withTimeout(10000) { while (capacityAttempts.get() == 0) delay(100) }
@@ -336,6 +369,8 @@ class DirectTransportDeviceTest {
                         capacity.closeStreams()
                     }
                     awaitDirect()
+
+                    phase("capacity-complete")
 
                     // Keep authorization/DTLS real. Shorten only the client's scheduling input
                     // so a real acknowledged renewal can return the unavailable control fixture.
@@ -394,6 +429,8 @@ class DirectTransportDeviceTest {
                             .build()
                     val renewal = CairnApi(origin, vault, renewalClient, api.installationId)
                     renewal.csrf = api.csrf
+                    renewal.directDiagnostic = { trace("renewal-native", it) }
+                    phase("renewal-probe")
                     try {
                         renewal.startDirect(context)
                         withTimeout(10000) {
@@ -422,7 +459,9 @@ class DirectTransportDeviceTest {
                         renewal.closeStreams()
                     }
 
+                    phase("renewal-complete")
                     for (status in listOf(200, 401, 403)) {
+                        phase("control-probe-$status")
                         val attempts = AtomicInteger()
                         val unavailableClient =
                             client
@@ -448,6 +487,7 @@ class DirectTransportDeviceTest {
                                 .build()
                         val probe = CairnApi(origin, vault, unavailableClient, api.installationId)
                         probe.csrf = api.csrf
+                        probe.directDiagnostic = { trace("control-$status-native", it) }
                         try {
                             probe.startDirect(context)
                             withTimeout(10000) { while (attempts.get() == 0) delay(100) }
@@ -464,6 +504,8 @@ class DirectTransportDeviceTest {
                         }
                     }
                     suspendedControl = true
+                    phase("before-large-request")
+                    trace("primary-route", api.transport.route.value)
                     val largeRequest = runCatching {
                         api.request(
                             "POST",
@@ -475,6 +517,8 @@ class DirectTransportDeviceTest {
                         )
                     }
                         .exceptionOrNull()
+                    phase("after-large-request")
+                    trace("primary-route", api.transport.route.value)
                     assertEquals(
                         "The real router retains its 150 kB JSON body limit",
                         413,
@@ -567,6 +611,8 @@ class DirectTransportDeviceTest {
                         .toString()
                 )
         } finally {
+            phase("finished")
+            routeTrace.cancelAndJoin()
             api.closeStreams()
             if (scenario == "network-change") shell("svc wifi enable")
         }
