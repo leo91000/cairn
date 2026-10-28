@@ -2,7 +2,7 @@
 
 Date : 2026-10-28.
 
-Cette décision remplace la délégation externe d’[ADR-0038](0038-luau-installation-plugins-and-external-bot-delegation.md), d’[ADR-0045](0045-declarative-plugin-contributions.md), d’[ADR-0046](0046-plugin-transports-and-forms-in-luau.md), d’[ADR-0057](0057-guided-plugin-setup.md), d’[ADR-0059](0059-delegated-tasks.md) et d’[ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) ; remplace les droits par instance d’[ADR-0045](0045-declarative-plugin-contributions.md) et d’[ADR-0051](0051-agent-centric-permissions.md) et les rôles d’[ADR-0029](0029-sharing-whole-installations.md) ; précise [ADR-0064](0064-opt-in-installation-tools-for-agents.md).
+Cette décision remplace la délégation externe d’[ADR-0038](0038-luau-installation-plugins-and-external-bot-delegation.md), d’[ADR-0045](0045-declarative-plugin-contributions.md), d’[ADR-0046](0046-plugin-transports-and-forms-in-luau.md), d’[ADR-0057](0057-guided-plugin-setup.md), d’[ADR-0059](0059-delegated-tasks.md) et d’[ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) ; remplace en partie les droits par instance d’[ADR-0045](0045-declarative-plugin-contributions.md) et d’[ADR-0051](0051-agent-centric-permissions.md) ; étend les rôles d’[ADR-0029](0029-sharing-whole-installations.md) ; précise [ADR-0064](0064-opt-in-installation-tools-for-agents.md).
 
 ## Constat
 
@@ -49,28 +49,33 @@ contributions une par une. Les outils, commandes et hooks accordés un par un pe
 `message` seulement pour #support. Un droit sur une ressource couvre ses descendants
 (un salon couvre ses fils). Cairn applique la restriction avant le plugin, à chaque
 appel d’outil, et ne livre pas à une règle un événement dont la payload désigne une
-autre ressource. Une restriction porte sur un type de ressource : chaque ressource de
-ce type que désigne l’entrée ou la payload doit être couverte, les autres types
-restant libres (restreindre le hook `message` à #support n’empêche pas son auteur
-d’être n’importe qui). Si l’entrée ou la payload ne désigne aucune ressource
-identifiable d’un type restreint, elle est refusée.
+autre ressource. Une restriction porte sur un type de ressource et sur ses
+descendants : chaque ressource de ce type, ou d’un type descendant, que désigne
+l’entrée ou la payload doit se trouver sous une ressource couverte, d’après la
+hiérarchie que Cairn résout lui-même (un fil de #general est refusé quand seul
+#support est accordé). Les autres types restent libres : restreindre le hook `message`
+à #support n’empêche pas son auteur d’être n’importe qui. Une entrée ou une payload
+qui ne désigne aucune ressource identifiable d’un type restreint, ou des ressources
+contradictoires, est refusée.
 Les identifiants de run et les instructions ajoutées au prompt s’accordent aussi un
 par un, sans restriction ; les conditions d’attente restent bornées par l’accès aux
 projets. Rien n’est accordé par défaut. `cairn_installation` peut lire et réduire ces
 droits, jamais les accorder. Un agent délégué
 ([ADR-0059](0059-delegated-tasks.md)) doit être couvert par son demandeur contribution
-par contribution et ressource par ressource, pas seulement instance par instance.
+par contribution et ressource par ressource, pas seulement instance par instance ; la
+couverture est revérifiée à chaque action de la tâche, pas seulement à sa création.
 
 ### Accès des comptes aux agents
 
-Un membre ne démarre, ne poursuit, n’oriente, n’arrête, ne lance à la main, ne
-répond aux questions et n’utilise comme agent d’exécution d’une règle que les agents
-auxquels il a accès ; il continue de voir
+Un membre ne démarre, ne poursuit, n’oriente, ne lance à la main, ne répond aux
+questions et n’utilise comme agent d’exécution d’une règle que les agents auxquels il
+a accès ; arrêter un travail reste permis à tous ; il continue de voir
 toutes les conversations ([ADR-0029](0029-sharing-whole-installations.md)). Ses
 tâches planifiées sur un agent auquel il perd l’accès sont suspendues comme ses
 règles. L’agent agit comme un rôle : y avoir accès, c’est pouvoir obtenir tout ce
-qu’il peut faire. Un agent délégué n’exige pas cet accès : la couverture par son
-demandeur borne déjà ses droits. Un agent qui a l’accès à l’installation la gère entière, avec
+qu’il peut faire. Pour une tâche déléguée, l’accès à l’agent de sa conversation
+demandeuse suffit à la poursuivre ou à répondre à ses questions : la couverture par
+ce demandeur borne ses droits. Un agent qui a l’accès à l’installation la gère entière, avec
 l’autorité de gestion du propriétaire
 ([ADR-0064](0064-opt-in-installation-tools-for-agents.md)) : avoir accès à cet agent
 revient à avoir accès à tous les agents, et ce qu’un membre lui fait créer survit à
@@ -130,16 +135,16 @@ une règle qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l�
   pour auteur, qui ne la rend pas privée
   ([ADR-0029](0029-sharing-whole-installations.md)) ; elle note l’auteur externe
   comme origine.
-- **Versions** : une exécution garde la version de la règle avec laquelle elle a
+- **Versions** : un déclenchement garde la version de la règle avec laquelle il a
   commencé ; une modification ne vaut que pour les événements suivants.
-- **Historique** : chacun voit l’état des exécutions des règles qu’il voit ; leur
+- **Historique** : chacun voit l’état des déclenchements des règles qu’il voit ; leur
   détail (payload et résultats des actions) n’est visible que du créateur, du
   propriétaire et des membres qui ont accès à l’agent d’exécution.
 - **Échecs** : une erreur passagère (limite de débit, service indisponible) fait
   réessayer l’action en échec seule, avec un délai croissant qui respecte celui que
   demande le service ; les actions déjà faites ne sont pas rejouées. Une erreur
-  définitive, ou des essais épuisés, arrête l’exécution. L’historique des exécutions
-  est visible par ceux qui voient la règle.
+  définitive, ou des essais épuisés, arrête le déclenchement, avec le détail de
+  l’erreur dans l’historique.
 
 Un bot Discord devient un agent qui a le hook `message` et les outils `read`, `post`
 et `react` limités à un salon, accompagné des règles du modèle « Bot
@@ -155,7 +160,7 @@ Les autres membres la voient sans pouvoir la modifier ; ils peuvent la dupliquer
 s’ils ont tous les droits qu’elle utilise, le duplicata leur appartenant et démarrant
 désactivé pour ne pas répondre deux fois au même événement. Le propriétaire peut
 supprimer n’importe quelle règle ou la mettre en pause en urgence, sans la modifier ;
-la pause arrête aussi ses exécutions en cours, et seul le propriétaire la lève.
+la pause arrête aussi ses déclenchements en cours, et seul le propriétaire la lève.
 Lever cette pause et supprimer la règle d’un autre restent hors de
 `cairn_installation` ; un agent n’y modifie ou ne supprime que les règles dont le
 créateur est le compte pour lequel il travaille.
@@ -166,14 +171,16 @@ Comme les tâches ([ADR-0029](0029-sharing-whole-installations.md)), une règle
 appartient à une adhésion : retirer, faire partir ou supprimer le créateur la
 désactive définitivement, et le réinviter ne la relance pas. Elle reste visible ; le
 propriétaire peut la supprimer et un membre la dupliquer. Comme pour les tâches
-planifiées, une exécution exige une adhésion vérifiée récemment ; si elle ne peut pas
-l’être, l’exécution attend.
+planifiées, un déclenchement exige une adhésion vérifiée récemment ; si elle ne peut
+pas l’être, il attend.
 
 Un agent qui a l’accès à l’installation peut créer des règles. Leur créateur est le
-compte pour lequel il travaille : celui qui a écrit le message que traite son tour,
+compte pour lequel son tour travaille : celui qui a écrit le message qui a lancé le
+tour, conservé par ses réveils, ses attentes et les réponses à ses questions ;
 l’auteur de la tâche pour une exécution planifiée (le propriétaire pour une mission
-créée par un agent, [ADR-0064](0064-opt-in-installation-tools-for-agents.md)), ou le
-créateur de la règle pour un tour qu’une règle a déclenché. Il ne peut accorder de
+créée par un agent, [ADR-0064](0064-opt-in-installation-tools-for-agents.md)) ; le
+compte de la conversation demandeuse pour une tâche déléguée ; le créateur de la règle
+pour un tour qu’une règle a lancé. Il ne peut accorder de
 droits à aucun agent ni à aucun compte. Une règle créée par le MCP public a pour
 créateur le propriétaire qui a autorisé ce client.
 
@@ -182,9 +189,10 @@ conversation qui s’exécute en natif, que si son créateur détenait l’autor
 ([ADR-0050](0050-trusted-native-execution.md)) dans la requête authentifiée qui a
 enregistré cette version de la règle. Une requête de `cairn_installation`, ou du MCP
 public sans autorité native, ne peut pas l’accorder, comme pour les tâches déléguées
-([ADR-0059](0059-delegated-tasks.md)). L’autorité est conservée avec la version et
-revérifiée à chaque action qui résout, à l’exécution, un agent ou une conversation
-natifs ; sans elle, l’action échoue. Le travail natif qu’une règle démarre garde les
+([ADR-0059](0059-delegated-tasks.md)). L’autorité est conservée avec la version ; à
+chaque action qui résout, au moment du déclenchement, un agent ou une conversation
+natifs, Cairn vérifie à la fois cette autorité conservée et l’autorité native actuelle
+du créateur ; sans elles, l’action échoue. Le travail natif qu’une règle démarre garde les
 limites de node et le renouvellement de bail de tout travail natif.
 
 ### Budget du moteur
@@ -192,19 +200,21 @@ limites de node et le renouvellement de bail de tout travail natif.
 Le moteur est borné pour qu’une boucle (une action qui déclenche le hook qui l’a
 lancée) s’arrête d’elle-même. Cairn ne peut pas toujours relier un appel d’outil à
 l’événement qu’il provoque en retour chez le service ; le budget est donc porté par
-chaque règle : un plafond d’exécutions et un plafond de déclenchements d’agent par
-heure, avec des valeurs par défaut que le créateur peut changer sous un maximum fixé
+chaque règle : un plafond de déclenchements et un plafond de conversations démarrées
+ou orientées par heure, avec des valeurs par défaut que le créateur peut changer sous un maximum fixé
 par Cairn. Au dépassement, la règle est suspendue jusqu’à ce que son créateur ou le
 propriétaire la relance, et son créateur est prévenu ; cette suspension laisse finir
-les exécutions en cours, que bornent leurs propres limites. Les chaînes que Cairn sait suivre,
+les déclenchements en cours, que bornent leurs propres limites. Les chaînes que Cairn sait suivre,
 quand une action provoque un hook de Cairn, ont en plus une profondeur maximale.
-Chaque exécution est limitée en nombre de pas (blocs et itérations) et d’appels
-d’outils, sans compter les attentes ; au dépassement, elle s’arrête en erreur.
+Chaque déclenchement est limité en nombre de pas (blocs et itérations) et d’appels
+d’outils, sans compter les attentes ; au dépassement, il s’arrête en erreur.
 
-Une exécution qui se termine sans effet (aucune action exécutée en dehors des blocs et
-des conditions) ne compte pas dans les plafonds horaires et n’est pas gardée
+Un déclenchement qui se termine sans effet (aucune action exécutée en dehors des
+blocs et des conditions) ne compte pas dans les plafonds horaires et n’est pas gardé
 dans l’historique, qui n’en garde que le nombre : un salon actif n’épuise pas le
-budget de la règle. La progression, déjà cadencée par Cairn, ne compte pas non plus.
+budget de la règle. Les déclenchements par la progression, déjà cadencée par Cairn,
+ne comptent pas dans le plafond de déclenchements ; les conversations qu’ils démarrent
+ou orientent comptent toujours.
 
 ### Sans migration
 

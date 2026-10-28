@@ -249,10 +249,10 @@ appeler un outil…). Elle agit avec l’autorité de son créateur, seul à pou
 modifier. Un plugin peut proposer des modèles de règles prêts à l’emploi.
 _Avoid_ : hook (l’événement auquel elle réagit), automation, workflow
 
-**Exécution d’une règle** :
+**Déclenchement d’une règle** :
 Le traitement d’un événement par une règle de hook, de sa première condition à sa
 dernière action, avec la version de la règle en vigueur à son début.
-_Avoid_ : run (réservé au tour d’un agent)
+_Avoid_ : exécution, run (réservés au travail d’un agent)
 
 **Agent d’exécution d’une règle** :
 L’agent dont les droits encadrent le hook qu’une règle écoute et les outils qu’elle
