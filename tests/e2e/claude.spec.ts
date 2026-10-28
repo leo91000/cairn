@@ -368,6 +368,8 @@ test('Claude agents, chats, questions and scheduled work run on a connected Clau
 
 test('switching coding agents preserves one chat, context and provider selection after reload', async ({ page, workspace }, testInfo) => {
   test.setTimeout(120000)
+  await seedCodexAccount(workspace, 'Provider switching', limits(10, 20))
+  await workspace.api('/api/accounts/refresh', 'POST')
   if (!(await workspace.api('/api/accounts')).accounts.some((a: { provider: string }) => a.provider === 'claude'))
     expect((await connectClaude(workspace)).state).toBe('complete')
   await page.goto(workspacePath('/connections'))
