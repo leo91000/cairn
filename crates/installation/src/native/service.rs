@@ -433,7 +433,8 @@ impl Controller {
             };
             // Deliver the result path consumed by the node connector.
             let result = root.join("data/output/result.md");
-            if let Ok(file) = crate::artifacts::file::open_export(&result, &root.join("data")) {
+            if let Ok(file) = crate::artifacts::file::open_export(&result, &root.join("data")).await
+            {
                 let file = tokio::fs::File::from_std(file);
                 let mut bytes = Vec::new();
                 if file.take(1_000_001).read_to_end(&mut bytes).await.is_ok()
@@ -1850,15 +1851,20 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             let disk_owner = disk::lock(&controller.state).await?;
             uuid(id)?;
             let value = input(request, 16384).await?;
-            let active = controller.active.lock().await;
-            let attempt = active
-                .get(*id)
-                .ok_or_else(|| Error::conflict("Native attempt is not active."))?;
-            if value["runId"] != attempt.run || attempt.stop.is_cancelled() {
-                return Err(Error::forbidden("Wrong native artifact scope."));
-            }
+            let (run, stop) = {
+                let active = controller.active.lock().await;
+                let attempt = active
+                    .get(*id)
+                    .ok_or_else(|| Error::conflict("Native attempt is not active."))?;
+                if value["runId"] != attempt.run || attempt.stop.is_cancelled() {
+                    return Err(Error::forbidden("Wrong native artifact scope."));
+                }
+                (attempt.run.clone(), attempt.stop.clone())
+            };
+            // Keep physical ownership through the copy, while health, lease
+            // supervision and cancellation remain free to inspect active runs.
             let plan = controller.plan(id).await?;
-            let environment = workspace::directory(&controller.state, &attempt.run)?;
+            let environment = workspace::directory(&controller.state, &run)?;
             let root = environment.join("data");
             let path = Path::new(text(&value, "path"));
             let project_root = Path::new(text(&plan, "projectRoot"));
@@ -1867,7 +1873,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             } else if let Ok(relative) = path.strip_prefix(
                 guest_data(&plan, &controller.data)
                     .join("runs")
-                    .join(&attempt.run)
+                    .join(&run)
                     .join("output"),
             ) {
                 (root.join("output").join(relative), root.clone())
@@ -1888,7 +1894,9 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 controller.disk_growth().await?,
             )
             .await?;
-            drop(active);
+            if stop.is_cancelled() {
+                return Err(Error::forbidden("Native artifact attempt stopped."));
+            }
             drop(disk_owner);
             let file = tokio::fs::File::from_std(snapshot.reopen()?);
             let stream = futures_util::stream::try_unfold(
@@ -3002,9 +3010,8 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
-    async fn tmp_artifact_uses_the_ephemeral_path_and_rejects_redirects() {
-        let (_fixture, controller) = fixture().await;
+    async fn artifact_fixture() -> (tempfile::TempDir, Controller, String, String, PathBuf) {
+        let (fixture, controller) = fixture().await;
         let run = crate::config::id();
         let attempt = crate::config::id();
         let stage = controller.data.join("runs").join(&run);
@@ -3047,6 +3054,12 @@ mod tests {
                 protection: None,
             },
         );
+        (fixture, controller, run, attempt, environment)
+    }
+
+    #[tokio::test]
+    async fn tmp_artifact_uses_the_ephemeral_path_and_rejects_redirects() {
+        let (_fixture, controller, run, attempt, environment) = artifact_fixture().await;
         tokio::fs::write(environment.join("tmp/result"), b"actual temporary artifact")
             .await
             .unwrap();
@@ -3081,6 +3094,135 @@ mod tests {
             )
             .await
             .is_err()
+        );
+    }
+
+    #[test]
+    fn delayed_artifact_keeps_health_leases_and_cancellation_responsive() {
+        // Isolate the native tool bundle environment from parallel unit tests.
+        let tools = tempfile::tempdir().unwrap();
+        let bundle = tools.path().join("tools");
+        std::fs::create_dir(&bundle).unwrap();
+        std::fs::write(bundle.join("manifest.json"), b"{}").unwrap();
+        std::fs::write(
+            tools.path().join("release.json"),
+            serde_json::to_vec(&json!({
+                "runtimeId": crate::nodes::component_runtime(),
+                "os": "linux", "arch": "x86_64"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "native::service::tests::delayed_artifact_control_child",
+                "--ignored",
+            ])
+            .env("CAIRN_NATIVE_TOOLS", bundle)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated native tool bundle environment"]
+    fn delayed_artifact_control_child() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (_fixture, controller, run, attempt, environment) =
+            runtime.block_on(artifact_fixture());
+        let path = environment.join("tmp/result");
+        std::fs::write(&path, b"completed artifact").unwrap();
+        let (opening, release) = crate::artifacts::file::tests::delay_open(&path);
+        let exporting = controller.clone();
+        let id = attempt.clone();
+        let export = runtime.spawn(async move {
+            handler(
+                State(exporting),
+                request(
+                    &format!("/runs/{id}/artifact"),
+                    &json!({ "runId": run, "path": "/tmp/result" }),
+                ),
+            )
+            .await
+        });
+        let opened = opening.recv_timeout(Duration::from_secs(5));
+        let physical_owner = crate::file_lock::exclusive(
+            &controller.state.join("storage.lock"),
+            "Export must retain physical ownership",
+        );
+        let controls = controller.clone();
+        let (progress, observed) = std::sync::mpsc::channel();
+        let control = runtime.spawn(async move {
+            let health = handler(
+                State(controls.clone()),
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(health.status(), 200);
+            let health: Value = serde_json::from_slice(
+                &axum::body::to_bytes(health.into_body(), 100_000)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(health["activeRuns"], 1);
+            let lease = handler(
+                State(controls.clone()),
+                request(
+                    &format!("/runs/{attempt}/lease"),
+                    &json!({ "remainingMs": 60_000 }),
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(lease.status(), 200);
+            assert!(controls.leased(&attempt).await);
+            // Exercise the same active-map cancellation and disk-abort path
+            // without invoking privileged host systemd operations in a unit test.
+            controls
+                .active
+                .lock()
+                .await
+                .get(&attempt)
+                .unwrap()
+                .stop
+                .cancel();
+            controls.abort_disk(&attempt).await.unwrap();
+            let _ = progress.send(());
+        });
+        let responsive = observed.recv_timeout(Duration::from_secs(2));
+        // Release the filesystem even when the old controller holds active.
+        let _ = release.send(());
+        let exported = runtime.block_on(export).unwrap();
+        runtime.block_on(control).unwrap();
+        opened.expect("The native artifact must reach its filesystem open");
+        assert!(physical_owner.is_err());
+        responsive
+            .expect("Health, lease renewal and cancellation must finish during the delayed open");
+        assert_eq!(exported.unwrap_err().status, 403);
+        assert!(
+            crate::file_lock::exclusive(&controller.state.join("storage.lock"), "Export finished",)
+                .is_ok()
+        );
+        assert_eq!(
+            std::fs::read_dir(controller.state.join("exports"))
+                .unwrap()
+                .count(),
+            0
         );
     }
 
