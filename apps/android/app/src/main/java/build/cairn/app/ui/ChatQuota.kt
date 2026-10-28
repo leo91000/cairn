@@ -35,6 +35,16 @@ internal data class ChatQuota(
     val automatic: Boolean,
 )
 
+/** A live account wait that recovers automatically, without reconnecting an account. */
+internal fun isQuotaWait(status: String, reason: String?, accountRequired: String?): Boolean =
+    status in listOf("running", "queued") &&
+        accountRequired.isNullOrEmpty() &&
+        Regex(
+                "^(?:Usage exhausted\\.|Waiting for a .+ account with available usage\\.)",
+                RegexOption.IGNORE_CASE,
+            )
+            .containsMatchIn(reason.orEmpty())
+
 private fun quotaFailure(event: RunEvent): String {
     if (event.type !in listOf("turn.failed", "error")) return ""
     val data = event.activityData()

@@ -300,6 +300,37 @@ describe('the Fil', () => {
     expect(fil.waiting[0]).toMatchObject({ key: 'task:watch', subtitle: 'Wait for CI', runId: 'watch-1' })
   })
 
+  it('places automatic quota waits after dated resumptions and keeps attention and suspension priorities', () => {
+    const quota = { status: 'running' as const, accountWaitReason: 'Usage exhausted. Waiting for an available Codex account to resume.' }
+    const fil = filOf([
+      chat('quota', quota),
+      chat('admission', { status: 'queued', accountWaitReason: 'Waiting for a Claude Code account with available usage.' }),
+      chat('question', { ...quota, pendingQuestions: 1 }),
+      chat('paused', { ...quota, paused: true }),
+      chat('failed', { ...quota, status: 'failed' }),
+      chat('reconnect', { ...quota, accountRequired: 'codex' }),
+      chat('suspended', { ...quota, suspendedByExclusive: reservation }),
+      chat('runner', { status: 'queued', accountWaitReason: 'Waiting for a free runner.' }),
+      chat('dated', {
+        status: 'succeeded',
+        wakeup: {
+          id: 'wake',
+          messageId: null,
+          reason: '',
+          seconds: 60,
+          createdAt: 1,
+          wakeAt: 300,
+        },
+      }),
+    ], [task('mission')], [run('mission-1', 'mission', quota)])
+    expect(fil.waiting.map(item => item.title)).toEqual(['dated', 'quota', 'admission', 'mission'])
+    expect(fil.waiting.slice(1).every(item => item.subtitle === 'Waiting for quota' && item.wakeAt === undefined)).toBe(true)
+    expect(fil.forYou.map(item => item.title)).toEqual(['question', 'failed'])
+    expect(fil.recent.map(item => item.title)).toEqual(['paused'])
+    expect(fil.live.map(item => item.title)).toEqual(['reconnect', 'suspended', 'runner'])
+    expect(filOf([chat('quota', { ...quota, accountWaitReason: null })], [], []).live[0].kind).toBe('running')
+  })
+
   describe('a blocked mission', () => {
     const blocked = (values: Partial<RunListItem['outcome'] & object> = {}): RunListItem['outcome'] => ({
       status: 'blocked',

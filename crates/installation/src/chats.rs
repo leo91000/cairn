@@ -217,6 +217,9 @@ pub(crate) fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
     chat["suspendedByExclusive"] = run
         .as_ref()
         .map_or(Value::Null, |run| run["suspendedByExclusive"].clone());
+    for field in ["accountWaitReason", "accountRequired"] {
+        chat[field] = run.as_ref().map_or(Value::Null, |run| run[field].clone());
+    }
     // The coding agent of the latest turn, which a message may switch from the agent's own.
     chat["provider"] = run
         .as_ref()

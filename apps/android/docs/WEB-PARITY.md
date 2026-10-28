@@ -14,6 +14,18 @@ This changes the presentation of existing ordered `nodePriorities`, already
 editable through public MCP and `cairn_installation`; grants and placement rules
 are unchanged.
 
+## Quota waits in the Fil
+
+Automatic quota waits, including admission waits and exhausted accounts, appear
+with scheduled resumptions for conversations and missions on both clients. Web
+shows “Waiting for quota”; Android shows « En attente de quota ». No reset date is
+promised: undated waits follow dated resumptions and display availability rather
+than a countdown. Questions, failures, pauses and exclusive suspensions retain
+their existing priority. The conversation list now includes `accountWaitReason`
+and `accountRequired` in HTTP, public MCP and `cairn_installation`; existing grants
+are unchanged. Validation: Signal presentation tests, browser Fil quota journey,
+and Android Signal journey.
+
 ## Feature map
 
 Automatic agent placement: both apps offer VM only, native only and automatic
