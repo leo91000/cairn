@@ -107,9 +107,17 @@ impl Fixture {
     }
 
     async fn due(&self) {
-        let mut chat = self.service.get("chats", &self.chat).await.unwrap();
+        let mut chat = self
+            .service
+            .conversation_boundary(&self.chat)
+            .await
+            .unwrap();
         chat["wakeup"]["wakeAt"] = (now() - 1000).into();
-        self.service.store.put("chats", chat).await.unwrap();
+        self.service
+            .store
+            .save_conversation_boundary(chat)
+            .await
+            .unwrap();
     }
 
     async fn tick(&self) -> Value {
@@ -464,9 +472,13 @@ async fn queued_follow_ups_are_not_held_by_a_wakeup_that_cannot_resume() {
         .unwrap();
     f.schedule().await;
     f.finish().await;
-    let mut chat = f.service.get("chats", &f.chat).await.unwrap();
+    let mut chat = f.service.conversation_boundary(&f.chat).await.unwrap();
     chat["sessionRestartRequested"] = true.into();
-    f.service.store.put("chats", chat).await.unwrap();
+    f.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
 
     let detail = f.tick().await;
     assert_eq!(detail["run"]["chatExecution"]["messageId"], follow_up);
@@ -790,13 +802,17 @@ async fn timer_completion_is_a_result_and_existing_timer_records_still_resume() 
     let f = Fixture::new().await;
     let wake = f.schedule().await;
     // Exact persisted shape used by sleep before the unified interface.
-    let mut chat = f.service.get("chats", &f.chat).await.unwrap();
+    let mut chat = f.service.conversation_boundary(&f.chat).await.unwrap();
     let deadline = now() - 1000;
     chat["wakeup"] = json!({
         "id": wake["id"], "messageId": wake["messageId"], "reason": wake["reason"],
         "createdAt": deadline - 420_000, "wakeAt": deadline, "seconds": 420,
     });
-    f.service.store.put("chats", chat).await.unwrap();
+    f.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
     f.finish().await;
     let restarted = Service::new(f.service.config.clone()).await.unwrap();
     restarted.chat_tick(&HashSet::new()).await.unwrap();

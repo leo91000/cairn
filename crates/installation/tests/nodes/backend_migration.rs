@@ -151,7 +151,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     record["resources"] = limits(1, 512, 128);
     record["snapshot"] = json!({ "agent": original_agent });
     owner.add_run_fixture(&record).await;
-    owner.put("chats", json!({ "id": chat, "runId": run, "agentId": agent, "paused": false, "title": "same conversation" })).await;
+    owner.save_conversation_boundary(json!({ "id": chat, "runId": run, "agentId": agent, "paused": false, "title": "same conversation" })).await;
     let message = json!({
         "id": id(),
         "chatId": chat,

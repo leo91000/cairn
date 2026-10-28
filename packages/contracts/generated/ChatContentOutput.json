@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "chatId": {
+      "type": "string"
+    },
+    "data": {
+      "type": "string"
+    },
+    "encoding": {
+      "type": "string"
+    },
+    "format": {
+      "type": "string"
+    },
+    "nextOffset": {
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "offset": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "sha256": {
+      "type": "string"
+    },
+    "totalBytes": {
+      "format": "int64",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "chatId",
+    "encoding",
+    "format",
+    "offset",
+    "totalBytes",
+    "sha256",
+    "data"
+  ],
+  "title": "ChatContentOutput",
+  "type": "object"
+}

@@ -455,12 +455,10 @@ async fn chat_run(relay: &common::RelayedInstallation) -> (String, String) {
     .await
     .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let mut chat: Value = response.json().await.unwrap();
+    let chat: Value = response.json().await.unwrap();
     let chat_id = chat["id"].as_str().unwrap().to_owned();
     let run_id = uuid::Uuid::new_v4().to_string();
-    chat["runId"] = run_id.clone().into();
     // The execution adapter supplies a running turn; assertions cross the beacon API or push provider.
-    relay.installation.store.put("chats", chat).await.unwrap();
     let run = json!({
         "id": run_id,
         "taskId": chat_id,
@@ -471,7 +469,13 @@ async fn chat_run(relay: &common::RelayedInstallation) -> (String, String) {
     relay
         .installation
         .store
-        .transaction(move |db| db.admit_run(&serde_json::from_value(run)?, None, &json!({}), None))
+        .transaction(move |db| {
+            let state: cairn_contracts::RunState = serde_json::from_value(run)?;
+            db.admit_run(&state, None, &json!({}), None)?;
+            let mut conversation = db.conversation(chat["id"].as_str().unwrap())?.unwrap();
+            conversation.run_id = Some(state.id);
+            db.save_conversation(&conversation)
+        })
         .await
         .unwrap();
     (chat_id, run_id)

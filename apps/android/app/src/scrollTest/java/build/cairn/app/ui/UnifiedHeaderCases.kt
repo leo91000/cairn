@@ -44,8 +44,8 @@ abstract class UnifiedHeaderCases {
     private val now = System.currentTimeMillis()
     private val chat =
         Chat(
-            "chat",
-            "Orchestration de la release",
+            id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
+            title = "Orchestration de la release",
             agentName = "Agent principal",
             projectName = "Cairn",
             runId = "run",
@@ -80,7 +80,7 @@ abstract class UnifiedHeaderCases {
                     when (path) {
                         "/api/installations/fixture/api/chats/stream" ->
                             return stream(LiveState(chats = listOf(chat)))
-                        "/api/installations/fixture/api/chats/chat/stream" ->
+                        "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream" ->
                             return stream(
                                 LiveState(
                                     chat = chat,
@@ -254,7 +254,7 @@ abstract class UnifiedHeaderCases {
                         "Changer de conversation : ${chat.title} · Dernier harness : Claude Code"
                     )
                     .assertExists()
-                capture("chat")
+                capture("6cc6efab-10af-54c7-a91b-dcff664166a1")
                 val header = compose.onNodeWithTag("conversation-header")
                 assertTopsUnderSystemInsets(header)
                 val height = header.fetchSemanticsNode().boundsInRoot.height / density

@@ -60,15 +60,22 @@ class ContextCompactionJourneyTest {
             val calls = CopyOnWriteArrayList<Pair<String, String>>()
             val chat =
                 Chat(
-                    chatId,
+                    id = chatId,
                     title = "Refonte du module",
                     agentName = "Cairn",
                     status = "succeeded",
                     provider = "claude",
                     runId = "run",
                     run = Run(id = "run", taskId = chatId, status = "succeeded", trigger = "chat"),
-                    contextUsage = ContextUsage(150_000, 200_000, 120_000, false),
-                    compaction = ChatCompaction(supported = true, available = true),
+                    contextUsage =
+                        ContextUsage(
+                            contextTokens = 150_000,
+                            contextWindow = 200_000,
+                            cachedTokens = 120_000,
+                            estimated = false,
+                        ),
+                    compaction =
+                        ChatCompaction(supported = true, available = true, running = false),
                 )
             val events =
                 listOf(
@@ -204,7 +211,11 @@ class ContextCompactionJourneyTest {
                                     wireJson.encodeToString(
                                         chat.copy(
                                             compaction =
-                                                ChatCompaction(supported = true, running = true)
+                                                ChatCompaction(
+                                                    supported = true,
+                                                    available = false,
+                                                    running = true,
+                                                )
                                         )
                                     )
                                 else ->

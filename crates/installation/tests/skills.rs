@@ -41,6 +41,7 @@ async fn skill_usage_is_bounded_counts_delivered_mentions_once_and_is_shared_wit
     api.service
         .store
         .write(|db| {
+            db.save_conversation_boundary(&json!({ "id": "other-device" }))?;
             db.put_message(&json!({
                 "id": "old",
                 "chatId": "other-device",

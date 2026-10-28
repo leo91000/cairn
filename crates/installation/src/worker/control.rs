@@ -70,7 +70,7 @@ impl Worker {
                         request_cancel(db, run_id, executing.contains(run_id))?;
                     }
                 }
-                required(db.get("chats", &id)?, "Chat not found")
+                required(db.conversation_boundary(&id)?, "Chat not found")
             })
             .await?;
         if let Some(cancel) = chat["runId"].as_str().and_then(|id| active.get(id)) {
@@ -244,7 +244,7 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
         ));
     }
     crate::conversation_lifecycle::require_active_run(db, id)?;
-    let replay_refused = db.list("chats")?.iter().any(|chat| {
+    let replay_refused = db.conversations_boundary()?.iter().any(|chat| {
         chat["runId"] == id
             && (chat["cancelledByDeletion"] == true
                 || chat["sessionRestartRequested"] == true
@@ -432,48 +432,9 @@ pub async fn routes(s: &Arc<Service>, input: &crate::http::Input) -> Option<Resu
             }
             .await
         }
-        ["chats", id, "pause"] => pause_chat(s, input, id).await,
-        ["chats", id, "stop"] => stop_chat(s, id).await,
         _ => return None,
     };
     Some(result)
-}
-
-async fn pause_chat(s: &Service, input: &crate::http::Input, id: &str) -> Result<Value> {
-    let paused = input.boolean("paused")?;
-    let authorize = crate::native::policy::chat_authorization(id);
-    let chat = s.get("chats", id).await?;
-    crate::conversation_lifecycle::require_active(&chat)?;
-    if !paused && let Some(run_id) = chat["runId"].as_str() {
-        let run = s.store.run_state(run_id).await?;
-        if run.status.is_resumable()
-            && chat["cancelledByDeletion"] != true
-            && chat["sessionRestartRequested"] != true
-        {
-            s.worker
-                .resume_authorized(s, run_id, authorize.clone())
-                .await?;
-        }
-    }
-    s.store.delete(&format!("chat-error:{id}")).await?;
-    if paused {
-        return s.chat_pause(id, true).await;
-    }
-    let id = id.to_owned();
-    let result = s
-        .store
-        .transaction(move |db| {
-            authorize(db)?;
-            crate::chats::pause_in(db, &id, false)
-        })
-        .await?;
-    s.worker.notify();
-    Ok(result)
-}
-
-async fn stop_chat(s: &Service, id: &str) -> Result<Value> {
-    s.worker.stop_chat_authorized(s, id, |_| Ok(())).await?;
-    Ok(json!({ "stopped": true }))
 }
 
 #[cfg(test)]
