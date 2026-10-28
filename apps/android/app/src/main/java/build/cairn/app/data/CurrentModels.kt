@@ -33,7 +33,7 @@ data class ChatMessage(
 data class QuestionOption(
     val label: String,
     val description: String = "",
-    val id: String = label,
+    val id: String = "",
     val recommended: Boolean = false,
 )
 
@@ -47,7 +47,14 @@ data class QuestionField(
     val minChoices: Int? = null,
     val maxChoices: Int? = null,
 ) {
+    val supportsAnswers: Boolean
+        get() =
+            mode in setOf("single", "multiple") &&
+                options.all { it.id.isNotEmpty() } &&
+                options.map { it.id }.distinct().size == options.size
+
     fun accepts(selected: List<String>, comment: String): Boolean {
+        if (!supportsAnswers) return false
         if (selected.isEmpty()) return comment.isNotBlank()
         val maximum = if (mode == "single") 1 else maxChoices ?: options.size
         return selected.size >= (minChoices ?: 1) &&
