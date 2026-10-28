@@ -549,7 +549,7 @@ impl Publication<'_> {
         };
         let result = diagnostic::scope(
             Some(metrics.clone()),
-            self.transfer_operations(manifest, objects),
+            Box::pin(self.transfer_operations(manifest, objects)),
         )
         .await;
         summary.outcome = if result.is_ok() { "success" } else { "error" };
