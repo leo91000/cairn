@@ -21,6 +21,141 @@ import org.junit.Test
 
 class DirectTransportTest {
     @Test
+    fun `trace explains a relay refusal after direct not sent without recording the exception`() =
+        runBlocking {
+            MockWebServer().use { server ->
+                server.start()
+                server.enqueue(MockResponse().setResponseCode(413))
+                val trace = DirectTrace()
+                val api = CairnApi(server.url("/"), MemoryVault(), installationId = "test")
+                api.transport.trace = trace
+                val channel = DirectChannel({ _, _, _ -> throw DirectNotSent("private-error") }, {})
+                channel.trace = trace
+                api.transport.attach(channel)
+                try {
+                    val failure = runCatching {
+                        api.request(
+                            "POST",
+                            "/chats/missing/messages",
+                            body("text" to "private-payload"),
+                        )
+                    }
+                        .exceptionOrNull()
+                    assertEquals(413, (failure as? ApiException)?.status)
+                    assertEquals("relay", api.transport.route.value)
+                    assertEquals(1, server.requestCount)
+                    val snapshot = trace.snapshot()
+                    assertEquals(
+                        "REQUEST_NOT_SENT",
+                        snapshot["firstFailure"]!!.jsonObject["event"]!!.jsonPrimitive.content,
+                    )
+                    val response = snapshot["events"]!!.jsonArray.last().jsonObject
+                    assertEquals("RESPONSE_RELAY", response["event"]!!.jsonPrimitive.content)
+                    assertEquals(413, response["value"]!!.jsonPrimitive.int)
+                    assertFalse(response["taggedDirect"]!!.jsonPrimitive.boolean)
+                    assertFalse(snapshot.toString().contains("private-"))
+                } finally {
+                    api.closeStreams()
+                }
+            }
+        }
+
+    @Test
+    fun `trace distinguishes a direct application refusal from transport fallback without secrets`() =
+        runBlocking {
+            MockWebServer().use { server ->
+                server.start()
+                val trace = DirectTrace()
+                val api =
+                    CairnApi(
+                        server.url("/"),
+                        MemoryVault(),
+                        installationId = "private-installation",
+                    )
+                api.transport.trace = trace
+                lateinit var channel: DirectChannel
+                channel =
+                    DirectChannel(
+                        { packet, _, _ ->
+                            val request =
+                                wireJson
+                                    .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
+                                    .jsonObject
+                            channel.receive(
+                                singleFramePacket(
+                                    buildJsonObject {
+                                        put("type", "response")
+                                        put("id", request["id"]!!)
+                                        put("status", 413)
+                                        put("headers", JsonArray(emptyList()))
+                                        put("body", "")
+                                    }
+                                        .toString()
+                                        .toByteArray()
+                                )
+                            )
+                        },
+                        {},
+                    )
+                channel.trace = trace
+                api.transport.attach(channel)
+                try {
+                    val failure = runCatching {
+                        api.request("GET", "/private-path?secret=private-query")
+                    }
+                        .exceptionOrNull()
+                    assertEquals(413, (failure as? ApiException)?.status)
+                    assertEquals("direct", api.transport.route.value)
+                    assertEquals(0, server.requestCount)
+                    val snapshot = trace.snapshot()
+                    assertFalse(snapshot.containsKey("firstFailure"))
+                    val response = snapshot["events"]!!.jsonArray.last().jsonObject
+                    assertEquals("RESPONSE_DIRECT", response["event"]!!.jsonPrimitive.content)
+                    assertEquals(413, response["value"]!!.jsonPrimitive.int)
+                    assertTrue(response["taggedDirect"]!!.jsonPrimitive.boolean)
+                    assertFalse(snapshot.toString().contains("private-"))
+                } finally {
+                    api.closeStreams()
+                }
+            }
+        }
+
+    @Test
+    fun `trace preserves decoder cause before closed channel replays a read on relay`() =
+        runBlocking {
+            MockWebServer().use { server ->
+                server.start()
+                server.enqueue(MockResponse().setBody("[]"))
+                val trace = DirectTrace()
+                val api = CairnApi(server.url("/"), MemoryVault(), installationId = "test")
+                api.transport.trace = trace
+                val disposed = java.util.concurrent.CountDownLatch(1)
+                val channel = DirectChannel({ _, _, _ -> }, { disposed.countDown() })
+                channel.trace = trace
+                api.transport.attach(channel)
+                try {
+                    channel.receive(singleFramePacket("private-malformed-json".toByteArray()))
+                    assertTrue(disposed.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                    assertEquals("[]", api.request("GET", "/chats"))
+                    assertEquals("relay", api.transport.route.value)
+                    val snapshot = trace.snapshot()
+                    assertEquals(
+                        "DECODE_ERROR",
+                        snapshot["firstFailure"]!!.jsonObject["event"]!!.jsonPrimitive.content,
+                    )
+                    assertTrue(
+                        snapshot["events"]!!.jsonArray.any {
+                            it.jsonObject["event"]!!.jsonPrimitive.content == "RESPONSE_RELAY"
+                        }
+                    )
+                    assertFalse(snapshot.toString().contains("private-"))
+                } finally {
+                    api.closeStreams()
+                }
+            }
+        }
+
+    @Test
     fun `a protocol mismatch is actionable and never falls back to relay`() = runBlocking {
         val packets =
             listOf(

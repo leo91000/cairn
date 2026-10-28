@@ -396,6 +396,53 @@ def main():
                 args.output.write_text(json.dumps({**saved, "lossCounters": counts}) + "\n")
 
 
+def android_clock_sample(adb):
+    # Seconds work on every supported toybox version. Include the quantization
+    # interval and command RTT; a midpoint alone would imply false precision.
+    before_wall = time.time_ns() // 1_000_000
+    before_mono = time.monotonic_ns() // 1_000_000
+    guest = int(adb("shell", "date", "+%s", text=True, timeout=10).stdout.strip()) * 1000
+    after_mono = time.monotonic_ns() // 1_000_000
+    after_wall = time.time_ns() // 1_000_000
+    return dict(hostBeforeMs=before_wall, hostAfterMs=after_wall,
+                roundTripMs=after_mono - before_mono,
+                hostWallDeltaMs=after_wall - before_wall - (after_mono - before_mono),
+                guestMinusHostLowerMs=guest - after_wall,
+                guestMinusHostUpperMs=guest + 1000 - before_wall)
+
+
+def run_android_instrumentation(adb, output, scenario):
+    clocks = []
+
+    def sample():
+        try:
+            clocks.append(android_clock_sample(adb))
+        except (subprocess.SubprocessError, ValueError):
+            clocks.append(dict(unavailable=True))
+
+    sample()
+    try:
+        result = adb("shell", "am", "instrument", "-w", "-e", "class", "build.cairn.app.data.DirectTransportDeviceTest",
+                     "-e", "cairnDirectScenario", scenario, "build.cairn.app.test/androidx.test.runner.AndroidJUnitRunner", text=True, timeout=360)
+        output.with_suffix(".instrumentation.txt").write_text(result.stdout)
+        return result
+    except subprocess.TimeoutExpired as error:
+        partial = error.stdout or b""
+        output.with_suffix(".instrumentation.txt").write_text(
+            partial.decode("utf-8", errors="replace") if isinstance(partial, bytes) else partial)
+        raise
+    finally:
+        sample()
+        try:
+            trace = json.loads(adb("exec-out", "run-as", "build.cairn.app", "cat",
+                                   "files/direct-trace.json", text=True, timeout=10).stdout)
+        except (subprocess.SubprocessError, ValueError):
+            # A crash or instrumentation timeout may prevent the device's finally block.
+            # Preserve the original error; never replace it with an evidence read error.
+            trace = dict(unavailable=True)
+        output.with_suffix(".transport.json").write_text(json.dumps(dict(trace=trace, clocks=clocks)) + "\n")
+
+
 def android(network, directory, args, report):
     if not os.environ.get("CAIRN_BEACON_TEST_DATABASE_URL"):
         raise RuntimeError("Set CAIRN_BEACON_TEST_DATABASE_URL to a disposable Postgres database")
@@ -445,13 +492,15 @@ def android(network, directory, args, report):
                  "apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"]:
         adb("install", "-r", "-t", path)
     adb("shell", "run-as", "build.cairn.app", "mkdir", "-p", "files")
+    adb("shell", "run-as", "build.cairn.app", "rm", "-f", "files/direct-trace.json", "files/direct-evidence.json")
     try:
         adb("shell", "run-as", "build.cairn.app", "sh", "-c", "'cat > files/direct-fixture.json'", input=private.read_bytes())
-        result = adb("shell", "am", "instrument", "-w", "-e", "class", "build.cairn.app.data.DirectTransportDeviceTest",
-                     "-e", "cairnDirectScenario", args.scenario, "build.cairn.app.test/androidx.test.runner.AndroidJUnitRunner", text=True, timeout=360)
-        args.output.with_suffix(".instrumentation.txt").write_text(result.stdout)
+        result = run_android_instrumentation(adb, args.output, args.scenario)
         if "OK (1 test)" not in result.stdout:
             raise RuntimeError("Native Android transport scenario failed; see instrumentation result")
+        transport = json.loads(args.output.with_suffix(".transport.json").read_text())
+        if transport["trace"].get("unavailable"):
+            raise RuntimeError("Native Android transport passed but its qualification trace is unavailable")
         evidence = json.loads(adb("exec-out", "run-as", "build.cairn.app", "cat", "files/direct-evidence.json", text=True).stdout)
         expected = "relay" if args.scenario == "udp-blocked" else "direct"
         if evidence["route"] != expected:

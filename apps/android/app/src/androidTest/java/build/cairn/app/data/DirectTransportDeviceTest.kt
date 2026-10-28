@@ -144,6 +144,8 @@ class DirectTransportDeviceTest {
                 .build()
         val api =
             CairnApi(origin, vault, client, configuration["installation"]!!.jsonPrimitive.content)
+        val trace = DirectTrace()
+        api.transport.trace = trace
         api.csrf = configuration["csrf"]!!.jsonPrimitive.content
         var directReads = 0
         var ui = false
@@ -464,6 +466,11 @@ class DirectTransportDeviceTest {
                         }
                     }
                     suspendedControl = true
+                    trace.record(DirectTrace.Event.LARGE_REQUEST_BEFORE)
+                    trace.record(
+                        if (api.transport.route.value == "direct") DirectTrace.Event.ROUTE_DIRECT
+                        else DirectTrace.Event.ROUTE_RELAY
+                    )
                     val largeRequest = runCatching {
                         api.request(
                             "POST",
@@ -475,6 +482,14 @@ class DirectTransportDeviceTest {
                         )
                     }
                         .exceptionOrNull()
+                    trace.record(
+                        DirectTrace.Event.LARGE_REQUEST_AFTER,
+                        (largeRequest as? ApiException)?.status?.toLong(),
+                    )
+                    trace.record(
+                        if (api.transport.route.value == "direct") DirectTrace.Event.ROUTE_DIRECT
+                        else DirectTrace.Event.ROUTE_RELAY
+                    )
                     assertEquals(
                         "The real router retains its 150 kB JSON body limit",
                         413,
@@ -567,6 +582,10 @@ class DirectTransportDeviceTest {
                         .toString()
                 )
         } finally {
+            // Persist before intentional cleanup, including when an assertion fails.
+            runCatching {
+                File(context.filesDir, "direct-trace.json").writeText(trace.snapshot().toString())
+            }
             api.closeStreams()
             if (scenario == "network-change") shell("svc wifi enable")
         }

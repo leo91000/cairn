@@ -6,6 +6,7 @@ import android.net.Network
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import build.cairn.app.data.DirectTrace.Event
 import java.io.IOException
 import java.net.InetAddress
 import java.net.UnknownHostException
@@ -88,13 +89,16 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
         }
 
     private fun networkChanged(next: Network?) {
+        api.transport.trace?.record(
+            if (next == null) Event.NETWORK_LOST else Event.NETWORK_AVAILABLE
+        )
         network = next
         synchronized(retry) {
             generation.incrementAndGet()
             retry.networkChanged()
         }
         restart.set(true)
-        active.get()?.fail()
+        active.get()?.fail(cause = Event.NETWORK_CHANGED)
         changed.trySend(Unit)
     }
 
@@ -116,6 +120,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                 return@launch
             }
             ProcessLifecycleOwner.get().lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                api.transport.trace?.record(Event.FOREGROUND)
                 if (manager.activeNetwork != network) networkChanged(manager.activeNetwork)
                 manager.registerDefaultNetworkCallback(callback)
                 try {
@@ -135,6 +140,10 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                             continue
                         }
                         val attempt = Attempt(attemptGeneration)
+                        api.transport.trace?.let {
+                            it.grantDeadlineMs = 0
+                            it.record(Event.ATTEMPT_START)
+                        }
                         active.set(attempt)
                         var attemptFailed = false
                         try {
@@ -146,6 +155,10 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                         } catch (error: Unavailable) {
                             unavailableAt.set(attemptGeneration)
                         } catch (error: Exception) {
+                            api.transport.trace?.failure(
+                                Event.CONNECT_ERROR,
+                                (error as? ApiException)?.status?.toLong(),
+                            )
                             attemptFailed = true
                             rememberDenial(error)
                             // Direct is optional; the relay reports installation/session failures.
@@ -166,6 +179,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                         }
                     }
                 } finally {
+                    api.transport.trace?.record(Event.BACKGROUND)
                     manager.unregisterNetworkCallback(callback)
                 }
             }
@@ -174,7 +188,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
 
     fun close() {
         if (!stopped.compareAndSet(false, true)) return
-        active.get()?.fail()
+        active.get()?.fail(cause = Event.CLIENT_CLOSED)
         scope.cancel()
     }
 
@@ -195,7 +209,8 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
             CoroutineScope(SupervisorJob(scope.coroutineContext[Job]) + Dispatchers.IO)
         private val writable = Channel<Unit>(Channel.CONFLATED)
         private val dataLock = Any()
-        private val iceGrace = DirectIceGrace(workers) { fail() }
+        private val iceGrace = DirectIceGrace(workers) { fail(cause = Event.ICE_FAILED) }
+        private val tracedFailure = AtomicBoolean()
         private val events = AtomicReference<Call?>()
         private var factory: PeerConnectionFactory? = null
         private var peer: PeerConnection? = null
@@ -204,7 +219,16 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
         private var connection = ""
         private var fingerprint = ""
 
-        fun fail(error: Exception? = null) {
+        fun fail(error: Exception? = null, cause: Event = Event.ATTEMPT_CLOSED) {
+            // Keep the initiating category; cleanup and signal cancellation may follow it.
+            val trace = api.transport.trace
+            if (trace != null && tracedFailure.compareAndSet(false, true)) {
+                if (
+                    cause in setOf(Event.ATTEMPT_CLOSED, Event.NETWORK_CHANGED, Event.CLIENT_CLOSED)
+                )
+                    trace.record(cause)
+                else trace.failure(cause, (error as? ApiException)?.status?.toLong())
+            }
             // Renewal unavailability belongs to this network generation, even if a newer
             // default network was observed while the HTTP request was in flight.
             if (error is Unavailable) unavailableAt.set(attemptGeneration)
@@ -231,6 +255,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                         override fun onIceConnectionChange(
                             state: PeerConnection.IceConnectionState
                         ) {
+                            api.transport.trace?.record(Event.ICE_STATE, state = state)
                             iceGrace.changed(
                                 disconnected =
                                     state == PeerConnection.IceConnectionState.DISCONNECTED,
@@ -254,19 +279,20 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                                 put("sdp_mid", candidate.sdpMid)
                                 put("sdp_m_line_index", candidate.sdpMLineIndex)
                             }
-                            if (!candidates.trySend(value).isSuccess) fail()
+                            if (!candidates.trySend(value).isSuccess)
+                                fail(cause = Event.CANDIDATE_QUEUE_FULL)
                         }
 
                         override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) {}
 
                         override fun onAddStream(stream: MediaStream) {
-                            fail()
+                            fail(cause = Event.UNEXPECTED_MEDIA)
                         }
 
                         override fun onRemoveStream(stream: MediaStream) {}
 
                         override fun onDataChannel(channel: DataChannel) {
-                            fail()
+                            fail(cause = Event.UNEXPECTED_CHANNEL)
                         }
 
                         override fun onRenegotiationNeeded() {}
@@ -283,7 +309,10 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                                 System.currentTimeMillis() < expires.get()
                         },
                     )
-                    .also { it.onProtocolMismatch = { error -> rememberDenial(error) } }
+                    .also {
+                        it.onProtocolMismatch = { error -> rememberDenial(error) }
+                        it.trace = api.transport.trace
+                    }
             data
                 .get()!!
                 .registerObserver(
@@ -297,6 +326,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                             // writes/disposal.
                             workers.launch {
                                 val state = synchronized(dataLock) { data.get()?.state() }
+                                api.transport.trace?.record(Event.DATA_STATE, state = state)
                                 when (state) {
                                     DataChannel.State.OPEN -> {
                                         if (
@@ -306,10 +336,10 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                                             retry.connected()
                                             api.transport.attach(traffic!!)
                                             opened.complete(Unit)
-                                        } else fail()
+                                        } else fail(cause = Event.OPEN_REJECTED)
                                     }
                                     DataChannel.State.CLOSED,
-                                    DataChannel.State.CLOSING -> fail()
+                                    DataChannel.State.CLOSING -> fail(cause = Event.DATA_CLOSED)
                                     else -> {}
                                 }
                             }
@@ -321,7 +351,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                                 !buffer.binary ||
                                     size !in DirectChannel.HEADER..DirectChannel.MAX_PACKET
                             ) {
-                                fail()
+                                fail(cause = Event.INVALID_PACKET)
                                 return
                             }
                             // Copy native memory before callback return. The bounded worker queue
@@ -405,13 +435,13 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
-                    fail(error)
+                    fail(error, Event.SIGNAL_ERROR)
                 }
             }
             workers.launch {
                 while (isActive && !failed.isCompleted) {
                     if (System.currentTimeMillis() >= expires.get()) {
-                        fail()
+                        fail(cause = Event.GRANT_EXPIRED)
                         break
                     }
                     traffic!!.checkDeadline()
@@ -428,7 +458,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
-                    fail(error)
+                    fail(error, Event.RENEW_ERROR)
                 }
             }
             withTimeoutOrNull(30000) {
@@ -436,7 +466,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                     opened.onAwait {}
                     failed.onAwait {}
                 }
-            } ?: fail()
+            } ?: fail(cause = Event.CONNECT_TIMEOUT)
         }
 
         private suspend fun authorize(path: String): JsonObject =
@@ -463,6 +493,11 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
             )
             val deadline = claims["expires_at"]!!.jsonPrimitive.long * 1000
             require(deadline > System.currentTimeMillis())
+            if (deadline > previousDeadline) api.transport.trace?.grantDeadlineMs = deadline
+            api.transport.trace?.record(
+                if (deadline <= previousDeadline) Event.GRANT_CAPPED else Event.GRANT_UPDATED,
+                deadline - System.currentTimeMillis(),
+            )
             if (deadline <= previousDeadline) return false
             expires.set(deadline)
             return true
@@ -558,9 +593,14 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
+                if (!failed.isCompleted)
+                    api.transport.trace?.failure(
+                        Event.SIGNAL_ERROR,
+                        (error as? ApiException)?.status?.toLong(),
+                    )
                 rememberDenial(error)
             } finally {
-                fail()
+                fail(cause = Event.SIGNAL_ENDED)
             }
         }
 

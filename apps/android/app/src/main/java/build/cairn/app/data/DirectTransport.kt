@@ -1,5 +1,6 @@
 package build.cairn.app.data
 
+import build.cairn.app.data.DirectTrace.Event
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
@@ -49,6 +50,7 @@ class DirectTransport(private val installationId: String?, private val switched:
     val route = observed.asStateFlow()
     private val mismatch = MutableStateFlow<String?>(null)
     val protocolError = mismatch.asStateFlow()
+    @Volatile internal var trace: DirectTrace? = null
 
     fun rejectProtocol(error: ProtocolMismatch = ProtocolMismatch()) {
         mismatch.value = error.message
@@ -109,10 +111,24 @@ class DirectTransport(private val installationId: String?, private val switched:
         var replayedMessage = false
         if (channel != null) {
             try {
+                trace?.record(Event.REQUEST_STARTED)
                 val response = channel.request(request, prefix, chain.call()::isCanceled)
+                trace?.record(
+                    Event.RESPONSE_DIRECT,
+                    response.code.toLong(),
+                    taggedDirect = wasDirect(response),
+                )
                 if (current.get() === channel) observed.value = "direct"
                 return response
             } catch (error: IOException) {
+                trace?.failure(
+                    when (error) {
+                        is DirectNotSent -> Event.REQUEST_NOT_SENT
+                        is DirectLost -> Event.REQUEST_LOST
+                        is DirectRequestTimeout -> Event.REQUEST_TIMEOUT
+                        else -> Event.REQUEST_IO_ERROR
+                    }
+                )
                 if (error is DirectLost) channel.close()
                 val transportFailure =
                     error is DirectLost || error is DirectNotSent || error is DirectRequestTimeout
@@ -128,8 +144,14 @@ class DirectTransport(private val installationId: String?, private val switched:
             }
         }
         val response = chain.proceed(request)
-        if (request.url.encodedPath.startsWith(prefix) && acceptsApplication)
+        if (request.url.encodedPath.startsWith(prefix) && acceptsApplication) {
+            trace?.record(
+                Event.RESPONSE_RELAY,
+                response.code.toLong(),
+                taggedDirect = wasDirect(response),
+            )
             observed.value = "relay"
+        }
         if (replayedMessage && response.code == 409) {
             val error = runCatching {
                 wireJson
@@ -209,6 +231,7 @@ class DirectChannel(
 
     private val pending = ConcurrentHashMap<String, Exchange>()
     internal var onClosed: () -> Unit = {}
+    @Volatile internal var trace: DirectTrace? = null
     internal var onProtocolMismatch: (ProtocolMismatch) -> Unit = {}
     private val closed = AtomicBoolean()
     private val transfers = AtomicInteger()
@@ -235,9 +258,11 @@ class DirectChannel(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: ProtocolMismatch) {
+                trace?.failure(Event.PROTOCOL_MISMATCH)
                 onProtocolMismatch(error)
                 close(error)
             } catch (_: Exception) {
+                trace?.failure(Event.DECODE_ERROR)
                 // Malformed wire data keeps the existing connection-loss recovery rules.
                 close()
             }
@@ -246,6 +271,7 @@ class DirectChannel(
 
     fun close(reason: IOException = DirectLost("Connexion directe interrompue")) {
         if (!closed.compareAndSet(false, true)) return
+        trace?.record(Event.CHANNEL_CLOSED)
         pending.values.forEach {
             it.failure = reason
         }
@@ -262,6 +288,7 @@ class DirectChannel(
 
     fun receive(packet: ByteArray) {
         if (!valid()) {
+            trace?.failure(Event.VALIDITY_REJECTED)
             close()
             return
         }
@@ -274,6 +301,7 @@ class DirectChannel(
                 runBlocking { incoming.send(packet) }
             }
         } catch (_: Exception) {
+            trace?.failure(Event.RECEIVE_ERROR)
             close()
         }
     }
@@ -285,7 +313,10 @@ class DirectChannel(
                     System.nanoTime() - it.started >= TimeUnit.SECONDS.toNanos(30)
                 }
             }
-        if (expired) close()
+        if (expired) {
+            trace?.failure(Event.ASSEMBLY_TIMEOUT)
+            close()
+        }
     }
 
     private fun receiveFrame(packet: ByteArray) {

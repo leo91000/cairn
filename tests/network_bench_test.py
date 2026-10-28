@@ -5,7 +5,60 @@ import importlib.util
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 from pathlib import Path
+
+
+class AndroidEvidenceTest(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+        self.bench = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.bench)
+
+    def test_clock_bounds_include_command_latency_and_guest_second_quantization(self):
+        adb = Mock(return_value=subprocess.CompletedProcess([], 0, stdout="102\n"))
+        with patch.object(self.bench.time, "time_ns", side_effect=[100_000_000_000, 100_200_000_000]), \
+             patch.object(self.bench.time, "monotonic_ns", side_effect=[1_000_000_000, 1_200_000_000]):
+            sample = self.bench.android_clock_sample(adb)
+        self.assertEqual(sample["guestMinusHostLowerMs"], 1800)
+        self.assertEqual(sample["guestMinusHostUpperMs"], 3000)
+        self.assertEqual(sample["roundTripMs"], 200)
+        self.assertEqual(sample["hostWallDeltaMs"], 0)
+
+    def test_failed_assertion_still_collects_trace_before_returning_verdict(self):
+        def adb(*args, **kwargs):
+            if args[:3] == ("shell", "am", "instrument"):
+                return subprocess.CompletedProcess([], 0, stdout="FAILURES!!!\n")
+            if args[:2] == ("shell", "date"):
+                return subprocess.CompletedProcess([], 0, stdout="102\n")
+            return subprocess.CompletedProcess([], 0, stdout='{"events":[{"event":"DECODE_ERROR"}]}')
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "same-lan.json"
+            result = self.bench.run_android_instrumentation(adb, output, "same-lan")
+            self.assertEqual(result.stdout, "FAILURES!!!\n")
+            evidence = json.loads(output.with_suffix(".transport.json").read_text())
+            self.assertEqual(evidence["trace"]["events"][0]["event"], "DECODE_ERROR")
+            self.assertEqual(len(evidence["clocks"]), 2)
+            self.assertEqual(output.with_suffix(".instrumentation.txt").read_text(), result.stdout)
+
+    def test_unavailable_diagnostics_do_not_replace_original_instrumentation_timeout(self):
+        timeout = subprocess.TimeoutExpired("instrument", 360, output=b"partial instrumentation\n")
+
+        def adb(*args, **kwargs):
+            if args[:3] == ("shell", "am", "instrument"):
+                raise timeout
+            raise subprocess.CalledProcessError(1, "adb")
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "same-lan.json"
+            with self.assertRaises(subprocess.TimeoutExpired) as failure:
+                self.bench.run_android_instrumentation(adb, output, "same-lan")
+            self.assertIs(failure.exception, timeout)
+            self.assertEqual(output.with_suffix(".instrumentation.txt").read_text(), "partial instrumentation\n")
+            evidence = json.loads(output.with_suffix(".transport.json").read_text())
+            self.assertTrue(evidence["trace"]["unavailable"])
+            self.assertEqual(evidence["clocks"], [dict(unavailable=True), dict(unavailable=True)])
 
 
 class NetworkBenchTest(unittest.TestCase):

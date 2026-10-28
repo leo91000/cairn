@@ -69,3 +69,37 @@ Adapter tests independently verify the 16,384-byte packet and 10,732,204-byte
 frame caps, at most 32 incomplete assemblies, and the existing 13-byte abort
 envelope when cancellation happens after the first outgoing fragment. An
 individual cancellation leaves the peer available for a subsequent direct read.
+
+## Failure evidence
+
+The native bench enables an internal `DirectTrace` only for its primary client.
+The recorder keeps the last 128 events and preserves the first observed failure
+even if that event leaves the buffer. It accepts enum categories and numeric
+metadata; it never receives wire content, URLs, IDs, SDP, headers or exception
+messages. Native logging remains disabled. The trace is buffered in memory and
+written from the test's `finally` block before deliberate client cleanup.
+
+Each event includes monotonic elapsed milliseconds, device wall time, the delta
+between wall and monotonic elapsed time, and grant remaining milliseconds when
+known. Native events include foreground/default-network transitions, ICE and
+DataChannel states, grant updates/caps and the initiating close category for
+each attempt. Response events include HTTP status and the actual direct-channel
+response tag. `LARGE_REQUEST_BEFORE`/`AFTER` and adjacent route observations
+bracket the real 1 MB application refusal.
+
+`tests/network-bench.py` collects `<scenario>.transport.json` before interpreting
+the instrumentation verdict, including on assertion failure. It also samples
+guest/host wall-clock offset before and after instrumentation. Offset bounds
+include ADB command RTT and the guest clock command's one-second quantization;
+`hostWallDeltaMs` exposes host wall-clock movement during sampling. A missing
+trace or clock sample is explicitly unavailable and does not replace the
+original instrumentation failure. These samples cannot establish an earlier
+failure's clock behavior or distinguish a transient clock change between samples
+without the device event trace.
+
+This evidence was added after the same-LAN failure in
+[run 40696410719](https://github.com/leo91000/cairn/actions/runs/40696410719)
+at source `06526eccfa1a7ba1ed3d54dcd5040335ee9e2668`: the real large POST returned
+413, then the route assertion expected direct but observed relay after 120.394 s.
+Its original artifacts do not identify the transport failure or clock behavior.
+The later passing qualifications do not establish a cause or a causal repair.
