@@ -1,0 +1,73 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "EditChatMessage": {
+      "additionalProperties": false,
+      "properties": {
+        "attachmentIds": {
+          "default": [],
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
+        "mode": {
+          "default": "queue",
+          "pattern": "^(queue|steer)$",
+          "type": "string"
+        },
+        "model": {
+          "default": "",
+          "maxLength": 120,
+          "pattern": "^[\\w./:\\[\\]-]*$",
+          "type": "string"
+        },
+        "provider": {
+          "default": "",
+          "pattern": "^(|codex|claude|opencode)$",
+          "type": "string"
+        },
+        "reasoning": {
+          "default": "",
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
+        "speed": {
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
+        "text": {
+          "default": "",
+          "maxLength": 50000,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "properties": {
+    "chatId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "message": {
+      "$ref": "#/definitions/EditChatMessage"
+    },
+    "messageId": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "chatId",
+    "messageId",
+    "message"
+  ],
+  "title": "EditChatMessageInput",
+  "type": "object"
+}

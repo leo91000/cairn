@@ -13,7 +13,7 @@ class SavedConversationTest {
             finishedAt = 20,
             taskId = "",
         )
-    private val chat = Chat("chat", runId = "run", updatedAt = 10, status = "succeeded")
+    private val chat = Chat(id = "chat", runId = "run", updatedAt = 10, status = "succeeded")
 
     private fun saved(run: Run? = this.run, chat: Chat? = this.chat) =
         CachedHistory(

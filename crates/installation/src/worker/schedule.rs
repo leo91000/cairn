@@ -642,7 +642,11 @@ mod tests {
             }
         }).await.unwrap();
         chat["runId"] = run_id.clone().into();
-        service.store.put("chats", chat).await.unwrap();
+        service
+            .store
+            .save_conversation_boundary(chat)
+            .await
+            .unwrap();
         let workspace = service.config.data_dir.join("runs").join(&run_id);
         tokio::fs::create_dir_all(&workspace).await.unwrap();
         tokio::fs::write(workspace.join("work.txt"), "Private work")
@@ -696,7 +700,7 @@ mod tests {
             };
             original
                 .store
-                .transaction(move |db| db.remove("chats", &chat_id))
+                .transaction(move |db| db.remove_conversation(&chat_id))
                 .await
                 .unwrap();
             drop(original);
@@ -980,7 +984,7 @@ mod tests {
         assert!(
             service
                 .store
-                .get("chats", other_id)
+                .conversation_boundary(other_id)
                 .await
                 .unwrap()
                 .is_none(),
@@ -995,7 +999,7 @@ mod tests {
         assert!(
             service
                 .store
-                .get("chats", &chat_id)
+                .conversation_boundary(&chat_id)
                 .await
                 .unwrap()
                 .is_none()
@@ -1115,7 +1119,12 @@ mod tests {
         let deletion = tokio::spawn(async move { deleting.chat_trash(&deleting_id, true).await });
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let chat = service.store.get("chats", &chat_id).await.unwrap().unwrap();
+                let chat = service
+                    .store
+                    .conversation_boundary(&chat_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
                 let run = service.store.run(&run_id).await.unwrap();
                 if chat["lifecycle"] == "trash" && !run["cancelRequestedAt"].is_null() {
                     assert_eq!(run["status"], RunStatus::Queued);
@@ -1138,7 +1147,7 @@ mod tests {
         assert!(
             service
                 .store
-                .get("chats", &chat_id)
+                .conversation_boundary(&chat_id)
                 .await
                 .unwrap()
                 .is_none()
@@ -1202,9 +1211,9 @@ mod tests {
                 let chat_id = chat_id.clone();
                 let source = source.clone();
                 move |db| {
-                    let mut chat = db.get("chats", &chat_id)?.unwrap();
+                    let mut chat = db.conversation_boundary(&chat_id)?.unwrap();
                     chat["agentId"] = source["id"].clone();
-                    db.put("chats", &chat)?;
+                    db.save_conversation_boundary(&chat)?;
                     Ok(())
                 }
             })

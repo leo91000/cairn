@@ -352,12 +352,12 @@ abstract class ChatSwipeCases {
                     name = "Agent principal",
                 )
             val chats =
-                if (single) listOf(Chat("recent", "Chat récent", updatedAt = 300))
+                if (single) listOf(Chat(id = "recent", title = "Chat récent", updatedAt = 300))
                 else
                     listOf(
-                        Chat("old", "Chat ancien", updatedAt = 100),
-                        Chat("recent", "Chat récent", updatedAt = 300),
-                        Chat("middle", "Chat intermédiaire", updatedAt = 200),
+                        Chat(id = "old", title = "Chat ancien", updatedAt = 100),
+                        Chat(id = "recent", title = "Chat récent", updatedAt = 300),
+                        Chat(id = "middle", title = "Chat intermédiaire", updatedAt = 200),
                     )
             expectedPages = chats.size
             server.dispatcher =

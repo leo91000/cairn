@@ -283,7 +283,7 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
     db.revoke_mcp_run(run)?;
     db.0.execute("DELETE FROM chat_messages WHERE chat_id=?", [cid])?;
     db.0.execute("DELETE FROM runs WHERE id=?", [run])?;
-    db.remove("chats", cid)?;
+    db.remove_conversation(cid)?;
     db.audit("chat.purged", &json!({ "id": cid }))
 }
 
@@ -354,11 +354,11 @@ pub async fn expire_environment(s: &Service, chat: Value) -> Result<()> {
             db.event(&run, &cairn_contracts::EventKind::Status,
                 "Environment removed after inactivity. Conversation history, uploads and published artifacts are retained. The next message starts a fresh environment.", None)?;
         }
-        if let Some(mut current) = db.get("chats", &cid)? {
-            current["environmentState"] = "expired".into();
-            current["environmentError"] = Value::Null;
-            current["environmentRetryAfter"] = Value::Null;
-            db.put("chats", &current)?;
+        if let Some(mut current) = db.conversation(&cid)? {
+            current.environment_state = Some(cairn_contracts::ConversationEnvironmentState::Expired);
+            current.environment_error = None;
+            current.environment_retry_after = None;
+            db.save_conversation(&current)?;
         }
         Ok(())
     }).await
@@ -374,7 +374,7 @@ mod tests {
         let store = crate::store::Store::open(root.path()).unwrap();
         store
             .transaction(|db| {
-                db.put("chats", &json!({ "id": "chat", "runId": "run" }))?;
+                db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run" }))?;
                 for key in ["turn-speed:run", "chat-error:chat"] {
                     db.set(key, &json!({ "messageId": "message" }), None)?;
                 }

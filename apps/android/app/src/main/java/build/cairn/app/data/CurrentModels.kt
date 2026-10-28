@@ -2,157 +2,38 @@ package build.cairn.app.data
 
 import kotlinx.serialization.Serializable
 
-@Serializable
-data class ChatAttachment(
-    val id: String,
-    val chatId: String = "",
-    val name: String,
-    val size: Long = 0,
-    val mediaType: String = "application/octet-stream",
-    val kind: String = "file",
-)
+typealias ChatAttachment = build.cairn.contracts.ChatAttachment
 
-@Serializable
-data class ChatMessage(
-    val id: String,
-    val chatId: String = "",
-    val text: String = "",
-    val model: String = "",
-    val reasoning: String = "",
-    val mode: String = "queue",
-    val status: String = "queued",
-    val createdAt: Long = 0,
-    val attachments: List<ChatAttachment> = emptyList(),
-    val questionId: String? = null,
-    val provider: String = "",
-    /** The Codex speed this message asked for; empty on earlier messages. */
-    val speed: String = "",
-)
+typealias ChatMessage = build.cairn.contracts.ChatMessage
 
-@Serializable
-data class QuestionOption(
-    val label: String,
-    val description: String = "",
-    val id: String = label,
-    val recommended: Boolean = false,
-)
+typealias QuestionOption = build.cairn.boundary.QuestionOption
 
-@Serializable
-data class QuestionField(
-    val id: String,
-    val title: String,
-    val secret: Boolean = false,
-    val options: List<QuestionOption> = emptyList(),
-    val mode: String = "single",
-    val minChoices: Int? = null,
-    val maxChoices: Int? = null,
-) {
-    fun accepts(selected: List<String>, comment: String): Boolean {
-        if (selected.isEmpty()) return comment.isNotBlank()
-        val maximum = if (mode == "single") 1 else maxChoices ?: options.size
-        return selected.size >= (minChoices ?: 1) &&
-            selected.size <= maximum &&
-            selected.distinct().size == selected.size &&
-            selected.all { id -> options.any { it.id == id } }
-    }
-}
+typealias QuestionField = build.cairn.boundary.QuestionField
 
-@Serializable
-data class QuestionAnswer(val selected: List<String> = emptyList(), val comment: String = "")
+typealias QuestionAnswer = build.cairn.boundary.QuestionAnswer
 
-@Serializable
-data class ChatQuestion(
-    val id: String,
-    val chatId: String,
-    val runId: String = "",
-    val blocking: Boolean = false,
-    val fields: List<QuestionField> = emptyList(),
-    val status: String = "pending",
-    val createdAt: Long = 0,
-)
+typealias ChatQuestion = build.cairn.boundary.ChatQuestion
 
 typealias ChatWakeup = build.cairn.boundary.ChatWakeup
 
-typealias ContextUsage = build.cairn.boundary.ContextUsage
+typealias ContextUsage = build.cairn.contracts.ContextUsage
 
-/** Whether the coding agent can compact its context now, and why not when it cannot. */
-@Serializable
-data class ChatCompaction(
-    /** The coding agent offers a compaction control. OpenCode does not. */
-    val supported: Boolean = false,
-    val running: Boolean = false,
-    val available: Boolean = false,
-    val reason: String? = null,
-)
+typealias ChatCompaction = build.cairn.contracts.ChatCompaction
 
-/** The conversation whose agent delegated a conversation. */
-@Serializable data class ChatRequester(val chatId: String, val title: String = "")
+typealias ChatRequester = build.cairn.contracts.ChatRequester
 
-@Serializable data class CodingAgentSwitch(val provider: String, val error: String? = null)
+typealias CodingAgentSwitch = build.cairn.contracts.CodingAgentSwitch
 
-@Serializable data class CodingAgentChoice(val provider: String, val label: String)
+typealias CodingAgentChoice = build.cairn.contracts.CodingAgentChoice
 
-@Serializable
-data class CodingAgentOptions(
-    val runId: String? = null,
-    val turnId: String? = null,
-    val provider: String = "codex",
-    val choices: List<CodingAgentChoice> = emptyList(),
-    val switching: CodingAgentSwitch? = null,
-)
+typealias CodingAgentOptions = build.cairn.contracts.CodingAgentOptions
 
-@Serializable
-data class Chat(
-    val id: String,
-    val title: String = "Nouvelle conversation",
-    val agentId: String = MAIN_AGENT_ID,
-    val projectId: String? = null,
-    val runId: String? = null,
-    val paused: Boolean = false,
-    val createdAt: Long = 0,
-    val updatedAt: Long = 0,
-    val pendingQuestions: Int = 0,
-    val agentName: String = "",
-    val projectName: String? = null,
-    val status: String = "idle",
-    /** The coding agent of the latest turn; a message may switch it from the agent's own. */
-    val provider: String? = null,
-    /** When the agent's latest turn ended. */
-    val finishedAt: Long? = null,
-    /** Absent for older servers and before the coding agent reports it. */
-    val contextUsage: ContextUsage? = null,
-    val compaction: ChatCompaction? = null,
-    /** The agent finished a turn this account has not opened since. */
-    val unread: Boolean = false,
-    /** The opening of the agent's final message, while unread. */
-    val preview: String? = null,
-    val questions: List<ChatQuestion> = emptyList(),
-    val run: Run? = null,
-    val messages: List<ChatMessage> = emptyList(),
-    val error: String? = null,
-    val lifecycle: String = "active",
-    val purgeAt: Long? = null,
-    val restoredAt: Long? = null,
-    val sessionRestartRequested: Boolean = false,
-    val canRequestNewSession: Boolean = false,
-    val lifecycleError: String? = null,
-    val environmentState: String? = null,
-    val environmentExpiredAt: Long? = null,
-    val environmentError: String? = null,
-    val wakeup: ChatWakeup? = null,
-    val suspendedByExclusive: ExclusiveReservation? = null,
-    /** The conversation that delegated this one, while it still exists. */
-    val requester: ChatRequester? = null,
-    val codingAgentSwitch: CodingAgentSwitch? = null,
-    /** The current run's account wait, also available in conversation lists. */
-    val accountWaitReason: String? = null,
-    val accountRequired: String? = null,
-) {
-    val exclusiveSuspended
-        get() =
-            (run?.status ?: status) in listOf("running", "queued") &&
-                (suspendedByExclusive != null || run?.suspendedByExclusive != null)
-}
+typealias Chat = build.cairn.contracts.Chat
+
+val Chat.exclusiveSuspended: Boolean
+    get() =
+        (run?.status ?: status) in listOf("running", "queued") &&
+            (suspendedByExclusive != null || run?.suspendedByExclusive != null)
 
 @Serializable
 data class Deliverable(

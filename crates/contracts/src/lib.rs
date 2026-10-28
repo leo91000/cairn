@@ -174,3 +174,7 @@ pub use events::*;
 mod nodes;
 
 pub use nodes::*;
+
+mod conversations;
+
+pub use conversations::*;

@@ -165,7 +165,7 @@ class MissionChatDeviceTest {
                 trigger = "manual",
                 sessionId = "saved",
             )
-        val chat = Chat("follow-up", runId = run.id)
+        val chat = Chat(id = "follow-up", runId = run.id)
         var opened = ""
         val conversions = java.util.concurrent.atomic.AtomicInteger()
         MockWebServer().use { server ->

@@ -96,8 +96,8 @@ class FilUnreadJourneyTest {
     private val chats =
         listOf(
             Chat(
-                "done",
-                "Rédiger le changelog 0.53",
+                id = "done",
+                title = "Rédiger le changelog 0.53",
                 agentName = "Rédacteur",
                 status = "succeeded",
                 runId = "done-run",
@@ -109,16 +109,16 @@ class FilUnreadJourneyTest {
                     "Le changelog est prêt : 12 corrections, 3 nouveautés. J’ai ouvert la PR #184.",
             ),
             Chat(
-                "question",
-                "Choisir la pagination",
+                id = "question",
+                title = "Choisir la pagination",
                 agentName = "Rédacteur",
                 pendingQuestions = 1,
                 updatedAt = now - 60_000,
                 provider = "claude",
             ),
             Chat(
-                "old",
-                "Relecture du guide d’installation",
+                id = "old",
+                title = "Relecture du guide d’installation",
                 agentName = "Rédacteur",
                 status = "succeeded",
                 updatedAt = now - 86_400_000,

@@ -157,7 +157,12 @@ class HistoryScrollDeviceTest {
                     LiveBatch(
                         window,
                         LiveState(
-                            chat = Chat("long", "Longue conversation", agentName = "Main agent")
+                            chat =
+                                Chat(
+                                    id = "long",
+                                    title = "Longue conversation",
+                                    agentName = "Main agent",
+                                )
                         ),
                         reset = true,
                         more = false,

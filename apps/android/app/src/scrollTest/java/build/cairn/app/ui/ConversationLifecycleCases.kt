@@ -49,7 +49,7 @@ abstract class ConversationLifecycleCases {
             val restarts = CopyOnWriteArrayList<String>()
             val chat =
                 Chat(
-                    "chat",
+                    id = "chat",
                     title = "Conversation à conserver",
                     agentName = "Agent principal",
                     updatedAt = System.currentTimeMillis(),

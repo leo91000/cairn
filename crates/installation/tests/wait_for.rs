@@ -246,15 +246,15 @@ impl Fixture {
     }
 
     async fn due(&self) {
-        let mut chat = self.s.get("chats", &self.chat).await.unwrap();
+        let mut chat = self.s.conversation_boundary(&self.chat).await.unwrap();
         chat["wakeup"]["wakeAt"] = (now() - 1000).into();
-        self.s.store.put("chats", chat).await.unwrap();
+        self.s.store.save_conversation_boundary(chat).await.unwrap();
     }
 
     async fn next_poll(&self) {
-        let mut chat = self.s.get("chats", &self.chat).await.unwrap();
+        let mut chat = self.s.conversation_boundary(&self.chat).await.unwrap();
         chat["wakeup"]["nextCheckAt"] = 0.into();
-        self.s.store.put("chats", chat).await.unwrap();
+        self.s.store.save_conversation_boundary(chat).await.unwrap();
     }
 }
 
@@ -458,7 +458,7 @@ async fn github_monitor_only_probes_resumable_wakeups() {
     let f = Fixture::new().await;
     f.schedule(f.github_condition()).await;
     f.finish().await;
-    let chat = f.s.get("chats", &f.chat).await.unwrap();
+    let chat = f.s.conversation_boundary(&f.chat).await.unwrap();
     let run = f.s.store.run(&f.run).await.unwrap();
 
     for (field, value) in [
@@ -468,12 +468,18 @@ async fn github_monitor_only_probes_resumable_wakeups() {
     ] {
         let mut blocked = chat.clone();
         blocked[field] = value;
-        f.s.store.put("chats", blocked.clone()).await.unwrap();
+        f.s.store
+            .save_conversation_boundary(blocked.clone())
+            .await
+            .unwrap();
         conditions::poll_once(&f.s).await.unwrap();
         assert_eq!(f.calls().len(), 1, "chat guard: {field}");
-        assert_eq!(f.s.get("chats", &f.chat).await.unwrap(), blocked);
+        assert_eq!(f.s.conversation_boundary(&f.chat).await.unwrap(), blocked);
     }
-    f.s.store.put("chats", chat.clone()).await.unwrap();
+    f.s.store
+        .save_conversation_boundary(chat.clone())
+        .await
+        .unwrap();
 
     for (field, value) in [
         ("status", json!("running")),
@@ -488,7 +494,7 @@ async fn github_monitor_only_probes_resumable_wakeups() {
             .unwrap();
         conditions::poll_once(&f.s).await.unwrap();
         assert_eq!(f.calls().len(), 1, "run guard: {field}");
-        assert_eq!(f.s.get("chats", &f.chat).await.unwrap(), chat);
+        assert_eq!(f.s.conversation_boundary(&f.chat).await.unwrap(), chat);
         f.s.store
             .change_run_fixture(&f.run, json!({ (field): run[field] }))
             .await
@@ -500,7 +506,7 @@ async fn github_monitor_only_probes_resumable_wakeups() {
     conditions::poll_once(&f.s).await.unwrap();
     assert_eq!(f.calls().len(), 2);
     assert_eq!(
-        f.s.get("chats", &f.chat).await.unwrap()["wakeup"]["observation"]["conclusion"],
+        f.s.conversation_boundary(&f.chat).await.unwrap()["wakeup"]["observation"]["conclusion"],
         "success"
     );
 }
@@ -526,12 +532,15 @@ async fn github_monitor_rechecks_session_restart_after_the_probe() {
 
     // Preserve the wakeup deliberately to isolate the eligibility guard from
     // new-session's normal cancellation of the wakeup and pause of the chat.
-    let mut chat = f.s.get("chats", &f.chat).await.unwrap();
+    let mut chat = f.s.conversation_boundary(&f.chat).await.unwrap();
     chat["sessionRestartRequested"] = true.into();
-    f.s.store.put("chats", chat.clone()).await.unwrap();
+    f.s.store
+        .save_conversation_boundary(chat.clone())
+        .await
+        .unwrap();
     std::fs::write(f.root.path().join("github-release"), "").unwrap();
     observer.await.unwrap().unwrap();
-    assert_eq!(f.s.get("chats", &f.chat).await.unwrap(), chat);
+    assert_eq!(f.s.conversation_boundary(&f.chat).await.unwrap(), chat);
     assert_eq!(f.calls().len(), 2);
 }
 
@@ -719,13 +728,16 @@ async fn deferred_target_conversations_are_not_finished_and_cycles_are_rejected(
     )
     .await
     .unwrap();
-    let mut other = f.s.get("chats", other_id).await.unwrap();
+    let mut other = f.s.conversation_boundary(other_id).await.unwrap();
     other["wakeup"] = json!({
         "id": id(), "messageId": target["chatExecution"]["messageId"],
         "condition": { "type": "run_finished", "runId": f.run },
         "wakeAt": now() + 420000,
     });
-    f.s.store.put("chats", other.clone()).await.unwrap();
+    f.s.store
+        .save_conversation_boundary(other.clone())
+        .await
+        .unwrap();
     f.s.store
         .change_run(
             text(&target, "id"),
@@ -749,7 +761,7 @@ async fn deferred_target_conversations_are_not_finished_and_cycles_are_rejected(
         409
     );
     other["wakeup"]["condition"] = Value::Null;
-    f.s.store.put("chats", other).await.unwrap();
+    f.s.store.save_conversation_boundary(other).await.unwrap();
     assert_eq!(
         wait_for::schedule(&f.s, &f.token, &input).await.unwrap()["deferred"],
         true
@@ -1263,11 +1275,11 @@ async fn measure_wait_metadata() {
         }
         let write_cpu_ms = process_cpu_ms() - cpu_start;
         let child_cpu_ms = child_cpu_ms() - child_cpu_start;
-        let chat = f.s.get("chats", &f.chat).await.unwrap();
+        let chat = f.s.conversation_boundary(&f.chat).await.unwrap();
         let mut warm = Vec::new();
         for _ in 0..500 {
             let started = std::time::Instant::now();
-            std::hint::black_box(f.s.get("chats", &f.chat).await.unwrap());
+            std::hint::black_box(f.s.conversation_boundary(&f.chat).await.unwrap());
             warm.push(started.elapsed().as_secs_f64() * 1000.0);
         }
         let mut reopened = Vec::new();
@@ -1277,7 +1289,7 @@ async fn measure_wait_metadata() {
             let store = cairn_installation::store::Store::open(&f.s.config.data_dir).unwrap();
             pool_open.push(started.elapsed().as_secs_f64() * 1000.0);
             let started = std::time::Instant::now();
-            std::hint::black_box(store.get("chats", &f.chat).await.unwrap());
+            std::hint::black_box(store.conversation_boundary(&f.chat).await.unwrap());
             reopened.push(started.elapsed().as_secs_f64() * 1000.0);
         }
         let index_bytes =

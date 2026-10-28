@@ -38,9 +38,13 @@ abstract class QueueStripCases {
         "Également je ne vois pas de bouton pour mettre la file en pause sur Android, alors qu’il existe sur le web."
     private val messages =
         listOf(
-            ChatMessage("first", "chat", text = long),
-            ChatMessage("second", "chat", text = "Et relance la CI une fois que c’est fait."),
-            ChatMessage("third", "chat", text = "Puis publie les screenshots."),
+            ChatMessage(id = "first", chatId = "chat", text = long),
+            ChatMessage(
+                id = "second",
+                chatId = "chat",
+                text = "Et relance la CI une fois que c’est fait.",
+            ),
+            ChatMessage(id = "third", chatId = "chat", text = "Puis publie les screenshots."),
         )
 
     @Test
@@ -49,7 +53,7 @@ abstract class QueueStripCases {
             val calls = CopyOnWriteArrayList<Triple<String, String, String>>()
             val chat =
                 Chat(
-                    "chat",
+                    id = "chat",
                     title = "Refonte de la file",
                     agentName = "Agent principal",
                     status = "running",
@@ -67,7 +71,7 @@ abstract class QueueStripCases {
             // A neighbour enables the conversation pager, whose swipe must not steal the queue's.
             val neighbour =
                 Chat(
-                    "neighbour",
+                    id = "neighbour",
                     title = "Conversation voisine",
                     agentName = "Agent principal",
                     updatedAt = chat.updatedAt - 60000,

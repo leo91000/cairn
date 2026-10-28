@@ -103,7 +103,7 @@ class CacheMissReproductionTest {
                     wireJson.encodeToString(
                         LiveBatch(
                             events,
-                            LiveState(chat = Chat("diagnostic", title = "Diagnostic cache")),
+                            LiveState(chat = Chat(id = "diagnostic", title = "Diagnostic cache")),
                             reset = false,
                             more = false,
                             history = "v1:fixture:1",

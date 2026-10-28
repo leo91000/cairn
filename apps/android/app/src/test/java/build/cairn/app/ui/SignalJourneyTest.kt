@@ -100,16 +100,16 @@ class SignalJourneyTest {
     private val chats =
         listOf(
             Chat(
-                "question",
-                "Choisir la pagination",
+                id = "question",
+                title = "Choisir la pagination",
                 agentId = "23fd6447-79ef-5b16-9e92-4e5efcc9a72d",
                 agentName = "Designer",
                 pendingQuestions = 1,
                 updatedAt = now - 60_000,
             ),
             Chat(
-                "live",
-                "Refonte de l’application",
+                id = "live",
+                title = "Refonte de l’application",
                 agentName = "Agent principal",
                 projectName = "Cairn",
                 status = "running",
@@ -124,8 +124,8 @@ class SignalJourneyTest {
                 updatedAt = now - 120_000,
             ),
             Chat(
-                "done",
-                "Relecture de la PR",
+                id = "done",
+                title = "Relecture de la PR",
                 agentName = "Agent principal",
                 updatedAt = now - 90_000_000,
             ),
@@ -243,7 +243,7 @@ class SignalJourneyTest {
                                 json(
                                     wireJson.encodeToString(
                                         Chat(
-                                            "created",
+                                            id = "created",
                                             agentId = "23fd6447-79ef-5b16-9e92-4e5efcc9a72d",
                                         )
                                     )
@@ -259,7 +259,7 @@ class SignalJourneyTest {
                                         chat =
                                             chats.find { it.id == id }
                                                 ?: Chat(
-                                                    id,
+                                                    id = id,
                                                     agentId =
                                                         "23fd6447-79ef-5b16-9e92-4e5efcc9a72d",
                                                 )

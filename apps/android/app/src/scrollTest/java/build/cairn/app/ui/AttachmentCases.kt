@@ -100,7 +100,7 @@ abstract class AttachmentCases {
                 )
             val chat =
                 Chat(
-                    "chat",
+                    id = "chat",
                     title = "Refonte page tarifs",
                     runId = "run",
                     agentName = agent.name,
@@ -109,37 +109,47 @@ abstract class AttachmentCases {
             val files =
                 listOf(
                     ChatAttachment(
-                        "shot",
-                        "chat",
-                        "Screenshot_20261017-142133_Chrome.png",
-                        1_900_000,
-                        "image/png",
-                        "image",
+                        id = "shot",
+                        chatId = "chat",
+                        name = "Screenshot_20261017-142133_Chrome.png",
+                        size = 1_900_000,
+                        mediaType = "image/png",
+                        kind = "image",
                     ),
                     ChatAttachment(
-                        "hdr",
-                        "chat",
-                        "IMG_20261017_141502_HDR.jpg",
-                        3_400_000,
-                        "image/jpeg",
-                        "image",
+                        id = "hdr",
+                        chatId = "chat",
+                        name = "IMG_20261017_141502_HDR.jpg",
+                        size = 3_400_000,
+                        mediaType = "image/jpeg",
+                        kind = "image",
                     ),
                     ChatAttachment(
-                        "park",
-                        "chat",
-                        "IMG_20261017_141733.jpg",
-                        2_100_000,
-                        "image/jpeg",
-                        "image",
+                        id = "park",
+                        chatId = "chat",
+                        name = "IMG_20261017_141733.jpg",
+                        size = 2_100_000,
+                        mediaType = "image/jpeg",
+                        kind = "image",
                     ),
                     ChatAttachment(
-                        "brief",
-                        "chat",
-                        "Brief_refonte_page_tarifs_v3_FINAL_relu.pdf",
-                        831_488,
+                        id = "brief",
+                        chatId = "chat",
+                        name = "Brief_refonte_page_tarifs_v3_FINAL_relu.pdf",
+                        size = 831_488,
                     ),
-                    ChatAttachment("export", "chat", "export_clients_2026-10-17.csv", 253_952),
-                    ChatAttachment("sources", "chat", "maquettes-sources.zip", 6_200_000),
+                    ChatAttachment(
+                        id = "export",
+                        chatId = "chat",
+                        name = "export_clients_2026-10-17.csv",
+                        size = 253_952,
+                    ),
+                    ChatAttachment(
+                        id = "sources",
+                        chatId = "chat",
+                        name = "maquettes-sources.zip",
+                        size = 6_200_000,
+                    ),
                 )
             val pictures =
                 mapOf(

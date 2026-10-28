@@ -52,7 +52,7 @@ class RecentWindowResumeTest {
                 val revision = "v1:fixture:1"
                 val streams = CopyOnWriteArrayList<String>()
                 val olderRequests = CopyOnWriteArrayList<String>()
-                val state = LiveState(chat = Chat("diagnostic", title = "Diagnostic"))
+                val state = LiveState(chat = Chat(id = "diagnostic", title = "Diagnostic"))
                 fun message(n: Int) =
                     RunEvent(
                         id = n.toLong(),

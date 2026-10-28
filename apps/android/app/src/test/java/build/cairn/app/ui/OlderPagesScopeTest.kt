@@ -91,7 +91,9 @@ class OlderPagesScopeTest {
                                                         runId = "r1",
                                                     )
                                                 ),
-                                                LiveState(chat = Chat("fixture", title = "Test")),
+                                                LiveState(
+                                                    chat = Chat(id = "fixture", title = "Test")
+                                                ),
                                                 false,
                                                 false,
                                                 "v1:r1:1",

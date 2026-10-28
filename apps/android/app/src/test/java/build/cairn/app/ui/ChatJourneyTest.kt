@@ -175,7 +175,7 @@ class ChatJourneyTest {
                         }
                         val chat =
                             Chat(
-                                chatId,
+                                id = chatId,
                                 title = "Revue du projet",
                                 agentName = "Cairn",
                                 status = "running",
@@ -193,8 +193,8 @@ class ChatJourneyTest {
                                     else
                                         listOf(
                                             ChatMessage(
-                                                "queued",
-                                                chatId,
+                                                id = "queued",
+                                                chatId = chatId,
                                                 text = "Vérifier les tests",
                                                 status = "queued",
                                             )

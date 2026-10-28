@@ -44,8 +44,8 @@ abstract class UnifiedHeaderCases {
     private val now = System.currentTimeMillis()
     private val chat =
         Chat(
-            "chat",
-            "Orchestration de la release",
+            id = "chat",
+            title = "Orchestration de la release",
             agentName = "Agent principal",
             projectName = "Cairn",
             runId = "run",

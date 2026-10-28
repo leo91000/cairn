@@ -36,7 +36,7 @@ abstract class SavedConversationCases {
                     finishedAt = 20,
                     taskId = "",
                 )
-            val chat = Chat("saved", runId = run.id, updatedAt = 10, status = run.status)
+            val chat = Chat(id = "saved", runId = run.id, updatedAt = 10, status = run.status)
             val oldState = LiveState(chat = chat, run = run)
             val event =
                 RunEvent(

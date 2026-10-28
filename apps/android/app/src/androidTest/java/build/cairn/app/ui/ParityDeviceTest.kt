@@ -82,8 +82,8 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
         )
     private val chat =
         Chat(
-            "chat",
-            "Simplifier l’interface mobile",
+            id = "chat",
+            title = "Simplifier l’interface mobile",
             agentName = "Agent principal",
             projectName = "Cairn",
             runId = "run",

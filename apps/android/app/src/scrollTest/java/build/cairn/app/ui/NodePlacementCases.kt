@@ -560,7 +560,7 @@ abstract class NodePlacementCases {
                 )
             val chat =
                 Chat(
-                    "chat",
+                    id = "chat",
                     title = "Conversation suspendue",
                     agentName = "Agent principal",
                     status = "running",
