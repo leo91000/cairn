@@ -537,6 +537,7 @@ pub fn chat_plan(
     let mut plan = json!({
         "provider": provider,
         "execution": run["chatExecution"],
+        "environmentExpiredAt": run["environmentExpiredAt"],
         "instructions": prompt(&context, interactive(run)),
         "inputDirectory": input_directory,
         "output": prepared["output"],

@@ -245,6 +245,9 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
     // attempt, not a stale stopped-run endpoint or publication revision.
     let current_run = s.store.run(run_id).await?;
     let run = &current_run;
+    if run["environmentState"].is_string() {
+        return Err(Error::conflict("This working environment has expired."));
+    }
 
     timing.next("collect_before");
     let checkpoint = super::checkpoint(s, run_id).await?;
@@ -1551,6 +1554,14 @@ pub(crate) fn storage_for(s: &Service, backup: &Value) -> Result<Storage> {
 
 /// Retire a conversation's recovery references and durably queue remote reclamation.
 pub async fn purge(s: &Service, run: &str) -> Result<()> {
+    retire_environment(s, run, true).await
+}
+
+pub(crate) async fn expire_environment(s: &Service, run: &str) -> Result<()> {
+    retire_environment(s, run, false).await
+}
+
+async fn retire_environment(s: &Service, run: &str, permanently_deleted: bool) -> Result<()> {
     if run.is_empty() {
         return Ok(());
     }
@@ -1568,7 +1579,17 @@ pub async fn purge(s: &Service, run: &str) -> Result<()> {
     let mut deleted = HashSet::new();
     for location in locations {
         let storage = storage_for(s, &location)?;
-        if deleted.insert((storage.endpoint.clone(), storage.bucket.clone())) {
+        if !permanently_deleted {
+            // The same run can publish a new environment later. A delayed prefix
+            // deletion would erase its new manifests, so retire exact old keys only.
+            queue_deletion(
+                s,
+                &location,
+                &manifest_key(run, text(&location, "id")),
+                false,
+            )
+            .await?;
+        } else if deleted.insert((storage.endpoint.clone(), storage.bucket.clone())) {
             queue_deletion(s, &location, &format!("node-backups/{run}/"), true).await?;
         }
     }
@@ -1619,6 +1640,82 @@ use crate::run_fixture::DbRunFixture;
 #[cfg(test)]
 mod capture_policy_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn expiration_never_queues_a_prefix_that_can_erase_the_next_environment() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::config::Config {
+            data_dir: root.path().to_owned(),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().to_owned()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        tokio::fs::write(
+            root.path().join("storage-s3.json"),
+            br#"{"bucket":"retention-test","region":"us-east-1"}"#,
+        )
+        .await
+        .unwrap();
+        let run = id();
+        let old = id();
+        service
+            .store
+            .put(
+                "node-backups",
+                json!({
+                    "id": old, "runId": run, "destination": "s3", "bucket": "retention-test",
+                }),
+            )
+            .await
+            .unwrap();
+        expire_environment(&service, &run).await.unwrap();
+        let next = id();
+        service
+            .store
+            .put(
+                "node-backups",
+                json!({
+                    "id": next, "runId": run, "destination": "s3", "bucket": "retention-test",
+                }),
+            )
+            .await
+            .unwrap();
+        let old_key = manifest_key(&run, &old);
+        service
+            .store
+            .read(move |db| {
+                let mut statement = db.0.prepare("SELECT key,prefix FROM remote_deletions")?;
+                let queued = statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                assert_eq!(queued, vec![(old_key, false)]);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(
+            service
+                .store
+                .get("node-backups", &next)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
 
     #[tokio::test]
     async fn storage_pressure_recovers_dirty_finished_runs_without_pending_demand() {
