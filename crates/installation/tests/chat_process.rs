@@ -194,6 +194,55 @@ async fn cold_chats_refresh_and_remove_thread_mcp_configuration() {
 }
 
 #[tokio::test]
+async fn resident_starts_a_new_native_process_for_a_plan_turn_and_the_turn_after_it() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let service = Resident::start(config(&root), home.clone(), &root).await;
+    let turns = [None, Some("planning"), Some("afterPlan"), None];
+    for (index, mark) in turns.into_iter().enumerate() {
+        let mut plan = plan(&root, &format!("message {index}"));
+        plan["execution"]["messageId"] = format!("message-{index}").into();
+        plan["codexConfig"] = json!({ "mcp_servers": {} });
+        if index > 0 {
+            plan["sessionId"] = "fixture-chat".into();
+        }
+        if let Some(mark) = mark {
+            plan[mark] = true.into();
+        }
+        if mark == Some("planning") {
+            plan["sandbox"] = "read-only".into();
+        }
+        service.run(plan).await;
+    }
+    service.stop().await;
+
+    // Codex keeps a loaded sub-agent's sandbox: an earlier turn's writable sub-agent must
+    // not be loaded in the process that runs a plan turn, nor a read-only one after it.
+    let starts = lifecycle(&home)
+        .into_iter()
+        .filter(|entry| entry["method"] == "turn/start")
+        .map(|entry| entry["pid"].as_i64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), 4);
+    assert_ne!(
+        starts[1], starts[0],
+        "the plan turn reused a native process"
+    );
+    assert_ne!(starts[2], starts[1], "the turn after the plan reused it");
+    assert_eq!(
+        starts[3], starts[2],
+        "ordinary turns keep the resident process"
+    );
+    for pid in &starts[..2] {
+        assert_eq!(
+            unsafe { libc::kill(*pid as i32, 0) },
+            -1,
+            "a replaced native process must be reaped"
+        );
+    }
+}
+
+#[tokio::test]
 async fn resident_reuses_native_process_and_reloads_each_attempts_permissions() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);

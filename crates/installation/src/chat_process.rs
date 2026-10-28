@@ -126,8 +126,9 @@ struct ThreadConfig<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     model_reasoning_effort: Option<&'a str>,
     /// Off during a plan turn. Codex 0.164.0 still offers its collaboration tools on a
-    /// resumed thread; the sub-agents they start keep the turn's read-only sandbox
-    /// (`tests/native_plan_turns.rs`).
+    /// resumed thread: sub-agents keep the read-only sandbox because a plan turn runs in a
+    /// process that has not loaded them with another one (`resident.rs`,
+    /// `tests/native_plan_turns.rs`).
     #[serde(
         rename = "features.multi_agent",
         skip_serializing_if = "Option::is_none"

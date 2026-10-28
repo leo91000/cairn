@@ -66,7 +66,7 @@ pub async fn serve_with_ready(
             Session::codex_until(config, home, &[], Some(&config.home), &stop).await?;
         tracing::info!(target: "cairn_performance", operation = "codex_resident", event = "ready", native_init_ms = started.elapsed().as_millis() as u64);
         let result = match notify() {
-            Ok(()) => serve_session(listener, &mut session, home, stop).await,
+            Ok(()) => serve_session(listener, &mut session, config, home, stop).await,
             Err(error) => Err(error),
         };
         session.close().await;
@@ -80,6 +80,7 @@ pub async fn serve_with_ready(
 async fn serve_session(
     listener: UnixListener,
     session: &mut Session,
+    config: &Config,
     home: &Path,
     stop: CancellationToken,
 ) -> Result<()> {
@@ -97,7 +98,7 @@ async fn serve_session(
             }
         };
         require_owner(&client)?;
-        let result = handle(&mut client, &listener, session, home, stop.clone()).await;
+        let result = handle(&mut client, &listener, session, config, home, stop.clone()).await;
         // An unknown client/native state cannot be offered to another attempt.
         result?;
     }
@@ -154,6 +155,7 @@ async fn handle(
     client: &mut UnixStream,
     listener: &UnixListener,
     session: &mut Session,
+    config: &Config,
     home: &Path,
     stop: CancellationToken,
 ) -> Result<()> {
@@ -169,6 +171,14 @@ async fn handle(
         return Err(Error::bad(
             "Resident Codex requires a thread configuration.",
         ));
+    }
+    // Codex keeps the sandbox of every sub-agent it has loaded, and unsubscribing does not
+    // unload them: an earlier turn's writable sub-agent could act during a plan turn. A plan
+    // turn, and the turn after one, start a new native process, where sub-agents reload under
+    // that turn's sandbox. Without one, the lease fails and the service stops.
+    if plan["planning"] == true || plan["afterPlan"] == true {
+        let fresh = Session::codex_until(config, home, &[], Some(&config.home), &stop).await?;
+        std::mem::replace(session, fresh).close().await;
     }
     tokio::select! {
         result = execute_lease(session, home, plan, &mut read, &mut write, stop) => result,

@@ -42,7 +42,14 @@ Pendant un tour de plan, Cairn applique lui-même la frontière :
   `turn/start.sandboxPolicy` en `readOnly` sans réseau, y compris sur un fil créé en
   YOLO. Les sous-agents des deux moteurs restent dans cette frontière : Codex 0.164.0
   propose encore ses outils de collaboration malgré `features.multi_agent = false`,
-  et Claude Code lance ses sous-agents sans demander le callback. Le champ
+  et Claude Code lance ses sous-agents sans demander le callback. Codex garde le bac à
+  sable de chaque sous-agent qu’un processus a chargé, même après `thread/unsubscribe`
+  du parent : un sous-agent qu’un tour YOLO a lancé pouvait écrire et utiliser le
+  réseau quand un tour de plan lui confiait une suite. Le service Codex résident de
+  Cairn démarre donc un nouveau processus natif pour un tour de plan et pour le tour qui
+  le suit ; un sous-agent rechargé y prend le bac à sable du tour. S’il ne peut pas en
+  démarrer un, le tour échoue sans s’exécuter. Hors service résident, chaque tour
+  démarre déjà son propre processus, comme Claude Code. Le champ
   `sandbox: read-only` du plan reste compris par les adaptateurs antérieurs.
 - **Callback Claude restreint** : lecture, recherche, shell dans le bac à sable sans
   `allowed_domains`, outils MCP déjà restreints, et le seul fichier de plan sous l’état
@@ -98,7 +105,9 @@ tient pas n’est pas servie. Résultats du 2026-10-27 :
 - Codex 0.164.0, sur un fil créé par un tour YOLO : écritures dans l’espace de travail
   et le HOME refusées, connexion locale refusée, demande d’escalade refusée ; le
   sous-agent lancé par `spawn_agent` a tenté d’écrire et de se connecter, et ses deux
-  tentatives ont été refusées ; tous les tours gardent le modèle configuré ; le tour
+  tentatives ont été refusées ; à travers le service résident, un sous-agent lancé par
+  un tour YOLO, relancé pendant le tour de plan, a vu son écriture et sa connexion
+  refusées, puis a écrit au tour d’implémentation ; tous les tours gardent le modèle configuré ; le tour
   précédent et le tour qui suit le plan écrivent normalement.
 
 ## Limites

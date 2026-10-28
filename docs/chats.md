@@ -72,8 +72,9 @@ agent's access; MCP connections only offer tools they declare read-only
 cancelling a task, plugin tools and plugin commands are unavailable. Builds and tests that
 write files fail. Claude Code runs in its plan permission mode; Codex receives the
 `plan` collaboration preset it lists. Subagents of either engine stay inside the
-same boundary, and Claude Code's auto-mode classifier never decides in place of
-Cairn. OpenCode cannot run plan turns. A plan request cannot steer a running turn
+same boundary, including Codex subagents an earlier turn started: the resident Codex
+process is replaced for a plan turn and the turn after it. Claude Code's auto-mode
+classifier never decides in place of Cairn. OpenCode cannot run plan turns. A plan request cannot steer a running turn
 that may change files: queue it. One sent to steer while no turn runs waits for its
 own plan turn rather than joining a later turn. See
 [the plan-turn decision](adr/0072-plan-turns.md), which also records the native

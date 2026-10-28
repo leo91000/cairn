@@ -799,3 +799,261 @@ async fn native_codex_plan_turn_blocks_writes_network_and_subagent_effects() {
         assert_eq!(happened, true, "the {control} turn could not write");
     }
 }
+
+/// A local Responses API for an earlier sub-agent: an ordinary turn starts it, then later
+/// turns follow up with it. `phase` selects the turn being played.
+async fn retained_subagent_model(
+    workspace: &Path,
+    probe: u16,
+    phase: Arc<AtomicUsize>,
+) -> (String, Arc<Mutex<Vec<Value>>>) {
+    let child_outputs = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let observed = child_outputs.clone();
+    let child_id = Arc::new(Mutex::new(String::new()));
+    let ws = workspace.to_string_lossy().into_owned();
+    let router = Router::new().route(
+        "/v1/responses",
+        post(move |body: Bytes| {
+            let request: Value = serde_json::from_slice(&body).unwrap();
+            let input = request["input"].as_array().cloned().unwrap_or_default();
+            let turn_start = input
+                .iter()
+                .rposition(|item| item["type"] == "message" && item["role"] == "user")
+                .unwrap_or(0);
+            let current = json!({ "input": input[turn_start..] });
+            let outputs = function_outputs(&current);
+            let history = Value::from(input.clone()).to_string();
+            let child = history.contains("CHILD SEED") && !history.contains("MAIN TURN");
+            let phase = phase.load(Ordering::SeqCst);
+            if child {
+                observed.lock().unwrap().extend(outputs.clone());
+            }
+            let follow_up = |step: usize| {
+                json!({
+                    "type": "function_call",
+                    "id": format!("fc_{}", uuid::Uuid::new_v4().simple()),
+                    "call_id": format!("call_probe_{step}_{}", uuid::Uuid::new_v4().simple()),
+                    "namespace": "collaboration",
+                    "name": "followup_task",
+                    "arguments": json!({ "target": *child_id.lock().unwrap(), "message": "CHILD FOLLOWUP" }).to_string(),
+                })
+            };
+            let act = match (child, phase, outputs.len()) {
+                (false, 0, 0) => Some(codex_call(&Act::Spawn("CHILD SEED".into()), 0)),
+                (false, 0, 1) => {
+                    let started: Value =
+                        serde_json::from_str(outputs[0]["output"].as_str().unwrap_or("{}"))
+                            .unwrap_or_default();
+                    *child_id.lock().unwrap() = text_of(&started, "task_name");
+                    Some(codex_call(&Act::Pause(1500), 1))
+                }
+                (false, 1, 0) => Some(codex_call(&Act::Shell(format!("touch {ws}/parent-wrote; echo exit=$?")), 0)),
+                (false, 1, 1) | (false, 2, 0) => Some(follow_up(outputs.len())),
+                (false, 1, 2) | (false, 2, 1) => Some(codex_call(&Act::Pause(3000), outputs.len())),
+                (true, 1, 0) => Some(codex_call(
+                    &Act::Shell(format!("touch {ws}/child-wrote; echo write=$?; curl -sS -m 2 http://127.0.0.1:{probe}/; echo net=$?")),
+                    0,
+                )),
+                (true, 2, 0) => Some(codex_call(&Act::Shell(format!("touch {ws}/child-after-plan; echo write=$?")), 0)),
+                _ => None,
+            };
+            let item = act.unwrap_or_else(|| {
+                json!({
+                    "type": "message",
+                    "role": "assistant",
+                    "id": format!("msg_{}", uuid::Uuid::new_v4().simple()),
+                    "content": [{ "type": "output_text", "text": "Probe finished." }],
+                })
+            });
+            async move {
+                (
+                    [("content-type", "text/event-stream")],
+                    response_events(vec![item]),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (format!("http://{address}/v1"), child_outputs)
+}
+
+fn text_of(value: &Value, key: &str) -> String {
+    value[key].as_str().unwrap_or_default().to_owned()
+}
+
+/// Cairn's resident Codex keeps one native process between turns, and Codex keeps the
+/// sandbox of every sub-agent it has loaded. A sub-agent an ordinary YOLO turn started
+/// must not act with that sandbox when a plan turn follows up with it.
+#[tokio::test]
+#[ignore = "requires a native Codex binary"]
+async fn native_codex_plan_turn_bounds_a_subagent_an_earlier_turn_started() {
+    let binary = std::env::var("CODEX_NATIVE_BIN").expect("set CODEX_NATIVE_BIN");
+    let root = TempDir::new().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let (probe, hits) = probe_listener().await;
+    let phase = Arc::new(AtomicUsize::new(0));
+    let (url, child_outputs) = retained_subagent_model(&workspace, probe, phase.clone()).await;
+
+    let home = root.path().join("codex");
+    std::fs::create_dir(&home).unwrap();
+    let configured = configured_model(&binary, &home);
+    std::fs::write(
+        home.join("config.toml"),
+        format!(
+            "model = \"{configured}\"\nmodel_provider = \"local\"\n\n[model_providers.local]\nname = \"local\"\nbase_url = \"{url}\"\nwire_api = \"responses\"\nenv_key = \"LOCAL_PROBE_KEY\"\n"
+        ),
+    )
+    .unwrap();
+    let exec = if std::env::var("NATIVE_PROBE_DROP_CAPS").is_ok() {
+        "exec setpriv --inh-caps=-all --ambient-caps=-all --"
+    } else {
+        "exec"
+    };
+    let exec = if std::env::var("NATIVE_PROBE_PRIVATE_TMP").is_ok() {
+        format!("{exec} bwrap --dev-bind / / --tmpfs /tmp --")
+    } else {
+        exec.to_owned()
+    };
+    let launcher = root.path().join("codex-launcher");
+    std::fs::write(
+        &launcher,
+        format!("#!/bin/sh\nexport LOCAL_PROBE_KEY=local-test\n{exec} '{binary}' \"$@\"\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &launcher,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let config = Config {
+        codex_bin: launcher.to_string_lossy().into_owned(),
+        ..common::config(root.path())
+    };
+    std::fs::create_dir(root.path().join("inbox")).unwrap();
+    std::fs::create_dir_all(&config.home).unwrap();
+
+    // The resident service, as a conversation's VM runs it between attempts.
+    let socket = root.path().join("resident/codex.sock");
+    let stop = CancellationToken::new();
+    let service = {
+        let (config, home, socket, stop) =
+            (config.clone(), home.clone(), socket.clone(), stop.clone());
+        tokio::spawn(async move {
+            cairn_installation::chat_process::resident::serve(&config, &home, &socket, stop).await
+        })
+    };
+    common::eventually(
+        Duration::from_secs(60),
+        Duration::from_millis(50),
+        async || {
+            cairn_installation::chat_process::resident::ready(&socket)
+                .await
+                .ok()
+                .filter(|ready| *ready)
+        },
+    )
+    .await;
+    let run = |plan: Value| {
+        let socket = socket.clone();
+        async move {
+            let (tx, mut rx) = mpsc::channel(256);
+            let events = tokio::spawn(async move {
+                let mut events = Vec::new();
+                while let Some(event) = rx.recv().await {
+                    events.push(event);
+                }
+                events
+            });
+            let result = tokio::time::timeout(
+                Duration::from_secs(180),
+                cairn_installation::chat_process::resident::run(
+                    &socket,
+                    plan,
+                    tx,
+                    CancellationToken::new(),
+                ),
+            )
+            .await
+            .expect("native Codex turn timed out");
+            (result.map_err(|error| error.message), events.await.unwrap())
+        }
+    };
+    let turn = |id: &str| {
+        json!({
+            "execution": { "messageId": id, "text": format!("MAIN TURN {id}"), "recovery": false, "attachments": [] },
+            "instructions": "Follow the task scope",
+            "inputDirectory": root.path().join("inbox"),
+            "output": root.path().join(format!("{id}.md")),
+            "cwd": workspace,
+            "model": "",
+            "reasoning": "medium",
+            "sandbox": "yolo",
+            "writableRoots": [workspace],
+            "args": [],
+            "codexConfig": { "mcp_servers": {} },
+        })
+    };
+
+    let (first, events) = run(turn("first")).await;
+    let session = events
+        .iter()
+        .find(|event| event["type"] == "thread.started")
+        .map_or(Value::Null, |event| event["thread_id"].clone());
+
+    phase.store(1, Ordering::SeqCst);
+    let mut planning = turn("plan");
+    planning["planning"] = true.into();
+    planning["sandbox"] = "read-only".into();
+    planning["sessionId"] = session.clone();
+    let (planned, _) = run(planning).await;
+    let during_plan = Value::from(child_outputs.lock().unwrap().clone()).to_string();
+
+    phase.store(2, Ordering::SeqCst);
+    let mut next = turn("implement");
+    next["afterPlan"] = true.into();
+    next["sessionId"] = session;
+    let (implemented, _) = run(next).await;
+    stop.cancel();
+    let served = service.await.unwrap();
+
+    let effects = json!({
+        "parent-wrote": workspace.join("parent-wrote").exists(),
+        "child-wrote": workspace.join("child-wrote").exists(),
+        "loopback-connections": hits.load(Ordering::SeqCst),
+    });
+    report(
+        "codex-retained-subagent",
+        &json!({
+            "binary": binary,
+            "turns": { "first": first, "plan": planned, "implement": implemented },
+            "effects": effects,
+            "childAfterPlanWrote": workspace.join("child-after-plan").exists(),
+            "subagentOutputs": child_outputs.lock().unwrap().clone(),
+        }),
+    );
+
+    first.unwrap();
+    planned.unwrap();
+    implemented.unwrap();
+    served.unwrap();
+    for (effect, happened) in effects.as_object().unwrap() {
+        assert!(
+            happened == false || happened == 0,
+            "{effect} happened during a plan turn"
+        );
+    }
+    // The earlier sub-agent ran its follow-up during the plan turn and was refused.
+    assert!(
+        during_plan.contains("child-wrote") && during_plan.contains("Read-only file system"),
+        "{during_plan}"
+    );
+    assert!(during_plan.contains("Failed to connect"), "{during_plan}");
+    // After the plan, the same sub-agent writes again under the agent's own sandbox.
+    assert!(
+        workspace.join("child-after-plan").exists(),
+        "the sub-agent did not run after the plan"
+    );
+}
