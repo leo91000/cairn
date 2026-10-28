@@ -1,5 +1,5 @@
 name: Set up pnpm and Node
-description: Retry bootstrap once when the registry or runtime download is unavailable.
+description: Use cached Node 24 and retry pnpm bootstrap once when the registry is unavailable.
 inputs:
   install:
     description: Install dependencies from the lockfile.
@@ -10,11 +10,14 @@ inputs:
 runs:
   using: composite
   steps:
+    - uses: actions/setup-node@v7.1.0
+      with:
+        node-version: '24'
+        package-manager-cache: false
     - id: setup
       uses: pnpm/setup@v2.1.0
       continue-on-error: true
       with:
-        runtime: node@24
         require-lockfile: true
         install: ${{ inputs.install }}
         cache: ${{ inputs.cache }}
@@ -22,7 +25,6 @@ runs:
       if: steps.setup.outcome == 'failure'
       uses: pnpm/setup@v2.1.0
       with:
-        runtime: node@24
         require-lockfile: true
         install: ${{ inputs.install }}
         cache: ${{ inputs.cache }}
