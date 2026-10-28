@@ -375,7 +375,10 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             cairn_workspace.report_outcome with completed, blocked, or needs_input, a \
             concrete reason, and validation/delivery evidence. A successful process or \
             local commit is not a completed request when an authorized push, CI check, \
-            or release remains blocked. Never include credentials in evidence. Do not \
+            or release remains blocked. Use waitingOn external only for work already \
+            underway that can finish without intervention. Missing credentials, \
+            permissions or broken run access require repair by the user or requester; \
+            they are not outside checks. Never include credentials in evidence. Do not \
             present VM-local paths as downloadable links."
     } else {
         ""

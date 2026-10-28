@@ -174,9 +174,23 @@ impl ExecutionAdapter for Codex {
 
     fn chat_mcp(&self, mcp: &Value) -> Value {
         // MCP access belongs to the thread lease, not the resident CLI arguments.
+        // The prewarmed process has no run environment. Replace both shell values
+        // on every lease; an empty token also clears access retained by a thread.
+        let token = text(&mcp["env"], crate::mcps::RUN_TOKEN_ENV);
+        let origin = mcp["env"][crate::plugins::cli::ORIGIN_ENV]
+            .as_str()
+            .unwrap_or(crate::microvm::mcp::ORIGIN);
         json!({
             "args": [],
-            "codexConfig": { "mcp_servers": mcp["codexConfig"] },
+            "codexConfig": {
+                "mcp_servers": mcp["codexConfig"],
+                "shell_environment_policy": {
+                    "set": {
+                        (crate::mcps::RUN_TOKEN_ENV): token,
+                        (crate::plugins::cli::ORIGIN_ENV): origin,
+                    }
+                }
+            },
         })
     }
 

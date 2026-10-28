@@ -49,9 +49,12 @@ fn origin(configured: Option<&str>) -> Result<String> {
 pub async fn run(args: &[String]) -> Result<()> {
     let input = arguments(args)?;
     let origin = origin(std::env::var(ORIGIN_ENV).ok().as_deref())?;
-    let bearer = std::env::var("CAIRN_MCP_RUN_TOKEN").map_err(|_| {
-        Error::unauthorized("Run this command inside an active Cairn conversation.")
-    })?;
+    let bearer = std::env::var(crate::mcps::RUN_TOKEN_ENV)
+        .ok()
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| {
+            Error::unauthorized("Run this command inside an active Cairn conversation.")
+        })?;
     // Always use the run-local channel, never an arbitrary user-provided URL.
     let client = reqwest::Client::builder()
         .no_proxy()
