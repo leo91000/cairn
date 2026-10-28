@@ -189,6 +189,7 @@ pub async fn capture(s: &Service, run: &Value) -> Result<Value> {
 async fn capture_owned(s: &Service, run: &Value) -> Result<Value> {
     let publication_attempt = id();
     let span = tracing::info_span!(
+        target: "cairn_performance",
         "disk_publication_attempt",
         publication_attempt,
         run_id = crate::performance::identity(text(run, "id"))

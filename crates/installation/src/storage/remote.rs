@@ -158,6 +158,9 @@ impl BlockSource for RemoteSource {
             let mut waiting = None;
             let mut delay = Duration::from_millis(100);
             loop {
+                let network = crate::performance::publication::start(
+                    crate::performance::publication::Stage::NodeBaseRequest,
+                );
                 let request = crate::performance::publication::restore_request(
                     self.client.get(url.clone()).bearer_auth(&self.credential),
                 )
@@ -165,13 +168,19 @@ impl BlockSource for RemoteSource {
                 if let Ok(response) = self.unless_stopped(request).await?
                     && let Some(bytes) = self.receive(response).await?
                 {
+                    network.finish(bytes.len());
                     return Ok(bytes);
                 }
+                drop(network);
                 if waiting.is_none() {
                     self.waiting.fetch_add(1, Ordering::SeqCst);
                     waiting = Some(Waiting(&self.waiting));
                 }
+                let wait = crate::performance::publication::start(
+                    crate::performance::publication::Stage::NodeRetryWait,
+                );
                 self.unless_stopped(tokio::time::sleep(delay)).await?;
+                wait.finish(0);
                 delay = (delay * 2).min(Duration::from_secs(5));
             }
         });

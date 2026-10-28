@@ -37,9 +37,12 @@ pub(crate) enum Stage {
     NodeBaseRead,
     NodeBackpressure,
     NodeFirstByte,
+    NodeBaseRequest,
+    NodeRetryWait,
+    NodeCacheWait,
 }
 
-const NAMES: [&str; 27] = [
+const NAMES: [&str; 30] = [
     "inventory",
     "nodeHeaders",
     "nodeBody",
@@ -67,6 +70,9 @@ const NAMES: [&str; 27] = [
     "nodeBaseRead",
     "nodeBackpressure",
     "nodeFirstByte",
+    "nodeBaseRequest",
+    "nodeRetryWait",
+    "nodeCacheWait",
 ];
 
 #[derive(Default, Clone, Copy)]
@@ -627,5 +633,70 @@ mod node_tests {
             )
             .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+    use crate::storage::{BlockSource, remote::RemoteSource};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn node_base_retries_preserve_attempt_context_through_blocking_io() {
+        let metrics = Metrics::new(
+            &crate::config::id(),
+            &crate::config::id(),
+            &crate::config::id(),
+            "node",
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let expected_attempt = metrics.attempt.clone();
+        let expected_snapshot = metrics.snapshot.clone();
+        let app = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
+            let count = count.clone();
+            let attempt = expected_attempt.clone();
+            let snapshot = expected_snapshot.clone();
+            async move {
+                assert_eq!(headers["x-cairn-publication-attempt"], attempt);
+                assert_eq!(headers["x-cairn-publication-snapshot"], snapshot);
+                if count.fetch_add(1, Ordering::Relaxed) == 0 {
+                    (axum::http::StatusCode::SERVICE_UNAVAILABLE, "")
+                } else {
+                    (axum::http::StatusCode::OK, "block")
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let source = RemoteSource::new(
+            &json!({ "master": endpoint, "grant": "synthetic-fixture" }),
+            tokio::runtime::Handle::current(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap();
+        let bytes = scope(Some(metrics.clone()), async move {
+            blocking(move || source.fetch(&format!("b3-{}", "a".repeat(64))))
+                .await
+                .unwrap()
+                .unwrap()
+        })
+        .await;
+        assert_eq!(bytes, b"block");
+        let value = metrics.snapshot();
+        assert_eq!(value["stages"]["nodeBaseRead"]["completed"], 1);
+        assert_eq!(value["stages"]["nodeBaseRead"]["bytes"], 5);
+        assert_eq!(value["stages"]["nodeBaseRequest"]["started"], 2);
+        assert_eq!(value["stages"]["nodeBaseRequest"]["failedOrCancelled"], 1);
+        assert_eq!(value["stages"]["nodeRetryWait"]["completed"], 1);
+        assert!(
+            value["stages"]["nodeRetryWait"]["wallUsSum"]
+                .as_u64()
+                .unwrap()
+                >= 90_000
+        );
+        server.abort();
     }
 }

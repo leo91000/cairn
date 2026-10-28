@@ -77,6 +77,8 @@ observation, not proof of completion or a final byte total.
 | `uploadDrain` | Final join of all started PUTs, including on error, before lock release; bytes zero. |
 | `nodeOpen` | Reader open/load, lease and journal/runtime coordination before headers; bytes zero. |
 | `nodeProduce` | Inclusive reconstruction/read per block, with journal/base/cache work and integrity checks; plaintext bytes. |
+| `nodeBaseRequest`, `nodeRetryWait` | Each node-to-manager base request (including body/renewal) and retry sleep, separately; successful plaintext bytes / zero bytes. Failed responses count failed operations. |
+| `nodeCacheWait` | Wait for the existing same-block source coalescing lock; bytes zero. |
 | `nodeBaseRead` | Node remote-base fetch including manager round trip, retries and recovery waits; plaintext bytes. Manager S3/codec stages correlate when supported. |
 | `nodeBackpressure` | Yielded block to next producer poll, excluding the last block; downstream transport backpressure plus scheduling. Bytes zero; not an isolated network latency. |
 

@@ -1,6 +1,9 @@
 use super::*;
 use crate::{
-    object_storage::{HotS3, tests::fixture_storage},
+    object_storage::{
+        HotS3,
+        tests::{fixture_storage, fixture_storage_at},
+    },
     storage::digest,
 };
 use axum::{
@@ -234,10 +237,12 @@ async fn transfer_diagnostics_measure_base_get_decode_and_failed_put_without_los
         }
     }))
     .await;
-    let storage = fixture_storage(&url, "diagnostics", s.hot_s3.clone()).await;
+    let logical_endpoint = "https://diagnostic-fixture.invalid";
+    let storage = fixture_storage_at(&url, logical_endpoint, "diagnostics", s.hot_s3.clone()).await;
     tokio::fs::write(
         s.config.data_dir.join("storage-s3.json"),
-        json!({ "bucket": "diagnostics", "region": "us-east-1", "endpoint": url }).to_string(),
+        json!({ "bucket": "diagnostics", "region": "us-east-1", "endpoint": logical_endpoint })
+            .to_string(),
     )
     .await
     .unwrap();
@@ -262,7 +267,7 @@ async fn transfer_diagnostics_measure_base_get_decode_and_failed_put_without_los
         budget: 0,
     };
     let backup = Arc::new(
-        json!({ "destination": "s3", "endpoint": url, "bucket": "diagnostics", "runId": run_id }),
+        json!({ "destination": "s3", "endpoint": logical_endpoint, "bucket": "diagnostics", "runId": run_id }),
     );
     let block = json!({ "hash": object.hash, "object": object.id, "size": object.size });
     let sources = HashMap::from([(object.hash.clone(), (backup, block))]);
@@ -319,4 +324,71 @@ async fn transfer_diagnostics_measure_base_get_decode_and_failed_put_without_los
         assert!(stages["getBody"]["wallUsSum"].as_u64().unwrap() >= 15_000);
     }
     server.abort();
+}
+
+#[derive(Clone)]
+struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn default_logging_filter_correlates_pretransfer_failure_and_cancelled_summary() {
+    use tracing::instrument::WithSubscriber;
+    let root = tempfile::tempdir().unwrap();
+    let s = service(root.path()).await;
+    let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let output = bytes.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_env_filter("warn,cairn_performance=info")
+        .with_writer(move || LogWriter(output.clone()))
+        .finish();
+    async {
+        assert!(capture_owned(&s, &json!({ "id": id() })).await.is_err());
+        let metrics =
+            diagnostic::Metrics::new(&id(), "credential-not-a-uuid", "path-not-a-uuid", "manager");
+        let _summary = diagnostic::Summary {
+            metrics,
+            outcome: "cancelled",
+        };
+    }
+    .with_subscriber(subscriber)
+    .await;
+    let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+    let rows: Vec<Value> = logs
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let phase = rows
+        .iter()
+        .find(|row| {
+            row["fields"]["operation"] == "disk_publication"
+                && row["fields"]["event"] == "incomplete"
+        })
+        .unwrap();
+    let attempt = phase["span"]["publication_attempt"].as_str().unwrap();
+    crate::validation::uuid(attempt).unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|row| row["fields"]["operation"] == "s3_totals")
+            .unwrap()["fields"]["publication_attempt"],
+        attempt
+    );
+    let summary = rows
+        .iter()
+        .find(|row| row["fields"]["operation"] == "disk_publication_transfer")
+        .unwrap();
+    assert_eq!(summary["fields"]["outcome"], "cancelled");
+    assert_eq!(summary["fields"]["run_id"], "unknown");
+    assert!(!logs.contains("credential-not-a-uuid"));
+    assert!(!logs.contains("path-not-a-uuid"));
 }

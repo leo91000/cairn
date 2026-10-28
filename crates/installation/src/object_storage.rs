@@ -897,6 +897,15 @@ pub(crate) mod tests {
     use super::*;
 
     pub(crate) async fn fixture_storage(endpoint: &str, bucket: &str, hot: Arc<HotS3>) -> Storage {
+        fixture_storage_at(endpoint, endpoint, bucket, hot).await
+    }
+
+    pub(crate) async fn fixture_storage_at(
+        endpoint: &str,
+        logical_endpoint: &str,
+        bucket: &str,
+        hot: Arc<HotS3>,
+    ) -> Storage {
         use aws_sdk_s3::config::{Credentials, Region, retry::RetryConfig};
 
         let sdk = aws_sdk_s3::Client::from_conf(
@@ -913,7 +922,7 @@ pub(crate) mod tests {
         );
         hot.clients.lock().await.insert(
             ClientKey {
-                endpoint: Some(endpoint.into()),
+                endpoint: Some(logical_endpoint.into()),
                 region: "us-east-1".into(),
                 environment_endpoint: std::env::var("AWS_ENDPOINT_URL_S3").ok(),
                 profile: std::env::var("AWS_PROFILE").ok(),
@@ -924,7 +933,7 @@ pub(crate) mod tests {
         Storage {
             bucket: bucket.into(),
             binary: "unused".into(),
-            endpoint: Some(endpoint.into()),
+            endpoint: Some(logical_endpoint.into()),
             region: "us-east-1".into(),
             credentials: None,
             integrated: false,
@@ -932,6 +941,56 @@ pub(crate) mod tests {
             server_side_encryption: Some(aws_sdk_s3::types::ServerSideEncryption::Aes256),
             hot,
         }
+    }
+
+    #[tokio::test]
+    async fn publication_diagnostics_record_real_slot_cancellation_and_later_put() {
+        use crate::config::id;
+        use crate::performance::publication::{Metrics, scope};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new().fallback(|| async { axum::http::StatusCode::OK });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let hot = Arc::new(HotS3::new());
+        let storage = fixture_storage(&endpoint, "fixture", hot.clone()).await;
+        let held = hot
+            .writes
+            .acquire_many(HOT_WRITE_CONCURRENCY as u32)
+            .await
+            .unwrap();
+        let metrics = Metrics::new(&id(), &id(), &id(), "manager");
+        let pending = storage.clone();
+        let caller = tokio::spawn(scope(Some(metrics.clone()), async move {
+            pending.upload_bytes(b"block".to_vec(), "fixture").await
+        }));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while metrics.snapshot()["stages"]["putSlot"]["inFlight"] != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            metrics.snapshot()["stages"]["putSlot"]["failedOrCancelled"],
+            1
+        );
+        assert_eq!(metrics.snapshot()["stages"]["putRequest"]["started"], 0);
+        drop(held);
+        scope(
+            Some(metrics.clone()),
+            storage.upload_bytes(b"block".to_vec(), "fixture"),
+        )
+        .await
+        .unwrap();
+        let value = metrics.snapshot();
+        assert_eq!(value["stages"]["putRequest"]["bytes"], 5);
+        assert_eq!(value["stages"]["putSlot"]["completed"], 1);
+        assert!(value["stages"]["putSlot"]["wallUsSum"].as_u64().unwrap() >= 15_000);
+        assert_eq!(hot.writes.available_permits(), HOT_WRITE_CONCURRENCY);
+        server.abort();
     }
 
     #[tokio::test]

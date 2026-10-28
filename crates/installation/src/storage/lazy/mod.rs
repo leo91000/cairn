@@ -305,7 +305,11 @@ impl LazyDisk {
         // Concurrent disk readers and snapshot reconstruction may need the same
         // cold block. Hold only its lock across I/O; unrelated blocks stay parallel.
         let fetching = self.blocks.fetching(hash, &self.source)?;
+        let waiting = crate::performance::publication::start(
+            crate::performance::publication::Stage::NodeCacheWait,
+        );
         let _fetching = fetching.lock().map_err(failure)?;
+        waiting.finish(0);
         if let Some(bytes) = self.cached_block(hash, foreground)? {
             if bytes.len() != length {
                 return Err(failure("Invalid cached block extent"));
