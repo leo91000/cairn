@@ -6,6 +6,7 @@ import { generateKeyPairSync, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { createServer as createTcpServer } from 'node:net'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 import { promisify } from 'node:util'
@@ -43,6 +44,11 @@ const mail = createServer(async (request, response) => {
 })
 const reservation = createServer()
 const databaseReservation = createServer()
+let tlsConnections = 0
+const tlsProbe = createTcpServer((socket) => {
+  tlsConnections++
+  socket.destroy()
+})
 let origin
 
 async function ready() {
@@ -63,7 +69,8 @@ async function main() {
     mail.listen(0, '127.0.0.1')
     reservation.listen(0, '127.0.0.1')
     databaseReservation.listen(0, '127.0.0.1')
-    await Promise.all([once(mail, 'listening'), once(reservation, 'listening'), once(databaseReservation, 'listening')])
+    tlsProbe.listen(0, '127.0.0.1')
+    await Promise.all([once(mail, 'listening'), once(reservation, 'listening'), once(databaseReservation, 'listening'), once(tlsProbe, 'listening')])
     const port = reservation.address().port
     const databasePort = databaseReservation.address().port
     await Promise.all([
@@ -124,6 +131,23 @@ async function main() {
     const installer = await fetch(`${origin}/install.sh`).then(response => response.text())
     assert.ok(installer.includes(origin), 'Installer must use the configured beacon origin')
     assert.ok(!installer.includes('__CAIRN_'), 'Embedded installer assets must be complete')
+    const gatewayRoot = '/tmp/cairn-gateway-smoke'
+    const gateway = '/usr/local/lib/cairn/cairn-node-gateway'
+    await docker('exec', '-e', `CAIRN_GATEWAY_ROOT=${gatewayRoot}`, name, gateway, 'configure', `https://localhost:${tlsProbe.address().port}`, '00000000-0000-0000-0000-000000000000', '0'.repeat(64))
+    await docker('exec', name, 'sed', '-i', 's/"direct":true/"direct":false/', `${gatewayRoot}/config.json`)
+    await docker('exec', '-d', '-e', `CAIRN_GATEWAY_ROOT=${gatewayRoot}`, name, 'sh', '-c', `echo $$ > ${gatewayRoot}/pid; exec ${gateway} run > ${gatewayRoot}/gateway.log 2>&1`)
+    for (let attempt = 0; attempt < 20; attempt++) {
+      if (tlsConnections > 0)
+        break
+      await fetch('http://127.0.0.1:4319/internal/nodes/native-install.sh', { signal: AbortSignal.timeout(500) }).catch(() => null)
+      await setTimeout(100)
+    }
+
+    const gatewayLog = (await docker('exec', name, 'cat', `${gatewayRoot}/gateway.log`)).stdout
+    assert.match(gatewayLog, /Cairn node gateway listening/)
+    assert.doesNotMatch(gatewayLog, /CryptoProvider|panicked/)
+    assert.ok(tlsConnections > 0, 'Packaged node gateway must attempt its TLS connection')
+    await docker('exec', name, 'sh', '-c', `kill "$(cat ${gatewayRoot}/pid)"`)
 
     const post = (path, body) => fetch(`${origin}${path}`, {
       method: 'POST',
@@ -168,6 +192,8 @@ async function main() {
       await new Promise(resolve => reservation.close(resolve))
     if (databaseReservation.listening)
       await new Promise(resolve => databaseReservation.close(resolve))
+    if (tlsProbe.listening)
+      await new Promise(resolve => tlsProbe.close(resolve))
   }
 }
 
