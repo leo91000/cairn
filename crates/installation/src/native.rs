@@ -14,6 +14,7 @@ pub mod policy;
 mod protection;
 pub mod releases;
 mod service;
+mod suspension;
 mod systemd;
 mod watchdog;
 mod workspace;

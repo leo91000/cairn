@@ -739,7 +739,7 @@ fn question_event(id: &str, blocking: bool) -> Value {
 }
 
 #[tokio::test]
-async fn closed_questions_leave_the_pending_badge_without_becoming_answers() {
+async fn common_questions_survive_native_closures_without_becoming_answers() {
     for blocking in [false, true] {
         let mut fixture = Fixture::new().await;
         let chat = question_chat(&fixture).await;
@@ -747,18 +747,35 @@ async fn closed_questions_leave_the_pending_badge_without_becoming_answers() {
         fixture.event(question_event(&question, blocking)).await;
         assert_eq!(
             fixture.service.chat_detail(&chat).await.unwrap()["pendingQuestions"],
+            0
+        );
+        fixture
+            .service
+            .question_receive(
+                &fixture.id,
+                question_event(&question, false)["question"].clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture.service.chat_detail(&chat).await.unwrap()["pendingQuestions"],
             1
         );
         fixture
             .event(json!({ "type": "chat.question.closed", "questionId": question }))
             .await;
-        // A duplicate event must not reopen a withdrawn question.
+        // Native events cannot replace or retire a common questionnaire.
         fixture.event(question_event(&question, blocking)).await;
         let detail = fixture.service.chat_detail(&chat).await.unwrap();
-        assert_eq!(detail["pendingQuestions"], 0);
-        assert_eq!(detail["questions"][0]["status"], "cancelled");
+        assert_eq!(detail["pendingQuestions"], 1);
+        assert_eq!(detail["questions"][0]["status"], "pending");
         assert_eq!(detail["questions"][0]["blocking"], false);
         assert_eq!(detail["messages"], json!([]));
+        fixture
+            .service
+            .question_cancel(&chat, &question)
+            .await
+            .unwrap();
         assert!(
             fixture
                 .service
@@ -766,7 +783,10 @@ async fn closed_questions_leave_the_pending_badge_without_becoming_answers() {
                     &chat,
                     &question,
                     json!({
-                        "id": crate::config::id(), "answers": { "scope": ["Everything"] },
+                        "id": crate::config::id(),
+                        "answers": {
+                            "scope": { "selected": [], "comment": "Everything" },
+                        },
                     })
                 )
                 .await
@@ -797,7 +817,14 @@ async fn a_completed_outcome_retires_questions_but_input_needed_and_old_reports_
             )
             .await
             .unwrap();
-        fixture.event(question_event(&"a".repeat(64), false)).await;
+        fixture
+            .service
+            .question_receive(
+                &fixture.id,
+                question_event(&"a".repeat(64), false)["question"].clone(),
+            )
+            .await
+            .unwrap();
         fixture.event(json!({ "type": "turn.completed" })).await;
         assert_eq!(
             fixture.service.chat_detail(&chat).await.unwrap()["pendingQuestions"],
@@ -807,7 +834,7 @@ async fn a_completed_outcome_retires_questions_but_input_needed_and_old_reports_
 }
 
 #[tokio::test]
-async fn releasing_a_session_preserves_answers_in_delivery() {
+async fn releasing_a_session_preserves_common_questions_and_answers_in_delivery() {
     let mut fixture = Fixture::new().await;
     let chat = question_chat(&fixture).await;
     let pending = "a".repeat(64);
@@ -817,8 +844,16 @@ async fn releasing_a_session_preserves_answers_in_delivery() {
         .chat_send(&chat, json!({ "id": crate::config::id(), "text": "Start" }))
         .await
         .unwrap();
-    fixture.event(question_event(&pending, true)).await;
-    fixture.event(question_event(&answering, true)).await;
+    for question in [&pending, &answering] {
+        fixture
+            .service
+            .question_receive(
+                &fixture.id,
+                question_event(question, false)["question"].clone(),
+            )
+            .await
+            .unwrap();
+    }
     let answer = crate::config::id();
     fixture
         .service
@@ -826,7 +861,10 @@ async fn releasing_a_session_preserves_answers_in_delivery() {
             &chat,
             &answering,
             json!({
-                "id": answer, "answers": { "scope": ["Keep this answer"] },
+                "id": answer,
+                "answers": {
+                    "scope": { "selected": [], "comment": "Keep this answer" },
+                },
             }),
         )
         .await
@@ -842,11 +880,11 @@ async fn releasing_a_session_preserves_answers_in_delivery() {
         .event(json!({ "type": "chat.question.closed" }))
         .await;
     let detail = fixture.service.chat_detail(&chat).await.unwrap();
-    assert_eq!(detail["pendingQuestions"], 0);
+    assert_eq!(detail["pendingQuestions"], 1);
     let questions = detail["questions"].as_array().unwrap();
     assert_eq!(
         questions.iter().find(|q| q["id"] == pending).unwrap()["status"],
-        "cancelled"
+        "pending"
     );
     assert_eq!(
         questions.iter().find(|q| q["id"] == answering).unwrap()["status"],

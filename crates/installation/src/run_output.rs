@@ -344,8 +344,8 @@ pub fn exhausted(event: &Value) -> bool {
 }
 
 /// The rule that sets chat turns apart from scheduled work.
-pub const INTERACTIVE: &str = "This is an interactive chat. Use native user-input questions when \
-    clarification is useful. Nonblocking questions let you continue independent \
+pub const INTERACTIVE: &str = "This is an interactive chat. Use cairn_workspace.ask_questions when \
+    clarification is useful; native question tools are disabled. Supply a stable UUID requestId for retries. Questions can use single or multiple choice, bounds and recommendations without preselection. Answers distinguish selected options from a free-text comment. The tool returns immediately; durable questions let you continue independent \
     work while the user considers the options; a suggested answer is never user \
     approval. Follow the latest user instructions and do not treat a question \
     as authorization to publish changes. Use cairn_workspace.pending_questions and \
@@ -375,7 +375,10 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             cairn_workspace.report_outcome with completed, blocked, or needs_input, a \
             concrete reason, and validation/delivery evidence. A successful process or \
             local commit is not a completed request when an authorized push, CI check, \
-            or release remains blocked. Never include credentials in evidence. Do not \
+            or release remains blocked. Use waitingOn external only for work already \
+            underway that can finish without intervention. Missing credentials, \
+            permissions or broken run access require repair by the user or requester; \
+            they are not outside checks. Never include credentials in evidence. Do not \
             present VM-local paths as downloadable links."
     } else {
         ""

@@ -502,6 +502,54 @@ def main():
                 (managed(run) / 'ready').unlink()
             return attempt
 
+        def qualify_exclusive(owner, peer, peer_run):
+            # Older reference runtimes deliberately skip the new capability.
+            if not api('/health', method='GET').get('exclusiveReservations'):
+                return
+            descendant = managed(peer_run) / 'descendant'
+            epoch = api('/exclusive', method='GET')['highestEpoch'] + 1
+            reservation = dict(id=str(uuid.uuid4()), epoch=epoch, ownerAttemptId=owner,
+                               memberAttemptIds=[], expiresAt=int(time.time() * 1000) + 5000,
+                               remainingMs=5000, minimumAvailableMemoryMiB=1, reason='Native runtime qualification')
+            acquired = api('/exclusive/acquire', reservation)
+            assert acquired['reservation']['state'] == 'acquired'
+            assert peer in acquired['reservation']['pausedAttemptIds']
+            size = descendant.stat().st_size
+            time.sleep(0.3)
+            assert descendant.stat().st_size == size, 'Exclusive pause left a descendant running.'
+            assert api('/runs/' + peer + '/administrative-pause', method='GET')['administrativePausedMs'] >= 250
+            # The controller checks its gate before plan loading or slot admission.
+            try:
+                api('/runs/' + str(uuid.uuid4()))
+            except urllib.error.HTTPError as error:
+                assert error.code == 409
+            else:
+                raise AssertionError('Exclusive reservation admitted an unrelated attempt.')
+            released = api('/exclusive/release', dict(id=reservation['id'], epoch=epoch))
+            assert released['reservation'] is None
+            eventually(lambda: descendant.stat().st_size > size)
+            # Expiration uses the same physical release path without a manager.
+            reservation.update(id=str(uuid.uuid4()), epoch=epoch + 1,
+                               expiresAt=int(time.time() * 1000) + 1000, remainingMs=1000)
+            api('/exclusive/acquire', reservation)
+            eventually(lambda: api('/exclusive', method='GET')['reservation'] is None, timeout=10)
+            size = descendant.stat().st_size
+            eventually(lambda: descendant.stat().st_size > size)
+            reservation.update(id=str(uuid.uuid4()), epoch=epoch + 2,
+                               expiresAt=int(time.time() * 1000) + 5000, remainingMs=5000,
+                               minimumAvailableMemoryMiB=1_000_000)
+            try:
+                api('/exclusive/acquire', reservation)
+            except urllib.error.HTTPError as error:
+                assert error.code == 503
+            else:
+                raise AssertionError('Native reservation promised unavailable memory.')
+            assert api('/exclusive', method='GET')['reservation'] is None
+            size = descendant.stat().st_size
+            eventually(lambda: descendant.stat().st_size > size)
+            metrics.setdefault('exclusiveReservations', []).append(dict(mode=current_mode['mode'],
+                descendantFrozen=True, admissionBlocked=True, released=True, expired=True))
+
         def fenced(run, attempt, timeout=90):
             eventually(lambda: (state / (attempt + '.exit')).exists(), timeout=timeout)
             # Completion writes the exit marker before retiring admission. Use
@@ -677,6 +725,7 @@ def main():
             api('/node-budget', dict(limits=dict(diskMiB=4096, cpu=2, memoryMiB=1024), slots=2))
             earlier = start(run)
             later = start(other)
+            qualify_exclusive(earlier, later, other)
             closing = time.monotonic()
             api('/runs/' + earlier, method='DELETE')
             fenced(run, earlier, timeout=15)
@@ -704,6 +753,7 @@ def main():
             fenced(run, first_protected)
             fenced(other, second_protected)
             admin_first, admin_second = start(run), start(other)
+            qualify_exclusive(admin_first, admin_second, other)
             assert stat.S_IMODE(root.stat().st_mode) == 0o700, 'Administrator changed private ancestor permissions.'
             assert host_marker.read_text() == 'administrative-change', 'sudo did not administer the actual host.'
             target = dict(mode='protected', generation=str(uuid.uuid4()))

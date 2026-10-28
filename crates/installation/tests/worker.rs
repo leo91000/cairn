@@ -2777,8 +2777,8 @@ async fn claude_conversations_run_together_and_lowering_limit_does_not_cancel_th
     let mut chats = Vec::new();
     let mut runs = Vec::new();
     for prompt in [
-        "fixture:question",
-        "fixture:question",
+        "fixture:batch",
+        "fixture:batch",
         "Complete third conversation",
     ] {
         let mut sent = message(prompt);
@@ -2795,20 +2795,7 @@ async fn claude_conversations_run_together_and_lowering_limit_does_not_cancel_th
             })
             .await;
     }
-    // Both real fixture subprocesses have received their prompts and are waiting on separate questions.
-    eventually(
-        Duration::from_secs(10),
-        Duration::from_millis(30),
-        async || {
-            for chat in &chats[..2] {
-                if s.chat_detail(chat).await.unwrap()["pendingQuestions"] != 1 {
-                    return None;
-                }
-            }
-            Some(())
-        },
-    )
-    .await;
+    // Both real fixture subprocesses hold independent turns.
     for run in &runs[..2] {
         let credentials = std::fs::read_to_string(
             fixture
@@ -2830,17 +2817,9 @@ async fn claude_conversations_run_together_and_lowering_limit_does_not_cancel_th
         );
     }
     let answer = async |chat: &str| {
-        let question = s.chat_detail(chat).await.unwrap()["questions"][0]["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        s.question_answer(
-            chat,
-            &question,
-            json!({ "id": id(), "answers": { "0": ["Small change"] } }),
-        )
-        .await
-        .unwrap();
+        let mut sent = message("fixture:batch Finish the independent work");
+        sent["mode"] = "steer".into();
+        s.chat_send(chat, sent).await.unwrap();
     };
     answer(&chats[0]).await;
     fixture

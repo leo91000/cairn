@@ -161,6 +161,7 @@ class SignalJourneyTest {
     private fun journey(
         claudeConnected: Boolean = true,
         liveEvents: List<RunEvent> = emptyList(),
+        feedChats: List<Chat> = chats,
         body: (CairnViewModel) -> Unit,
     ) {
         MockWebServer().use { server ->
@@ -236,7 +237,7 @@ class SignalJourneyTest {
                                 )
                             path == "/api/installations/fixture/api/mcps" -> json("""{"mcps":[]}""")
                             path == "/api/installations/fixture/api/chats/stream" ->
-                                stream(LiveState(chats = chats))
+                                stream(LiveState(chats = feedChats))
                             path == "/api/installations/fixture/api/chats" &&
                                 request.method == "POST" ->
                                 json(
@@ -394,6 +395,30 @@ class SignalJourneyTest {
                 File(dir, "$name.png").outputStream(),
             )
     }
+
+    @Test
+    fun `quota waits appear under scheduled resumptions without a countdown`() =
+        journey(
+            feedChats =
+                listOf(
+                    Chat(
+                        id = "quota",
+                        title = "Attendre le quota",
+                        status = "running",
+                        accountWaitReason =
+                            "Usage exhausted. Waiting for an available Codex account to resume.",
+                    )
+                )
+        ) {
+            waitText("Attendre le quota")
+            compose.onNodeWithText("REPRISE PRÉVUE").assertExists()
+            compose.onNodeWithText("En attente de quota").assertExists()
+            compose.onNodeWithText("Selon disponibilité").assertExists()
+            compose.onNodeWithText("EN COURS").assertDoesNotExist()
+            compose
+                .onAllNodesWithTag("chat-working-avatar", useUnmergedTree = true)
+                .assertCountEquals(0)
+        }
 
     @Test
     fun `fil groups what needs the user, live work and recent conversations`() = journey {

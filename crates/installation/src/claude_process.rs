@@ -10,7 +10,7 @@ use crate::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
@@ -249,6 +249,7 @@ pub fn args(plan: &Value, instructions: &Path) -> Vec<String> {
     let mut denied = strings(&plan["claudeDeniedTools"])
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    denied.push("AskUserQuestion".into());
     if plan["sandbox"] == "read-only" {
         denied.extend(["Write", "Edit", "NotebookEdit"].map(str::to_owned));
     }
@@ -423,12 +424,6 @@ impl UsageLimit {
     }
 }
 
-/// An AskUserQuestion permission request waiting for the user's answers.
-struct Question {
-    request_id: Value,
-    input: Value,
-}
-
 /// One execution: the messages submitted to Claude Code and what it reported back.
 struct Turn<'a> {
     plan: &'a Value,
@@ -447,7 +442,6 @@ struct Turn<'a> {
     pending: HashSet<String>,
     /// Submitted messages Claude Code has echoed back.
     consumed: HashSet<String>,
-    questions: HashMap<String, Question>,
     /// Running tools, by tool use ID.
     tools: HashMap<String, Value>,
     /// Subagents still working, by the ID of the tool use that started them.
@@ -700,22 +694,7 @@ impl Turn<'_> {
                 continue;
             }
             if message["questionCancelled"] == true {
-                if let Some(question) = self.questions.remove(text(&message, "questionId")) {
-                    send(&mut self.stdin, control_response(&question.request_id, &json!({
-                        "behavior": "deny",
-                        "message": "This question was withdrawn. No answer or authorization was provided.",
-                    }))).await?;
-                    self.emit(json!({
-                        "type": "chat.question.closed",
-                        "questionId": message["questionId"],
-                    }))
-                    .await?;
-                }
                 self.submitted.insert(id.into());
-                continue;
-            }
-            if let Some(question) = self.questions.remove(text(&message, "questionId")) {
-                self.answer(question, &message).await?;
                 continue;
             }
             send(&mut self.stdin, input(&message, self.inbox).await?).await?;
@@ -724,37 +703,6 @@ impl Turn<'_> {
             self.waiting_for_background = false;
         }
         Ok(())
-    }
-
-    async fn answer(&mut self, question: Question, message: &Value) -> Result<()> {
-        let id = text(message, "id");
-        let mut updated = question.input;
-        let mut answers = Map::new();
-        for (index, asked) in updated["questions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .enumerate()
-        {
-            let answer = strings(&message["answers"][index.to_string()])
-                .collect::<Vec<_>>()
-                .join(", ");
-            answers.insert(text(asked, "question").to_owned(), answer.into());
-        }
-        updated["answers"] = answers.into();
-        let response = json!({ "behavior": "allow", "updatedInput": updated });
-        send(
-            &mut self.stdin,
-            control_response(&question.request_id, &response),
-        )
-        .await?;
-        self.submitted.insert(id.into());
-        self.deliver(id).await?;
-        self.emit(json!({
-            "type": "chat.question.closed",
-            "questionId": message["questionId"],
-        }))
-        .await
     }
 
     /// Handles one stream-json line. Answers whether the request is complete.
@@ -1361,7 +1309,17 @@ impl Turn<'_> {
         let request_id = value["request_id"].clone();
         let can_use_tool = request["subtype"] == "can_use_tool";
         if can_use_tool && request["tool_name"] == "AskUserQuestion" {
-            return self.ask(value, request_id).await;
+            return send(
+                &mut self.stdin,
+                control_response(
+                    &request_id,
+                    &json!({
+                        "behavior": "deny",
+                        "message": crate::chats::questions::NATIVE_DENIED,
+                    }),
+                ),
+            )
+            .await;
         }
         let allowed =
             can_use_tool && allowed_tool(self.plan, text(request, "tool_name"), &request["input"]);
@@ -1371,38 +1329,6 @@ impl Turn<'_> {
             json!({ "behavior": "deny", "message": DENIED })
         };
         send(&mut self.stdin, control_response(&request_id, &response)).await
-    }
-
-    async fn ask(&mut self, value: &Value, request_id: Value) -> Result<()> {
-        let input = &value["request"]["input"];
-        let id = crate::auth::hex_digest(&format!(
-            "claude:{}:{}",
-            self.initial_id,
-            text(value, "request_id")
-        ));
-        let fields = input["questions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .enumerate()
-            .map(|(index, question)| {
-                let options = question["options"].as_array().cloned().unwrap_or_default();
-                json!({ "id": index.to_string(), "title": question["question"], "options": options })
-            })
-            .collect::<Vec<_>>();
-        let fields = crate::validation::parse("questions", fields.into())?;
-        self.questions.insert(
-            id.clone(),
-            Question {
-                request_id,
-                input: input.clone(),
-            },
-        );
-        self.emit(json!({
-            "type": "chat.question",
-            "question": { "id": id, "blocking": true, "fields": fields },
-        }))
-        .await
     }
 
     /// The messages a result settles. A result belongs to a turn, not one stdin message:
@@ -1669,7 +1595,6 @@ pub async fn run(
         delivered: HashSet::new(),
         pending: HashSet::from([initial_id.to_owned()]),
         consumed: HashSet::new(),
-        questions: HashMap::new(),
         tools: HashMap::new(),
         subagents: HashMap::new(),
         settled: HashMap::new(),

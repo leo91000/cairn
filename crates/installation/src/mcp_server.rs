@@ -910,6 +910,7 @@ pub(crate) async fn invoke(
         | "switch_chat_coding_agent"
         | "list_chat_questions"
         | "answer_chat_question"
+        | "withdraw_chat_question"
         | "restore_chat"
         | "restart_chat_session"
         | "resume_chat"

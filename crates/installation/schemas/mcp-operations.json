@@ -179,7 +179,7 @@
   },
   {
     "name": "list_chats",
-    "description": "List conversations with pagination, optional agent/project filters and active/trash view. Returns metadata, without messages or marking chats read. Metadata includes environmentState (cleaning, expired or null), environmentExpiredAt and environmentError. Send a new message after expiration to start a fresh environment using the preserved history.",
+    "description": "List conversations with pagination, optional agent/project filters and active/trash view. Returns metadata including accountWaitReason and accountRequired for quota waits, without messages or marking chats read. Metadata includes environmentState (cleaning, expired or null), environmentExpiredAt and environmentError. Send a new message after expiration to start a fresh environment using the preserved history.",
     "scope": "read",
     "destructive": false,
     "inputSchema": {
@@ -664,7 +664,7 @@
   },
   {
     "name": "answer_chat_question",
-    "description": "Answer a pending question. Supply a fresh UUID answer.id and one answer per field; identical retries are safe. May steer or start agent work.",
+    "description": "Answer a pending questionnaire with separate selected option IDs and comment for every field. Text alone is allowed. Supply a fresh UUID answer.id; identical retries are safe. May steer or start agent work.",
     "scope": "run",
     "destructive": true,
     "inputSchema": {
@@ -695,14 +695,29 @@
                 "type": "string"
               },
               "additionalProperties": {
-                "minItems": 1,
-                "maxItems": 1,
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 10000
-                }
+                "type": "object",
+                "properties": {
+                  "selected": {
+                    "default": [],
+                    "maxItems": 30,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  },
+                  "comment": {
+                    "default": "",
+                    "type": "string",
+                    "maxLength": 10000
+                  }
+                },
+                "required": [
+                  "selected",
+                  "comment"
+                ],
+                "additionalProperties": false
               }
             }
           },
@@ -719,6 +734,31 @@
         "questionId",
         "answer"
       ]
+    }
+  },
+  {
+    "name": "withdraw_chat_question",
+    "description": "Withdraw a pending questionnaire without supplying any answer or authorization. Identical retries are safe; answers being delivered cannot be withdrawn.",
+    "scope": "run",
+    "destructive": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "questionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "chatId",
+        "questionId"
+      ],
+      "additionalProperties": false
     }
   },
   {

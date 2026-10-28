@@ -293,13 +293,17 @@ abstract class NodePlacementCases {
             .onNodeWithText("Tous les slots partagent ces budgets.", substring = true)
             .assertExists()
         compose.onNodeWithText("Réservation exclusive").assertDoesNotExist()
-        compose.onNodeWithText("Mettez à jour le runtime", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("Mettez à jour le runtime", substring = true).assertExists()
         compose.onNodeWithText("Personnes de confiance").performScrollTo().assertExists()
-        compose
-            .onNodeWithText("Activer l’exécution native")
-            .performScrollTo()
-            .performClick()
-            .assertIsOn()
+        val nativeToggle = compose.onNodeWithText("Activer l’exécution native").performScrollTo()
+        nativeToggle.performClick()
+        try {
+            nativeToggle.assertIsOn()
+        } catch (failure: AssertionError) {
+            // Preserve the failing device state before the fixture closes the editor.
+            runCatching { capture("native-node-toggle-failure") }
+            throw failure
+        }
         compose.onNodeWithText("trusted@example.test").performScrollTo().performClick()
         capture("native-node-trust")
         compose.onNodeWithText("Enregistrer").performClick()

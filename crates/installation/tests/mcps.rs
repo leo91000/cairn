@@ -942,3 +942,157 @@ async fn current_mcp_sql_roundtrips_selections_and_keeps_credentials_encrypted()
             .unwrap()
     );
 }
+
+#[tokio::test]
+async fn public_questionnaire_answers_preserve_choices_comments_and_withdrawal_authority() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let (s, origin, server) = served(&root).await;
+    let token = common::relay_fixture::grant(&s, &["read", "run"]).await;
+    let reader = common::relay_fixture::grant(&s, &["read"]).await;
+    let mcp = Mcp {
+        http: reqwest::Client::new(),
+        endpoint: format!("{origin}/mcp"),
+        token,
+    };
+    let reader = Mcp {
+        http: reqwest::Client::new(),
+        endpoint: format!("{origin}/mcp"),
+        token: reader,
+    };
+    let run = manual_run(&s, "Questionnaire", "Ask about platforms").await;
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    s.store.put("chats", chat).await.unwrap();
+    let question = "e".repeat(64);
+    s.question_receive(
+        run["id"].as_str().unwrap(),
+        json!({
+            "id": question,
+            "blocking": false,
+            "fields": [
+                {
+                    "id": "platforms",
+                    "title": "Which platforms?",
+                    "mode": "multiple",
+                    "minChoices": 2,
+                    "maxChoices": 2,
+                    "options": [
+                        {
+                            "id": "android",
+                            "label": "Android",
+                        },
+                        {
+                            "id": "web",
+                            "label": "Web",
+                        },
+                    ],
+                },
+            ],
+        }),
+    )
+    .await
+    .unwrap();
+    let listed = mcp
+        .call(
+            "list_chat_questions",
+            json!({
+                "chatId": chat_id,
+            }),
+        )
+        .await;
+    assert_eq!(
+        result(&listed)["questions"][0]["fields"][0]["mode"],
+        "multiple"
+    );
+    let invalid = mcp
+        .call(
+            "answer_chat_question",
+            json!({
+                "chatId": chat_id,
+                "questionId": question,
+                "answer": {
+                    "id": uuid::Uuid::new_v4(),
+                    "answers": {
+                        "platforms": {
+                            "selected": [
+                                "android",
+                            ],
+                            "comment": "Android first",
+                        },
+                    },
+                },
+            }),
+        )
+        .await;
+    assert_eq!(invalid["result"]["isError"], true);
+    let input = json!({
+        "chatId": chat_id,
+        "questionId": question,
+        "answer": {
+            "id": uuid::Uuid::new_v4(),
+            "answers": {
+                "platforms": {
+                    "selected": [
+                        "android",
+                        "web",
+                    ],
+                    "comment": "Android first",
+                },
+            },
+        },
+    });
+    let answered = mcp.call("answer_chat_question", input.clone()).await;
+    assert_eq!(result(&answered)["status"], "answering", "{answered}");
+    let repeated = mcp.call("answer_chat_question", input).await;
+    assert_eq!(result(&answered), result(&repeated));
+    let detail = s.chat_detail(&chat_id).await.unwrap();
+    assert_eq!(detail["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        detail["messages"][0]["answers"]["platforms"],
+        json!({
+            "selected": [
+                "android",
+                "web",
+            ],
+            "comment": "Android first",
+        })
+    );
+    let pending = "f".repeat(64);
+    s.question_receive(
+        run["id"].as_str().unwrap(),
+        json!({
+            "id": pending,
+            "blocking": false,
+            "fields": [
+                {
+                    "id": "note",
+                    "title": "Anything else?",
+                },
+            ],
+        }),
+    )
+    .await
+    .unwrap();
+    let args = json!({
+        "chatId": chat_id,
+        "questionId": pending,
+    });
+    let forbidden = reader.call("withdraw_chat_question", args.clone()).await;
+    assert!(forbidden["error"].is_object() || forbidden["result"]["isError"] == true);
+    let withdrawn = mcp.call("withdraw_chat_question", args.clone()).await;
+    assert_eq!(result(&withdrawn)["status"], "cancelled", "{withdrawn}");
+    assert_eq!(
+        result(&mcp.call("withdraw_chat_question", args).await)["status"],
+        "cancelled"
+    );
+    assert_eq!(
+        s.chat_detail(&chat_id).await.unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    server.abort();
+}

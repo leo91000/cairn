@@ -250,17 +250,19 @@ public installation manager. The [release runbook](PRODUCTION-CAIRN.md) covers
 release checks and failure recovery. The [configuration reference](PRODUCTION-CAIRN-SETUP.md)
 covers environment setup, DNS, Resend, OAuth and co-location.
 
-Main and same-repository PRs build both installation and beacon images. All
-existing quality, browser, network and installation/VM smoke checks remain
+Nightly, manual and version-tag qualification builds both installation and Beacon
+images. PRs and main pushes run the short checks described in
+[PR validation](agents/pr-validation.md). All quality, browser, network and installation/VM smoke checks remain
 publication prerequisites, alongside the exact beacon-image smoke with
 Postgres, bundled SPA, sign-in, persistence and readiness checks. Both images
 carry SBOM/provenance and share schema-3 evidence for one validated Git tree.
-Older single-image evidence cannot be reused. Fork images remain local.
+Older single-image evidence cannot be reused. Manual runs provide test results
+but cannot supply reusable release provenance.
 
 A `v*` tag promotes both immutable digests without rebuilding if a trusted run
 validated that exact tree and current installation CLI versions, and production
 still serves the engine releases its rollback checks used. Otherwise the full
-pipeline runs. A tag waits for concurrent main validation for up to 40
+pipeline runs. A tag waits for concurrent nightly validation for up to 40
 minutes; if validation is still pending, retry after it completes. No second
 build starts at that deadline. Production deployment jobs remain serialized.
 Main, PR and manual workflows never deploy.
@@ -416,8 +418,8 @@ node scripts/nested-android-validation.mjs record /path/to/intel.json https://<d
 
 The recorded commit status documents the result; CI does not wait for it.
 
-Image promotion requires the ordinary CI checks. Tag releases reuse the successful
-main pipeline's exact image.
+Image promotion requires the ordinary CI checks. Tag releases reuse a successful nightly
+qualification's exact image, or run the complete qualification themselves.
 
 ### Task-author security and coordinated upgrades (#59)
 

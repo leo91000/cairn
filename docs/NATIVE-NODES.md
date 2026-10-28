@@ -88,6 +88,25 @@ conversations before resuming them. An all-node grant does not replace that
 migration. Native execution still requires the node owner's opt-in, trust
 in every originating person, and fresh membership and delegation evidence.
 
+Native runtimes supporting exclusive reservations report `exclusiveReservations: true`.
+The owner grants “Reserve exclusively” on the agent's node access page, on web or
+Android. An authorized run uses `acquire_exclusive`, `exclusive_status`,
+`renew_exclusive` and `release_exclusive` through its workspace tools. The same
+agent profiles and node capabilities are exposed through public Cairn MCP and
+`cairn_installation`; installation agents cannot grant themselves exclusivity.
+Reservations block new Cairn execution and freeze other managed workload cgroups,
+including descendants, with confirmed automatic resume after release or expiration.
+Storage protection retains its own suspension reason. Confirmed exclusive pauses
+extend execution time budgets; security leases keep expiring normally. Native
+controller recovery fences the old workloads before clearing reservation ownership.
+
+This reserves Cairn work on that node, not external applications, physical GPUs or
+the whole host. Frozen processes keep their RAM and GPU allocations. Optional RAM
+headroom is checked against real shared cgroup usage and host availability; native
+reservations fail when it is unavailable rather than reclaiming peer memory.
+Administrator enforcement remains cooperative because root can escape cgroups.
+Older native runtimes require an update before the reservation can be used.
+
 The controller defaults to one slot and supports configurable concurrent executions.
 All slots share the configured CPU/RAM ceiling through a systemd workload slice,
 and the existing disk budget. Per-conversation limits are ceilings, not reservations.

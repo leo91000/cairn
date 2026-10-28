@@ -19,6 +19,7 @@ import {
   usageLimitDetail,
   usageLimitTitle,
 } from './engine-status'
+import { questionAnswerText } from './question-answer'
 
 export const MAX_ACTIVITY_GROUP_SIZE = 30
 
@@ -473,7 +474,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
         role: 'user',
         id: `user:${event.id}`,
         time: typeof event.payload?.createdAt === 'number' && Number.isFinite(event.payload.createdAt) && event.payload.createdAt > 0 && event.payload.createdAt <= event.createdAt ? event.payload.createdAt : event.createdAt,
-        text: typeof event.payload?.text === 'string' ? event.payload.text : event.text,
+        text: questionAnswerText(typeof event.payload?.text === 'string' ? event.payload.text : event.text, event.payload?.questionId),
         attachments: Array.isArray(event.payload?.attachments) ? event.payload.attachments : [],
       })
       continue

@@ -344,6 +344,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
         assert_eq!(result(&updated)["capabilities"]["backend"], "native");
         let mut capable = s.node_boundary(next).await.unwrap();
         capable["capabilities"]["nativeModeProtocol"] = 1.into();
+        capable["exclusiveReservations"] = true.into();
         s.store.put_node_fixture(capable).await.unwrap();
         let (_, preview) = node_management_call(
             &app,
@@ -390,6 +391,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
             .unwrap();
         assert_eq!(node["nativeAccounts"], json!([trusted]));
         assert_eq!(node["slots"], 6);
+        assert_eq!(node["exclusiveReservations"], true);
         s.store
             .update_run_boundary(
                 run["id"].as_str().unwrap(),
@@ -2512,6 +2514,63 @@ async fn both_mcp_endpoints_can_pause_and_delete_instances_pending_package_reapp
 }
 
 #[tokio::test]
+async fn both_mcp_endpoints_list_current_chat_account_waits() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (target, configuration) = active_run(&s, &main).await;
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = target["id"].clone();
+    s.store.put("chats", chat.clone()).await.unwrap();
+    for required in [None, Some(cairn_contracts::AgentProvider::Codex)] {
+        s.store
+            .change_run(
+                text(&target, "id"),
+                cairn_installation::runs::RunChanges {
+                    account_wait_reason: Some(Some(
+                        "Waiting for a Codex account with available usage.".into(),
+                    )),
+                    account_required: Some(required),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+        for internal in [false, true] {
+            let response = if internal {
+                call(&s, &configuration, "list_chats", json!({})).await
+            } else {
+                public_call(&s, &["read"], "list_chats", json!({})).await
+            };
+            let listed = &result(&response)["chats"][0];
+            assert_eq!(
+                listed["accountWaitReason"],
+                detail["run"]["accountWaitReason"]
+            );
+            assert_eq!(listed["accountRequired"], detail["run"]["accountRequired"]);
+            assert_eq!(listed["accountWaitReason"], detail["accountWaitReason"]);
+            assert_eq!(listed["accountRequired"], detail["accountRequired"]);
+            assert!(listed.get("run").is_none());
+        }
+    }
+    s.store
+        .change_run(
+            text(&target, "id"),
+            cairn_installation::runs::RunChanges {
+                account_wait_reason: Some(None),
+                account_required: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let cleared = s.chat_detail(text(&chat, "id")).await.unwrap();
+    assert!(cleared["accountWaitReason"].is_null());
+    assert!(cleared["accountRequired"].is_null());
+}
+
+#[tokio::test]
 async fn both_mcp_endpoints_manage_chat_queues_and_lifecycle() {
     for internal in [false, true] {
         let root = TempDir::new().unwrap();
@@ -2916,7 +2975,7 @@ async fn chat_questions_redact_private_answers_and_content_chunks_detect_changes
     assert_eq!(result(&questions)["questions"][0]["status"], "pending");
     let answer = json!({
         "chatId": chat_id, "questionId": question_id,
-        "answer": { "id": uuid::Uuid::new_v4(), "answers": { "secret": ["fixture-private-answer"] } },
+        "answer": { "id": uuid::Uuid::new_v4(), "answers": { "secret": { "selected": [], "comment": "fixture-private-answer" } } },
     });
     let answered = call(&s, &configuration, "answer_chat_question", answer.clone()).await;
     assert_eq!(result(&answered)["status"], "answering");
@@ -2930,6 +2989,18 @@ async fn chat_questions_redact_private_answers_and_content_chunks_detect_changes
             "{tool} exposed a private answer"
         );
     }
+    let obsolete = "b".repeat(64);
+    s.question_receive(target["id"].as_str().unwrap(), json!({
+        "id": obsolete, "blocking": false, "fields": [{ "id": "note", "title": "Still useful?" }],
+    })).await.unwrap();
+    let withdrawn = call(
+        &s,
+        &configuration,
+        "withdraw_chat_question",
+        json!({ "chatId": chat_id, "questionId": obsolete }),
+    )
+    .await;
+    assert_eq!(result(&withdrawn)["status"], "cancelled");
     // Populate a long, entirely delivered history so pagination is limited by bytes,
     // independently of the undelivered-message queue limit.
     let chat_key = chat_id.clone();

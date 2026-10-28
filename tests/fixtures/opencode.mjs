@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import path from 'node:path'
 import process from 'node:process'
+import { askCairn } from './cairn-questions.mjs'
 
 if (process.argv.includes('--version')) {
   process.stdout.write('1.19.0\n')
@@ -234,6 +235,13 @@ async function main() {
       return
     }
 
+    if (body.includes('fixture:cairn-question')) {
+      const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT)
+      await askCairn(config.mcp.cairn_workspace, [{ id: 'layout', title: 'Which layout?', options: [{ id: 'compact', label: 'Compact' }] }])
+      await finish(session, input.messageID, 'Awaiting input')
+      return
+    }
+
     if (body.includes('fixture:opencode-question')) {
       const request = id('que')
       questions.set(request, { session, parent: input.messageID })
@@ -350,7 +358,7 @@ async function main() {
       json(200, true)
       const rejected = question[2] === 'reject'
       emit(rejected ? 'question.rejected' : 'question.replied', { sessionID: pending.session.id, requestID: question[1] })
-      await finish(pending.session, pending.parent, rejected ? 'Question withdrawn without an answer.' : `I will use the ${body.answers[0].join(', ')} layout.`)
+      await finish(pending.session, rejected ? pending.session.questionRefusalParent : pending.parent, rejected ? pending.session.questionRefusal : `I will use the ${body.answers[0].join(', ')} layout.`)
       return
     }
 
@@ -363,6 +371,22 @@ async function main() {
 
     if (request.method === 'GET') {
       json(200, route[2] === '/message' ? session.messages : { id: session.id, directory: session.directory })
+      return
+    }
+
+    if (route[2] === '/message' && request.method === 'POST' && body.noReply === true) {
+      session.questionRefusal = body.parts.map(part => part.text).join('\n')
+      session.questionRefusalParent = body.messageID
+      const info = {
+        id: body.messageID,
+        sessionID: session.id,
+        role: 'user',
+        time: { created: Date.now() },
+      }
+      session.messages.push({ info, parts: body.parts })
+      await persist()
+      emit('message.updated', { info })
+      json(200, { info, parts: body.parts })
       return
     }
 

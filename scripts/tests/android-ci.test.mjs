@@ -126,8 +126,28 @@ describe('validated Android build reuse', () => {
 
   it('accepts validation only from the Android push workflow on main at the exact commit', () => {
     expect(trustedAndroidRun(run, config)).toBe(true)
+    expect(trustedAndroidRun({ ...run, event: 'schedule' }, config)).toBe(true)
+    expect(trustedAndroidRun({ ...run, event: 'schedule', head_sha: 'b'.repeat(40) }, config)).toBe(false)
     for (const change of [{ event: 'pull_request' }, { event: 'workflow_dispatch' }, { head_branch: 'other' }, { head_sha: 'b'.repeat(40) }, { path: '.github/workflows/ci.yaml' }, { head_repository: { full_name: 'other/repo' } }])
       expect(trustedAndroidRun({ ...run, ...change }, config)).toBe(false)
+  })
+
+  it('waits for nightly qualification and verifies the APK before reuse', async () => {
+    let polls = 0
+    expect(await resolveAndroidRelease(config, {
+      gh: async (args) => {
+        if (args[0] === 'api') {
+          const query = new URLSearchParams(args[1].split('?')[1])
+          expect(query.has('event')).toBe(false)
+          return JSON.stringify({ workflow_runs: [{ ...run, event: 'schedule', status: polls ? 'completed' : 'in_progress' }] })
+        }
+
+        await fixture(args.at(-1))
+        return ''
+      },
+      sleep: async () => { polls++ },
+    })).toEqual({ runId: run.id })
+    expect(polls).toBe(1)
   })
 
   it('waits for concurrent main validation and verifies its artifact before skipping any checks', async () => {
