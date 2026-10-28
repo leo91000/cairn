@@ -548,7 +548,7 @@ class ConversationPresentationTest {
             Run(
                 id = "run",
                 status = "queued",
-                chatExecution = ChatExecution("one"),
+                chatExecution = ChatExecution(messageId = "one"),
                 accountWaitReason =
                     "Reconnect your Claude Code account in Connections to continue.",
                 accountRequired = "claude",
@@ -578,7 +578,7 @@ class ConversationPresentationTest {
                 id = "run",
                 status = "queued",
                 accountWaitReason = reason,
-                chatExecution = ChatExecution("one"),
+                chatExecution = ChatExecution(messageId = "one"),
                 taskId = "",
             )
         assertEquals(ChatWaitNotice(reason), chatWaitNotice(run))
@@ -607,7 +607,7 @@ class ConversationPresentationTest {
             Run(
                 id = "run",
                 status = "running",
-                chatExecution = ChatExecution("one"),
+                chatExecution = ChatExecution(messageId = "one"),
                 taskId = "",
             )
         val delivery =
