@@ -102,6 +102,7 @@ impl Service {
             vault,
             shutdown: CancellationToken::new(),
         });
+        crate::chats::questions::retire_native(&service).await?;
         service.bootstrap_main_agent().await?;
         service.avatars.recover(&service).await?;
         tokio::spawn(crate::artifacts::preview::recover(service.clone()));

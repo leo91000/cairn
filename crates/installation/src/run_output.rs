@@ -344,8 +344,8 @@ pub fn exhausted(event: &Value) -> bool {
 }
 
 /// The rule that sets chat turns apart from scheduled work.
-pub const INTERACTIVE: &str = "This is an interactive chat. Use native user-input questions when \
-    clarification is useful. Nonblocking questions let you continue independent \
+pub const INTERACTIVE: &str = "This is an interactive chat. Use cairn_workspace.ask_questions when \
+    clarification is useful; native question tools are disabled. Supply a stable UUID requestId for retries. Questions can use single or multiple choice, bounds and recommendations without preselection. Answers distinguish selected options from a free-text comment. The tool returns immediately; durable questions let you continue independent \
     work while the user considers the options; a suggested answer is never user \
     approval. Follow the latest user instructions and do not treat a question \
     as authorization to publish changes. Use cairn_workspace.pending_questions and \

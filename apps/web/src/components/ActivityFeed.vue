@@ -26,6 +26,7 @@ import { quotaEntries } from '../chat-quota'
 import { deliveryEntries } from '../deliverables'
 import { ArrowDown, Maximize2, Minimize2 } from '../icons'
 import { MessageTimes } from '../message-times'
+import { questionAnswerText } from '../question-answer'
 import { exclusiveSuspensionLabel } from '../run-status'
 import { backgroundWait, waitingStep, workingStep } from '../signal'
 import { mentionSegments } from '../skill-mentions'
@@ -110,7 +111,7 @@ const entries = computed(() => {
         role: 'user',
         id: `sending:${message.id}`,
         time: message.createdAt,
-        text: message.text,
+        text: questionAnswerText(message.text, message.questionId),
         attachments: message.attachments,
         delivery: label,
       })

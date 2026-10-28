@@ -711,7 +711,7 @@ async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
 }
 
 #[tokio::test]
-async fn withdrawn_questions_reject_the_native_request_without_an_answer() {
+async fn native_questions_are_rejected_without_creating_a_cairn_question() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     connect(&s).await;
@@ -749,99 +749,7 @@ async fn withdrawn_questions_reject_the_native_request_without_an_answer() {
         tokio::fs::read_to_string(root.path().join("result.md"))
             .await
             .unwrap(),
-        "Question withdrawn without an answer."
-    );
-}
-
-#[tokio::test]
-async fn native_questions_use_cairn_ids_and_answers_reach_the_original_native_request() {
-    let root = TempDir::new().unwrap();
-    let s = service(&root).await;
-    connect(&s).await;
-    let lease = s
-        .accounts
-        .acquire(&s, "question-test", Provider::Opencode, MODEL)
-        .await
-        .unwrap()
-        .unwrap();
-    let _broker = broker::serve(&s, &lease).await.unwrap();
-    let mut config = s.config.clone();
-    config.home = lease.home.parent().unwrap().to_owned();
-    let next_config = config.clone();
-    let input = plan(&root, "fixture:opencode-question");
-    let (tx, mut rx) = mpsc::channel(128);
-    let task =
-        tokio::spawn(
-            async move { opencode::run(&config, input, tx, CancellationToken::new()).await },
-        );
-    let mut answered = false;
-    let mut session = String::new();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(event) = rx.recv().await {
-            if event["type"] == "thread.started" {
-                session = text(&event, "thread_id").to_owned();
-            }
-            if event["type"] == "chat.question" {
-                let id = text(&event["question"], "id");
-                assert_eq!(id.len(), 64);
-                assert!(id.bytes().all(|c| c.is_ascii_hexdigit()));
-                tokio::fs::create_dir_all(root.path().join("inbox"))
-                    .await
-                    .unwrap();
-                tokio::fs::write(
-                    root.path().join("inbox/messages.json"),
-                    json!([{
-                        "id": "answer", "questionId": id, "answers": { "0": ["Compact"] },
-                        "text": "Compact", "attachments": [],
-                    }])
-                    .to_string(),
-                )
-                .await
-                .unwrap();
-                answered = true;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    task.await.unwrap().unwrap();
-    assert!(answered);
-    assert_eq!(
-        tokio::fs::read_to_string(root.path().join("result.md"))
-            .await
-            .unwrap(),
-        "I will use the Compact layout."
-    );
-
-    // Leave the delivered answer on disk, as it can be until the manager's next tick.
-    let mut next = plan(&root, "Continue after the question.");
-    next["execution"]["messageId"] = "next".into();
-    next["sessionId"] = session.into();
-    let (tx, mut rx) = mpsc::channel(128);
-    let next_task = tokio::spawn(async move {
-        opencode::run(&next_config, next, tx, CancellationToken::new()).await
-    });
-    let mut events = Vec::new();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(event) = rx.recv().await {
-            events.push(event);
-        }
-    })
-    .await
-    .unwrap();
-    next_task.await.unwrap().unwrap();
-    assert!(events.iter().any(|e| e["type"] == "turn.completed"));
-    assert!(!events.iter().any(|e| e["type"] == "chat.question"));
-    assert!(
-        !events
-            .iter()
-            .any(|e| e["type"] == "chat.delivered" && e["messageId"] == "answer")
-    );
-    assert!(
-        tokio::fs::read_to_string(root.path().join("result.md"))
-            .await
-            .unwrap()
-            .contains("compact status panel")
+        "Native question tools are disabled. Use cairn_workspace.ask_questions to ask the user."
     );
 }
 

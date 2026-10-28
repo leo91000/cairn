@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { z } from 'zod'
 import {
+  askQuestionsInput,
   chatInput,
   chatMessageInput,
   questionAnswerInput,
@@ -12,6 +13,7 @@ const schemas = {
   message: chatMessageInput,
   answer: questionAnswerInput,
   questions: questionFields,
+  askQuestions: askQuestionsInput,
 }
 await writeFile('crates/installation/schemas/inputs.json', `${JSON.stringify(Object.fromEntries(Object.entries(schemas).map(([name, schema]) => [name, z.toJSONSchema(schema, { unrepresentable: 'any' })])), null, 2)}\n`)
 

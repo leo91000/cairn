@@ -2930,7 +2930,7 @@ async fn chat_questions_redact_private_answers_and_content_chunks_detect_changes
     assert_eq!(result(&questions)["questions"][0]["status"], "pending");
     let answer = json!({
         "chatId": chat_id, "questionId": question_id,
-        "answer": { "id": uuid::Uuid::new_v4(), "answers": { "secret": ["fixture-private-answer"] } },
+        "answer": { "id": uuid::Uuid::new_v4(), "answers": { "secret": { "selected": [], "comment": "fixture-private-answer" } } },
     });
     let answered = call(&s, &configuration, "answer_chat_question", answer.clone()).await;
     assert_eq!(result(&answered)["status"], "answering");
@@ -2944,6 +2944,18 @@ async fn chat_questions_redact_private_answers_and_content_chunks_detect_changes
             "{tool} exposed a private answer"
         );
     }
+    let obsolete = "b".repeat(64);
+    s.question_receive(target["id"].as_str().unwrap(), json!({
+        "id": obsolete, "blocking": false, "fields": [{ "id": "note", "title": "Still useful?" }],
+    })).await.unwrap();
+    let withdrawn = call(
+        &s,
+        &configuration,
+        "withdraw_chat_question",
+        json!({ "chatId": chat_id, "questionId": obsolete }),
+    )
+    .await;
+    assert_eq!(result(&withdrawn)["status"], "cancelled");
     // Populate a long, entirely delivered history so pagination is limited by bytes,
     // independently of the undelivered-message queue limit.
     let chat_key = chat_id.clone();

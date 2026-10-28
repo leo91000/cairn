@@ -7,6 +7,7 @@ use cairn_installation::{
     error::Result,
     provider::Provider,
     service::Service,
+    validation::text,
 };
 use common::eventually;
 use serde_json::{Value, json};
@@ -1030,70 +1031,20 @@ async fn reasoning_before_text_keeps_one_message_per_block() {
 }
 
 #[tokio::test]
-async fn question_answers_use_control_protocol() {
+async fn native_questions_are_denied_with_the_common_tool_instructions() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);
-    let p = plan(&root, "fixture:question");
-    let (tx, mut rx) = mpsc::channel(64);
-    let task =
-        tokio::spawn(async move { claude_process::run(&c, p, tx, CancellationToken::new()).await });
-    tokio::time::timeout(Duration::from_secs(8), async {
-        while let Some(event) = rx.recv().await {
-            if event["type"] != "chat.question" {
-                continue;
-            }
-            let question = &event["question"]["id"];
-            assert_eq!(question.as_str().unwrap().len(), 64);
-            deliver(
-                &root,
-                &json!([{
-                    "id": "answer",
-                    "questionId": question,
-                    "answers": { "0": ["Small change"] },
-                }]),
-            );
-        }
-    })
-    .await
-    .unwrap();
-    task.await.unwrap().unwrap();
-    let response: Value = serde_json::from_slice(
-        &std::fs::read(root.path().join("home/.claude/question-response.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        response["response"]["response"]["updatedInput"]["answers"]["Which approach?"],
-        "Small change"
-    );
-}
-
-#[tokio::test]
-async fn withdrawn_questions_deny_the_native_request_without_an_answer() {
-    let root = TempDir::new().unwrap();
-    let c = setup(&root);
-    let p = plan(&root, "fixture:question");
-    let (tx, mut rx) = mpsc::channel(64);
-    let task =
-        tokio::spawn(async move { claude_process::run(&c, p, tx, CancellationToken::new()).await });
-    let mut completed = false;
-    tokio::time::timeout(Duration::from_secs(8), async {
-        while let Some(event) = rx.recv().await {
-            if event["type"] == "chat.question" {
-                deliver(&root, &json!([{
-                    "id": "withdrawal", "questionId": event["question"]["id"], "questionCancelled": true,
-                }]));
-            }
-            completed |= event["type"] == "turn.completed";
-        }
-    }).await.unwrap();
-    task.await.unwrap().unwrap();
-    assert!(completed);
+    let (result, events) = run_to_end(&c, plan(&root, "fixture:question")).await;
+    result.unwrap();
+    assert!(completes(&events));
+    assert!(!events.iter().any(|event| event["type"] == "chat.question"));
     let response: Value = serde_json::from_slice(
         &std::fs::read(root.path().join("home/.claude/question-response.json")).unwrap(),
     )
     .unwrap();
     let decision = &response["response"]["response"];
     assert_eq!(decision["behavior"], "deny");
+    assert!(text(decision, "message").contains("cairn_workspace.ask_questions"));
     assert!(decision["updatedInput"].is_null());
 }
 
