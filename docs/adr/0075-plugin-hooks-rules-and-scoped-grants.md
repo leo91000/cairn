@@ -6,6 +6,7 @@ Cette décision remplace la délégation externe
 d’[ADR-0038](0038-luau-installation-plugins-and-external-bot-delegation.md),
 d’[ADR-0045](0045-declarative-plugin-contributions.md),
 d’[ADR-0046](0046-plugin-transports-and-forms-in-luau.md),
+d’[ADR-0051](0051-agent-centric-permissions.md),
 d’[ADR-0057](0057-guided-plugin-setup.md), d’[ADR-0059](0059-delegated-tasks.md) et
 d’[ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) ; remplace en partie les
 droits par instance d’[ADR-0045](0045-declarative-plugin-contributions.md),
@@ -59,18 +60,20 @@ d’abord puis émet le hook ; les règles, asynchrones, modifient ensuite ce qu
 
 Le propriétaire accorde à un agent, pour une instance, soit l’accès complet, sans
 limite et y compris ce qu’une version suivante du plugin ajoutera, soit ses
-contributions une par une. L’accès complet comprend les identifiants de run, sauf
-quand l’agent les reçoit déjà d’une autre instance du même package : le propriétaire
-choisit l’instance qui les donne, en accordant le droit ou en revoyant une mise à jour
-du plugin qui en ajoute. Les outils, commandes et hooks accordés un par un peuvent
-être restreints à des ressources : `discord.post` seulement dans #support, le hook
-`message` seulement pour #support. Un droit sur une ressource couvre ses descendants
-(un salon couvre ses fils). Cairn applique la restriction avant le plugin, à chaque
-appel d’outil ou de commande, et ne livre pas à une règle un événement dont la payload
-désigne une autre ressource. Une restriction porte sur un type de ressource et sur ses
-descendants : chaque ressource de ce type, ou d’un type descendant, que désigne
-l’entrée ou la payload doit se trouver sous une ressource couverte, d’après la
-hiérarchie que Cairn résout lui-même (un fil de #general est refusé quand seul
+contributions une par une. Pour un package qui déclare des identifiants de run,
+l’agent les reçoit d’une seule instance, que le propriétaire choisit explicitement et
+que Cairn retient ; un accès complet aux autres instances ne les comprend pas. Retirer
+le droit sur cette instance laisse l’agent sans identifiants de run pour ce package
+jusqu’à un nouveau choix du propriétaire : une réduction n’élargit jamais un autre
+droit. Les outils, commandes et hooks accordés un par un peuvent être restreints à des
+ressources : `discord.post` seulement dans #support, le hook `message` seulement pour
+#support. Un droit sur une ressource couvre ses descendants (un salon couvre ses
+fils). Cairn applique la restriction avant le plugin, à chaque appel d’outil ou de
+commande, et ne livre pas à une règle un événement dont la payload désigne une autre
+ressource. Une restriction porte sur un type de ressource et sur ses descendants :
+chaque ressource de ce type, ou d’un type descendant, que désigne l’entrée ou la
+payload doit se trouver sous une ressource couverte, d’après la hiérarchie que Cairn
+résout lui-même (un fil de #general est refusé quand seul
 #support est accordé). Les autres types restent libres : restreindre le hook `message`
 à #support n’empêche pas son auteur d’être n’importe qui. Une entrée ou une payload
 qui ne désigne aucune ressource identifiable d’un type restreint, ou des ressources
@@ -84,29 +87,32 @@ tout ce que permet le compte de l’instance : les accorder rend vaines les rest
 de ressource de ses outils. Un agent détient toujours au plus une instance par package
 qui déclare des identifiants de run, qu’il les reçoive seuls ou par un accès complet
 ([ADR-0053](0053-github-as-a-bundled-plugin.md)) ; ses autres contributions peuvent
-venir de plusieurs instances, et une contribution accordée compte comme une instance
-accordée pour les étapes partagées de configuration
+venir de plusieurs instances, et seule une instance accordée en accès complet compte
+comme accordée pour réutiliser ses étapes partagées de configuration
 ([ADR-0057](0057-guided-plugin-setup.md)). Rien n’est accordé par défaut.
 `cairn_installation` peut lire et réduire ces droits, jamais les accorder. Un agent
 délégué ([ADR-0059](0059-delegated-tasks.md)) doit être couvert par son demandeur
 contribution par contribution et ressource par ressource, pas seulement instance par
 instance ; la couverture est revérifiée à chaque action de la tâche, pas seulement à
-sa création.
+sa création. Une fois la conversation demandeuse supprimée, la tâche déléguée exige
+l’accès à son propre agent.
 
 ### Accès des comptes aux agents
 
 Un membre ne démarre, ne poursuit, n’oriente, ne lance à la main, ne répond aux
 questions et n’utilise comme agent d’exécution d’une règle que les agents auxquels il
-a accès ; arrêter un travail reste permis à tous ; il continue de voir toutes les
-conversations ([ADR-0029](0029-sharing-whole-installations.md)). Ses tâches planifiées
-sur un agent auquel il perd l’accès sont suspendues comme ses règles. L’agent agit
-comme un rôle : y avoir accès, c’est pouvoir obtenir tout ce qu’il peut faire. Pour
-une tâche déléguée, l’accès à l’agent de sa conversation demandeuse suffit à la
-poursuivre ou à répondre à ses questions : la couverture par ce demandeur borne ses
-droits. Un agent qui a l’accès à l’installation la gère entière, avec l’autorité de
-gestion du propriétaire ([ADR-0064](0064-opt-in-installation-tools-for-agents.md)) :
-avoir accès à cet agent revient à avoir accès à tous les agents, et ce qu’un membre
-lui fait créer survit à son départ.
+a accès, ni ne crée ou ne modifie de tâche sur un autre agent ; arrêter un travail
+reste permis à tous ; il continue de voir toutes les conversations
+([ADR-0029](0029-sharing-whole-installations.md)). Ses tâches planifiées sur un agent
+auquel il perd l’accès sont suspendues comme ses règles. L’agent agit comme un rôle :
+y avoir accès, c’est pouvoir obtenir tout ce qu’il peut faire. Pour une tâche
+déléguée, l’accès à l’agent de sa conversation demandeuse suffit à la poursuivre ou à
+répondre à ses questions : la couverture par ce demandeur borne ses droits. Un agent
+qui a l’accès à l’installation la gère entière, avec l’autorité de gestion du
+propriétaire ([ADR-0064](0064-opt-in-installation-tools-for-agents.md)) : avoir accès
+à cet agent revient à avoir accès à tous les agents, et ce qu’un membre lui fait
+créer, hors ses règles, survit à son départ (une mission a le propriétaire pour
+auteur).
 
 Seul le propriétaire donne ou retire ces accès, et seulement depuis le web et Android
 : comme la gestion des membres, ils sont exclus du MCP public et de
@@ -217,9 +223,11 @@ atteint le tour (une règle, un agent, `cairn_installation`, un réveil sans mes
 il ne peut plus en écrire. Il écrit alors au nom de ce compte : il crée des règles à
 son nom, et ne modifie, désactive, réactive ou supprime que les règles de ce compte.
 Il ne peut accorder de droits à aucun agent ni à aucun compte, ni toucher à la règle
-d’un autre compte, ni lever une pause d’urgence, ni réduire un droit dont dépend la
-règle active d’un autre compte. Une règle créée par le MCP public a pour créateur le
-propriétaire qui a autorisé ce client.
+d’un autre compte, ni lever une pause d’urgence, ni réduire, sur l’agent d’exécution
+d’une règle d’un autre compte dont l’adhésion dure, un droit sur un hook ou un outil
+que cette règle utilise, ressources comprises, quel que soit l’état de la règle. Une
+règle créée par le MCP public a pour créateur le propriétaire qui a autorisé ce
+client.
 
 Une règle n’atteint un agent dont la politique autorise l’exécution native, ou une
 conversation qui s’exécute en natif, que si son créateur détenait l’autorité native
@@ -298,7 +306,11 @@ Un agent démarré par une règle agit pour son créateur, à partir d’un cont
 des inconnus. Il ne peut pas écrire de règles, mais s’il a l’accès à l’installation,
 un auteur externe peut tenter de lui faire faire tout le reste de ce que permet cet
 accès, y compris supprimer l’agent ou l’instance dont dépendent les règles d’autres
-comptes : un agent qui répond à un salon public ne devrait pas l’avoir.
+comptes : un agent qui répond à un salon public ne devrait pas l’avoir. De même, dans
+un tour qu’une personne a lancé, un agent qui lit un contenu externe par un outil (un
+salon, une issue) peut être poussé à écrire une règle durable au nom de cette personne
+; ce risque résiduel est accepté, et l’historique d’une règle montre dans quelle
+conversation elle a été écrite.
 
 Comme toute capacité de l’interface, les règles (éditeur compris) et les droits par
 ressource arrivent sur le web, Android, le MCP public et `cairn_installation` en même
