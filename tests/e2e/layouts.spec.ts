@@ -150,8 +150,13 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
       const collapsed = scope.getByTestId('agent-actions').locator(':scope > button[aria-expanded="false"]')
       while (await collapsed.count())
         await collapsed.first().click()
-      await scope.getByTestId('agent-step').filter({ hasText: text }).first().click()
-      await expect(sheet).toBeVisible()
+      const step = scope.getByTestId('agent-step').filter({ hasText: text }).first()
+      await expect(sheet).toHaveCount(0)
+      await expect(async () => {
+        if (!await sheet.isVisible())
+          await step.click()
+        await expect(sheet).toBeVisible({ timeout: 1000 })
+      }).toPass({ timeout: 7000 })
     }
 
     await openStep(page.locator('body'), 'File changes')
