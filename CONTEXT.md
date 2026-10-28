@@ -251,7 +251,7 @@ _Avoid_ : hook (l’événement auquel elle réagit), automation, workflow
 
 **Modèle de règles** :
 Un ensemble de règles de hook prêtes à l’emploi qu’un plugin propose, avec les
-paramètres à choisir à l’installation (agent, salon…). L’installer crée des règles
+paramètres à choisir en l’installant (agent, salon…). L’installer crée des règles
 ordinaires, sans lien avec le modèle.
 _Avoid_ : template, recette
 
