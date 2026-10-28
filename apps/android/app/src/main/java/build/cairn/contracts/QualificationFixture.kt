@@ -35,4 +35,6 @@ value class Names(
     Map<
         String,
         String,
-    > by value
+    > by value {
+    init {}
+}

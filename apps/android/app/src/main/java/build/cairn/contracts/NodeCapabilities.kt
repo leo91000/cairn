@@ -24,9 +24,9 @@ data class NodeCapabilities(
     init {
         require(Regex("^(firecracker|native)\$").containsMatchIn(backend))
         require(cpu >= 0L)
-        require(diskMiB >= 0L)
-        require(diskTotalMiB >= 0L)
-        require(memoryMiB >= 0L)
+        require(diskMiB in 0L..9007199254740991L)
+        require(diskTotalMiB in 0L..9007199254740991L)
+        require(memoryMiB in 0L..9007199254740991L)
         require(nativeModeProtocol >= 0L)
     }
 }

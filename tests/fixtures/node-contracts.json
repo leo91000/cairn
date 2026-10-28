@@ -67,7 +67,7 @@
       "maintenance": null,
       "maintenanceError": null,
       "maintenanceGeneration": null,
-      "maintenanceStartedAt": null,
+      "maintenanceStartedAt": 0,
       "imageDigest": null,
       "updateError": null,
       "runtimeId": "development",
@@ -83,7 +83,24 @@
       },
       "retainedRuns": [],
       "diskGrowthProtocol": null,
-      "diskCapacity": null,
+      "diskCapacity": {
+        "protocol": 1,
+        "capturedAt": 0,
+        "usedBytes": 1024,
+        "freeBytes": 4096,
+        "ownedBytes": {
+          "attempt": 1024
+        },
+        "retainedBytes": {
+          "run": 512
+        },
+        "requests": [
+          {
+            "attemptId": "00000000-0000-4000-8000-000000000003",
+            "currentMiB": 32768
+          }
+        ]
+      },
       "occupiedSlots": 1,
       "availableSlots": 3,
       "agents": [],
@@ -91,7 +108,16 @@
         "count": 0,
         "diskMiB": 0
       },
-      "diskAccounting": null
+      "diskAccounting": {
+        "capturedAt": 0,
+        "localBytes": 1024,
+        "unusedGrantedBytes": 512,
+        "hostFreeBytes": 4096,
+        "hostReserveBytes": 512,
+        "poolReserveBytes": 128,
+        "reclaimableBytes": 256,
+        "unsynchronizedBytes": 128
+      }
     }
   ],
   "commands": [
@@ -251,5 +277,31 @@
         "confirmNativeAdministration": false
       }
     }
+  ],
+  "wireNumberPaths": [
+    "/capabilities/memoryMiB",
+    "/capabilities/diskMiB",
+    "/capabilities/diskTotalMiB",
+    "/usage/memoryMiB",
+    "/usage/diskMiB",
+    "/usage/diskBytes",
+    "/staleDisks/diskMiB",
+    "/maintenanceStartedAt",
+    "/lastSeen",
+    "/createdAt",
+    "/diskCapacity/capturedAt",
+    "/diskCapacity/usedBytes",
+    "/diskCapacity/freeBytes",
+    "/diskCapacity/ownedBytes/attempt",
+    "/diskCapacity/retainedBytes/run",
+    "/diskCapacity/requests/0/currentMiB",
+    "/diskAccounting/capturedAt",
+    "/diskAccounting/localBytes",
+    "/diskAccounting/unusedGrantedBytes",
+    "/diskAccounting/hostFreeBytes",
+    "/diskAccounting/hostReserveBytes",
+    "/diskAccounting/poolReserveBytes",
+    "/diskAccounting/reclaimableBytes",
+    "/diskAccounting/unsynchronizedBytes"
   ]
 }

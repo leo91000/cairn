@@ -625,3 +625,12 @@ complete deterministic node values, warmups, alternating repetitions, audit,
 transactional writes/deletes, process CPU and DB/WAL/page reporting. Results belong
 in the PR description, never in Git. Cold connections retain the OS page cache;
 these local timings are separate from production network latency.
+
+Node counters and timestamps enforce the common exact wire range (0 through
+2^53−1) at Rust deserialization and in generated JSON schemas/Kotlin constraints,
+including optional byte usage and per-attempt disk observations. The shared corpus
+checks both endpoints and rejects overflow. Machine heartbeats reject an invalid
+usage observation before publishing it. Node mutations and placement choices use
+the same inventory enrichment as listings, reading occupancy, authorized agents,
+stale disks and disk accounting from the response transaction's snapshot rather
+than returning the storage model's empty presentation defaults.

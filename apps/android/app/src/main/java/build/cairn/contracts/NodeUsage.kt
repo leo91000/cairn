@@ -14,8 +14,8 @@ data class NodeUsage(
     val memoryMiB: Long = 0,
 ) {
     init {
-        diskBytes?.let { require(it >= 0L) }
-        require(diskMiB >= 0L)
-        require(memoryMiB >= 0L)
+        diskBytes?.let { require(it in 0L..9007199254740991L) }
+        require(diskMiB in 0L..9007199254740991L)
+        require(memoryMiB in 0L..9007199254740991L)
     }
 }

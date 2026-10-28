@@ -122,12 +122,14 @@
         },
         "diskMiB": {
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
         "diskTotalMiB": {
           "default": 0,
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
@@ -136,6 +138,7 @@
         },
         "memoryMiB": {
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
@@ -168,40 +171,49 @@
       "properties": {
         "capturedAt": {
           "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
           "type": "integer"
         },
         "hostFreeBytes": {
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
         "hostReserveBytes": {
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
         "localBytes": {
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
         "poolReserveBytes": {
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
         "reclaimableBytes": {
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
         "unsynchronizedBytes": {
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
         "unusedGrantedBytes": {
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         }
@@ -223,18 +235,19 @@
       "properties": {
         "capturedAt": {
           "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
           "type": "integer"
         },
         "freeBytes": {
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
         "ownedBytes": {
           "additionalProperties": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
+            "$ref": "#/definitions/WireUnsigned"
           },
           "type": "object"
         },
@@ -252,14 +265,13 @@
         },
         "retainedBytes": {
           "additionalProperties": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
+            "$ref": "#/definitions/WireUnsigned"
           },
           "type": "object"
         },
         "usedBytes": {
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         }
@@ -283,6 +295,7 @@
         },
         "currentMiB": {
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         }
@@ -328,36 +341,42 @@
         "backupSeconds": {
           "default": 60,
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
         "cacheMiB": {
           "default": 102400,
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
         "maxDirtySeconds": {
           "default": 300,
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
         "memoryCacheMiB": {
           "default": 256,
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
         "reserveMiB": {
           "default": 10240,
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
         "reservePercent": {
           "default": 5,
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         }
@@ -369,6 +388,7 @@
       "properties": {
         "diskBytes": {
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -378,12 +398,14 @@
         "diskMiB": {
           "default": 0,
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
         "memoryMiB": {
           "default": 0,
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         }
@@ -400,6 +422,7 @@
         },
         "diskMiB": {
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         }
@@ -409,6 +432,12 @@
         "diskMiB"
       ],
       "type": "object"
+    },
+    "WireUnsigned": {
+      "format": "uint64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
     }
   },
   "properties": {
@@ -441,6 +470,8 @@
     },
     "createdAt": {
       "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
       "type": "integer"
     },
     "diskAccounting": {
@@ -512,6 +543,8 @@
     "lastSeen": {
       "default": null,
       "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
       "type": [
         "integer",
         "null"
@@ -548,6 +581,8 @@
     "maintenanceStartedAt": {
       "default": null,
       "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
       "type": [
         "integer",
         "null"

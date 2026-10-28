@@ -4,40 +4,49 @@
   "properties": {
     "capturedAt": {
       "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
       "type": "integer"
     },
     "hostFreeBytes": {
       "format": "uint64",
+      "maximum": 9007199254740991,
       "minimum": 0,
       "type": "integer"
     },
     "hostReserveBytes": {
       "format": "uint64",
+      "maximum": 9007199254740991,
       "minimum": 0,
       "type": "integer"
     },
     "localBytes": {
       "format": "uint64",
+      "maximum": 9007199254740991,
       "minimum": 0,
       "type": "integer"
     },
     "poolReserveBytes": {
       "format": "uint64",
+      "maximum": 9007199254740991,
       "minimum": 0,
       "type": "integer"
     },
     "reclaimableBytes": {
       "format": "uint64",
+      "maximum": 9007199254740991,
       "minimum": 0,
       "type": "integer"
     },
     "unsynchronizedBytes": {
       "format": "uint64",
+      "maximum": 9007199254740991,
       "minimum": 0,
       "type": "integer"
     },
     "unusedGrantedBytes": {
       "format": "uint64",
+      "maximum": 9007199254740991,
       "minimum": 0,
       "type": "integer"
     }

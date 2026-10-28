@@ -92,8 +92,11 @@ data class ExecutionNode(
 ) {
     init {
         require(availableSlots >= 0L)
+        require(createdAt in 0L..9007199254740991L)
         diskGrowthProtocol?.let { require(it >= 0L) }
         java.util.UUID.fromString(id)
+        lastSeen?.let { require(it in 0L..9007199254740991L) }
+        maintenanceStartedAt?.let { require(it in 0L..9007199254740991L) }
         require(occupiedSlots >= 0L)
         runtimeSlots?.let { require(it >= 0L) }
         slots?.let { require(it >= 0L) }

@@ -205,9 +205,10 @@ fn name(value: &str) -> Result<String> {
     Ok(value.into())
 }
 
-fn public(mut node: ExecutionNode) -> Result<Value> {
-    node.status = status(&node);
-    Ok(serde_json::to_value(node)?)
+fn public(db: &Db<'_>, node: ExecutionNode) -> Result<Value> {
+    let usage = Usage::load(db)?;
+    let view = usage.describe(db, node)?;
+    Ok(serde_json::to_value(view)?)
 }
 
 pub(crate) fn is_active_attempt(attempt: &Value) -> bool {
@@ -226,11 +227,19 @@ struct StaleDisk {
 /// conversation now running elsewhere (it may hold changes newer than the recovery
 /// point used to resume it), or older copies set aside beside a current disk.
 async fn stale_disks(s: &Service, volumes: &[Value], attempts: &[Value]) -> Result<Vec<StaleDisk>> {
+    let volumes = volumes.to_vec();
+    let attempts = attempts.to_vec();
+    s.store
+        .read(move |db| stale_disks_in(db, &volumes, &attempts))
+        .await
+}
+
+fn stale_disks_in(db: &Db<'_>, volumes: &[Value], attempts: &[Value]) -> Result<Vec<StaleDisk>> {
     let mut stale = Vec::new();
     for volume in volumes.iter().filter(|v| v["materialized"] == true) {
         let run = volume["runId"].as_str().unwrap_or_default();
         let node = volume["nodeId"].as_str().unwrap_or_default();
-        let record = s.store.run(run).await.ok();
+        let record = db.run(run)?;
         let executing = attempts
             .iter()
             .any(|a| a["runId"] == run && a["nodeId"] == node && is_active_attempt(a));
@@ -240,7 +249,7 @@ async fn stale_disks(s: &Service, volumes: &[Value], attempts: &[Value]) -> Resu
         if executing || moving {
             continue;
         }
-        let checkpoint = checkpoint(s, run).await?;
+        let checkpoint = db_checkpoint(db, run)?;
         let total = volume["diskMiB"].as_u64().unwrap_or(0);
         let elsewhere = checkpoint["nodeId"]
             .as_str()
@@ -264,13 +273,25 @@ async fn stale_disks(s: &Service, volumes: &[Value], attempts: &[Value]) -> Resu
     Ok(stale)
 }
 
-struct Usage<'a> {
-    attempts: &'a [Value],
-    agents: &'a [Value],
-    stale: &'a [StaleDisk],
+struct Usage {
+    attempts: Vec<Value>,
+    agents: Vec<Value>,
+    stale: Vec<StaleDisk>,
 }
 
-impl Usage<'_> {
+impl Usage {
+    fn load(db: &Db<'_>) -> Result<Self> {
+        let attempts = db.list("node-attempts")?;
+        let volumes = db.list("node-volumes")?;
+        let agents = db.agent_snapshots()?;
+        let stale = stale_disks_in(db, &volumes, &attempts)?;
+        Ok(Self {
+            attempts,
+            agents,
+            stale,
+        })
+    }
+
     fn stale_summary(&self, node: &ExecutionNode) -> StaleDisks {
         let stale = self
             .stale
@@ -318,7 +339,7 @@ impl Usage<'_> {
             .collect())
     }
 
-    fn describe(&self, mut node: ExecutionNode) -> Result<ExecutionNode> {
+    fn describe(&self, db: &Db<'_>, mut node: ExecutionNode) -> Result<ExecutionNode> {
         let used = self
             .attempts
             .iter()
@@ -331,6 +352,14 @@ impl Usage<'_> {
         node.stale_disks = self.stale_summary(&node);
         node.agents = self.granted_agents(&node)?;
         node.status = status(&node);
+        if node.capabilities.backend == NodeBackend::Native && node.disk_growth_protocol == Some(1)
+        {
+            node.disk_accounting = serde_json::from_value(disk_capacity::accounting(
+                db,
+                &serde_json::to_value(&node)?,
+                &self.attempts,
+            )?)?;
+        }
         Ok(node)
     }
 }
@@ -346,36 +375,18 @@ pub(crate) fn slots(node: &Value) -> u64 {
 
 /// Nodes with their shared budgets, free slots and authorized agents.
 pub async fn typed_inventory(s: &Service) -> Result<Vec<ExecutionNode>> {
-    let attempts = s.store.list("node-attempts").await?;
-    let volumes = s.store.list("node-volumes").await?;
-    let agents = s.store.agent_snapshots().await?;
-    let stale = stale_disks(s, &volumes, &attempts).await?;
-    let usage = Usage {
-        attempts: &attempts,
-        agents: &agents,
-        stale: &stale,
-    };
-    let mut nodes = s
-        .store
-        .nodes()
-        .await?
-        .into_iter()
-        .map(|node| usage.describe(node))
-        .collect::<Result<Vec<_>>>()?;
     s.store
-        .read(move |db| {
-            for node in &mut nodes {
-                if node.capabilities.backend == NodeBackend::Native
-                    && node.disk_growth_protocol == Some(1)
-                {
-                    node.disk_accounting = serde_json::from_value(disk_capacity::accounting(
-                        db,
-                        &serde_json::to_value(&*node)?,
-                        &attempts,
-                    )?)?;
-                }
-            }
-            Ok(nodes)
+        .read(|db| {
+            let tx = rusqlite::Transaction::new_unchecked(
+                db.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let db = Db(&tx);
+            let usage = Usage::load(&db)?;
+            db.nodes()?
+                .into_iter()
+                .map(|node| usage.describe(&db, node))
+                .collect()
         })
         .await
 }
@@ -387,10 +398,6 @@ pub async fn inventory(s: &Service) -> Result<Vec<Value>> {
         .into_iter()
         .map(|node| Ok(serde_json::to_value(node)?))
         .collect()
-}
-
-fn public_boundary(node: Value) -> Result<Value> {
-    public(serde_json::from_value(node)?)
 }
 
 pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
@@ -582,7 +589,7 @@ pub(crate) async fn configure_storage(
             let configuration = db
                 .node_storage_configuration(&node)?
                 .ok_or_else(|| Error::not_found("Node missing."))?;
-            Ok((record, configuration))
+            Ok((public(db, record)?, configuration))
         })
         .await?;
     if apply_storage_configuration(s, &request.node_id.to_string(), &configuration)
@@ -593,7 +600,7 @@ pub(crate) async fn configure_storage(
             "Storage settings were saved, but the node has not confirmed them. It will retry automatically.",
         ));
     }
-    public(value)
+    Ok(value)
 }
 
 async fn apply_storage_configuration(
@@ -711,7 +718,7 @@ pub(crate) async fn configure_node(
             record.revision = id();
             db.save_node(&record)?;
             db.audit("node.configured", &json!({ "nodeId": node }))?;
-            public(record)
+            public(db, record)
         })
         .await
 }
@@ -1030,7 +1037,7 @@ pub(crate) async fn revoke(
                 &json!({ "nodeId": node, "releasedPlacements": released }),
             )?;
             Ok(serde_json::to_value(cairn_contracts::NodeRevocation {
-                node: serde_json::from_value(public(record)?)?,
+                node: serde_json::from_value(public(db, record)?)?,
                 released_placements: released as u32,
             })?)
         })

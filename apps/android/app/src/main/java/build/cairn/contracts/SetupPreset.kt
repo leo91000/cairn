@@ -33,4 +33,6 @@ value class Values(
     Map<
         String,
         Boolean,
-    > by value
+    > by value {
+    init {}
+}

@@ -10,6 +10,6 @@ data class NodeGrowthRequest(
     val currentMiB: Long,
 ) {
     init {
-        require(currentMiB >= 0L)
+        require(currentMiB in 0L..9007199254740991L)
     }
 }

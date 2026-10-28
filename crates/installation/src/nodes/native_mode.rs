@@ -355,7 +355,7 @@ pub async fn change(
             db.save_node(&node)?;
             return Ok(json!({
                 "status": "awaiting-owner",
-                "node": super::public(node)?,
+                "node": super::public(db, node)?,
                 "message": "The installation owner must review and confirm native administrator in this node's details. An agent cannot elevate its host.",
             }));
         }
@@ -380,7 +380,7 @@ pub async fn change(
         node.revision = id();
         db.save_node(&node)?;
         db.audit("node.native-mode.requested", &json!({ "nodeId": node_id, "mode": change.mode, "generation": generation }))?;
-        super::public(node)
+        super::public(db, node)
     }).await
 }
 

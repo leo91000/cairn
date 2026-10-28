@@ -11,6 +11,6 @@ data class StaleDisks(
 ) {
     init {
         require(count >= 0L)
-        require(diskMiB >= 0L)
+        require(diskMiB in 0L..9007199254740991L)
     }
 }

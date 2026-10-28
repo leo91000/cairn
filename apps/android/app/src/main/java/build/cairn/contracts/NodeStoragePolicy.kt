@@ -20,11 +20,11 @@ data class NodeStoragePolicy(
     val reservePercent: Long = 5,
 ) {
     init {
-        require(backupSeconds >= 0L)
-        require(cacheMiB >= 0L)
-        require(maxDirtySeconds >= 0L)
-        require(memoryCacheMiB >= 0L)
-        require(reserveMiB >= 0L)
-        require(reservePercent >= 0L)
+        require(backupSeconds in 0L..9007199254740991L)
+        require(cacheMiB in 0L..9007199254740991L)
+        require(maxDirtySeconds in 0L..9007199254740991L)
+        require(memoryCacheMiB in 0L..9007199254740991L)
+        require(reserveMiB in 0L..9007199254740991L)
+        require(reservePercent in 0L..9007199254740991L)
     }
 }

@@ -16,6 +16,7 @@ data class NodeEnrollment(
 ) {
     init {
         require(Regex("^(firecracker|native)\$").containsMatchIn(backend))
+        require(expiresAt in 0L..9007199254740991L)
         java.util.UUID.fromString(nodeId)
     }
 }

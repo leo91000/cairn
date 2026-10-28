@@ -16,12 +16,13 @@ data class NodeDiskAccounting(
     val unusedGrantedBytes: Long,
 ) {
     init {
-        require(hostFreeBytes >= 0L)
-        require(hostReserveBytes >= 0L)
-        require(localBytes >= 0L)
-        require(poolReserveBytes >= 0L)
-        require(reclaimableBytes >= 0L)
-        require(unsynchronizedBytes >= 0L)
-        require(unusedGrantedBytes >= 0L)
+        require(capturedAt in 0L..9007199254740991L)
+        require(hostFreeBytes in 0L..9007199254740991L)
+        require(hostReserveBytes in 0L..9007199254740991L)
+        require(localBytes in 0L..9007199254740991L)
+        require(poolReserveBytes in 0L..9007199254740991L)
+        require(reclaimableBytes in 0L..9007199254740991L)
+        require(unsynchronizedBytes in 0L..9007199254740991L)
+        require(unusedGrantedBytes in 0L..9007199254740991L)
     }
 }

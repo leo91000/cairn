@@ -35,9 +35,11 @@ pub struct NodeResources {
     pub cpu: u32,
     #[schemars(range(min = 128, max = 1073741824_u64))]
     #[ts(type = "number")]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub memory_mi_b: u64,
     #[schemars(range(min = 128, max = 1099511627776_u64))]
     #[ts(type = "number")]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub disk_mi_b: u64,
 }
 
@@ -78,11 +80,17 @@ pub struct NodeCapabilities {
     pub native_mode_protocol: u32,
     pub cpu: u32,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub memory_mi_b: u64,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub disk_mi_b: u64,
     #[serde(default)]
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub disk_total_mi_b: u64,
 }
 
@@ -133,16 +141,28 @@ impl NodeCapabilities {
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct NodeStoragePolicy {
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub cache_mi_b: u64,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub memory_cache_mi_b: u64,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub reserve_mi_b: u64,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub reserve_percent: u64,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub backup_seconds: u64,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub max_dirty_seconds: u64,
 }
 
@@ -250,12 +270,18 @@ pub enum NodeStatus {
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct NodeUsage {
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub memory_mi_b: u64,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub disk_mi_b: u64,
     // Native health reports exact disk bytes; VM health only reports MiB.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(type = "number | null", optional = nullable)]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "optional_wire_unsigned", default)]
     pub disk_bytes: Option<u64>,
 }
 
@@ -264,6 +290,8 @@ pub struct NodeUsage {
 pub struct StaleDisks {
     pub count: u32,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub disk_mi_b: u64,
 }
 
@@ -353,6 +381,8 @@ pub struct ExecutionNode {
     #[serde(default)]
     #[ts(optional = nullable)]
     #[ts(type = "number | null")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "optional_wire_timestamp")]
     pub maintenance_started_at: Option<i64>,
     #[serde(default)]
     #[ts(optional = nullable)]
@@ -364,8 +394,12 @@ pub struct ExecutionNode {
     pub runtime_id: String,
     #[serde(default)]
     #[ts(type = "number | null")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "optional_wire_timestamp")]
     pub last_seen: Option<i64>,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_timestamp")]
     pub created_at: i64,
     pub storage: NodeStoragePolicy,
     #[serde(default)]
@@ -401,14 +435,24 @@ impl ExecutionNode {
 pub struct NodeDiskObservation {
     pub protocol: u8,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_timestamp")]
     pub captured_at: i64,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub used_bytes: u64,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub free_bytes: u64,
     #[ts(type = "{ [key: string]: number }")]
+    #[serde(deserialize_with = "wire_unsigned_map")]
+    #[schemars(with = "std::collections::BTreeMap<String, WireUnsigned>")]
     pub owned_bytes: std::collections::BTreeMap<String, u64>,
     #[ts(type = "{ [key: string]: number }")]
+    #[serde(deserialize_with = "wire_unsigned_map")]
+    #[schemars(with = "std::collections::BTreeMap<String, WireUnsigned>")]
     pub retained_bytes: std::collections::BTreeMap<String, u64>,
     pub requests: Vec<NodeGrowthRequest>,
 }
@@ -418,6 +462,8 @@ pub struct NodeDiskObservation {
 pub struct NodeGrowthRequest {
     pub attempt_id: String,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub current_mi_b: u64,
 }
 
@@ -425,20 +471,36 @@ pub struct NodeGrowthRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NodeDiskAccounting {
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_timestamp")]
     pub captured_at: i64,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub local_bytes: u64,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub unused_granted_bytes: u64,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub host_free_bytes: u64,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub host_reserve_bytes: u64,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub pool_reserve_bytes: u64,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub reclaimable_bytes: u64,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_unsigned")]
     pub unsynchronized_bytes: u64,
 }
 
@@ -494,6 +556,8 @@ pub struct NodeEnrollment {
     pub install_command: Option<String>,
     pub code: String,
     #[ts(type = "number")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    #[serde(deserialize_with = "wire_timestamp")]
     pub expires_at: i64,
 }
 
@@ -619,9 +683,98 @@ pub enum NativeModeChangeOutput {
     },
 }
 
+// Counts and timestamps cross JavaScript and Kotlin unchanged. Keep the schema
+// constraint next to each field; serde also rejects overflow at machine inputs.
+fn wire_unsigned<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let value = u64::deserialize(deserializer)?;
+    if value > 9_007_199_254_740_991 {
+        return Err(serde::de::Error::custom("Integer exceeds the wire range"));
+    }
+    Ok(value)
+}
+
+fn optional_wire_unsigned<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    Option::<u64>::deserialize(deserializer)?
+        .map(|value| {
+            if value > 9_007_199_254_740_991 {
+                Err(serde::de::Error::custom("Integer exceeds the wire range"))
+            } else {
+                Ok(value)
+            }
+        })
+        .transpose()
+}
+
+fn wire_timestamp<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<i64, D::Error> {
+    let value = wire_integer(deserializer)?;
+    if value < 0 {
+        return Err(serde::de::Error::custom("Timestamp must be nonnegative"));
+    }
+    Ok(value)
+}
+
+fn optional_wire_timestamp<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<i64>, D::Error> {
+    let value = Option::<i64>::deserialize(deserializer)?;
+    if value.is_some_and(|value| !(0..=9_007_199_254_740_991).contains(&value)) {
+        return Err(serde::de::Error::custom("Timestamp exceeds the wire range"));
+    }
+    Ok(value)
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(transparent)]
+struct WireUnsigned(
+    #[serde(deserialize_with = "wire_unsigned")]
+    #[schemars(range(min = 0, max = 9007199254740991_u64))]
+    u64,
+);
+
+fn wire_unsigned_map<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<std::collections::BTreeMap<String, u64>, D::Error> {
+    Ok(
+        std::collections::BTreeMap::<String, WireUnsigned>::deserialize(deserializer)?
+            .into_iter()
+            .map(|(key, value)| (key, value.0))
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_observations_reject_wire_overflow_without_losing_exact_large_counts() {
+        let corpus: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/node-contracts.json"))
+                .unwrap();
+        for path in corpus["wireNumberPaths"].as_array().unwrap() {
+            let path = path.as_str().unwrap();
+            for number in [0_u64, 9_007_199_254_740_991] {
+                let mut value = corpus["views"][0].clone();
+                *value.pointer_mut(path).unwrap() = number.into();
+                let view: ExecutionNode = serde_json::from_value(value.clone()).unwrap();
+                assert_eq!(
+                    serde_json::to_value(view).unwrap().pointer(path),
+                    value.pointer(path),
+                    "{path}"
+                );
+            }
+            for number in [9_007_199_254_740_992_u64, 9_007_199_254_740_993, u64::MAX] {
+                let mut value = corpus["views"][0].clone();
+                *value.pointer_mut(path).unwrap() = number.into();
+                assert!(
+                    serde_json::from_value::<ExecutionNode>(value).is_err(),
+                    "{path}: {number}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn node_contracts_keep_capacity_observation_separate_from_configuration_and_authority() {

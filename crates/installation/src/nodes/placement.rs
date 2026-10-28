@@ -921,11 +921,12 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
             }),
         )?;
     }
+    let usage = super::Usage::load(db)?;
     let nodes = db
-        .nodes_boundary()?
+        .nodes()?
         .into_iter()
-        .filter(|n| n["revoked"] != true && allowed(&access["nodes"], text(n, "id")))
-        .map(super::public_boundary)
+        .filter(|node| !node.revoked && allowed(&access["nodes"], &node.id.to_string()))
+        .map(|node| Ok(serde_json::to_value(usage.describe(db, node)?)?))
         .collect::<Result<Vec<_>>>()?;
     Ok(json!({
         "nodes": nodes,

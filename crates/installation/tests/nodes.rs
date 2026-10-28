@@ -6681,3 +6681,98 @@ async fn saved_storage_policy_is_retried_after_the_controller_fails_to_confirm_i
     assert_eq!(applied.lock().unwrap()["generation"], 1);
     server.abort();
 }
+
+#[tokio::test]
+async fn node_mutations_and_placement_keep_real_occupancy_grants_and_stale_disk_summaries() {
+    let owner = Owner::new().await;
+    let (node, agent, run, attempt) = (id(), id(), id(), id());
+    let mut record = schedulable_node(&node, &limits(7, 16384, 131072));
+    record["slots"] = 4.into();
+    owner.put_node_fixture(record).await;
+    owner.grant_nodes(&agent, json!([node])).await;
+    let mut persisted = run_record(&run, RunStatus::Running);
+    persisted["snapshot"] = agent_run(&run, &agent)["snapshot"].clone();
+    owner.add_run_fixture(&persisted).await;
+    placement::reserve(&owner.service, &agent_run(&run, &agent), &attempt)
+        .await
+        .unwrap();
+    owner
+        .put(
+            "node-volumes",
+            json!({
+                "id": id(),
+                "nodeId": node,
+                "runId": id(),
+                "materialized": true,
+                "diskMiB": 2048,
+            }),
+        )
+        .await;
+    let (status, saved) = owner
+        .send(
+            "PUT",
+            &format!("/api/nodes/{node}"),
+            json!({ "name": "Still occupied", "tags": [], "limits": limits(7, 16384, 131072), "slots": 4, "accepting": true }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["occupiedSlots"], 1);
+    assert_eq!(saved["availableSlots"], 3);
+    assert!(
+        saved["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|grant| grant["id"] == agent)
+    );
+    assert_eq!(saved["staleDisks"], json!({ "count": 1, "diskMiB": 2048 }));
+    let choices = placement::configure(&owner.service, &run, None)
+        .await
+        .unwrap();
+    let selected = find_by_id(&choices["nodes"], &node);
+    for field in ["occupiedSlots", "availableSlots", "agents", "staleDisks"] {
+        assert_eq!(selected[field], saved[field], "placement {field}");
+    }
+    let (status, revoked) = owner
+        .send("POST", &format!("/api/nodes/{node}/revoke"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{revoked}");
+    let (_, inventory) = owner.get("/api/nodes").await;
+    let listed = find_by_id(&inventory, &node);
+    for field in ["occupiedSlots", "availableSlots", "agents", "staleDisks"] {
+        assert_eq!(revoked["node"][field], listed[field], "revoke {field}");
+    }
+}
+
+#[tokio::test]
+async fn node_heartbeats_reject_inexact_usage_without_publishing_the_observation() {
+    let owner = Owner::new().await;
+    let identity = owner
+        .enroll("Usage node", &capabilities(true, 8, 16384, 131072))
+        .await;
+    let node_id = text(&identity, "nodeId");
+    let token = text(&identity, "token");
+    let mut observation = json!({
+        "capabilities": capabilities(true, 8, 16384, 131072),
+        "pool": { "capacity": 4, "retained_runs": [] },
+        "usage": { "memoryMiB": 128, "diskMiB": 128, "diskBytes": 9007199254740991_u64 },
+    });
+    let (status, response) = owner
+        .call("POST", HEARTBEAT, observation.clone(), Some(token))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let saved = owner.service.get_node(node_id).await.unwrap();
+    assert_eq!(
+        saved.usage.as_ref().unwrap().disk_bytes,
+        Some(9_007_199_254_740_991)
+    );
+    for field in ["memoryMiB", "diskMiB", "diskBytes"] {
+        observation["usage"][field] = json!(9007199254740993_u64);
+        let (status, response) = owner
+            .call("POST", HEARTBEAT, observation.clone(), Some(token))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {response}");
+        assert_eq!(owner.service.get_node(node_id).await.unwrap(), saved);
+        observation["usage"][field] = json!(128);
+    }
+}

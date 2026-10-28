@@ -16,4 +16,6 @@ value class McpEnvironment(
     Map<
         String,
         String,
-    > by value
+    > by value {
+    init {}
+}

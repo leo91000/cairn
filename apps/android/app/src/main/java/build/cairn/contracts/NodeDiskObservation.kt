@@ -15,9 +15,10 @@ data class NodeDiskObservation(
     val usedBytes: Long,
 ) {
     init {
-        require(freeBytes >= 0L)
+        require(capturedAt in 0L..9007199254740991L)
+        require(freeBytes in 0L..9007199254740991L)
         require(protocol in 0..255)
-        require(usedBytes >= 0L)
+        require(usedBytes in 0L..9007199254740991L)
     }
 }
 
@@ -34,7 +35,11 @@ value class OwnedBytes(
     Map<
         String,
         Long,
-    > by value
+    > by value {
+    init {
+        require(value.values.all { it in 0L..9007199254740991L })
+    }
+}
 
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
@@ -49,4 +54,8 @@ value class RetainedBytes(
     Map<
         String,
         Long,
-    > by value
+    > by value {
+    init {
+        require(value.values.all { it in 0L..9007199254740991L })
+    }
+}

@@ -14,6 +14,17 @@ Reference: web commit `2e9868233295af713eede804c7d70b9f514df04b` (v0.21.12).
 This audit compares user actions and information, with native Android presentation.
 It does not assert pixel equality between a browser and Material components.
 
+## Exact node counters and mutation summaries
+
+Web and Android consume the same bounded node counters and timestamps (0 through
+2^53−1), including exact native disk bytes. Rust and generated schemas enforce the
+range; generated Kotlin models preserve the accepted values as Long. Shared
+contract tests cover endpoints and overflow. Configuration, storage, native-mode,
+revocation and placement responses now include the same actual occupancy, agent
+access, stale disks and disk accounting as inventory listings. The public MCP and
+`cairn_installation` use these same views and existing authorization checks.
+Native presentation is unchanged.
+
 ## Node priority drag and drop
 
 Both apps let owners drag a node priority handle onto another row, then save the

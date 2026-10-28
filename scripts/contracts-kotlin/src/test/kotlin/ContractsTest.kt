@@ -25,6 +25,38 @@ class ContractsTest {
             assertEquals("protected", node.nativeModeRequest?.mode)
             assertEquals(4L, node.slots)
         }
+        fun replaceNumber(value: JsonElement, path: List<String>, number: Long): JsonElement {
+            if (path.isEmpty()) return JsonPrimitive(number)
+            val key = path.first()
+            return when (value) {
+                is JsonObject ->
+                    JsonObject(
+                        value.toMutableMap().apply {
+                            this[key] = replaceNumber(getValue(key), path.drop(1), number)
+                        }
+                    )
+                is JsonArray ->
+                    JsonArray(
+                        value.toMutableList().apply {
+                            this[key.toInt()] =
+                                replaceNumber(this[key.toInt()], path.drop(1), number)
+                        }
+                    )
+                else -> error("Invalid numeric fixture path")
+            }
+        }
+        val original = corpus.getValue("views").jsonArray.first()
+        for (path in corpus.getValue("wireNumberPaths").jsonArray) {
+            val keys = path.jsonPrimitive.content.removePrefix("/").split("/")
+            for (number in listOf(0L, 9007199254740991L)) {
+                json.decodeFromJsonElement<ExecutionNode>(replaceNumber(original, keys, number))
+            }
+            for (number in listOf(-1L, 9007199254740992L, Long.MAX_VALUE)) {
+                assertFails("$path: $number") {
+                    json.decodeFromJsonElement<ExecutionNode>(replaceNumber(original, keys, number))
+                }
+            }
+        }
         for (value in corpus.getValue("commands").jsonArray) {
             val command = json.decodeFromJsonElement<UpdateNodeInput>(value)
             assertEquals("r1", command.node.revision)

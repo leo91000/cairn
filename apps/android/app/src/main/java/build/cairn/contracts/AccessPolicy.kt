@@ -35,4 +35,6 @@ value class McpTools(
     Map<
         String,
         List<String>,
-    > by value
+    > by value {
+    init {}
+}

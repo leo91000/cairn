@@ -28,7 +28,9 @@ value class Errors(
     Map<
         String,
         String,
-    > by value
+    > by value {
+    init {}
+}
 
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
@@ -43,4 +45,6 @@ value class Options(
     Map<
         String,
         List<PluginOption>,
-    > by value
+    > by value {
+    init {}
+}
