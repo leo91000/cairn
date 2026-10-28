@@ -1,0 +1,1720 @@
+{
+  "parse": [
+    {
+      "name": "flowchart-basic",
+      "source": "flowchart TD\n    A[Start] --> B{Is it working?}\n    B -->|Yes| C[Great!]\n    B -- No --> D[Debug]\n    D --> B\n    C --> E((Done))",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Start",
+            "shape": "rect"
+          },
+          {
+            "id": "B",
+            "label": "Is it working?",
+            "shape": "diamond"
+          },
+          {
+            "id": "C",
+            "label": "Great!",
+            "shape": "rect"
+          },
+          {
+            "id": "D",
+            "label": "Debug",
+            "shape": "rect"
+          },
+          {
+            "id": "E",
+            "label": "Done",
+            "shape": "circle"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "B",
+            "to": "C",
+            "label": "Yes",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "B",
+            "to": "D",
+            "label": "No",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "D",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "C",
+            "to": "E",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 231,
+        "height": 412,
+        "items": 24
+      }
+    },
+    {
+      "name": "flowchart-shapes",
+      "source": "graph LR\n    a1([Stadium]) --> a2[[Subroutine]] --> a3[(Database)]\n    a3 --> a4((Circle)) & a5>Flag] & a6{{Hexagon}}\n    a6 -.-> a7[/Lean right/] ==> a8[\\Lean left\\]\n    a8 --- a9[/Trapezoid\\] --o a10[\\Inverted/]\n    a10 <--> a11(((Double))) --x a12(\"Quoted <b>label</b><br/>with break\")\n    a12 ~~~ a1",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "a1",
+            "label": "Stadium",
+            "shape": "stadium"
+          },
+          {
+            "id": "a2",
+            "label": "Subroutine",
+            "shape": "subroutine"
+          },
+          {
+            "id": "a3",
+            "label": "Database",
+            "shape": "cylinder"
+          },
+          {
+            "id": "a4",
+            "label": "Circle",
+            "shape": "circle"
+          },
+          {
+            "id": "a5",
+            "label": "Flag",
+            "shape": "flag"
+          },
+          {
+            "id": "a6",
+            "label": "Hexagon",
+            "shape": "hexagon"
+          },
+          {
+            "id": "a7",
+            "label": "Lean right",
+            "shape": "parallelogram"
+          },
+          {
+            "id": "a8",
+            "label": "Lean left",
+            "shape": "parallelogram-alt"
+          },
+          {
+            "id": "a9",
+            "label": "Trapezoid",
+            "shape": "trapezoid"
+          },
+          {
+            "id": "a10",
+            "label": "Inverted",
+            "shape": "trapezoid-alt"
+          },
+          {
+            "id": "a11",
+            "label": "Double",
+            "shape": "doublecircle"
+          },
+          {
+            "id": "a12",
+            "label": "Quoted label\nwith break",
+            "shape": "round"
+          }
+        ],
+        "edges": [
+          {
+            "from": "a1",
+            "to": "a2",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "a2",
+            "to": "a3",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "a3",
+            "to": "a4",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "a3",
+            "to": "a5",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "a3",
+            "to": "a6",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "a6",
+            "to": "a7",
+            "label": "",
+            "line": "dotted",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "a7",
+            "to": "a8",
+            "label": "",
+            "line": "thick",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "a8",
+            "to": "a9",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "none",
+            "length": 1
+          },
+          {
+            "from": "a9",
+            "to": "a10",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "circle",
+            "length": 1
+          },
+          {
+            "from": "a10",
+            "to": "a11",
+            "label": "",
+            "line": "solid",
+            "start": "arrow",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "a11",
+            "to": "a12",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "cross",
+            "length": 1
+          },
+          {
+            "from": "a12",
+            "to": "a1",
+            "label": "",
+            "line": "invisible",
+            "start": "none",
+            "end": "none",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 1677,
+        "height": 271,
+        "items": 50
+      }
+    },
+    {
+      "name": "flowchart-subgraphs",
+      "source": "---\ntitle: Deploy pipeline\n---\nflowchart TB\n    subgraph ci [Continuous integration]\n      direction LR\n      lint[Lint] --> test[Test]\n      test --> build[Build image]\n    end\n    subgraph cd[\"Delivery\"]\n      stage[Staging] --> prod[Production]\n    end\n    build --> stage\n    dev((Developer)) --> ci\n    prod -. rollback .-> stage\n    classDef danger fill:#fbe6df,stroke:#b53d22,color:#b53d22\n    class prod danger\n    style dev fill:#14365a,stroke:#14365a\n    click prod \"https://example.com/prod\" \"Open\"\n    linkStyle 0 stroke:#12806f,stroke-width:2px",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "lint",
+            "label": "Lint",
+            "shape": "rect",
+            "parent": "ci"
+          },
+          {
+            "id": "test",
+            "label": "Test",
+            "shape": "rect",
+            "parent": "ci"
+          },
+          {
+            "id": "build",
+            "label": "Build image",
+            "shape": "rect",
+            "parent": "ci"
+          },
+          {
+            "id": "stage",
+            "label": "Staging",
+            "shape": "rect",
+            "parent": "cd"
+          },
+          {
+            "id": "prod",
+            "label": "Production",
+            "shape": "rect",
+            "parent": "cd",
+            "link": "https://example.com/prod",
+            "style": {
+              "fill": "#fbe6df",
+              "stroke": "#b53d22",
+              "color": "#b53d22"
+            }
+          },
+          {
+            "id": "dev",
+            "label": "Developer",
+            "shape": "circle",
+            "style": {
+              "fill": "#14365a",
+              "stroke": "#14365a"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "lint",
+            "to": "test",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1,
+            "style": {
+              "stroke": "#12806f",
+              "strokeWidth": 2
+            }
+          },
+          {
+            "from": "test",
+            "to": "build",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "stage",
+            "to": "prod",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "build",
+            "to": "stage",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "dev",
+            "to": "ci",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "prod",
+            "to": "stage",
+            "label": "rollback",
+            "line": "dotted",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "ci",
+            "label": "Continuous integration"
+          },
+          {
+            "id": "cd",
+            "label": "Delivery"
+          }
+        ],
+        "title": "Deploy pipeline"
+      },
+      "layout": {
+        "width": 229,
+        "height": 759,
+        "items": 33
+      }
+    },
+    {
+      "name": "flowchart-oneline",
+      "source": "graph LR; A-->B; B-->C; C-->A",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "rect"
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "shape": "rect"
+          },
+          {
+            "id": "C",
+            "label": "C",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "B",
+            "to": "C",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "C",
+            "to": "A",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 296,
+        "height": 91,
+        "items": 12
+      }
+    },
+    {
+      "name": "state",
+      "source": "stateDiagram-v2\n    [*] --> Idle\n    Idle --> Running : start\n    Running --> Paused : pause\n    Paused --> Running : resume\n    Running --> Done : finish\n    state Running {\n      [*] --> Fetching\n      Fetching --> Working\n      Working --> [*]\n    }\n    state check <<choice>>\n    Done --> check\n    check --> [*] : ok\n    check --> Idle : retry\n    note right of Paused : Waiting for the user\n    Done : All steps finished",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "[*]start:root",
+            "label": "",
+            "shape": "start"
+          },
+          {
+            "id": "Idle",
+            "label": "Idle",
+            "shape": "round"
+          },
+          {
+            "id": "Paused",
+            "label": "Paused",
+            "shape": "round"
+          },
+          {
+            "id": "Done",
+            "label": "All steps finished",
+            "shape": "round"
+          },
+          {
+            "id": "[*]start:Running",
+            "label": "",
+            "shape": "start",
+            "parent": "Running"
+          },
+          {
+            "id": "Fetching",
+            "label": "Fetching",
+            "shape": "round",
+            "parent": "Running"
+          },
+          {
+            "id": "Working",
+            "label": "Working",
+            "shape": "round",
+            "parent": "Running"
+          },
+          {
+            "id": "[*]end:Running",
+            "label": "",
+            "shape": "end",
+            "parent": "Running"
+          },
+          {
+            "id": "check",
+            "label": "",
+            "shape": "choice"
+          },
+          {
+            "id": "[*]end:root",
+            "label": "",
+            "shape": "end"
+          },
+          {
+            "id": "note-1",
+            "label": "Waiting for the user",
+            "shape": "note"
+          }
+        ],
+        "edges": [
+          {
+            "from": "[*]start:root",
+            "to": "Idle",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "Idle",
+            "to": "Running",
+            "label": "start",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "Running",
+            "to": "Paused",
+            "label": "pause",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "Paused",
+            "to": "Running",
+            "label": "resume",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "Running",
+            "to": "Done",
+            "label": "finish",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "[*]start:Running",
+            "to": "Fetching",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "Fetching",
+            "to": "Working",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "Working",
+            "to": "[*]end:Running",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "Done",
+            "to": "check",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "check",
+            "to": "[*]end:root",
+            "label": "ok",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "check",
+            "to": "Idle",
+            "label": "retry",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "Paused",
+            "to": "note-1",
+            "label": "",
+            "line": "dotted",
+            "start": "none",
+            "end": "none",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "Running",
+            "label": "Running"
+          }
+        ]
+      },
+      "layout": {
+        "width": 384,
+        "height": 852,
+        "items": 58
+      }
+    },
+    {
+      "name": "sequence",
+      "source": "sequenceDiagram\n    autonumber\n    actor U as User\n    participant W as Web app\n    participant API\n    participant DB as Database\n    U->>W: Open conversation\n    W->>+API: GET /chats/42\n    API->>DB: SELECT messages\n    DB-->>API: rows\n    alt cache hit\n      API-->>W: 200 (cached)\n    else cache miss\n      API->>API: Render markdown\n      API-->>-W: 200 OK\n    end\n    loop Every 30s\n      W-)API: heartbeat\n    end\n    Note over W,API: Live updates via SSE\n    W--xU: Connection lost",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "U",
+            "label": "User",
+            "actor": true
+          },
+          {
+            "id": "W",
+            "label": "Web app",
+            "actor": false
+          },
+          {
+            "id": "API",
+            "label": "API",
+            "actor": false
+          },
+          {
+            "id": "DB",
+            "label": "Database",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "message",
+            "from": "U",
+            "to": "W",
+            "label": "Open conversation",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 1
+          },
+          {
+            "type": "message",
+            "from": "W",
+            "to": "API",
+            "label": "GET /chats/42",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": true,
+            "deactivate": false,
+            "number": 2
+          },
+          {
+            "type": "message",
+            "from": "API",
+            "to": "DB",
+            "label": "SELECT messages",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 3
+          },
+          {
+            "type": "message",
+            "from": "DB",
+            "to": "API",
+            "label": "rows",
+            "line": "dotted",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 4
+          },
+          {
+            "type": "block",
+            "kind": "alt",
+            "label": "cache hit"
+          },
+          {
+            "type": "message",
+            "from": "API",
+            "to": "W",
+            "label": "200 (cached)",
+            "line": "dotted",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 5
+          },
+          {
+            "type": "branch",
+            "kind": "else",
+            "label": "cache miss"
+          },
+          {
+            "type": "message",
+            "from": "API",
+            "to": "API",
+            "label": "Render markdown",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 6
+          },
+          {
+            "type": "message",
+            "from": "API",
+            "to": "W",
+            "label": "200 OK",
+            "line": "dotted",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": true,
+            "number": 7
+          },
+          {
+            "type": "end"
+          },
+          {
+            "type": "block",
+            "kind": "loop",
+            "label": "Every 30s"
+          },
+          {
+            "type": "message",
+            "from": "W",
+            "to": "API",
+            "label": "heartbeat",
+            "line": "solid",
+            "head": "async",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 8
+          },
+          {
+            "type": "end"
+          },
+          {
+            "type": "note",
+            "placement": "over",
+            "participants": [
+              "W",
+              "API"
+            ],
+            "label": "Live updates via SSE"
+          },
+          {
+            "type": "message",
+            "from": "W",
+            "to": "U",
+            "label": "Connection lost",
+            "line": "dotted",
+            "head": "cross",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 9
+          }
+        ]
+      },
+      "layout": {
+        "width": 644,
+        "height": 761,
+        "items": 81
+      }
+    },
+    {
+      "name": "pie",
+      "source": "pie showData\n    title Where the time goes\n    \"Builds\" : 42.5\n    \"Tests\" : 30\n    \"Reviews\" : 18\n    \"Coffee\" : 9.5",
+      "diagram": {
+        "kind": "pie",
+        "showData": true,
+        "slices": [
+          {
+            "label": "Builds",
+            "value": 42.5
+          },
+          {
+            "label": "Tests",
+            "value": 30
+          },
+          {
+            "label": "Reviews",
+            "value": 18
+          },
+          {
+            "label": "Coffee",
+            "value": 9.5
+          }
+        ],
+        "title": "Where the time goes"
+      },
+      "layout": {
+        "width": 391,
+        "height": 246,
+        "items": 23
+      }
+    },
+    {
+      "name": "complex",
+      "source": "flowchart TD\n    U[User sends message] --> R{Route request}\n    R -->|chat| C[Conversation service]\n    R -->|mission| M[Mission scheduler]\n    R -->|plugin| P[Plugin runtime]\n    C --> Q[(Queue)]\n    M --> Q\n    P --> Q\n    Q --> W1[Worker 1]\n    Q --> W2[Worker 2]\n    Q --> W3[Worker 3]\n    W1 & W2 & W3 --> A{All succeeded?}\n    A -- yes --> D[Deliver result]\n    A -- no --> X[Retry with backoff]\n    X --> Q\n    D --> N([Notify user])\n    C -.-> L[Audit log]\n    M -.-> L",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "U",
+            "label": "User sends message",
+            "shape": "rect"
+          },
+          {
+            "id": "R",
+            "label": "Route request",
+            "shape": "diamond"
+          },
+          {
+            "id": "C",
+            "label": "Conversation service",
+            "shape": "rect"
+          },
+          {
+            "id": "M",
+            "label": "Mission scheduler",
+            "shape": "rect"
+          },
+          {
+            "id": "P",
+            "label": "Plugin runtime",
+            "shape": "rect"
+          },
+          {
+            "id": "Q",
+            "label": "Queue",
+            "shape": "cylinder"
+          },
+          {
+            "id": "W1",
+            "label": "Worker 1",
+            "shape": "rect"
+          },
+          {
+            "id": "W2",
+            "label": "Worker 2",
+            "shape": "rect"
+          },
+          {
+            "id": "W3",
+            "label": "Worker 3",
+            "shape": "rect"
+          },
+          {
+            "id": "A",
+            "label": "All succeeded?",
+            "shape": "diamond"
+          },
+          {
+            "id": "D",
+            "label": "Deliver result",
+            "shape": "rect"
+          },
+          {
+            "id": "X",
+            "label": "Retry with backoff",
+            "shape": "rect"
+          },
+          {
+            "id": "N",
+            "label": "Notify user",
+            "shape": "stadium"
+          },
+          {
+            "id": "L",
+            "label": "Audit log",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "U",
+            "to": "R",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "R",
+            "to": "C",
+            "label": "chat",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "R",
+            "to": "M",
+            "label": "mission",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "R",
+            "to": "P",
+            "label": "plugin",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "C",
+            "to": "Q",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "M",
+            "to": "Q",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "P",
+            "to": "Q",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "Q",
+            "to": "W1",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "Q",
+            "to": "W2",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "Q",
+            "to": "W3",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "W1",
+            "to": "A",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "W2",
+            "to": "A",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "W3",
+            "to": "A",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A",
+            "to": "D",
+            "label": "yes",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A",
+            "to": "X",
+            "label": "no",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "X",
+            "to": "Q",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "D",
+            "to": "N",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "C",
+            "to": "L",
+            "label": "",
+            "line": "dotted",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "M",
+            "to": "L",
+            "label": "",
+            "line": "dotted",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 585,
+        "height": 830,
+        "items": 77
+      }
+    },
+    {
+      "name": "flowchart-entities",
+      "source": "flowchart LR\n    A[\"Quote #quot;here#quot; &amp; there\"] -->|\"pipe | label\"| B(fa:fa-car Car **bold**)\n    B --> C@{ shape: cyl, label: \"Store\" }\n    C --> D:::warn & E\n    classDef warn fill:#fff0b5,stroke:#66501c\n    classDef default stroke-dasharray: 4 2\n    subgraph \"Spaced title\"\n      D\n    end",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Quote \"here\" & there",
+            "shape": "rect",
+            "style": {
+              "dashed": true
+            }
+          },
+          {
+            "id": "B",
+            "label": "Car bold",
+            "shape": "round",
+            "style": {
+              "dashed": true
+            }
+          },
+          {
+            "id": "C",
+            "label": "Store",
+            "shape": "cylinder",
+            "style": {
+              "dashed": true
+            }
+          },
+          {
+            "id": "D",
+            "label": "D",
+            "shape": "rect",
+            "parent": "subgraph-1",
+            "style": {
+              "dashed": true,
+              "fill": "#fff0b5",
+              "stroke": "#66501c"
+            }
+          },
+          {
+            "id": "E",
+            "label": "E",
+            "shape": "rect",
+            "style": {
+              "dashed": true
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "pipe | label",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "B",
+            "to": "C",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "C",
+            "to": "D",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "C",
+            "to": "E",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "subgraph-1",
+            "label": "Spaced title"
+          }
+        ]
+      },
+      "layout": {
+        "width": 713,
+        "height": 183,
+        "items": 24
+      }
+    },
+    {
+      "name": "flowchart-lengths",
+      "source": "flowchart BT\n    a ---> b\n    b ==> c\n    c -..-> d\n    d -- long label text ---> e\n    e <--> a\n    f o--o g\n    h x--x i",
+      "diagram": {
+        "kind": "graph",
+        "direction": "BT",
+        "nodes": [
+          {
+            "id": "a",
+            "label": "a",
+            "shape": "rect"
+          },
+          {
+            "id": "b",
+            "label": "b",
+            "shape": "rect"
+          },
+          {
+            "id": "c",
+            "label": "c",
+            "shape": "rect"
+          },
+          {
+            "id": "d",
+            "label": "d",
+            "shape": "rect"
+          },
+          {
+            "id": "e",
+            "label": "e",
+            "shape": "rect"
+          },
+          {
+            "id": "f",
+            "label": "f",
+            "shape": "rect"
+          },
+          {
+            "id": "g",
+            "label": "g",
+            "shape": "rect"
+          },
+          {
+            "id": "h",
+            "label": "h",
+            "shape": "rect"
+          },
+          {
+            "id": "i",
+            "label": "i",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "a",
+            "to": "b",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 2
+          },
+          {
+            "from": "b",
+            "to": "c",
+            "label": "",
+            "line": "thick",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "c",
+            "to": "d",
+            "label": "",
+            "line": "dotted",
+            "start": "none",
+            "end": "arrow",
+            "length": 2
+          },
+          {
+            "from": "d",
+            "to": "e",
+            "label": "long label text",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 2
+          },
+          {
+            "from": "e",
+            "to": "a",
+            "label": "",
+            "line": "solid",
+            "start": "arrow",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "f",
+            "to": "g",
+            "label": "",
+            "line": "solid",
+            "start": "circle",
+            "end": "circle",
+            "length": 1
+          },
+          {
+            "from": "h",
+            "to": "i",
+            "label": "",
+            "line": "solid",
+            "start": "cross",
+            "end": "cross",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 371,
+        "height": 665,
+        "items": 37
+      }
+    },
+    {
+      "name": "state-fork",
+      "source": "stateDiagram\n    direction LR\n    [*] --> fork_state\n    state fork_state <<fork>>\n    fork_state --> A\n    fork_state --> B\n    state join_state <<join>>\n    A --> join_state\n    B --> join_state\n    join_state --> [*]\n    state \"Waiting for input\" as W\n    A --> W\n    note left of W\n      Multi line\n      note body\n    end note",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "[*]start:root",
+            "label": "",
+            "shape": "start"
+          },
+          {
+            "id": "fork_state",
+            "label": "",
+            "shape": "fork"
+          },
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "round"
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "shape": "round"
+          },
+          {
+            "id": "join_state",
+            "label": "",
+            "shape": "fork"
+          },
+          {
+            "id": "[*]end:root",
+            "label": "",
+            "shape": "end"
+          },
+          {
+            "id": "W",
+            "label": "Waiting for input",
+            "shape": "round"
+          },
+          {
+            "id": "note-1",
+            "label": "Multi line\nnote body",
+            "shape": "note"
+          }
+        ],
+        "edges": [
+          {
+            "from": "[*]start:root",
+            "to": "fork_state",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "fork_state",
+            "to": "A",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "fork_state",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A",
+            "to": "join_state",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "B",
+            "to": "join_state",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "join_state",
+            "to": "[*]end:root",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A",
+            "to": "W",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "note-1",
+            "to": "W",
+            "label": "",
+            "line": "dotted",
+            "start": "none",
+            "end": "none",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 552,
+        "height": 244,
+        "items": 29
+      }
+    },
+    {
+      "name": "sequence-blocks",
+      "source": "sequenceDiagram\n    title: Checkout\n    participant C as Client\n    participant S as Server\n    C->>S: POST /orders\n    activate S\n    par Charge card\n      S->>S: charge()\n    and Reserve stock\n      S-)S: reserve()\n    end\n    critical Persist\n      S->>S: commit\n    option Timeout\n      S--xC: 504\n    end\n    rect rgb(191, 223, 255)\n      S-->>C: 201 Created\n    end\n    deactivate S\n    break when cancelled\n      C->S: cancel\n    end\n    opt Receipt\n      S--)C: email\n    end\n    Note left of C: Done",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "C",
+            "label": "Client",
+            "actor": false
+          },
+          {
+            "id": "S",
+            "label": "Server",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "message",
+            "from": "C",
+            "to": "S",
+            "label": "POST /orders",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          },
+          {
+            "type": "activate",
+            "participant": "S"
+          },
+          {
+            "type": "block",
+            "kind": "par",
+            "label": "Charge card"
+          },
+          {
+            "type": "message",
+            "from": "S",
+            "to": "S",
+            "label": "charge()",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          },
+          {
+            "type": "branch",
+            "kind": "and",
+            "label": "Reserve stock"
+          },
+          {
+            "type": "message",
+            "from": "S",
+            "to": "S",
+            "label": "reserve()",
+            "line": "solid",
+            "head": "async",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          },
+          {
+            "type": "end"
+          },
+          {
+            "type": "block",
+            "kind": "critical",
+            "label": "Persist"
+          },
+          {
+            "type": "message",
+            "from": "S",
+            "to": "S",
+            "label": "commit",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          },
+          {
+            "type": "branch",
+            "kind": "option",
+            "label": "Timeout"
+          },
+          {
+            "type": "message",
+            "from": "S",
+            "to": "C",
+            "label": "504",
+            "line": "dotted",
+            "head": "cross",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          },
+          {
+            "type": "end"
+          },
+          {
+            "type": "block",
+            "kind": "rect",
+            "label": "",
+            "color": "rgb(191, 223, 255)"
+          },
+          {
+            "type": "message",
+            "from": "S",
+            "to": "C",
+            "label": "201 Created",
+            "line": "dotted",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          },
+          {
+            "type": "end"
+          },
+          {
+            "type": "deactivate",
+            "participant": "S"
+          },
+          {
+            "type": "block",
+            "kind": "break",
+            "label": "when cancelled"
+          },
+          {
+            "type": "message",
+            "from": "C",
+            "to": "S",
+            "label": "cancel",
+            "line": "solid",
+            "head": "none",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          },
+          {
+            "type": "end"
+          },
+          {
+            "type": "block",
+            "kind": "opt",
+            "label": "Receipt"
+          },
+          {
+            "type": "message",
+            "from": "S",
+            "to": "C",
+            "label": "email",
+            "line": "dotted",
+            "head": "async",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          },
+          {
+            "type": "end"
+          },
+          {
+            "type": "note",
+            "placement": "left",
+            "participants": [
+              "C"
+            ],
+            "label": "Done"
+          }
+        ],
+        "title": "Checkout"
+      },
+      "layout": {
+        "width": 405,
+        "height": 898,
+        "items": 59
+      }
+    },
+    {
+      "name": "pie-simple",
+      "source": "pie title Languages\n    \"TypeScript\" : 61\n    \"Kotlin\" : 24\n    \"Rust\" : 15",
+      "diagram": {
+        "kind": "pie",
+        "showData": false,
+        "slices": [
+          {
+            "label": "TypeScript",
+            "value": 61
+          },
+          {
+            "label": "Kotlin",
+            "value": 24
+          },
+          {
+            "label": "Rust",
+            "value": 15
+          }
+        ],
+        "title": "Languages"
+      },
+      "layout": {
+        "width": 360,
+        "height": 246,
+        "items": 18
+      }
+    }
+  ],
+  "errors": [
+    {
+      "name": "unclosed-label",
+      "source": "flowchart TD\n  A[Start --> B"
+    },
+    {
+      "name": "dangling-link",
+      "source": "flowchart TD\n  A -->"
+    },
+    {
+      "name": "unknown-sequence-line",
+      "source": "sequenceDiagram\n  Alice is talking"
+    },
+    {
+      "name": "negative-pie",
+      "source": "pie\n  \"A\" : -1"
+    },
+    {
+      "name": "empty-pie",
+      "source": "pie title Nothing"
+    }
+  ],
+  "unsupported": [
+    "gantt\n  title A plan\n  section One\n  Task :a1, 2024-01-01, 3d",
+    "classDiagram\n  Animal <|-- Duck",
+    "erDiagram\n  A ||--o{ B : has",
+    "not a diagram"
+  ]
+}

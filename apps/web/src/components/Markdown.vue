@@ -10,17 +10,68 @@ import {
 } from 'vue'
 import { api, apiResourceUrl } from '../api'
 import { artifactLink } from '../deliverables'
+import { isDiagramLanguage } from '../diagram'
+import { DiagramCache, diagramFigure, diagramFonts } from '../diagram-svg'
 import { HighlightCache } from '../highlight-cache'
+import { Check, Copy } from '../icons'
 import { markdownHtml as vMarkdownHtml } from '../markdown-html'
 
 const props = defineProps<{ content: string, compactLinks?: boolean }>()
 const ArtifactViewer = defineAsyncComponent(() => import('./ArtifactViewer.vue'))
+const DiagramViewer = defineAsyncComponent(() => import('./DiagramViewer.vue'))
 const opening = ref<{ items: Deliverable[], id: string }>()
+const viewing = ref<{ source: string, returnFocus: HTMLElement }>()
 const loading = ref(false)
 const error = ref('')
 const highlights = new HighlightCache()
+const diagrams = new DiagramCache()
+// Sources whose figure shows its code; re-renders while streaming keep the reader's choice.
+const sourceViews = new Set<string>()
 let request: AbortController | undefined
-onBeforeUnmount(() => request?.abort())
+let copied: ReturnType<typeof setTimeout> | undefined
+onBeforeUnmount(() => {
+  request?.abort()
+  clearTimeout(copied)
+})
+
+function diagramAction(event: MouseEvent) {
+  const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button[data-diagram-action]') : null
+  const figure = button?.closest<HTMLElement>('figure.diagram')
+  if (!button || !figure)
+    return false
+  const source = figure.querySelector('.diagram-source code')?.textContent ?? ''
+  const kind = button.dataset.diagramAction
+  if (kind === 'source') {
+    const showing = figure.classList.toggle('diagram-showing-source')
+    button.setAttribute('aria-pressed', String(showing))
+    if (showing)
+      sourceViews.add(source)
+    else
+      sourceViews.delete(source)
+  }
+  else if (kind === 'copy') {
+    void navigator.clipboard?.writeText(source).then(() => {
+      const icon = button.querySelector('i')
+      icon?.classList.replace(Copy, Check)
+      button.title = 'Copied'
+      clearTimeout(copied)
+      copied = setTimeout(() => {
+        icon?.classList.replace(Check, Copy)
+        button.title = 'Copy source'
+      }, 1500)
+    })
+  }
+  else if (kind === 'expand') {
+    viewing.value = { source, returnFocus: button }
+  }
+
+  return true
+}
+
+function onClick(event: MouseEvent) {
+  if (!diagramAction(event))
+    void openLink(event)
+}
 
 async function openLink(event: MouseEvent) {
   if (event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey)
@@ -54,11 +105,15 @@ async function openLink(event: MouseEvent) {
 
 const html = computed(() => {
   let rawHtml = false
+  // Streaming fences stay code until their closing fence arrives, so drawings never flicker.
+  const finished = new Set<string>()
   const parsed = marked.parse(props.content, {
     async: false,
     walkTokens(token) {
       if (token.type === 'html')
         rawHtml = true
+      if (token.type === 'code' && isDiagramLanguage(token.lang) && /\n {0,3}(?:`{3,}|~{3,})[ \t]*$/.test(token.raw.trimEnd()))
+        finished.add(token.text)
 
       // Sync parsing needs no callback results. Avoid growing the result array
       // that Marked concatenates at each token while collecting async work.
@@ -68,8 +123,21 @@ const html = computed(() => {
   const container = document.createElement('div')
   container.innerHTML = DOMPurify.sanitize(parsed)
   highlights.beginRender()
+  if (finished.size) {
+    // Layouts measured before the web fonts loaded are redone once they arrive.
+    void diagramFonts.value
+    diagrams.beginRender()
+  }
+
   for (const code of container.querySelectorAll('pre code')) {
     const language = [...code.classList].find(name => name.startsWith('language-'))?.slice(9)
+    const source = (code.textContent || '').replace(/\n$/, '')
+    const figure = isDiagramLanguage(language) && finished.has(source) && diagramFigure(source, diagrams, sourceViews.has(source))
+    if (figure) {
+      code.parentElement!.replaceWith(figure)
+      continue
+    }
+
     code.innerHTML = highlights.render(code.textContent || '', language)
   }
 
@@ -86,7 +154,7 @@ const html = computed(() => {
     const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
     const nodes: Text[] = []
     while (walker.nextNode()) {
-      if (!walker.currentNode.parentElement?.closest('a, code, pre'))
+      if (!walker.currentNode.parentElement?.closest('a, code, pre, figure.diagram'))
         nodes.push(walker.currentNode as Text)
     }
 
@@ -110,7 +178,7 @@ const html = computed(() => {
     }
   }
 
-  for (const link of container.querySelectorAll('a[href]')) {
+  for (const link of container.querySelectorAll('a[href]:not(svg a)')) {
     link.setAttribute('target', '_blank')
     link.setAttribute('rel', 'noopener noreferrer')
     const href = link.getAttribute('href')!
@@ -151,7 +219,7 @@ const html = computed(() => {
 </script>
 
 <template>
-  <div v-markdown-html="html" class="markdown text-sm leading-[1.8] wrap-anywhere" @click="openLink" />
+  <div v-markdown-html="html" class="markdown text-sm leading-[1.8] wrap-anywhere" @click="onClick" />
   <p v-if="loading" role="status" class="text-sm text-muted">
     Opening file…
   </p>
@@ -164,5 +232,11 @@ const html = computed(() => {
     :items="opening.items"
     :initial="opening.id"
     @close="opening = undefined"
+  />
+  <DiagramViewer
+    v-if="viewing"
+    :source="viewing.source"
+    :return-focus="viewing.returnFocus"
+    @close="viewing = undefined"
   />
 </template>
