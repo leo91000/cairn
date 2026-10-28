@@ -58,15 +58,18 @@ d’abord puis émet le hook ; les règles, asynchrones, modifient ensuite ce qu
 
 Le propriétaire accorde à un agent, pour une instance, soit l’accès complet, sans
 limite et y compris ce qu’une version suivante du plugin ajoutera, soit ses
-contributions une par une. Les outils, commandes et hooks accordés un par un peuvent
-être restreints à des ressources : `discord.post` seulement dans #support, le hook
-`message` seulement pour #support. Un droit sur une ressource couvre ses descendants
-(un salon couvre ses fils). Cairn applique la restriction avant le plugin, à chaque
-appel d’outil, et ne livre pas à une règle un événement dont la payload désigne une
-autre ressource. Une restriction porte sur un type de ressource et sur ses descendants
-: chaque ressource de ce type, ou d’un type descendant, que désigne l’entrée ou la
-payload doit se trouver sous une ressource couverte, d’après la hiérarchie que Cairn
-résout lui-même (un fil de #general est refusé quand seul
+contributions une par une. Une mise à jour du plugin qui ajoute des identifiants de
+run à un package dont l’agent a l’accès complet à plusieurs instances ne les lui donne
+que pour celle que le propriétaire choisit en la revoyant. Les outils, commandes et
+hooks accordés un par un peuvent être restreints à des ressources : `discord.post`
+seulement dans #support, le hook `message` seulement pour #support. Un droit sur une
+ressource couvre ses descendants (un salon couvre ses fils). Cairn applique la
+restriction avant le plugin, à chaque appel d’outil, et ne livre pas à une règle un
+événement dont la payload désigne une autre ressource. Une restriction porte sur un
+type de ressource et sur ses descendants : chaque ressource de ce type, ou d’un type
+descendant, que désigne l’entrée ou la payload doit se trouver sous une ressource
+couverte, d’après la hiérarchie que Cairn résout lui-même (un fil de #general est
+refusé quand seul
 #support est accordé). Les autres types restent libres : restreindre le hook `message`
 à #support n’empêche pas son auteur d’être n’importe qui. Une entrée ou une payload
 qui ne désigne aucune ressource identifiable d’un type restreint, ou des ressources
@@ -142,12 +145,15 @@ une règle qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l�
   résultat des actions précédentes (`{{steps.post.messageId}}`) et ne fait qu’une
   chose : démarrer un agent avec une clé déjà liée échoue, et c’est l’arbre qui
   choisit d’orienter la conversation existante.
-- **Clé de conversation** : démarrer un agent peut rattacher la conversation à une clé
+- **Clé de conversation** : les actions d’une règle n’atteignent une conversation
+  existante que par sa clé. Démarrer un agent peut rattacher la conversation à une clé
   tirée de la payload (`discord:{{threadId}}`). Les clés appartiennent au créateur de
   la règle : deux membres qui utilisent la même clé désignent deux conversations
-  différentes, et une règle n’atteint que les clés de son créateur. Orienter, annuler,
-  répondre à une question ou mémoriser une valeur sur la conversation d’une clé exige
-  en plus que le créateur ait accès à l’agent de cette conversation.
+  différentes, et une règle n’atteint que les clés de son créateur. Une clé se libère
+  quand sa conversation est supprimée ; une conversation terminée garde la sienne et
+  peut être orientée de nouveau. Orienter, annuler, répondre à une question ou
+  mémoriser une valeur sur la conversation d’une clé exige en plus que le créateur ait
+  accès à l’agent de cette conversation.
 - **Valeurs mémorisées** : soit sur une conversation, par sa clé, partagées par les
   règles qui la touchent et supprimées avec elle, soit propres à la règle.
 - **Hooks de Cairn** : Cairn émet quatre hooks pour les conversations rattachées à une
@@ -183,34 +189,35 @@ conversations Cairn dans Discord disparaît.
 Une règle s’exécute avec l’autorité de son créateur, revérifiée à chaque action : un
 droit manquant pour une action la fait échouer. Seul le créateur modifie sa règle. Les
 autres membres la voient sans pouvoir la modifier ; ils peuvent la dupliquer s’ils ont
-tous les droits qu’elle utilise, le duplicata leur appartenant et démarrant désactivé
-pour ne pas répondre deux fois au même événement. Le propriétaire peut supprimer
-n’importe quelle règle ou la mettre en pause en urgence, sans la modifier ; la pause
-arrête aussi ses déclenchements en cours, et seul le propriétaire la lève.
-
-Quand le créateur perd l’accès à l’agent d’exécution, ou que cet agent perd le hook de
-plugin écouté, la règle est suspendue, pas supprimée ; elle repart quand le droit
-revient. Comme les tâches ([ADR-0029](0029-sharing-whole-installations.md)), une règle
-appartient à une adhésion : retirer, faire partir ou supprimer le créateur la
-désactive définitivement, et le réinviter ne la relance pas. Elle reste visible ; le
-propriétaire peut la supprimer et un membre la dupliquer. Comme pour les tâches
-planifiées, un déclenchement exige une adhésion vérifiée récemment ; si elle ne peut
+tous les droits qu’elle utilise, le duplicata leur appartenant. Le propriétaire peut
+supprimer n’importe quelle règle. Comme les tâches
+([ADR-0029](0029-sharing-whole-installations.md)), une règle appartient à une
+adhésion, et un déclenchement exige une adhésion vérifiée récemment ; si elle ne peut
 pas l’être, il attend.
 
-Un agent qui a l’accès à l’installation n’écrit des règles que pour la personne qui
-lui donne ses instructions : l’auteur de la dernière intervention humaine du tour
-(message, orientation ou réponse à une question écrits par une personne sur le web,
-Android ou le MCP public ; pour une tâche déléguée, celle de son propre tour, ou à
-défaut du tour demandeur). Il crée des règles à son nom, et ne modifie, met en pause,
-relance ou supprime que les règles de cette personne. Un tour sans intervention
-humaine (tâche planifiée, mission créée par un agent, tour lancé par une règle, réveil
-sans message), et tout tour d’une conversation rattachée à une clé, ne peut écrire
-aucune règle : ni un contenu externe qu’une règle y fait entrer ni une mission ne peut
-agir au nom d’un compte. Il ne peut accorder de droits à aucun agent ni à aucun
-compte, ni mettre en pause ou supprimer la règle d’un autre compte, ni lever la pause
-d’urgence du propriétaire, ni réduire un droit dont dépend la règle active d’un autre
-compte. Une règle créée par le MCP public a pour créateur le propriétaire qui a
-autorisé ce client.
+Une règle ne se déclenche que si rien ne l’en empêche. Chaque empêchement se lève
+indépendamment des autres :
+
+| Empêchement | Cause | Levé par |
+| --- | --- | --- |
+| Désactivée | son créateur, ou une duplication (le duplicata démarre ainsi) | son créateur |
+| Pause d’urgence | le propriétaire ; arrête aussi les déclenchements en cours | le propriétaire |
+| Budget épuisé | un plafond horaire dépassé ; le créateur est prévenu | son créateur ou le propriétaire |
+| Droits perdus | le créateur perd l’accès à l’agent d’exécution, ou cet agent le hook de plugin écouté | le retour du droit, de lui-même |
+| Adhésion terminée | le créateur est retiré, part ou est supprimé ; le réinviter n’y change rien | jamais : il reste à dupliquer |
+
+Un agent qui a l’accès à l’installation n’écrit des règles que dans un tour dont
+toutes les entrées viennent de personnes : des messages, orientations et réponses
+écrits sur le web, Android ou le MCP public, dans une conversation sans clé qui n’est
+ni une tâche (planifiée, lancée à la main ou déléguée) ni une mission. Dès qu’une
+autre entrée atteint le tour (une règle, un agent, `cairn_installation`, un réveil
+sans message), il ne peut plus en écrire. Il écrit alors au nom de l’auteur de la
+dernière de ces entrées : il crée des règles à son nom, et ne modifie, désactive,
+réactive ou supprime que les règles de cette personne. Il ne peut accorder de droits à
+aucun agent ni à aucun compte, ni toucher à la règle d’un autre compte, ni lever une
+pause d’urgence, ni réduire un droit dont dépend la règle active d’un autre compte.
+Une règle créée par le MCP public a pour créateur le propriétaire qui a autorisé ce
+client.
 
 Une règle n’atteint un agent dont la politique autorise l’exécution native, ou une
 conversation qui s’exécute en natif, que si son créateur détenait l’autorité native
@@ -276,6 +283,10 @@ place les instances que leurs agents utilisent, jusqu’à ce qu’il réduise c
 
 ## Conséquences
 
+Les restrictions de ressource reposent sur ce que le package déclare : les champs qui
+désignent des ressources et la liste qui fournit leur hiérarchie. Un package approuvé
+reste donc de confiance pour ces déclarations, comme il l’était pour l’admission.
+
 Les risques d’un droit trop large relèvent du propriétaire ; Cairn doit en revanche
 rendre ces droits lisibles et n’en accorder aucun par défaut. Les capacités d’un
 plugin qui ne passent pas par des entrées d’outil ne peuvent pas être restreintes : un
@@ -284,7 +295,8 @@ outil doit recevoir en entrée ce qu’il touche.
 Un agent démarré par une règle agit pour son créateur, à partir d’un contenu écrit par
 des inconnus. Il ne peut pas écrire de règles, mais s’il a l’accès à l’installation,
 un auteur externe peut tenter de lui faire faire tout le reste de ce que permet cet
-accès : un agent qui répond à un salon public ne devrait pas l’avoir.
+accès, y compris supprimer l’agent ou l’instance dont dépendent les règles d’autres
+comptes : un agent qui répond à un salon public ne devrait pas l’avoir.
 
 Comme toute capacité de l’interface, les règles (éditeur compris) et les droits par
 ressource arrivent sur le web, Android, le MCP public et `cairn_installation` en même

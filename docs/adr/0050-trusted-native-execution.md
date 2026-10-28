@@ -1,7 +1,7 @@
 # Trusted native execution alongside Firecracker
 
-Update: [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) replaces plugin delegations with hook rules. A rule version records the
-native authority of the authenticated request that saved it; each action that reaches
+Update: [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) replaces plugin
+delegations with hook rules. A rule version records the native authority of the authenticated request that saved it; each action that reaches
 native work checks that record and the creator's current native authority.
 
 Update: [ADR-0073](0073-automatic-agent-placement.md) permits automatic per-agent

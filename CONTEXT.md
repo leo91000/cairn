@@ -181,7 +181,8 @@ L’emplacement d’où une skill a été importée par la source de skills d’
 **Instance de plugin** :
 Une configuration d’un plugin par le propriétaire, par exemple un bot Discord, un
 compte de service 1Password ou un compte GitHub : ses réglages et ses secrets
-chiffrés. Les droits des agents sur l’instance, complets ou contribution par contribution, se
+chiffrés. Les droits des agents sur l’instance, complets ou contribution par
+contribution, se
 choisissent sur la page de chaque agent, ou à la dernière étape de sa création, qui
 ne fait qu’ajouter des droits. Aucun agent n’est autorisé par défaut.
 _Avoid_ : connexion (réservé aux comptes des agents de code)
@@ -269,7 +270,7 @@ Ce sur quoi portent les hooks et les outils d’un plugin, et que le plugin sait
 un serveur ou un salon Discord, une personne, un dépôt GitHub. Le droit d’un agent sur
 un outil, une commande ou un hook peut être limité à certaines ressources et à ce
 qu’elles contiennent.
-_Avoid_ : scope, portée
+_Avoid_ : scope, portée, ressource seul (réservé aux ressources d’une node)
 
 **Clé de conversation** :
 L’identifiant externe, tiré d’un hook, auquel une règle rattache une conversation, par

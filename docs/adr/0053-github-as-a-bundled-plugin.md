@@ -1,4 +1,4 @@
-> Statut : précisée par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) : la limite d’une instance par package ne vise plus que les identifiants de run, reçus seuls ou par un accès complet ; les autres contributions d’un même package peuvent venir de plusieurs instances.
+> Statut : remplacée en partie par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) : la limite d’une instance par package ne vise plus que les identifiants de run, reçus seuls ou par un accès complet ; les autres contributions d’un même package peuvent venir de plusieurs instances.
 
 # GitHub devient un plugin livré avec Cairn
 
