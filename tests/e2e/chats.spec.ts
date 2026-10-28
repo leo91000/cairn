@@ -1378,10 +1378,11 @@ test('answers in-flight questions with choices or free text on desktop and mobil
   await page.getByRole('button', { name: 'Send answer', exact: true }).click()
   await expect(page.getByRole('dialog')).not.toBeVisible()
   await expect(page.getByRole('button', { name: 'Answer pending questions' })).not.toBeVisible()
-  await expectChatReady(page)
   const chatKey = new URL(page.url()).pathname.split('/').at(-1)!
   const chatId = (await workspace.api(`/api/chats/${chatKey}`)).id
-  expect(workspace.service.questions.list(chatId)[0].status).toBe('answered')
+  // Submission queues the answer; Ready can still describe the preceding turn.
+  await expect.poll(() => workspace.service.questions.list(chatId)[0].status).toBe('answered')
+  await expectChatReady(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.getByRole('button', { name: 'Chat details', exact: true }).click()
   await page.getByRole('link', { name: 'Question notifications' }).click()
