@@ -1502,7 +1502,7 @@ async fn assert_refreshes_are_shared(
         json!({ "tokens": { "access_token": "stale", "account_id": "intruder" } }).to_string(),
     )
     .unwrap();
-    service.accounts.release(&service, first).await.unwrap();
+    service.accounts.release(service, first).await.unwrap();
     assert!(a.tokens(false).await.is_err());
     assert!(
         b.tokens(false).await.unwrap()["accessToken"] == "synthetic-refreshed",

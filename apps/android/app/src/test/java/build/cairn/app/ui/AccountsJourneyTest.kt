@@ -11,6 +11,7 @@ import androidx.work.Configuration
 import androidx.work.testing.*
 import build.cairn.app.data.*
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
@@ -21,6 +22,9 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+
+private const val WORK_ACCOUNT_ID = "00000000-0000-4000-8000-000000000001"
+private const val WORK_REVISION = "00000000-0000-4000-8000-000000000002"
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36], qualifiers = "w412dp-h915dp-mdpi")
@@ -42,7 +46,7 @@ class AccountsJourneyTest {
     }
 
     private val work =
-        """{"id":"work","provider":"codex","name":"Work","email":"work@example.test","plan":"plus","state":"ready","status":"next","stale":false,"remainingPercent":82.0,"activeRunIds":["run"],"maxConcurrentRuns":4,"usage":{"checkedAt":1,"windows":[{"id":"main:primary","label":"5-hour window","usedPercent":4,"durationMins":300,"resetsAt":1893499200},{"id":"main:secondary","label":"Weekly","usedPercent":18,"durationMins":10080,"resetsAt":1894017600}],"resets":{"available":3}}}"""
+        """{"id":"$WORK_ACCOUNT_ID","revision":"$WORK_REVISION","provider":"codex","name":"Work","email":"work@example.test","plan":"plus","state":"ready","status":"next","stale":false,"remainingPercent":82.0,"activeRunIds":["run"],"maxConcurrentRuns":4,"usage":{"checkedAt":1,"windows":[{"id":"main:primary","label":"5-hour window","usedPercent":4,"durationMins":300,"resetsAt":1893499200},{"id":"main:secondary","label":"Weekly","usedPercent":18,"durationMins":10080,"resetsAt":1894017600}],"resets":{"available":3}}}"""
 
     /** A server whose accounts change with each request, recording what the app sends. */
     private class Accounts {
@@ -229,9 +233,13 @@ class AccountsJourneyTest {
             server,
             { request, payload ->
                 if (request.method == "PUT") {
-                    assertEquals("/api/installations/fixture/api/accounts/work", request.path)
+                    assertEquals(
+                        "/api/installations/fixture/api/accounts/$WORK_ACCOUNT_ID",
+                        request.path,
+                    )
                     val command = wireJson.parseToJsonElement(payload).jsonObject
-                    assertEquals("", command["revision"]?.jsonPrimitive?.content)
+                    val current = wireJson.parseToJsonElement(server.accounts[0]).jsonObject
+                    assertEquals(current["revision"], command["revision"])
                     val update = command.getValue("settings").jsonObject
                     update["maxConcurrentRuns"]?.let {
                         server.accounts[0] =
@@ -249,6 +257,13 @@ class AccountsJourneyTest {
                                     "\"status\":\"paused\",\"enabled\":false",
                                 )
                         }
+                    val updated = wireJson.parseToJsonElement(server.accounts[0]).jsonObject
+                    server.accounts[0] =
+                        JsonObject(
+                                updated +
+                                    ("revision" to JsonPrimitive(UUID.randomUUID().toString()))
+                            )
+                            .toString()
                     server.accounts[0]
                 } else null
             },
@@ -268,7 +283,7 @@ class AccountsJourneyTest {
                 .performClick()
             compose.waitUntil(10000) {
                 server.requests.any {
-                    it.first == "PUT /api/installations/fixture/api/accounts/work"
+                    it.first == "PUT /api/installations/fixture/api/accounts/$WORK_ACCOUNT_ID"
                 }
             }
             assertEquals(
@@ -277,7 +292,8 @@ class AccountsJourneyTest {
                     .parseToJsonElement(
                         server.requests
                             .first {
-                                it.first == "PUT /api/installations/fixture/api/accounts/work"
+                                it.first ==
+                                    "PUT /api/installations/fixture/api/accounts/$WORK_ACCOUNT_ID"
                             }
                             .second
                     )
@@ -295,7 +311,7 @@ class AccountsJourneyTest {
                 .performClick()
             compose.waitUntil(10000) {
                 server.requests.count {
-                    it.first == "PUT /api/installations/fixture/api/accounts/work"
+                    it.first == "PUT /api/installations/fixture/api/accounts/$WORK_ACCOUNT_ID"
                 } == 2
             }
             assertEquals(
@@ -303,7 +319,10 @@ class AccountsJourneyTest {
                 wireJson
                     .parseToJsonElement(
                         server.requests
-                            .last { it.first == "PUT /api/installations/fixture/api/accounts/work" }
+                            .last {
+                                it.first ==
+                                    "PUT /api/installations/fixture/api/accounts/$WORK_ACCOUNT_ID"
+                            }
                             .second
                     )
                     .jsonObject
@@ -329,7 +348,7 @@ class AccountsJourneyTest {
             Accounts().apply {
                 accounts += work
                 signIn =
-                    """{"accountId":"work","provider":"codex","state":"pending","phase":"authorizing","code":"ABCD-12345","url":"https://auth.openai.com/codex/device"}"""
+                    """{"accountId":"$WORK_ACCOUNT_ID","provider":"codex","state":"pending","phase":"authorizing","code":"ABCD-12345","url":"https://auth.openai.com/codex/device"}"""
             }
         journey(
             server,
