@@ -9,11 +9,21 @@ class ConversationsTest {
     @Test
     fun conversationLifecycleMessagesAndExecutionDecodeLikeRust() {
         val root = File(System.getProperty("cairn.contractWire")).parentFile
-        val corpus = json.parseToJsonElement(File(root, "../../../tests/fixtures/conversation-contracts.json").readText()).jsonObject
-        corpus.getValue("creates").jsonArray.forEach { json.decodeFromJsonElement<CreateChatInput>(it) }
+        val corpus =
+            json
+                .parseToJsonElement(
+                    File(root, "../../../tests/fixtures/conversation-contracts.json").readText()
+                )
+                .jsonObject
+        corpus.getValue("creates").jsonArray.forEach {
+            json.decodeFromJsonElement<CreateChatInput>(it)
+        }
         corpus.getValue("messages").jsonArray.forEach {
             val message = json.decodeFromJsonElement<ChatMessageInput>(it)
-            assertEquals(message, json.decodeFromJsonElement<ChatMessageInput>(json.encodeToJsonElement(message)))
+            assertEquals(
+                message,
+                json.decodeFromJsonElement<ChatMessageInput>(json.encodeToJsonElement(message)),
+            )
         }
         corpus.getValue("invalidMessages").jsonArray.forEach { value ->
             assertFails(value.toString()) { json.decodeFromJsonElement<ChatMessageInput>(value) }
@@ -30,6 +40,8 @@ class ConversationsTest {
         corpus.getValue("invalidViews").jsonArray.forEach { value ->
             assertFails(value.toString()) { json.decodeFromJsonElement<Chat>(value) }
         }
-        corpus.getValue("executions").jsonArray.forEach { json.decodeFromJsonElement<ChatExecution>(it) }
+        corpus.getValue("executions").jsonArray.forEach {
+            json.decodeFromJsonElement<ChatExecution>(it)
+        }
     }
 }

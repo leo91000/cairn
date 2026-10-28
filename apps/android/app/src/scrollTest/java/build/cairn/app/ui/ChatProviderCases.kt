@@ -56,7 +56,7 @@ abstract class ChatProviderCases {
                     accountWaitReason =
                         "Reconnect your Claude Code account in Connections to continue.",
                     accountRequired = "claude",
-                    chatExecution = ChatExecution("message"),
+                    chatExecution = ChatExecution(messageId = "message"),
                     taskId = "",
                 )
             val chat =
