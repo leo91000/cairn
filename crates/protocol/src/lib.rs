@@ -275,6 +275,7 @@ pub fn webhook_header(name: &str) -> bool {
     !matches!(
         name,
         "host"
+            | "authorization"
             | "cookie"
             | "origin"
             | "referer"

@@ -238,12 +238,27 @@ for (const grant of ['root', 'resource'] as const) {
         projects: [],
         skills: [],
         mcps: [],
-        github: false,
         installation: false,
         sandbox: 'read-only',
       },
     })
     await useRelayForHttpMocks(page)
+    await page.route('**/agents', async (route) => {
+      if (route.request().method() !== 'GET')
+        return route.continue()
+      const response = await route.fetch()
+      const listing = await response.json()
+      // Preview the selected native agent; host admission has its own backend cases.
+      return route.fulfill({
+        response,
+        json: {
+          ...listing,
+          agents: listing.agents.map((item: Agent) => item.id === agent.id
+            ? { ...item, access: { ...item.access, backend: 'native' } }
+            : item),
+        },
+      })
+    })
     let globalReads = 0
     await page.route('**/api/plugins', (route) => {
       globalReads++
@@ -321,6 +336,7 @@ for (const grant of ['root', 'resource'] as const) {
       await expect(editor.getByRole('radio', { name: new RegExp(agent.name) })).toBeEnabled()
       await expect(editor.getByRole('radio', { name: new RegExp(agent.name) })).toBeChecked()
       await expect(editor.getByRole('status').filter({ hasText: 'can use everything' })).toContainText('use its plugins')
+      await expect(editor.getByRole('status').filter({ hasText: 'requires the installation owner\'s current native delegation' })).toBeVisible()
       await expect(editor.getByRole('button', { name: 'Save instance', exact: true })).toBeEnabled()
       expect(globalReads).toBe(0)
     }
@@ -458,7 +474,7 @@ test('Discord bots are set up through the package’s own form and keep the toke
   await expect(review.getByRole('checkbox', { name: /Reapprove the new access for #support on Acme/ })).toBeChecked()
   const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await review.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await saving).postDataJSON().reapproveDelegations).toEqual([botId])
+  expect((await saving).postDataJSON().review.reapproveDelegations).toEqual([botId])
   await expect(review).toHaveCount(0)
 
   // An earlier change elsewhere already suspended the bot: a later edit never reapproves it by default.
@@ -473,7 +489,7 @@ test('Discord bots are set up through the package’s own form and keep the toke
   // Alone, a delegation already suspended does not open the review, and is not reapproved.
   const direct = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await describe('Answers support questions')
-  expect((await direct).postDataJSON()).not.toHaveProperty('reapproveDelegations')
+  expect((await direct).postDataJSON().review.reapproveDelegations).toEqual([])
   await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
   await expect(review).toHaveCount(0)
 
@@ -489,14 +505,14 @@ test('Discord bots are set up through the package’s own form and keep the toke
   await expect(review).toContainText('Already suspended by an earlier change. Reapprove only after checking its current access.')
   const unchecked = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await review.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await unchecked).postDataJSON()).not.toHaveProperty('reapproveDelegations')
+  expect((await unchecked).postDataJSON().review.reapproveDelegations).toEqual([])
   await expect(review).toHaveCount(0)
   // Checked deliberately, it is reapproved.
   await describe('Answers support questions in Acme')
   await earlier.check()
   const checked = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await review.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await checked).postDataJSON().reapproveDelegations).toEqual([botId])
+  expect((await checked).postDataJSON().review.reapproveDelegations).toEqual([botId])
   await expect(review).toHaveCount(0)
   await page.goto(workspacePath('/plugins/discord'))
 
@@ -879,7 +895,6 @@ test('setup agent and resource parent selection preserve explicit authority', as
       projects: [],
       skills: [],
       mcps: [],
-      github: false,
       installation: false,
     },
   })
@@ -2075,7 +2090,6 @@ async function conversationRoutesFixture(workspace: import('./fixtures').Workspa
     access: {
       projects: [],
       installation: false,
-      github: false,
       mcps: [],
       sandbox: 'read-only',
     },
@@ -2304,13 +2318,16 @@ test('resource route warnings include scoped grants without refusing the selecte
     if (route.request().method() !== 'GET')
       return route.continue()
     const response = await route.fetch()
-    const agents = await response.json()
+    const listing = await response.json()
     // Client metadata fixture; native admission remains tested by the backend.
     return route.fulfill({
       response,
-      json: agents.map((agent: Agent) => nativePreview && agent.id === fixture.agent.id
-        ? { ...agent, access: { ...agent.access, backend: 'native' } }
-        : agent),
+      json: {
+        ...listing,
+        agents: listing.agents.map((agent: Agent) => nativePreview && agent.id === fixture.agent.id
+          ? { ...agent, access: { ...agent.access, backend: 'native' } }
+          : agent),
+      },
     })
   })
   await workspace.api(`/api/agents/${fixture.agent.id}`, 'PUT', {

@@ -42,7 +42,7 @@ pub fn authorize_in(db: &crate::store::Db<'_>, bearer: &str) -> Result<Value> {
         return Err(denied());
     }
     let agent = &run["snapshot"]["agent"];
-    let current = db.get("agents", text(agent, "id"))?.ok_or_else(denied)?;
+    let current = db.agent_snapshot(text(agent, "id"))?.ok_or_else(denied)?;
     if !covers(&current, agent) {
         return Err(Error::forbidden("Agent permissions were reduced."));
     }

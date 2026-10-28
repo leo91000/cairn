@@ -667,6 +667,150 @@ pub(crate) async fn maintain(s: Arc<Service>) {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn observations_captured_before_a_merge_are_retried_under_the_destination() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("home")).unwrap();
+        let config = serde_json::from_value(json!({
+            "dataDir": root.path().join("data"), "home": root.path().join("home"),
+            "workspaceRoots": [root.path()], "publicUrl": "http://localhost:4310",
+            "host": "127.0.0.1", "port": 0, "codexBin": "unused-fixture",
+            "concurrency": 1, "logger": false, "workerEnabled": false, "runnerUrl": "",
+        }))
+        .unwrap();
+        let s = Service::new(config).await.unwrap();
+        let executable = std::env::var_os("CAIRN_TEST_CODE_WORKER")
+            .expect("Run backend tests through pnpm test:backend");
+        s.plugins.use_worker(executable.into());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new().route(
+            "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+            axum::routing::get(|headers: axum::http::HeaderMap| async move {
+                if headers.get("authorization").and_then(|h| h.to_str().ok())
+                    != Some("Bearer fixture-only")
+                {
+                    return Err(Error::unauthorized("Incorrect fixture token"));
+                }
+                Ok(axum::Json(json!({"owner": {
+                    "account_id": "fixture-owner", "access_id": "fixture-owner"
+                }, "members": []})))
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let identity = s.config.data_dir.join("installation-relay/identity.json");
+        std::fs::create_dir_all(identity.parent().unwrap()).unwrap();
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        let identity_file = std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600)
+            .open(identity)
+            .unwrap();
+        serde_json::to_writer(
+            identity_file,
+            &json!({
+                "origin": origin, "installationId": "00000000-0000-4000-8000-000000000055",
+                "token": "fixture-only",
+            }),
+        )
+        .unwrap();
+        let installed = registry::install(
+            &s,
+            &json!({
+                "manifest": {
+                    "id": "fixture", "name": "Condition fixture", "version": "1",
+                    "apiVersion": cairn_plugin_api::API_VERSION,
+                    "capabilities": [], "agentAccess": {"description": "Observe readiness"},
+                    "conditions": [{"name": "ready", "description": "Readiness",
+                        "inputSchema": {"type": "object", "properties": {}}}],
+                },
+                "source": "return {condition = function() return {state = 'completed'} end}",
+            }),
+        )
+        .await
+        .unwrap();
+        registry::approve(&s, "fixture", "1", text(&installed, "digest"))
+            .await
+            .unwrap();
+        let (chat, current_run) = s.store
+            .transaction(|db| {
+                let source = serde_json::to_value(crate::agent_fixture::profile(json!({
+                    "id": "00000000-0000-4000-8000-000000000010",
+                }))?)?;
+                let target = crate::agent_fixture::profile(json!({
+                    "id": "00000000-0000-4000-8000-000000000011",
+                }))?;
+                let target = serde_json::to_value(db.save_agent(&target)?)?;
+                let mut instance = Connection::draft("instance", "fixture", json!({}), vec![]);
+                instance.enabled = true;
+                instance.revision = "fixture-revision".into();
+                instance.agent_ids = vec!["00000000-0000-4000-8000-000000000011".into()];
+                db.put(connections::KIND, &serde_json::to_value(instance)?)?;
+                let captured_run = json!({
+                    "id": "run", "taskId": "task", "trigger": "chat", "status": "succeeded", "createdAt": now(),
+                    "snapshot": { "agent": source }, "chatExecution": { "messageId": "message" },
+                });
+                db.add_run(&captured_run, None)?;
+                let chat = db.put(
+                    "chats",
+                    &json!({
+                        "id": "chat", "agentId": "00000000-0000-4000-8000-000000000011", "runId": "run",
+                        "wakeup": {
+                            "messageId": "message", "wakeAt": now() + 60_000,
+                            "condition": { "type": "fixture_ready", "pluginId": "fixture" },
+                        },
+                    }),
+                )?;
+                let current_run =
+                    db.patch_run("run", &json!({ "snapshot": { "agent": target } }))?;
+                let stale_denial =
+                    crate::waits::access(db, &captured_run, &chat["wakeup"]["condition"])
+                        .unwrap_err();
+                record(
+                    db,
+                    vec![(
+                        crate::waits::Owner {chat: true, record: chat.clone()}.into(),
+                        captured_run.into(), None,
+                    )],
+                    &Err(stale_denial),
+                )?;
+                assert_eq!(db.get("chats", "chat")?.unwrap(), chat);
+                assert!(db.events("run", 0, 10)?.is_empty());
+                Ok((chat, current_run))
+            })
+            .await
+            .unwrap();
+        let fresh = observe(&s, &current_run, &chat["wakeup"]["condition"], None).await;
+        assert_eq!(
+            fresh.as_ref().unwrap().result.as_ref().unwrap()["state"],
+            "completed"
+        );
+        s.store
+            .transaction(move |db| {
+                record(
+                    db,
+                    vec![(
+                        crate::waits::Owner {
+                            chat: true,
+                            record: chat,
+                        }
+                        .into(),
+                        current_run.into(),
+                        None,
+                    )],
+                    &fresh,
+                )?;
+                assert_eq!(
+                    db.get("chats", "chat")?.unwrap()["wakeup"]["observation"]["state"],
+                    "completed"
+                );
+                assert_eq!(db.events("run", 0, 10)?.len(), 1);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        server.abort();
+    }
+
     #[test]
     fn displays_are_bounded_and_toned() {
         let waiting = waiting_display(&json!({

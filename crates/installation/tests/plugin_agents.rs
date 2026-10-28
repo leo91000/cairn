@@ -1,6 +1,8 @@
 //! Plugin API v2 end to end, through the built-in 1Password package: an ordinary
 //! package with a secret setting, agent grants, commands, a tool, instructions, a
 //! declared program, a view, actions and a test.
+use common::AgentFixture;
+
 mod common;
 
 use axum::{body::Body, http::StatusCode};
@@ -192,11 +194,29 @@ async fn service_accounts_are_instances_with_encrypted_tokens_and_live_grants() 
     // The fake CLI only accepts the original token.
     assert_eq!(run(&f, read.clone()).await, Err(502));
 
-    let temporary = s.agent(json!({ "name": "Temporary" }), None).await.unwrap();
+    let temporary = s
+        .agent_fixture(json!({ "name": "Temporary" }), None)
+        .await
+        .unwrap();
     update["agentIds"] = json!([MAIN_AGENT_ID, temporary["id"]]);
     update.as_object_mut().unwrap().remove("secrets");
     save(s, update.clone(), Some(&account)).await;
-    s.remove("agents", text(&temporary, "id")).await.unwrap();
+    cairn_installation::api::dispatch(
+        s,
+        &cairn_installation::http::Input {
+            method: "DELETE".into(),
+            path: format!("/api/agents/{}", text(&temporary, "id")),
+            query: std::collections::HashMap::default(),
+            headers: axum::http::HeaderMap::default(),
+            body: Value::Null,
+            identity: Some(cairn_installation::auth::InstallationIdentity::trusted(
+                cairn_installation::auth::InstallationRole::Owner,
+                "fixture-owner",
+            )),
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(
         s.get(connections::KIND, &account).await.unwrap()["agentIds"],
         json!([MAIN_AGENT_ID])

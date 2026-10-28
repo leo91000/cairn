@@ -31,60 +31,15 @@ data class Installation(
     val updateRequired: Boolean = false,
 )
 
+const val DRAFT_AGENT_ID = "00000000-0000-4000-8000-000000000000"
+
 const val MAIN_AGENT_ID = "00000000-0000-4000-8000-000000000001"
 
-@Serializable
-data class AccessPolicy(
-    /** Nodes its conversations may run on; null means every node, including future ones. */
-    val nodes: List<String>? = listOf(LOCAL_NODE_ID),
-    /** Projects the agent may open; null means every project, including future ones. */
-    val projects: List<String>? = null,
-    val skills: List<String>? = null,
-    val mcps: List<String>? = null,
-    val mcpTools: Map<String, List<String>> = emptyMap(),
-    val installation: Boolean = false,
-    /** Hands tasks to conversations that report back, on any coding agent and model. */
-    val delegation: Boolean = false,
-    val sandbox: String = "yolo",
-    val backend: String = "firecracker",
-)
+typealias AccessPolicy = build.cairn.contracts.AccessPolicy
 
-@Serializable
-data class AgentPortrait(
-    val status: String = "ready",
-    val revision: String = "",
-    val url: String? = null,
-    val error: String? = null,
-)
+typealias AgentPortrait = build.cairn.contracts.AgentAvatar
 
-@Serializable
-data class Agent(
-    val id: String = "",
-    val name: String = "",
-    val description: String = "",
-    val model: String = "",
-    val reasoning: String = "high",
-    /** Codex speed; empty runs at Standard. */
-    val speed: String = "",
-    val instructions: String = "",
-    val timeoutMinutes: Int = 0,
-    val access: AccessPolicy = AccessPolicy(),
-    /**
-     * Nodes on which the agent may suspend every other conversation during intensive work. Only
-     * effective where it may also run. A live grant: it applies immediately, even in running
-     * conversations. Kept outside [access] so it never enters a run's frozen policy.
-     */
-    val exclusiveNodes: List<String> = emptyList(),
-    /**
-     * Plugin instances (e.g. 1Password service accounts) whose commands and tools it gets. A live
-     * grant, kept outside [access] like [exclusiveNodes].
-     */
-    val plugins: List<String> = emptyList(),
-    val provider: String = "codex",
-    val avatar: AgentPortrait? = null,
-    /** Changes on every save; sent back so a stale editor cannot overwrite newer access. */
-    val revision: String = "",
-)
+typealias Agent = build.cairn.contracts.Agent
 
 typealias Project = build.cairn.contracts.Project
 
@@ -137,7 +92,22 @@ data class SnapshotSkill(
 @Serializable
 data class Snapshot(
     val task: Task = Task(),
-    val agent: Agent = Agent(),
+    val agent: Agent =
+        Agent(
+            exclusiveNodes = emptyList(),
+            plugins = emptyList(),
+            id = "00000000-0000-4000-8000-000000000000",
+            name = "",
+            revision = "",
+            createdAt = 0,
+            access =
+                AccessPolicy(
+                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                    projects = null,
+                    skills = null,
+                    mcps = null,
+                ),
+        ),
     val project: Project? = null,
     val projects: List<Project> = emptyList(),
     val skills: List<SnapshotSkill> = emptyList(),

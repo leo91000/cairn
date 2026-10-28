@@ -47,12 +47,13 @@ pub(crate) async fn routes(
                 resource,
                 provider,
                 Initiator {
+                    caller: capabilities::Caller::default(),
                     account: account.into(),
                     owner_access: snapshot.owner_access_id.clone(),
                     actor: None,
                     external: None,
                     source_event: String::new(),
-                    setup_target: Some(target.clone()),
+                    target: Some(target.clone()),
                 },
                 &body,
             )
@@ -79,7 +80,16 @@ pub(crate) async fn routes(
                     "This authorization belongs to another setup resource.",
                 ));
             }
-            finish_pending(s, package, provider, key, value, pending).await
+            finish_pending(
+                s,
+                package,
+                provider,
+                key,
+                value,
+                pending,
+                capabilities::Caller::default(),
+            )
+            .await
         }
         ("GET", true) => {
             let value = s
@@ -104,27 +114,15 @@ pub(crate) async fn routes(
                 return Ok(json!({"status": "disconnected"}));
             };
             let authorization: Authorization = serde_json::from_value(value)?;
-            let mut result = summary(&authorization);
-            if authorization.personal.is_some()
-                || authorization.setup.as_ref().is_none_or(|saved| {
-                    saved.id != snapshot.id || saved.revision != snapshot.revision
-                })
-                || authorization.instance_revision != snapshot.revision
-                || authorization.owner_access != snapshot.owner_access_id
-                || authorization.digest != package.digest
-                || authorization
-                    .metadata
-                    .iter()
-                    .any(|(key, value)| resource.settings.get(key) != Some(value))
-                || (authorization
-                    .tokens
-                    .expires_at
-                    .is_some_and(|expiry| expiry <= now())
-                    && authorization.tokens.refresh.is_none())
-            {
-                result["status"] = json!("reconnect");
-            }
-            Ok(result)
+            Ok(status_summary(
+                &authorization,
+                &target.connection(),
+                &resource,
+                &package.digest,
+                Some(&snapshot.owner_access_id),
+                None,
+                Some(snapshot),
+            ))
         }
         ("DELETE", true) => {
             target.require_revision(&input.body)?;

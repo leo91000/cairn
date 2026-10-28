@@ -19,7 +19,7 @@ use axum::{
 };
 use cairn_plugin_api::WebhookSignature;
 use serde_json::{Map, Value, json};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 /// The JSON worker frame may expand each incoming byte to six escaped bytes.
 pub const BODY_BYTES: usize = 128 * 1024;
@@ -122,7 +122,8 @@ async fn receive(
         }
         None => draft.as_ref().unwrap().connection(),
     };
-    let package = registry::active(s, &connection.plugin_id).await?;
+    let approved = registry::approved(s, &connection.plugin_id).await?;
+    let package = &approved.package;
     if draft
         .as_ref()
         .is_some_and(|draft| draft.digest != package.digest)
@@ -194,19 +195,21 @@ async fn receive(
         "instance": scope::summary(&connection),
         "setup": setup_scope.is_some(),
     });
-    let scope = setup_scope.unwrap_or_else(|| Scope::Ingress(Box::new(connection)));
+    let scope = setup_scope.unwrap_or_else(|| {
+        Scope::Ingress(
+            Box::new(connection),
+            Arc::new(scope::LocalAuthority::for_package(&approved)),
+        )
+    });
     // A one-shot handler includes capability RPC futures. Keep its state on the
     // heap so nested public HTTP delivery does not grow the caller's stack.
-    let value = Box::pin(scope::invoke(s, &package, "webhook", payload, &scope)).await?;
+    let value = Box::pin(scope::invoke(s, package, "webhook", payload, &scope)).await?;
     if !matches!(scope, Scope::Setup(_)) {
         s.store
             .read(move |db| connections::authorize(db, &expected))
             .await?;
     }
-    let active = registry::active(s, &package.manifest.id).await?;
-    if active.digest != package.digest {
-        return Err(Error::forbidden("The plugin approval changed."));
-    }
+    approved.recheck(s).await?;
     response(&value)
 }
 

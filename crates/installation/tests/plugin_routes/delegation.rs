@@ -1,3 +1,5 @@
+use crate::common::AgentFixture;
+
 use super::*;
 
 pub(super) async fn running_turn(s: &Service, chat: &str) -> (Value, String) {
@@ -89,7 +91,7 @@ async fn delegated_source(check: SourceCheck) {
     let (origin, controller_server) = common::serve_locally(controller).await;
     let (_root, s, instance, resource, app) = configured_fixture_with_runner(None, &origin).await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Routed delegator", "access": { "projects": [], "delegation": true },
             }),
@@ -98,7 +100,7 @@ async fn delegated_source(check: SourceCheck) {
         .await
         .unwrap();
     let reviewer = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Other agent", "access": { "projects": [] },
             }),
@@ -403,7 +405,7 @@ async fn delegated_source(check: SourceCheck) {
 async fn delegation_cannot_borrow_another_agents_granular_resource_grants() {
     let (_root, s, instance, resource, app) = fixture().await;
     let parent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Requester without resources", "access": { "delegation": true },
             }),
@@ -412,7 +414,7 @@ async fn delegation_cannot_borrow_another_agents_granular_resource_grants() {
         .await
         .unwrap();
     let target = s
-        .agent(json!({ "name": "Granted reviewer" }), None)
+        .agent_fixture(json!({ "name": "Granted reviewer" }), None)
         .await
         .unwrap();
     let grants =
@@ -576,7 +578,7 @@ async fn delegation_cannot_borrow_another_agents_granular_resource_grants() {
 async fn altered_route_approvals_do_not_gain_implicit_delegation_defaults() {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(json!({ "name": "Existing routed agent" }), None)
+        .agent_fixture(json!({ "name": "Existing routed agent" }), None)
         .await
         .unwrap();
     let route = create_route(
@@ -619,9 +621,11 @@ async fn altered_route_approvals_do_not_gain_implicit_delegation_defaults() {
     );
 
     // Adding the real power cannot repair the incomplete approval implicitly.
-    let mut changed = s.get("agents", text(&agent, "id")).await.unwrap();
+    let mut changed = s.agent_snapshot(text(&agent, "id")).await.unwrap();
     changed["access"]["delegation"] = json!(true);
-    s.agent(changed, Some(text(&agent, "id"))).await.unwrap();
+    s.agent_fixture(changed, Some(text(&agent, "id")))
+        .await
+        .unwrap();
     let mut event = event;
     event["id"] = json!("new-delegation-power");
     let denied = deliver(&app, &instance, event).await;
@@ -649,7 +653,7 @@ async fn delegated_scope_unions_cover_combinations_without_filling_permission_ho
         .await
         .unwrap();
     let parent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Two scoped rules", "access": { "delegation": true },
             }),
@@ -658,7 +662,7 @@ async fn delegated_scope_unions_cover_combinations_without_filling_permission_ho
         .await
         .unwrap();
     let target = s
-        .agent(json!({ "name": "Both dimensions" }), None)
+        .agent_fixture(json!({ "name": "Both dimensions" }), None)
         .await
         .unwrap();
     let grants =

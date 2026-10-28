@@ -34,6 +34,135 @@ fn main() {
     export::<ListProjectsOutput>(root, &mut generator, Contract::Serialize);
     export::<Project>(root, &mut generator, Contract::Serialize);
     export::<DeleteProjectOutput>(root, &mut generator, Contract::Serialize);
+    export::<CreateAgentInput>(root, &mut generator, Contract::Deserialize);
+    export::<ReplaceAgentInput>(root, &mut generator, Contract::Deserialize);
+    export::<SetAgentAvatarInput>(root, &mut generator, Contract::Deserialize);
+    export::<AgentInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListAgentsInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListAgentsOutput>(root, &mut generator, Contract::Serialize);
+    export::<Agent>(root, &mut generator, Contract::Serialize);
+    export::<DeleteAgentOutput>(root, &mut generator, Contract::Serialize);
+    export::<AvatarConfiguration>(root, &mut generator, Contract::Serialize);
+    export::<AgentPreview>(root, &mut generator, Contract::Serialize);
+    export::<MergeAgentsInput>(root, &mut generator, Contract::Deserialize);
+    export::<MergeAgentsOutput>(root, &mut generator, Contract::Serialize);
+    let clients = serde_json::json!([
+        {
+            "name": "setAgentAvatar",
+            "input": "SetAgentAvatarInput",
+            "output": "Agent",
+            "method": "POST",
+            "path": "/agents/{agentId}/avatar/upload"
+        },
+        {
+            "name": "listAgents",
+            "input": "ListAgentsInput",
+            "output": "ListAgentsOutput",
+            "method": "GET",
+            "path": "/agents"
+        },
+        {
+            "name": "getAgent",
+            "input": "AgentInput",
+            "output": "Agent",
+            "method": "GET",
+            "path": "/agents/{agentId}"
+        },
+        {
+            "name": "createAgent",
+            "input": "CreateAgentInput",
+            "output": "Agent",
+            "method": "POST",
+            "path": "/agents"
+        },
+        {
+            "name": "replaceAgent",
+            "input": "ReplaceAgentInput",
+            "output": "Agent",
+            "method": "PUT",
+            "path": "/agents/{agentId}"
+        },
+        {
+            "name": "deleteAgent",
+            "input": "AgentInput",
+            "output": "DeleteAgentOutput",
+            "method": "DELETE",
+            "path": "/agents/{agentId}"
+        },
+        {
+            "name": "previewAgent",
+            "input": "ReplaceAgentInput",
+            "output": "AgentPreview",
+            "method": "POST",
+            "path": "/agents/{agentId}/preview"
+        },
+        {
+            "name": "mergeAgents",
+            "input": "MergeAgentsInput",
+            "output": "MergeAgentsOutput",
+            "method": "POST",
+            "path": "/agents/{sourceId}/merge"
+        },
+        {
+            "name": "getAgentAvatarConfiguration",
+            "input": "ListAgentsInput",
+            "output": "AvatarConfiguration",
+            "method": "GET",
+            "path": "/agent-avatars"
+        },
+        {
+            "name": "generateAgentAvatar",
+            "input": "AgentInput",
+            "output": "Agent",
+            "method": "POST",
+            "path": "/agents/{agentId}/avatar/generate"
+        },
+    ]);
+    fs::write(
+        root.join("agent-clients.json"),
+        serde_json::to_string_pretty(&clients).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let agents: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/agent-contracts.json")).unwrap();
+    let creates: Vec<CreateAgentInput> = agents["creates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| serde_json::from_value(value.clone()).unwrap())
+        .collect();
+    let views: Vec<Agent> = creates
+        .iter()
+        .enumerate()
+        .map(|(index, input)| Agent {
+            id: AgentId(uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap()),
+            settings: input.settings.clone(),
+            revision: "profile-revision".into(),
+            created_at: 9007199254740991,
+            avatar: if index == 0 {
+                None
+            } else {
+                Some(AgentAvatar {
+                    status: if index == 1 { "generating" } else { "failed" }.into(),
+                    revision: "avatar-revision".into(),
+                    url: None,
+                    error: if index == 2 {
+                        Some("Portrait generation was interrupted. You can try again.".into())
+                    } else {
+                        None
+                    },
+                })
+            },
+        })
+        .collect();
+    fs::write(
+        root.join("agent-wire.json"),
+        serde_json::to_string_pretty(&serde_json::json!({ "creates": creates, "views": views }))
+            .unwrap()
+            + "\n",
+    )
+    .unwrap();
     let projects: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/project-contracts.json"
     ))

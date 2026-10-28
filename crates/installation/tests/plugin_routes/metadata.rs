@@ -1,3 +1,5 @@
+use crate::common::AgentFixture;
+
 use super::*;
 
 use super::management;
@@ -84,7 +86,7 @@ async fn refused(s: &Arc<Service>, configuration: &Value, name: &str, args: Valu
 async fn after_revocation(surface: Surface, during_read: bool, change: Change) {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Metadata manager", "access": {"projects": [], "installation": true},
             }),

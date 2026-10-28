@@ -1,4 +1,6 @@
 //! Admission fixtures use the real package and native authority; no work is completed synthetically.
+use crate::common::AgentFixture;
+
 use super::*;
 
 #[tokio::test]
@@ -76,7 +78,7 @@ async fn app_binding(scenario: AppBinding) {
     } else {
         configure(&app, &service).await
     };
-    let agent = service.agent(json!({
+    let agent = service.agent_fixture(json!({
         "name": "App binding", "access": {"projects": [], "skills": [], "mcps": [], "installation": false},
     }), None).await.unwrap();
     save(&app, &format!("/api/plugins/slack/connections/{}/resources/workspace/{}/routes", text(&instance,"id"), text(&resource,"id")), json!({
@@ -325,7 +327,7 @@ async fn transient_json_metadata_keeps_http_mentions_retryable() {
         .unwrap();
     let (instance, resource) = configure(&app, &service).await;
     let agent = service
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Read retry",
                 "access": { "projects": [], "skills": [], "mcps": [], "installation": false },
@@ -449,7 +451,7 @@ pub(super) async fn stale_second_route(app: &Router, service: &Arc<Service>, bas
     )
     .await;
     let agent = service
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Agent requiring reapproval",
                 "access": { "projects": [], "skills": [], "mcps": [], "installation": false },
@@ -476,7 +478,7 @@ pub(super) async fn stale_second_route(app: &Router, service: &Arc<Service>, bas
     let mut changed = agent.clone();
     changed["access"]["installation"] = json!(true);
     service
-        .agent(changed, Some(text(&agent, "id")))
+        .agent_fixture(changed, Some(text(&agent, "id")))
         .await
         .unwrap();
 }
@@ -500,7 +502,7 @@ async fn request_age_uses_receipt_time_even_when_an_older_signature_is_still_val
         .unwrap();
     let (instance, resource) = configure(&app, &service).await;
     let agent = service
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Age check",
                 "access": { "projects": [], "skills": [], "mcps": [], "installation": false },

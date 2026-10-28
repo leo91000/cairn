@@ -1,7 +1,7 @@
 # Slack foundations: current data contracts
 
-The integration follows Main `978faf70`, retaining the data contract introduced
-by `40a59561`: the installation reads only database version **2**. Previous installation versions are not
+The integration follows Main `5a6552b8`, including its typed-agent data contract:
+the installation reads only database version **3**. Previous installation versions are not
 migrated or opened as current data. Manager, runner, nodes and guests must use the
 same release. The next production release requires an owner-authorized complete
 reinstallation under [the production runbook](PRODUCTION-CAIRN.md#réinstallation-complète).

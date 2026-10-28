@@ -185,8 +185,11 @@ fn target_agent(
     let agent_id = input["agentId"]
         .as_str()
         .unwrap_or_else(|| text(requesting, "id"));
-    let current = required(db.get("agents", text(requesting, "id"))?, "Agent not found")?;
-    let agent = required(db.get("agents", agent_id)?, "Agent not found")?;
+    let current = required(
+        db.agent_snapshot(text(requesting, "id"))?,
+        "Agent not found",
+    )?;
+    let agent = required(db.agent_snapshot(agent_id)?, "Agent not found")?;
     let current_access = policy(&current);
     let target_access = policy(&agent);
     let nodes = current_access["nodes"].is_null()

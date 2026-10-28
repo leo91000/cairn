@@ -1,4 +1,6 @@
 //! Exercise security boundaries where the two plugin API families meet.
+use crate::common::AgentFixture;
+
 use super::*;
 
 #[tokio::test]
@@ -175,7 +177,7 @@ async fn plugin_management_retains_the_chat_members_original_access_generation()
     )
     .await
     .unwrap();
-    s.agent(
+    s.agent_fixture(
         json!({"name": "Main agent", "access": {"installation": true}}),
         Some(MAIN_AGENT_ID),
     )

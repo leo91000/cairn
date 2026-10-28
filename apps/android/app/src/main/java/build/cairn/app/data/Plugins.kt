@@ -626,11 +626,14 @@ fun Agent.delegationRisks(
         add("utiliser ses plugins, comme GitHub ou 1Password")
 }
 
-/** Configurer un bot ne prouve jamais l'identité de son auteur sur la machine. */
-fun Agent.externalBotExecutionWarning(): String? =
-    if (access.backend == "native")
-        "Les messages externes ne peuvent pas démarrer de travail avec un agent natif car ils ne portent pas d'identité Cairn vérifiée pour la machine. Choisissez un agent isolé pour ce bot."
-    else null
+/** Une instance exige la délégation du propriétaire ; une route ne la conserve pas encore. */
+fun Agent.externalBotExecutionWarning(resourceRoute: Boolean = false): String? {
+    if (access.backend != "native") return null
+    return if (resourceRoute)
+        "Les messages externes ne peuvent pas démarrer de travail avec un agent natif car cette route n'a pas de délégation native. Choisissez un agent isolé pour cette route."
+    else
+        "L'exécution de ce bot avec un agent natif exige une délégation native actuelle du propriétaire de l'installation. Enregistrez ou approuvez de nouveau le bot en tant que propriétaire pour conserver cette délégation."
+}
 
 /** `a, b et c`. */
 fun listed(items: List<String>): String =

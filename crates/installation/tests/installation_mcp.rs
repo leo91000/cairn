@@ -1,19 +1,19 @@
+use common::AgentFixture;
 use common::ProjectFixture;
 
 mod common;
 #[path = "common/management.rs"]
 mod management;
 
-use management::{active_run, call, enabled_main, public_call, request, result, service};
+use management::{
+    active_run, call, create_profile, enabled_main, public_call, replacement, request, result,
+    service,
+};
 
 use axum::{body::Body, http::StatusCode};
 use cairn_installation::{
-    auth::hex_digest,
-    config::MAIN_AGENT_ID,
-    mcps::channel,
-    run_status::RunStatus,
-    service::Service,
-    validation::{parse, text},
+    auth::hex_digest, config::MAIN_AGENT_ID, mcps::channel, run_status::RunStatus,
+    service::Service, validation::text,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -303,7 +303,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
     .await;
     assert_eq!(denied["result"]["isError"], true, "{denied}");
     assert!(denied["result"]["_meta"]["mcp/www_authenticate"].is_string());
-    s.agent(
+    s.agent_fixture(
         json!({ "name": "Main agent", "access": { "installation": false } }),
         Some(MAIN_AGENT_ID),
     )
@@ -435,7 +435,7 @@ async fn node_storage_controls_share_probes_persistence_and_permissions_across_b
     )
     .await;
     assert_eq!(denied["result"]["isError"], true, "{denied}");
-    s.agent(
+    s.agent_fixture(
         json!({ "name": "Main agent", "access": { "installation": false } }),
         Some(MAIN_AGENT_ID),
     )
@@ -479,21 +479,17 @@ async fn agent_catalog_accepts_current_providers_and_reasoning_through_native_mc
         &s,
         &configuration,
         "search",
-        json!({ "names": ["save_agent", "update_agent"], "detail": "schema" }),
+        json!({ "names": ["save_agent", "replace_agent"], "detail": "schema" }),
     )
     .await;
     let operations = result(&catalog)["operations"].as_array().unwrap();
     assert_eq!(operations.len(), 2);
-    for name in ["save_agent", "update_agent"] {
+    for name in ["save_agent", "replace_agent"] {
         let tool = operations.iter().find(|tool| tool["name"] == name).unwrap();
-        let schema = if name == "save_agent" {
-            &tool["inputSchema"]
-        } else {
-            &tool["inputSchema"]["properties"]["agent"]
-        };
+        let schema = &tool["inputSchema"]["definitions"]["AgentSettings"];
         assert_eq!(
-            schema["properties"]["provider"]["enum"],
-            json!(["codex", "claude", "opencode"])
+            schema["properties"]["provider"]["pattern"],
+            json!("^(codex|claude|opencode)$")
         );
         assert!(schema["properties"]["reasoning"].get("enum").is_none());
     }
@@ -532,7 +528,7 @@ async fn agent_catalog_accepts_current_providers_and_reasoning_through_native_mc
             }
         );
         assert_eq!(
-            s.get("agents", agent["id"].as_str().unwrap())
+            s.agent_snapshot(agent["id"].as_str().unwrap())
                 .await
                 .unwrap()["provider"],
             provider
@@ -555,31 +551,31 @@ async fn agent_catalog_accepts_current_providers_and_reasoning_through_native_mc
 }
 
 #[tokio::test]
-async fn agent_updates_preserve_omitted_settings_and_accept_new_engine_settings() {
+async fn agent_replacements_keep_explicit_settings_and_accept_new_engine_settings() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let main = enabled_main(&s).await;
     let (_, configuration) = active_run(&s, &main).await;
-    let saved = call(
-        &s,
-        &configuration,
-        "save_agent",
-        json!({
-            "name": "Restricted Claude",
-            "provider": "claude",
-            "reasoning": "max",
-            "model": "claude-opus-4-6",
-            "instructions": "Preserve these settings",
-            "timeoutMinutes": 37,
-            "access": { "nodes": [], "installation": true },
-        }),
-    )
-    .await;
-    let original = result(&saved);
+    let saved = s
+        .agent_fixture(
+            json!({
+                "name": "Restricted Claude",
+                "provider": "claude",
+                "reasoning": "max",
+                "model": "claude-opus-4-6",
+                "instructions": "Preserve these settings",
+                "timeoutMinutes": 37,
+                "access": { "nodes": [], "installation": true },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let original = &saved;
     let updated = call(
         &s,
         &configuration,
-        "update_agent",
+        "replace_agent",
         json!({
             "id": original["id"],
             "agent": { "description": "New description" },
@@ -601,7 +597,7 @@ async fn agent_updates_preserve_omitted_settings_and_accept_new_engine_settings(
     let updated = call(
         &s,
         &configuration,
-        "update_agent",
+        "replace_agent",
         json!({
             "id": original["id"],
             "agent": {
@@ -622,7 +618,7 @@ async fn agent_updates_preserve_omitted_settings_and_accept_new_engine_settings(
     let updated = call(
         &s,
         &configuration,
-        "update_agent",
+        "replace_agent",
         json!({
             "id": original["id"],
             "agent": { "reasoning": "" },
@@ -638,13 +634,13 @@ async fn agent_updates_preserve_omitted_settings_and_accept_new_engine_settings(
         json!({ "reasoning": "INVALID" }),
     ] {
         let before = s
-            .get("agents", original["id"].as_str().unwrap())
+            .agent_snapshot(original["id"].as_str().unwrap())
             .await
             .unwrap();
         let rejected = call(
             &s,
             &configuration,
-            "update_agent",
+            "replace_agent",
             json!({
                 "id": original["id"],
                 "agent": patch,
@@ -653,7 +649,7 @@ async fn agent_updates_preserve_omitted_settings_and_accept_new_engine_settings(
         .await;
         assert_eq!(rejected["result"]["isError"], true, "{rejected}");
         assert_eq!(
-            s.get("agents", original["id"].as_str().unwrap())
+            s.agent_snapshot(original["id"].as_str().unwrap())
                 .await
                 .unwrap(),
             before
@@ -701,7 +697,7 @@ async fn model_speeds_and_agent_speeds_match_public_mcp_and_installation_tools()
     let kept = public_call(
         &s,
         &["manage"],
-        "update_agent",
+        "replace_agent",
         json!({ "id": agent["id"], "agent": { "description": "Keeps its speed" } }),
     )
     .await;
@@ -709,7 +705,7 @@ async fn model_speeds_and_agent_speeds_match_public_mcp_and_installation_tools()
     let standard = call(
         &s,
         &configuration,
-        "update_agent",
+        "replace_agent",
         json!({ "id": agent["id"], "agent": { "speed": "standard" } }),
     )
     .await;
@@ -727,7 +723,7 @@ async fn model_speeds_and_agent_speeds_match_public_mcp_and_installation_tools()
     let rejected = call(
         &s,
         &configuration,
-        "update_agent",
+        "replace_agent",
         json!({ "id": agent["id"], "agent": { "provider": "claude", "speed": "priority" } }),
     )
     .await;
@@ -735,8 +731,8 @@ async fn model_speeds_and_agent_speeds_match_public_mcp_and_installation_tools()
     let switched = call(
         &s,
         &configuration,
-        "update_agent",
-        json!({ "id": agent["id"], "agent": { "provider": "claude", "reasoning": "max" } }),
+        "replace_agent",
+        json!({ "id": agent["id"], "agent": { "provider": "claude", "reasoning": "max", "speed": "" } }),
     )
     .await;
     assert_eq!(result(&switched)["provider"], "claude");
@@ -785,10 +781,10 @@ async fn model_speeds_and_agent_speeds_match_public_mcp_and_installation_tools()
 }
 
 #[tokio::test]
-async fn installation_access_is_opt_in_and_older_profile_updates_preserve_it() {
+async fn installation_access_is_opt_in_and_complete_profile_replacements_preserve_it() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
-    let main = s.get("agents", MAIN_AGENT_ID).await.unwrap();
+    let main = s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
     let (_, disabled) = active_run(&s, &main).await;
     assert!(disabled["codexConfig"].get("cairn_installation").is_none());
     assert!(
@@ -809,7 +805,7 @@ async fn installation_access_is_opt_in_and_older_profile_updates_preserve_it() {
     );
     assert!(configuration.get("claudeMcps").is_none());
     let claude = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Claude", "provider": "claude",
                 "access": { "installation": true },
@@ -834,19 +830,13 @@ async fn installation_access_is_opt_in_and_older_profile_updates_preserve_it() {
             .contains(&json!(token))
     );
     let saved = s
-        .agent(
+        .agent_fixture(
             json!({ "name": "Older editor", "access": { "nodes": null } }),
             Some(MAIN_AGENT_ID),
         )
         .await
         .unwrap();
     assert_eq!(saved["access"]["installation"], true);
-    let update = parse(
-        "mcp:update_agent",
-        json!({ "id": MAIN_AGENT_ID, "agent": { "access": {} } }),
-    )
-    .unwrap();
-    assert!(update["agent"]["access"].get("installation").is_none());
     assert_eq!(
         request(&s, token, "tools/list", json!({})).await.0,
         StatusCode::OK
@@ -912,6 +902,16 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         .collect();
     public_names.insert(cairn_contracts::RESUME_RUN_ID);
     public_names.extend([
+        "set_agent_avatar",
+        "list_agents",
+        "get_agent",
+        "save_agent",
+        "replace_agent",
+        "preview_agent",
+        "merge_agents",
+        "delete_agent",
+        "get_agent_avatar_configuration",
+        "generate_agent_avatar",
         "list_projects",
         "get_project",
         "save_project",
@@ -1019,7 +1019,7 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
     let main = enabled_main(&s).await;
     let (_, configuration) = active_run(&s, &main).await;
     let agent = s
-        .agent(json!({ "name": "Retired maintainer" }), None)
+        .agent_fixture(json!({ "name": "Retired maintainer" }), None)
         .await
         .unwrap();
     let id = agent["id"].as_str().unwrap();
@@ -1060,7 +1060,7 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
 
     let deleted = call(&s, &configuration, "delete_agent", json!({ "id": id })).await;
     assert_eq!(result(&deleted)["deleted"], true);
-    assert!(s.store.get("agents", id).await.unwrap().is_none());
+    assert!(s.store.agent_snapshot(id).await.unwrap().is_none());
     assert!(
         s.store
             .kv(&format!("agent-avatar:{id}"))
@@ -1104,7 +1104,7 @@ async fn delete_agent_rejects_main_task_references_and_active_work() {
     );
 
     let agent = s
-        .agent(json!({ "name": "Assigned maintainer" }), None)
+        .agent_fixture(json!({ "name": "Assigned maintainer" }), None)
         .await
         .unwrap();
     let id = agent["id"].as_str().unwrap();
@@ -1141,7 +1141,7 @@ async fn delete_agent_rejects_main_task_references_and_active_work() {
         busy["result"]["content"][0]["text"],
         "This item has active work. Cancel or wait for the run first."
     );
-    assert!(s.store.get("agents", id).await.unwrap().is_some());
+    assert!(s.store.agent_snapshot(id).await.unwrap().is_some());
 }
 
 #[tokio::test]
@@ -1151,7 +1151,7 @@ async fn delete_agent_cannot_use_a_revoked_installation_grant() {
     let main = enabled_main(&s).await;
     let (run, configuration) = active_run(&s, &main).await;
     let agent = s
-        .agent(json!({ "name": "Keep this profile" }), None)
+        .agent_fixture(json!({ "name": "Keep this profile" }), None)
         .await
         .unwrap();
     s.mcps
@@ -1167,14 +1167,14 @@ async fn delete_agent_cannot_use_a_revoked_installation_grant() {
         "tools/call",
         json!({
             "name": "delete_agent",
-            "arguments": { "id": agent["id"] },
+            "arguments": { "agentId": agent["id"] },
         }),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(
         s.store
-            .get("agents", agent["id"].as_str().unwrap())
+            .agent_snapshot(agent["id"].as_str().unwrap())
             .await
             .unwrap()
             .is_some()
@@ -1188,7 +1188,7 @@ async fn merge_agents_cannot_use_a_revoked_installation_grant() {
     let main = enabled_main(&s).await;
     let (run, configuration) = active_run(&s, &main).await;
     let agent = s
-        .agent(json!({ "name": "Keep this profile" }), None)
+        .agent_fixture(json!({ "name": "Keep this profile" }), None)
         .await
         .unwrap();
     s.mcps
@@ -1213,7 +1213,7 @@ async fn merge_agents_cannot_use_a_revoked_installation_grant() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(
         s.store
-            .get("agents", agent["id"].as_str().unwrap())
+            .agent_snapshot(agent["id"].as_str().unwrap())
             .await
             .unwrap()
             .is_some()
@@ -1224,10 +1224,10 @@ async fn merge_agents_cannot_use_a_revoked_installation_grant() {
 async fn installation_access_manages_resources_and_other_agents_work() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
-    let main = s.get("agents", MAIN_AGENT_ID).await.unwrap();
+    let main = s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
     let (foreign, _) = active_run(&s, &main).await;
     let manager = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Manager",
                 "access": {
@@ -1235,7 +1235,6 @@ async fn installation_access_manages_resources_and_other_agents_work() {
                     "projects": [],
                     "skills": [],
                     "mcps": [],
-                    "github": false,
                     "sandbox": "read-only"
                 }
             }),
@@ -1256,7 +1255,7 @@ async fn installation_access_manages_resources_and_other_agents_work() {
     let updated = call(
         &s,
         &configuration,
-        "update_agent",
+        "replace_agent",
         json!({
             "id": agent["id"],
             "agent": { "description": "Updated through MCP" }
@@ -1266,7 +1265,7 @@ async fn installation_access_manages_resources_and_other_agents_work() {
     assert_eq!(result(&updated)["description"], "Updated through MCP");
     let agents = call(&s, &configuration, "list_agents", json!({})).await;
     assert!(
-        result(&agents)
+        result(&agents)["agents"]
             .as_array()
             .unwrap()
             .iter()
@@ -1429,15 +1428,14 @@ async fn installation_access_can_save_global_and_project_skills() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let manager = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Skill author",
                 "access": {
                     "installation": true,
                     "projects": [],
                     "skills": [],
-                    "github": false
-                }
+                    }
             }),
             None,
         )
@@ -1700,7 +1698,7 @@ async fn run_grants_enforce_revocation_completion_and_chat_turn_binding() {
         .patch_run(id, json!({ "chatExecution": null }))
         .await
         .unwrap();
-    s.agent(
+    s.agent_fixture(
         json!({ "name": "Main", "access": { "installation": false } }),
         Some(MAIN_AGENT_ID),
     )
@@ -2399,9 +2397,9 @@ async fn chat_tools_preserve_scopes_caller_defaults_and_revocation() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
-                "name": "Delegated manager", "access": { "installation": true, "projects": [], "github": false },
+                "name": "Delegated manager", "access": { "installation": true, "projects": [] },
             }),
             None,
         )
@@ -2922,16 +2920,16 @@ async fn code_mode_checks_each_operations_scopes_and_revocation_without_rolling_
         "execute",
         json!({
             "code": r#"
-            await cairn.update_agent(input);
+            await cairn.replace_agent(input);
             return await cairn.list_chats({});
         "#,
-            "input": { "id": MAIN_AGENT_ID, "agent": { "access": access } },
+            "input": replacement(&s, json!({ "id": MAIN_AGENT_ID, "agent": { "access": access } })).await,
         }),
     )
     .await;
     assert_eq!(revoked["result"]["isError"], true);
     let agents = public_call(&s, &["read"], "list_agents", json!({})).await;
-    let main = result(&agents)
+    let main = result(&agents)["agents"]
         .as_array()
         .unwrap()
         .iter()
@@ -3014,7 +3012,7 @@ async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
     .unwrap();
     let account = account["id"].clone();
     let manager = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Manager",
                 "access": { "installation": true },
@@ -3030,7 +3028,7 @@ async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
     call(
         &s,
         &configuration,
-        "update_agent",
+        "replace_agent",
         json!({
             "id": manager["id"],
             "agent": { "description": "Edited", "plugins": [], "exclusiveNodes": [] }
@@ -3038,7 +3036,7 @@ async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
     )
     .await;
     let stored = s
-        .get("agents", manager["id"].as_str().unwrap())
+        .agent_snapshot(manager["id"].as_str().unwrap())
         .await
         .unwrap();
     assert_eq!(stored["plugins"], json!([account]));
@@ -3051,7 +3049,7 @@ async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
     )
     .await;
     // The published contract has no live grants: the request is refused or ignored.
-    let agents = s.store.list("agents").await.unwrap();
+    let agents = s.store.agent_snapshots().await.unwrap();
     for agent in agents.iter().filter(|agent| agent["id"] != manager["id"]) {
         assert_eq!(agent["plugins"], json!([]), "{created}");
     }
@@ -3092,7 +3090,7 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
         .unwrap();
     // Neither caller has a traced native host grant. Management access alone
     // must not allow the migration to manufacture that authority.
-    let profile = s.agent(json!({ "name": "Native destination", "access": { "backend": "native", "nodes": [node] } }), None).await.unwrap();
+    let profile = s.agent_fixture(json!({ "name": "Native destination", "access": { "backend": "native", "nodes": [node] } }), None).await.unwrap();
     let mut previous = profile.clone();
     previous["access"]["backend"] = "firecracker".into();
     common::add_run(&s.store, &json!({ "id": run, "taskId": "fixture", "status": "succeeded", "createdAt": 0, "snapshot": { "agent": previous } })).await;
@@ -3145,7 +3143,7 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
     .await;
     assert_eq!(denied["result"]["isError"], true);
     assert!(denied["result"]["_meta"]["mcp/www_authenticate"].is_string());
-    s.agent(
+    s.agent_fixture(
         json!({ "name": "Main agent", "access": { "installation": false } }),
         Some(MAIN_AGENT_ID),
     )
@@ -3338,7 +3336,7 @@ async fn plugin_selector_reads_match_owner_ui_public_mcp_and_installation_tool()
         }
     }
     // Reducing installation access invalidates the same tool, independently of saved plugin rules.
-    s.agent(
+    s.agent_fixture(
         json!({ "name": "Main agent", "access": { "installation": false } }),
         Some(MAIN_AGENT_ID),
     )
@@ -3414,10 +3412,10 @@ async fn full_instance_membership_is_readable_through_ui_and_both_management_too
             let mut root_agents = Vec::new();
             for n in 0..100 {
                 let agent = id();
-                db.put(
-                    "agents",
-                    &json!({"id":agent,"name":format!("Root agent {n}")}),
+                let profile = common::agent_fixture::profile(
+                    json!({"id":agent,"name":format!("Root agent {n}")}),
                 )?;
+                db.save_agent(&profile)?;
                 root_agents.push(agent);
             }
             let mut instance = db.get(connections::KIND, &large_for_write)?.unwrap();
@@ -3434,10 +3432,10 @@ async fn full_instance_membership_is_readable_through_ui_and_both_management_too
             }))?;
                 for n in 0..64 {
                     let agent = id();
-                    db.put(
-                        "agents",
-                        &json!({"id":agent,"name":format!("Resource agent {r}/{n}")}),
+                    let profile = common::agent_fixture::profile(
+                        json!({"id":agent,"name":format!("Resource agent {r}/{n}")}),
                     )?;
+                    db.save_agent(&profile)?;
                     db.put("plugin-resource-grants", &json!({
                     "id":id(),"connectionId":large_for_write,"resourceId":resource,"agentId":agent,
                     "profile":"read","operations":[],"deniedOperations":[],"scopes":{},
@@ -3576,7 +3574,7 @@ async fn waiting_missions_are_visible_and_cancellable_through_both_installation_
 }
 
 #[tokio::test]
-async fn owner_mcp_can_review_one_wildcard_administrator_node_without_broadening_other_admission() {
+async fn neither_agent_interface_can_review_an_administrator_node() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let main = enabled_main(&s).await;
@@ -3587,7 +3585,7 @@ async fn owner_mcp_can_review_one_wildcard_administrator_node_without_broadening
     let owner_token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
     let app = common::relay_fixture::router(s.clone()).await.unwrap();
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({ "name": "Wildcard native", "access": { "backend": "native", "nodes": null } }),
             None,
         )
@@ -3603,12 +3601,16 @@ async fn owner_mcp_can_review_one_wildcard_administrator_node_without_broadening
         })).await.unwrap();
         nodes.push(node);
     }
-    let args = json!({ "id": agent["id"], "agent": { "nativeNodeReviews": [nodes[0]] } });
+    let args = replacement(
+        &s,
+        json!({ "id": agent["id"], "agent": { "nativeNodeReviews": [nodes[0]] } }),
+    )
+    .await;
     let (_, denied) = node_management_call(
         &app,
         "/mcp-installation",
         agent_token,
-        "update_agent",
+        "replace_agent",
         args.clone(),
     )
     .await;
@@ -3620,22 +3622,10 @@ async fn owner_mcp_can_review_one_wildcard_administrator_node_without_broadening
             .is_empty()
     );
     let (_, response) =
-        node_management_call(&app, "/mcp", &owner_token, "update_agent", args).await;
-    let saved = result(&response);
-    assert_eq!(saved["id"], agent["id"], "{response}");
-    assert!(
-        saved["access"]["nodes"].is_null(),
-        "Scoped review must preserve wildcard placement"
-    );
-    assert!(saved["nativeNodeReviews"].is_null());
+        node_management_call(&app, "/mcp", &owner_token, "replace_agent", args).await;
+    assert_eq!(response["result"]["isError"], true, "{response}");
     assert!(
         s.get("nodes", &nodes[0]).await.unwrap()["nativeReviewedAgents"]
-            .as_array()
-            .unwrap()
-            .contains(&agent["id"])
-    );
-    assert!(
-        s.get("nodes", &nodes[1]).await.unwrap()["nativeReviewedAgents"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -3810,7 +3800,7 @@ async fn concurrent_resume_run_publishes_once_and_a_revoked_grant_cannot_resume(
         1
     );
     s.worker.cancel(&s, id).await.unwrap();
-    s.agent(
+    s.agent_fixture(
         json!({ "name": "Main agent", "access": { "installation": false } }),
         Some(MAIN_AGENT_ID),
     )
@@ -3940,5 +3930,186 @@ async fn typed_project_lifecycle_has_the_same_contract_on_both_tools() {
         )
         .await;
         assert_eq!(missing["result"]["isError"], true);
+    }
+}
+
+#[tokio::test]
+async fn typed_agent_profiles_preview_and_avatars_match_on_both_tools() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let connection = s.mcps.save(&s, json!({
+        "name": "Selected tools", "transport": "http", "url": "http://127.0.0.1:9/mcp", "allowPrivateNetwork": true,
+    }), None).await.unwrap();
+    let connection_id = connection["id"].as_str().unwrap();
+    for installation in [false, true] {
+        let invoke = |name, args| {
+            let configuration = &configuration;
+            let s = &s;
+            let token = &token;
+            let app = &app;
+            async move {
+                if installation {
+                    call(s, configuration, name, args).await
+                } else {
+                    let (status, response) =
+                        node_management_call(app, "/mcp", token, name, args).await;
+                    assert_eq!(status, StatusCode::OK);
+                    response
+                }
+            }
+        };
+        let malformed: Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/agent-contracts.json"))
+                .unwrap();
+        for command in malformed["invalidCreates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .skip(7)
+        {
+            let rejected = invoke("save_agent", command.clone()).await;
+            assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+        }
+        let command = create_profile(json!({ "name": "Typed profile" }));
+        let created = invoke("save_agent", command).await;
+        let created: cairn_contracts::Agent =
+            serde_json::from_value(result(&created).clone()).unwrap();
+        let settings = created.settings.clone();
+        let replacing = cairn_contracts::ReplaceAgentInput {
+            agent_id: created.id,
+            revision: created.revision.clone(),
+            settings: settings.clone(),
+            review: cairn_contracts::AgentReview::default(),
+        };
+        // Creation starts avatar work independently. Settle it before observing preview writes.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let profile = s
+                    .store
+                    .agent(&created.id.to_string())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if profile
+                    .avatar
+                    .as_ref()
+                    .is_none_or(|avatar| avatar.status != "generating")
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let before = s.store.revision();
+        let preview = invoke("preview_agent", serde_json::to_value(&replacing).unwrap()).await;
+        let preview: cairn_contracts::AgentPreview =
+            serde_json::from_value(result(&preview).clone()).unwrap();
+        assert_eq!(preview.runs.queued + preview.runs.running, 0);
+        assert!(preview.delegations.is_empty());
+        assert_eq!(
+            s.store.revision(),
+            before,
+            "Preview must not write or notify"
+        );
+        let replaced = invoke("replace_agent", serde_json::to_value(&replacing).unwrap()).await;
+        let replaced: cairn_contracts::Agent =
+            serde_json::from_value(result(&replaced).clone()).unwrap();
+        assert_ne!(created.revision, replaced.revision);
+        let stale = invoke("replace_agent", serde_json::to_value(&replacing).unwrap()).await;
+        assert_eq!(stale["result"]["isError"], true);
+        let mut expanded = replacing.clone();
+        expanded.revision = replaced.revision.clone();
+        expanded.settings.access.projects = None;
+        let denied = invoke("replace_agent", serde_json::to_value(expanded).unwrap()).await;
+        assert_eq!(
+            denied["result"]["isError"], true,
+            "An agent cannot expand permissions"
+        );
+        assert_eq!(
+            s.store
+                .agent(&created.id.to_string())
+                .await
+                .unwrap()
+                .unwrap(),
+            replaced
+        );
+        let configured = invoke("get_agent_avatar_configuration", json!({})).await;
+        assert_eq!(result(&configured), &json!({ "configured": false }));
+        let unavailable = invoke("generate_agent_avatar", json!({ "agentId": created.id })).await;
+        assert_eq!(unavailable["result"]["isError"], true);
+        let mut image = include_bytes!("../../../tests/fixtures/artifacts/thumbnail.png").to_vec();
+        image.resize(200_000, 0); // A valid image beyond the ordinary small-command body limit.
+        let uploaded = invoke(
+            "set_agent_avatar",
+            json!({ "agentId": created.id, "data": STANDARD.encode(image) }),
+        )
+        .await;
+        let uploaded: cairn_contracts::Agent =
+            serde_json::from_value(result(&uploaded).clone()).unwrap();
+        assert_eq!(uploaded.avatar.as_ref().unwrap().status, "ready");
+        assert_eq!(
+            uploaded.revision, replaced.revision,
+            "Portrait completion preserves the settings revision"
+        );
+        let read = invoke("get_agent", json!({ "agentId": created.id })).await;
+        assert_eq!(result(&read), &serde_json::to_value(&uploaded).unwrap());
+        // The owner grants a restricted connection. Agents may remove it, but cannot
+        // turn its selected tools into unrestricted tools while retaining the connection.
+        let granted = s
+            .agent_fixture(
+                json!({ "access": {
+            "mcps": [connection_id], "mcpTools": { connection_id: ["read"] },
+        } }),
+                Some(&created.id.to_string()),
+            )
+            .await
+            .unwrap();
+        let granted: cairn_contracts::Agent = serde_json::from_value(granted).unwrap();
+        let mut reduced = cairn_contracts::ReplaceAgentInput {
+            agent_id: granted.id,
+            revision: granted.revision.clone(),
+            settings: granted.settings,
+            review: cairn_contracts::AgentReview::default(),
+        };
+        reduced.settings.access.mcp_tools.clear();
+        let expanded = invoke("replace_agent", serde_json::to_value(&reduced).unwrap()).await;
+        assert_eq!(expanded["result"]["isError"], true, "{expanded}");
+        assert_eq!(
+            s.store
+                .agent(&created.id.to_string())
+                .await
+                .unwrap()
+                .unwrap()
+                .revision,
+            reduced.revision
+        );
+        reduced.settings.access.mcps = Some(Vec::new());
+        let removed = invoke("replace_agent", serde_json::to_value(reduced).unwrap()).await;
+        assert_eq!(result(&removed)["access"]["mcps"], json!([]));
+        assert_eq!(result(&removed)["access"]["mcpTools"], json!({}));
+
+        let deleted = invoke("delete_agent", json!({ "agentId": created.id })).await;
+        assert_eq!(result(&deleted), &json!({ "deleted": true }));
+        assert!(
+            s.store
+                .agent(&created.id.to_string())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            s.store
+                .kv(&format!("agent-avatar:{}", created.id))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

@@ -2,8 +2,7 @@
 package build.cairn.contracts
 
 import build.cairn.app.data.CairnApi
-import build.cairn.app.data.wireJson
 import kotlinx.serialization.json.encodeToJsonElement
 
 suspend fun CairnApi.createProject(input: CreateProjectInput): Project =
-    send("POST", "/projects", wireJson.encodeToJsonElement(input))
+    send("POST", "/projects", contractJson.encodeToJsonElement(input))

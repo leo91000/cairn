@@ -1,3 +1,6 @@
+use common::AgentFixture;
+use common::StoreAgentFixture;
+
 mod common;
 
 use axum::{
@@ -19,6 +22,156 @@ use std::{collections::HashSet, sync::Arc};
 
 const TRUSTED: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const OTHER: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+
+#[tokio::test]
+async fn an_owner_approved_bot_can_submit_to_its_native_agent() {
+    use cairn_installation::plugins::{capabilities, connections, registry, work};
+
+    let f = Fixture::new().await;
+    f.service
+        .plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    let mut node = f.node.clone();
+    node["nativeAccounts"] = json!([TRUSTED, "fixture-owner"]);
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    f.service.store.set("native-authority", json!({
+        "observedAt": now(),
+        "accounts": { "fixture-owner": { "email": "owner@example.test", "accessId": "fixture-owner" } }
+    }), None).await.unwrap();
+    let owner = RelayContext::new(&common::relay_fixture::context(&f.service).await);
+    let input = json!({
+        "name": "Native bot", "enabled": true, "agentId": f.agent["id"],
+        "accessMode": "everyone", "settings": { "guildId": "100", "channelId": "200" },
+        "token": "synthetic-discord-token",
+        "nativeAuthority": { "nativePrincipals": ["fixture-owner"], "nativeProvenanceUnknown": false }
+    });
+    let denied = connections::save(&f.service, "discord", &input, None)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        denied.status, 403,
+        "Unscoped management cannot mint a native bot grant"
+    );
+    let (status, saved) = f
+        .call_as(
+            &owner,
+            "POST",
+            "/api/plugins/discord/connections",
+            input,
+            false,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let connection: connections::Connection = serde_json::from_value(saved).unwrap();
+    let event = json!({
+        "name": "message", "revision": connection.revision, "authorId": "external-person",
+        "payload": { "id": "external-message", "author": { "id": "external-person", "name": "Person" } }
+    });
+    let context = capabilities::Context {
+        management: None,
+        local_authority: None,
+        resource_grant: None,
+        connection: connection.clone(),
+        manifest: registry::builtin("discord").unwrap().manifest,
+        event,
+        link: None,
+        draft: None,
+    };
+    let receipt = work::submit(
+        &f.service,
+        &context,
+        &json!({
+            "text": "Which projects can you access?", "thread": "500", "shared": true
+        }),
+    )
+    .await
+    .expect("The selected native agent must honor the owner's bot delegation");
+    f.service.chat_tick(&HashSet::new()).await.unwrap();
+    let chat = f
+        .service
+        .get("chats", text(&receipt, "chatId"))
+        .await
+        .unwrap();
+    let run = f.service.store.run(text(&chat, "runId")).await.unwrap();
+    assert_eq!(run["nativePrincipals"], json!(["fixture-owner"]));
+    assert_eq!(run["nativeProvenanceUnknown"], false);
+    let check = run.clone();
+    let target = node.clone();
+    assert!(
+        f.service
+            .store
+            .read(move |db| policy::allows(db, &check, &target))
+            .await
+            .unwrap()
+    );
+
+    let original = serde_json::to_value(&connection).unwrap();
+    for (label, field, value) in [
+        ("disabled", "enabled", json!(false)),
+        ("replaced", "revision", json!(id())),
+        ("person removed", "accessMode", json!("allowlist")),
+        ("owner changed", "ownerAccessId", json!("different-owner")),
+        (
+            "agent policy revoked",
+            "grantedAccess",
+            json!({ "backend": "firecracker" }),
+        ),
+    ] {
+        let mut changed = original.clone();
+        changed[field] = value;
+        f.service
+            .store
+            .put(connections::KIND, changed)
+            .await
+            .unwrap();
+        let (check, target) = (run.clone(), node.clone());
+        assert!(
+            !f.service
+                .store
+                .read(move |db| policy::allows(db, &check, &target))
+                .await
+                .unwrap(),
+            "{label}"
+        );
+        f.service
+            .store
+            .put(connections::KIND, original.clone())
+            .await
+            .unwrap();
+    }
+
+    f.service.store.set("native-authority", json!({
+        "observedAt": now(), "accounts": {
+            "fixture-owner": { "email": "owner@example.test", "accessId": "replacement-access" }
+        }
+    }), None).await.unwrap();
+    let (check, target) = (run.clone(), node.clone());
+    assert!(
+        !f.service
+            .store
+            .read(move |db| policy::allows(db, &check, &target))
+            .await
+            .unwrap(),
+        "Fresh membership must match the owner access that approved the delegation"
+    );
+
+    connections::set_enabled(
+        &f.service,
+        "discord",
+        &connection.id,
+        &json!({ "enabled": false }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !f.service
+            .store
+            .read(move |db| policy::allows(db, &run, &node))
+            .await
+            .unwrap(),
+        "Disabling the bot must revoke its native work, including already queued work"
+    );
+}
 
 #[tokio::test]
 async fn native_administrator_requires_owner_review_verified_generation_and_explicit_admission() {
@@ -140,7 +293,7 @@ async fn native_administrator_requires_owner_review_verified_generation_and_expl
     // A future wildcard agent did not appear in the owner's confirmation.
     let future = f
         .service
-        .agent(
+        .agent_fixture(
             json!({ "name": "Future native", "access": { "backend": "native", "nodes": null } }),
             None,
         )
@@ -346,7 +499,7 @@ impl Fixture {
             "slots": 1,
         });
         service.store.put("nodes", node.clone()).await.unwrap();
-        let agent = service.agent(json!({ "name": "Trusted native", "access": { "backend": "native", "nodes": [node["id"]] } }), None).await.unwrap();
+        let agent = service.agent_fixture(json!({ "name": "Trusted native", "access": { "backend": "native", "nodes": [node["id"]] } }), None).await.unwrap();
         Self {
             _root: root,
             service,
@@ -369,6 +522,17 @@ impl Fixture {
     }
 
     async fn owner_call(&self, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+        let body = if matches!(method, "POST" | "PUT")
+            && (path == "/api/agents" || path.starts_with("/api/agents/"))
+            && body.get("settings").is_none()
+        {
+            let existing = (method == "PUT").then(|| path.trim_start_matches("/api/agents/"));
+            common::agent_fixture::agent_command(&self.service, body, existing)
+                .await
+                .unwrap()
+        } else {
+            body
+        };
         self.call_as(&self.other, method, path, body, true).await
     }
 
@@ -457,7 +621,7 @@ async fn delegated_native_administration_requires_the_requesters_current_review(
     f.agent["access"]["nodes"] = Value::Null;
     f.service
         .store
-        .put("agents", f.agent.clone())
+        .put_agent_fixture(f.agent.clone())
         .await
         .unwrap();
 
@@ -471,7 +635,7 @@ async fn delegated_native_administration_requires_the_requesters_current_review(
         .unwrap();
     let target = f
         .service
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Reviewed target",
                 "access": { "backend": "native", "nodes": [administrator["id"]] },
@@ -556,7 +720,7 @@ async fn task_delegation_has_its_own_revocable_native_authority() {
     f.agent["access"]["delegation"] = true.into();
     f.service
         .store
-        .put("agents", f.agent.clone())
+        .put_agent_fixture(f.agent.clone())
         .await
         .unwrap();
     let (_, parent) = f.conversation().await;
@@ -619,14 +783,14 @@ async fn task_delegation_has_its_own_revocable_native_authority() {
     let mut revoked = f.agent.clone();
     revoked["access"]["delegation"] = false.into();
     revoked["access"]["installation"] = true.into();
-    f.service.store.put("agents", revoked).await.unwrap();
+    f.service.store.put_agent_fixture(revoked).await.unwrap();
     assert!(
         !check(child.clone()).await.unwrap(),
         "Installation access cannot replace revoked task delegation"
     );
     f.service
         .store
-        .put("agents", f.agent.clone())
+        .put_agent_fixture(f.agent.clone())
         .await
         .unwrap();
     assert!(check(child.clone()).await.unwrap());
@@ -724,7 +888,7 @@ async fn rejected_native_mutations_do_not_become_historical_directors() {
     // The MCP control path must also keep rejected resumes out of provenance.
     let director = f
         .service
-        .agent(
+        .agent_fixture(
             json!({ "name": "Other director", "access": { "installation": true } }),
             None,
         )
@@ -1001,7 +1165,11 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         f.service.store.put("nodes", node.clone()).await.unwrap();
         let mut agent = f.agent.clone();
         agent["access"]["backend"] = backend.into();
-        f.service.store.put("agents", agent.clone()).await.unwrap();
+        f.service
+            .store
+            .put_agent_fixture(agent.clone())
+            .await
+            .unwrap();
 
         let mut run = f.run();
         run["snapshot"]["agent"] = agent;
@@ -1275,7 +1443,7 @@ async fn wildcard_node_access_still_requires_trusted_contributors() {
     agent["access"]["nodes"] = Value::Null;
     let agent = f
         .service
-        .agent(agent, f.agent["id"].as_str())
+        .agent_fixture(agent, f.agent["id"].as_str())
         .await
         .unwrap();
     assert!(agent["access"]["nodes"].is_null());
@@ -1540,7 +1708,7 @@ async fn expired_authority_and_removed_members_fail_closed() {
 async fn delegate(f: &Fixture, provenance: bool) -> (Value, Value) {
     let parent_agent = f
         .service
-        .agent(
+        .agent_fixture(
             json!({ "name": "Trusted VM coordinator", "access": { "installation": true } }),
             None,
         )
@@ -1653,7 +1821,7 @@ async fn parent_node_grant_reductions_revoke_existing_native_delegation() {
     }
     let agent = f
         .service
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Bounded coordinator", "access": { "installation": true, "nodes": vm_nodes }
             }),
@@ -1711,7 +1879,7 @@ async fn parent_node_grant_reductions_revoke_existing_native_delegation() {
     ] {
         let mut current = agent.clone();
         current["access"]["nodes"] = nodes.clone();
-        f.service.store.put("agents", current).await.unwrap();
+        f.service.store.put_agent_fixture(current).await.unwrap();
         let (run, node) = (child.clone(), f.node.clone());
         let existing_allowed = f
             .service
@@ -1729,7 +1897,7 @@ async fn a_vm_coordinator_directed_by_unrelated_parents_loses_native_delegation(
     let (parent_a, _) = delegate(&f, true).await;
     let parent_b_agent = f
         .service
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Other VM director", "access": { "installation": true }
             }),
@@ -1744,7 +1912,7 @@ async fn a_vm_coordinator_directed_by_unrelated_parents_loses_native_delegation(
     common::add_run(&f.service.store, &parent_b).await;
     let coordinator = f
         .service
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Shared VM coordinator", "access": { "installation": true }
             }),
@@ -1887,7 +2055,7 @@ async fn a_vm_coordinator_directed_by_unrelated_parents_loses_native_delegation(
         assert_eq!(denied["result"]["isError"], true, "{denied}");
     }
     f.service
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Other VM director", "access": { "installation": false }
             }),
@@ -1937,7 +2105,7 @@ async fn changing_the_parent_permission_or_node_ceiling_revokes_descendants() {
         .unwrap();
     let mut agent = parent["snapshot"]["agent"].clone();
     agent["access"]["installation"] = false.into();
-    f.service.store.put("agents", agent).await.unwrap();
+    f.service.store.put_agent_fixture(agent).await.unwrap();
     let node = f.node.clone();
     assert!(
         !f.service
@@ -1953,7 +2121,7 @@ async fn editing_a_vm_task_cannot_replace_its_authors_with_a_native_trusted_edit
     let f = Fixture::new().await;
     let vm = f
         .service
-        .agent(json!({ "name": "VM task agent" }), None)
+        .agent_fixture(json!({ "name": "VM task agent" }), None)
         .await
         .unwrap();
     let task = policy::CALLER.scope(Some(OTHER.into()), f.service.task(
@@ -2159,7 +2327,7 @@ async fn converting_wildcard_access_never_reviews_host_root_without_explicit_own
     f.service.store.put("nodes", node).await.unwrap();
     let agent = f
         .service
-        .agent(
+        .agent_fixture(
             json!({ "name": "Future wildcard", "access": { "backend": "native", "nodes": null } }),
             None,
         )
@@ -2177,7 +2345,7 @@ async fn converting_wildcard_access_never_reviews_host_root_without_explicit_own
             .is_empty()
     );
     assert!(
-        f.service.get("agents", text(&agent, "id")).await.unwrap()["access"]["nodes"].is_null()
+        f.service.agent_snapshot(text(&agent, "id")).await.unwrap()["access"]["nodes"].is_null()
     );
     let mut confirmed = edit;
     confirmed["nativeNodeReviews"] = json!([node_id]);
@@ -2360,7 +2528,11 @@ async fn native_mode_transition_keeps_automatic_recovery_and_capacity_moves_on_t
     f.service.store.put("nodes", other).await.unwrap();
     let mut agent = f.agent.clone();
     agent["access"]["nodes"] = json!([source, destination]);
-    f.service.store.put("agents", agent.clone()).await.unwrap();
+    f.service
+        .store
+        .put_agent_fixture(agent.clone())
+        .await
+        .unwrap();
     let mut run = f.run();
     let run_id = text(&run, "id").to_owned();
     let point = id();
@@ -2507,7 +2679,7 @@ async fn saved_native_mission(f: &Fixture) -> Value {
 async fn resume_coordinator(f: &Fixture, traced: bool) -> (Value, Value) {
     let agent = f
         .service
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Resume coordinator", "access": { "installation": true },
             }),

@@ -444,7 +444,7 @@ fn check_dependencies(db: &Db<'_>, caller: &str, targets: Vec<String>) -> Result
 pub(crate) fn access(db: &Db<'_>, run: &Value, condition: &Value) -> Result<()> {
     let agent = &run["snapshot"]["agent"];
     let current = db
-        .get("agents", text(agent, "id"))?
+        .agent_snapshot(text(agent, "id"))?
         .ok_or_else(|| Error::forbidden("The waiting agent no longer exists."))?;
     if !covers(&current, agent) {
         return Err(Error::forbidden("Agent permissions were reduced."));

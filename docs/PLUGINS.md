@@ -485,6 +485,10 @@ storing its body. It forwards provider signature/retry headers and binds the req
 to the exact installation route, excluding browser credentials and proxy headers.
 Offline installations return 503; the relay deadline is 2.8 seconds.
 
+The public relay never forwards `Authorization`, `Cookie` or `Proxy-Authorization`.
+Signature and timestamp declarations cannot use these reserved credential headers;
+use provider-specific signature and timestamp headers instead.
+
 The direct route is `/api/plugin-webhooks/<instance>/<endpoint>`. The instance
 must be enabled and its package approved. This route has no Cairn account authority.
 Its fresh `webhook` handler receives `{endpoint, method, headers, body, instance, setup}`;
@@ -578,6 +582,14 @@ declared endpoint name to its callback URL; `urls.oauthCallback` is the shared O
 callback for that draft. They use Beacon by default. An explicit `directOrigin`
 uses an HTTPS origin without credentials, a path or query, under the same rule as
 OAuth. These addresses do not by themselves authorize any public request.
+
+Saved-instance form previews for packages with public endpoints or resource OAuth
+also receive these public addresses in `urls`, under the same owner and target
+checks. Inert previews expose `urls` there too and retain `setup` with their draft
+revision and expiry. An active preview has no draft `setup`. This lets a package
+regenerate its configuration after activation without treating an active instance
+as an inert draft. HTTP, public MCP and installation-tool previews use this same
+form context.
 
 Form handlers may use only declared HTTP and exec capabilities, with credentials
 injected by the host. Saved secret values never reach Luau. Editing, deleting or
@@ -966,15 +978,28 @@ this API remain in the delivery checklist.
 
 ### Host-managed resource OAuth
 
-`manage_plugin_oauth` exposes redacted `status` and local `revoke` for a named
-nonpersonal resource provider on an active instance through public owner MCP and
-`cairn_installation`. It uses the same captured owner/target/resource checks as the
-web and Android controls. Status reveals scopes and expiry, never credentials.
-Native revocation requires the agent's separate existing instance grant, retained
-through the deletion transaction; installation management cannot grant itself one.
-Revocation also retires in-flight resource consent. Starting/finishing consent,
-personal authorizations and inert drafts remain outside this operation's current
-slice and are still required for complete management parity.
+`manage_plugin_oauth` exposes `start`, `finish`, redacted `status` and local
+`revoke` for a named nonpersonal resource provider. Choose exactly one
+`instanceId` or inert `draftId`. Start takes `data.scopes` and optional
+`data.directOrigin`; draft start and revoke also require the latest opaque
+`data.setupRevision`. Finish takes the returned `data.state`, remains pending
+until a callback arrives and consumes a completed exchange once. Status reveals
+scopes and expiry, never credentials.
+
+Public owner MCP uses the same owner, target, resource and draft validation as
+the web and Android controls. On active instances, native start, finish and
+revocation require the agent's separate existing instance grant. The original
+management authority remains checked while claiming a code, before provider I/O
+and in the final write transaction. Installation management cannot grant itself
+private access. A consumed code is not retried after a refused or uncertain
+exchange, and revocation retires in-flight resource consent.
+
+Private draft consent belongs to the owner, as for root setup sign-in. Native
+management can read redacted draft status; private consent requires public owner
+MCP or the owner's plugin page. Inert authorization remains in its draft
+namespace until owner activation. Personal authorizations remain separate from
+these shared configuration operations and are still required for complete
+management parity; an installation grant cannot impersonate a personal requester.
 
 The `oauth` capability declares up to eight providers for resource collections.
 The host captures token responses; scripts receive neither authorization codes,
@@ -1230,7 +1255,7 @@ capability gate as long-lived workers).
 | Prompt instructions | `instructions` | — | — |
 | Instance panel | `instanceView: true` | `view`, `action` | `{ instance }`, `{ action, payload, values, instance }` |
 | Instance test | `instanceTest: true` | `test` | `{ instance }` |
-| Instance form | `instanceForm: true` | `form` | `{ values, credential, secrets, instance, changed, submit }` |
+| Instance form | `instanceForm: true` | `form` | `{ values, credential, secrets, instance, urls?, setup?, changed, submit }` |
 
 - **Commands** run as `cairn plugin <plugin> <command> …` in conversations.
   Arguments are flags (`{ name, flag: "--vault" }`) or positional values

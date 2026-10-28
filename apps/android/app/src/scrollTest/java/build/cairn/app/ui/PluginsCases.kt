@@ -31,6 +31,8 @@ import org.junit.Test
 abstract class PluginsCases {
     @get:Rule val compose = createComposeRule()
 
+    private val helperId = "08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3"
+
     private class Rendered(val vm: CairnViewModel, val mounted: MutableState<Boolean>)
 
     private var rendered: Rendered? = null
@@ -278,7 +280,7 @@ abstract class PluginsCases {
                     put("botName", "Cairn Bot")
                 },
             accessMode = "requests",
-            agentId = "helper",
+            agentId = helperId,
             status = PluginStatus("connected", "Signed in as Cairn Bot"),
             requests = listOf(PluginRequest(id = "r", userId = "300", name = "Sarah")),
             activity =
@@ -682,7 +684,7 @@ abstract class PluginsCases {
                 pluginId = "notes",
                 name = "Team notes",
                 settings = buildJsonObject { put("team", "core") },
-                agentId = "helper",
+                agentId = helperId,
                 accessMode = "everyone",
             )
         withServer { server ->
@@ -716,7 +718,7 @@ abstract class PluginsCases {
                                                 "Other workspace",
                                                 false,
                                                 emptyList(),
-                                                listOf("helper"),
+                                                listOf(helperId),
                                             )
                                         )
                                     )
@@ -735,7 +737,7 @@ abstract class PluginsCases {
                         state.copy(
                             agents =
                                 state.agents.map {
-                                    if (it.id == "helper")
+                                    if (it.id == helperId)
                                         it.copy(
                                             access =
                                                 AccessPolicy(
@@ -744,6 +746,9 @@ abstract class PluginsCases {
                                                     sandbox = "read-only",
                                                     delegation = true,
                                                     backend = "native",
+                                                    mcpTools =
+                                                        build.cairn.contracts.McpTools(emptyMap()),
+                                                    skills = null,
                                                 )
                                         )
                                     else it
@@ -778,7 +783,7 @@ abstract class PluginsCases {
                 compose.onNodeWithText("déléguer du travail", substring = true).assertExists()
                 compose
                     .onNodeWithText(
-                        "Les messages externes ne peuvent pas démarrer",
+                        "exige une délégation native actuelle du propriétaire",
                         substring = true,
                     )
                     .performScrollTo()
@@ -901,7 +906,10 @@ abstract class PluginsCases {
                 },
                 payload["settings"],
             )
-            assertEquals("helper", payload["agentId"]?.jsonPrimitive?.content)
+            assertEquals(
+                helperId,
+                payload["agentId"]?.jsonPrimitive?.content,
+            )
             assertEquals("project", payload["projectId"]?.jsonPrimitive?.content)
             assertEquals(
                 JsonArray(listOf(JsonPrimitive("300"), JsonPrimitive("301"))),
@@ -1234,7 +1242,10 @@ abstract class PluginsCases {
                 payload["settings"],
             )
             assertEquals("requests", payload["accessMode"]?.jsonPrimitive?.content)
-            assertEquals("helper", payload["agentId"]?.jsonPrimitive?.content)
+            assertEquals(
+                helperId,
+                payload["agentId"]?.jsonPrimitive?.content,
+            )
             // The token is only ever sent to the installation, never echoed back in settings.
             assertFalse(payload["settings"].toString().contains("synthetic_android_token"))
         }
@@ -1784,7 +1795,10 @@ abstract class PluginsCases {
                 buildJsonObject { put("token", "ops_android_fixture") },
                 payload["secrets"],
             )
-            assertEquals(JsonArray(listOf(JsonPrimitive("helper"))), payload["agentIds"])
+            assertEquals(
+                JsonArray(listOf(JsonPrimitive(helperId))),
+                payload["agentIds"],
+            )
             assertEquals(JsonObject(emptyMap()), payload["settings"])
         }
     }
@@ -3812,7 +3826,7 @@ abstract class PluginsCases {
                         .isNotEmpty()
             }
             val input = writes.single()
-            assertEquals("helper", input["agentId"]?.jsonPrimitive?.content)
+            assertEquals(helperId, input["agentId"]?.jsonPrimitive?.content)
             assertEquals("contribute", input["profile"]?.jsonPrimitive?.content)
             assertEquals(
                 listOf("delete-message"),
@@ -3996,7 +4010,7 @@ abstract class PluginsCases {
                                             PluginRoute(
                                                 id = "support",
                                                 name = "Support",
-                                                agentId = "helper",
+                                                agentId = helperId,
                                                 summary =
                                                     PluginRouteSummary(
                                                         period,
@@ -4008,14 +4022,14 @@ abstract class PluginsCases {
                                                 id = "paused",
                                                 name = "Paused",
                                                 enabled = false,
-                                                agentId = "helper",
+                                                agentId = helperId,
                                                 maxMessagesPerHour = 10,
                                                 summary = PluginRouteSummary(period, 3, 0),
                                             ),
                                             PluginRoute(
                                                 id = "older",
                                                 name = "Earlier host",
-                                                agentId = "helper",
+                                                agentId = helperId,
                                             ),
                                         )
                                     )
@@ -4107,7 +4121,7 @@ abstract class PluginsCases {
                                             PluginRoute(
                                                 id = "support",
                                                 name = "Support",
-                                                agentId = "helper",
+                                                agentId = helperId,
                                                 accessMode = "everyone",
                                                 match = mapOf("channel" to "C1"),
                                             )
@@ -4120,7 +4134,7 @@ abstract class PluginsCases {
                                     PluginPage(
                                         listOf(
                                             RouteEligibility(
-                                                agentId = "helper",
+                                                agentId = helperId,
                                                 eligible = true,
                                                 pluginAccess = true,
                                             )
@@ -4137,8 +4151,12 @@ abstract class PluginsCases {
             server.start()
             val helper =
                 Agent(
-                    id = "helper",
+                    id = helperId,
                     name = "Resource helper",
+                    createdAt = 0,
+                    exclusiveNodes = emptyList(),
+                    plugins = emptyList(),
+                    revision = "fixture-revision",
                     access =
                         AccessPolicy(
                             projects = emptyList(),
@@ -4146,6 +4164,8 @@ abstract class PluginsCases {
                             sandbox = "read-only",
                             delegation = true,
                             backend = "native",
+                            mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                            skills = null,
                         ),
                 )
             val vm =
@@ -4240,7 +4260,7 @@ abstract class PluginsCases {
                             id = id,
                             resourceId = "engineering",
                             name = id,
-                            agentId = "helper",
+                            agentId = helperId,
                             userIds = listOf("alice"),
                             revision = "revision-$id",
                         )
@@ -4250,7 +4270,7 @@ abstract class PluginsCases {
                         PluginResourceGrant(
                             id = id,
                             resourceId = "engineering",
-                            agentId = "helper",
+                            agentId = helperId,
                             profile = PluginAccessProfile.Read,
                             scopes = mapOf("channel" to listOf(id)),
                         )
@@ -4389,7 +4409,7 @@ abstract class PluginsCases {
                                 wireJson.encodeToString(PluginPage(routes.toList()))
                             requested.contains("$routePath/route-eligibility?") ->
                                 wireJson.encodeToString(
-                                    PluginPage(listOf(RouteEligibility("helper", true)))
+                                    PluginPage(listOf(RouteEligibility(helperId, true)))
                                 )
                             else -> null
                         }
@@ -4490,7 +4510,7 @@ abstract class PluginsCases {
                         .isNotEmpty()
             }
             assertEquals(1, writes.size)
-            assertEquals("helper", writes.single()["agentId"]?.jsonPrimitive?.content)
+            assertEquals(helperId, writes.single()["agentId"]?.jsonPrimitive?.content)
             assertEquals("C1", routes.single().match["constructor"])
             assertEquals("requests", routes.single().accessMode)
             assertTrue(routes.single().userIds.isEmpty())
@@ -4565,7 +4585,7 @@ abstract class PluginsCases {
                         id = "support",
                         resourceId = "engineering",
                         name = "Support",
-                        agentId = "helper",
+                        agentId = helperId,
                         accessMode = "requests",
                         match = mapOf("channel" to "C1"),
                         revision = "s1",
@@ -4574,7 +4594,7 @@ abstract class PluginsCases {
                         id = "operations",
                         resourceId = "engineering",
                         name = "Operations",
-                        agentId = "helper",
+                        agentId = helperId,
                         accessMode = "requests",
                         match = mapOf("channel" to "C2"),
                         revision = "o1",
@@ -4888,7 +4908,7 @@ abstract class PluginsCases {
                     resourceId = "resource$index",
                     name = "Route $index",
                     match = mapOf("channel" to "C$index"),
-                    agentId = "helper",
+                    agentId = helperId,
                     userIds = users,
                     people = users.map { PluginLabel(it, "😀".repeat(100)) },
                     revision = "revision$index",
@@ -4908,7 +4928,7 @@ abstract class PluginsCases {
                             route != null -> wireJson.encodeToString(PluginPage(listOf(route)))
                             requested.contains(root) && requested.contains("/route-eligibility?") ->
                                 wireJson.encodeToString(
-                                    PluginPage(listOf(RouteEligibility("helper", true)))
+                                    PluginPage(listOf(RouteEligibility(helperId, true)))
                                 )
                             else -> null
                         }
@@ -5016,7 +5036,7 @@ abstract class PluginsCases {
                 resourceId = "engineering",
                 name = "Existing route",
                 match = mapOf("channel" to "original"),
-                agentId = "helper",
+                agentId = helperId,
                 userIds = users,
                 people = users.map { PluginLabel(it, "😀".repeat(100)) },
                 revision = "r1",
@@ -5042,7 +5062,7 @@ abstract class PluginsCases {
                             }
                             path.contains("$root/route-eligibility?") ->
                                 wireJson.encodeToString(
-                                    PluginPage(listOf(RouteEligibility("helper", true)))
+                                    PluginPage(listOf(RouteEligibility(helperId, true)))
                                 )
                             else -> null
                         }
@@ -6406,7 +6426,7 @@ abstract class PluginsCases {
                             .isNotEmpty()
                 }
                 assertTrue(writes.single().first.endsWith("$root/engineering/grants"))
-                assertEquals("helper", writes.single().second["agentId"]?.jsonPrimitive?.content)
+                assertEquals(helperId, writes.single().second["agentId"]?.jsonPrimitive?.content)
                 assertEquals(
                     listOf("C1"),
                     writes.single().second["scopes"]!!.jsonObject["channel"]!!.jsonArray.map {
@@ -6499,7 +6519,7 @@ abstract class PluginsCases {
                         when {
                             path.contains("$root/route-eligibility?") ->
                                 wireJson.encodeToString(
-                                    PluginPage(listOf(RouteEligibility("helper", true)))
+                                    PluginPage(listOf(RouteEligibility(helperId, true)))
                                 )
                             path.endsWith("$root/routes") || path.endsWith("$root/grants") ->
                                 """{"items":[]}"""
@@ -6780,7 +6800,7 @@ abstract class PluginsCases {
                             name = "Application",
                         ),
                     ),
-                resourceGrantCounts = mapOf("helper" to 1),
+                resourceGrantCounts = mapOf(helperId to 1),
             )
         val rules =
             CopyOnWriteArrayList<PluginResourceGrant>().apply {
@@ -6788,7 +6808,7 @@ abstract class PluginsCases {
                     PluginResourceGrant(
                         id = "r1",
                         resourceId = "team",
-                        agentId = "helper",
+                        agentId = helperId,
                         profile = PluginAccessProfile.Read,
                         scopes = mapOf("channel" to listOf("C111")),
                     )
@@ -6798,7 +6818,7 @@ abstract class PluginsCases {
         val reads = CopyOnWriteArrayList<String>()
         val root =
             "/api/installations/fixture/api/plugins/scoped-rights/connections/app/resources/workspace"
-        val directory = "/api/installations/fixture/api/agents/helper/plugin-resource-grants"
+        val directory = "/api/installations/fixture/api/agents/$helperId/plugin-resource-grants"
         withServer { server ->
             server.dispatcher =
                 dispatcher(
@@ -6888,7 +6908,7 @@ abstract class PluginsCases {
                     AgentResourceAccess(
                         vm,
                         state,
-                        "helper",
+                        helperId,
                         scoped.agentDirectory().copy(legacyPackages = null),
                         changed = {},
                     )
@@ -6954,7 +6974,7 @@ abstract class PluginsCases {
             compose.onNodeWithText("Limiter channel").performScrollTo().performTextInput("C222")
             compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
             compose.waitUntil(10000) { writes.size == 1 }
-            assertEquals("helper", writes.single()["agentId"]?.jsonPrimitive?.content)
+            assertEquals(helperId, writes.single()["agentId"]?.jsonPrimitive?.content)
             assertEquals("contribute", writes.single()["profile"]?.jsonPrimitive?.content)
             assertEquals(
                 listOf("C222"),
@@ -6993,7 +7013,7 @@ abstract class PluginsCases {
                 id = "work",
                 pluginId = "forge",
                 name = "Work",
-                agentIds = listOf("helper"),
+                agentIds = listOf(helperId),
             )
         withServer { server ->
             val saved = CopyOnWriteArrayList<JsonObject>()
@@ -7288,7 +7308,10 @@ abstract class PluginsCases {
             assertEquals("bob@example.test", payload["name"]?.jsonPrimitive?.content)
             assertEquals("alice", payload["sharedFrom"]?.jsonPrimitive?.content)
             assertEquals("oauth-g", payload["credentialFlow"]?.jsonPrimitive?.content)
-            assertEquals(JsonArray(listOf(JsonPrimitive("helper"))), payload["agentIds"])
+            assertEquals(
+                JsonArray(listOf(JsonPrimitive(helperId))),
+                payload["agentIds"],
+            )
             assertEquals(
                 buildJsonObject {
                     put("clientId", clientId)
@@ -7381,7 +7404,7 @@ abstract class PluginsCases {
                                                     "Notes",
                                                     "Other team",
                                                     false,
-                                                    listOf("helper"),
+                                                    listOf(helperId),
                                                     listOf("resource-agent"),
                                                 )
                                             )
@@ -7493,18 +7516,41 @@ abstract class PluginsCases {
                         "/api/account/session" -> beaconAccountFixture("fixture-csrf")
                         "/api/installations/fixture/api/agents" ->
                             wireJson.encodeToString(
-                                listOf(
-                                    Agent(
-                                        id = MAIN_AGENT_ID,
-                                        name = "Cairn",
-                                        revision = "r1",
-                                    ),
-                                    Agent(
-                                        id = "helper",
-                                        name = "Helper",
-                                        access = AccessPolicy(projects = listOf("project")),
-                                        revision = "r1",
-                                    ),
+                                build.cairn.contracts.ListAgentsOutput(
+                                    listOf(
+                                        Agent(
+                                            exclusiveNodes = emptyList(),
+                                            plugins = emptyList(),
+                                            createdAt = 0,
+                                            access =
+                                                AccessPolicy(
+                                                    mcpTools =
+                                                        build.cairn.contracts.McpTools(emptyMap()),
+                                                    projects = null,
+                                                    skills = null,
+                                                    mcps = null,
+                                                ),
+                                            id = MAIN_AGENT_ID,
+                                            name = "Cairn",
+                                            revision = "r1",
+                                        ),
+                                        Agent(
+                                            exclusiveNodes = emptyList(),
+                                            plugins = emptyList(),
+                                            createdAt = 0,
+                                            id = helperId,
+                                            name = "Helper",
+                                            access =
+                                                AccessPolicy(
+                                                    mcpTools =
+                                                        build.cairn.contracts.McpTools(emptyMap()),
+                                                    skills = null,
+                                                    mcps = null,
+                                                    projects = listOf("project"),
+                                                ),
+                                            revision = "r1",
+                                        ),
+                                    )
                                 )
                             )
                         "/api/installations/fixture/api/plugins" ->
@@ -7539,6 +7585,10 @@ abstract class PluginsCases {
                         else ->
                             if (request.requestUrl?.encodedPath?.endsWith("/api/projects") == true)
                                 """{"projects":[]}"""
+                            else if (
+                                request.requestUrl?.encodedPath?.endsWith("/api/agents") == true
+                            )
+                                """{"agents":[]}"""
                             else "[]"
                     }
                 return MockResponse().setBody(result)

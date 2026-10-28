@@ -25,6 +25,7 @@ async fn public_webhook_relays_original_bytes_and_signatures_without_account_cre
                 "signature": headers["x-example-signature"].to_str().unwrap(),
                 "timestamp": headers["x-example-timestamp"].to_str().unwrap(),
                 "cookie": headers.contains_key("cookie"),
+                "authorization": headers.contains_key("authorization"),
                 "forwarded": headers.contains_key("x-forwarded-host"),
                 "account": identity.account_id,
                 "owner": identity.role == InstallationRole::Owner,
@@ -48,6 +49,7 @@ async fn public_webhook_relays_original_bytes_and_signatures_without_account_cre
         .header("x-example-signature", "v0=signature")
         .header("x-example-timestamp", "1234567890")
         .header("cookie", "session=untrusted")
+        .header("authorization", "Bearer fixture-ambient-authorization")
         .header("x-forwarded-host", "untrusted.example")
         .body(original)
         .send()
@@ -59,8 +61,16 @@ async fn public_webhook_relays_original_bytes_and_signatures_without_account_cre
     assert_eq!(
         value,
         json!({
-            "body": original, "signature": "v0=signature", "timestamp": "1234567890",
-            "cookie": false, "forwarded": false, "account": "", "owner": false, "mcp": null, "scope": target,
+            "body": original,
+            "signature": "v0=signature",
+            "timestamp": "1234567890",
+            "cookie": false,
+            "authorization": false,
+            "forwarded": false,
+            "account": "",
+            "owner": false,
+            "mcp": null,
+            "scope": target,
         })
     );
     relay.stop.cancel();

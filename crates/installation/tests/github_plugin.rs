@@ -2,6 +2,8 @@
 //! in through the host's device flow, granted agents' runs receive the account's
 //! credentials, projects are imported through its project source, and data saved
 //! before the package exists moves into instances. GitHub is simulated locally.
+use common::AgentFixture;
+
 mod common;
 
 use cairn_installation::{
@@ -154,9 +156,15 @@ async fn the_owner_signs_in_through_the_host_and_the_token_never_leaves_it() {
 #[tokio::test]
 async fn granted_runs_receive_the_account_and_lose_it_with_the_grant() {
     let f = fixture().await;
-    let agent = f.s.agent(restricted("Builder"), None).await.unwrap();
+    let agent =
+        f.s.agent_fixture(restricted("Builder"), None)
+            .await
+            .unwrap();
     let agent_id = text(&agent, "id").to_owned();
-    let other = f.s.agent(restricted("Bystander"), None).await.unwrap();
+    let other =
+        f.s.agent_fixture(restricted("Bystander"), None)
+            .await
+            .unwrap();
     let instance = github::instance(
         &f.s,
         "GitHub",
@@ -270,13 +278,16 @@ async fn granted_runs_receive_the_account_and_lose_it_with_the_grant() {
 #[tokio::test]
 async fn each_agent_runs_with_one_account_and_tokens_are_masked() {
     let f = fixture().await;
-    let agent = f.s.agent(restricted("Builder"), None).await.unwrap();
+    let agent =
+        f.s.agent_fixture(restricted("Builder"), None)
+            .await
+            .unwrap();
     let first = github::instance(&f.s, "First", "fixture-first", &[]).await;
     let second = github::instance(&f.s, "Second", "fixture-second", &[]).await;
     let mut edited = agent.clone();
     edited["plugins"] = json!([first, second]);
     let error =
-        f.s.agent(edited.clone(), Some(text(&agent, "id")))
+        f.s.agent_fixture(edited.clone(), Some(text(&agent, "id")))
             .await
             .unwrap_err();
     assert!(
@@ -285,7 +296,9 @@ async fn each_agent_runs_with_one_account_and_tokens_are_masked() {
         error.message
     );
     edited["plugins"] = json!([first]);
-    f.s.agent(edited, Some(text(&agent, "id"))).await.unwrap();
+    f.s.agent_fixture(edited, Some(text(&agent, "id")))
+        .await
+        .unwrap();
     // Granting from the instance side is refused the same way.
     let refused = connections::save(
         &f.s,
@@ -317,7 +330,10 @@ async fn each_agent_runs_with_one_account_and_tokens_are_masked() {
 #[tokio::test]
 async fn granted_agents_see_github_conditions_and_others_do_not() {
     let f = fixture().await;
-    let agent = f.s.agent(restricted("Watcher"), None).await.unwrap();
+    let agent =
+        f.s.agent_fixture(restricted("Watcher"), None)
+            .await
+            .unwrap();
     let agent_id = text(&agent, "id").to_owned();
     let instance = github::instance(&f.s, "GitHub", "fixture-token", &[&agent_id]).await;
     let run = run(&f.s, &agent_id).await;

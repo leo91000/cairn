@@ -1,4 +1,6 @@
 //! Accepted-work recovery uses actual provider completion, never seeded replies.
+use crate::common::AgentFixture;
+
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -73,7 +75,7 @@ async fn exchange(scenario: Scenario) {
         .unwrap();
     let (instance, resource) = configure(&app, &service).await;
     let agent = service
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Recovering Slack helper",
                 "access": {

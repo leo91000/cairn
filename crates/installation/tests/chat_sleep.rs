@@ -1,3 +1,5 @@
+use common::StoreAgentFixture;
+
 mod common;
 
 use cairn_installation::{
@@ -258,11 +260,11 @@ async fn scheduled_continuation_rechecks_permissions_before_reusing_the_workspac
     f.due().await;
     let mut agent = f
         .service
-        .get("agents", cairn_installation::config::MAIN_AGENT_ID)
+        .agent_snapshot(cairn_installation::config::MAIN_AGENT_ID)
         .await
         .unwrap();
     agent["access"]["sandbox"] = "read-only".into();
-    f.service.store.put("agents", agent).await.unwrap();
+    f.service.store.put_agent_fixture(agent).await.unwrap();
     let detail = f.tick().await;
     assert_eq!(detail["paused"], true);
     assert_eq!(detail["run"]["status"], "succeeded");
@@ -601,11 +603,15 @@ async fn time_conditions_are_available_without_plugin_or_installation_access() {
     let f = Fixture::new().await;
     let mut agent = f
         .service
-        .get("agents", cairn_installation::config::MAIN_AGENT_ID)
+        .agent_snapshot(cairn_installation::config::MAIN_AGENT_ID)
         .await
         .unwrap();
     agent["access"]["installation"] = false.into();
-    f.service.store.put("agents", agent.clone()).await.unwrap();
+    f.service
+        .store
+        .put_agent_fixture(agent.clone())
+        .await
+        .unwrap();
     let mut run = f.service.store.run(&f.run).await.unwrap();
     run["snapshot"]["agent"] = agent;
     f.service

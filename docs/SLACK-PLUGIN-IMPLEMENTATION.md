@@ -1,7 +1,7 @@
 # Slack plugin implementation
 
-Current integration follows Main978 with Main40a's current-only data contract:
-database version 2, fresh installation data for a future owner-authorized release, no automatic
+Current integration follows main `5a6552b8` and its current-only data contract:
+database version 3, fresh installation data for a future owner-authorized release, no automatic
 installation migration or downgrade reader. Earlier epoch/SQLite and transition
 statements below are historical checkpoint evidence, not the current release
 contract. [Current data inventory](SLACK-PLUGIN-COMPATIBILITY.md).
@@ -42,6 +42,26 @@ review findings and interrupted browser qualification remain tracked. Neither th
 slice nor its fixture success is a clean full review, complete CI or release gate.
 
 ## Delivery checklist
+
+Saved Slack app forms retain their stable public Events URL and generated app
+manifest, including when previewing HTTP settings from Socket Mode. The host
+supplies the saved instance's URLs separately from inert setup revision/expiry
+context. Owner HTTP, public MCP and the installation tool use the same Luau form.
+The package declares explicit instance agent access for configuration: an agent
+needs both installation management and an owner-granted app right. Neither right
+grants Slack people permission to start work. Real-worker HTTP fixtures cover the
+three preview interfaces and refuse an ungranted installation-management agent.
+This is preview qualification, not a transport-switch or real Slack qualification.
+
+Resource OAuth management now shares nonpersonal consent start/finish, status and
+disconnect across owner HTTP and public MCP, including inert drafts. The
+installation tool uses an existing explicit app grant for active private
+configuration; private draft consent retains the owner-only boundary of root
+setup sign-in. Consent does not activate a draft, publish its resources or grant
+agents access. Controlled HTTP callback fixtures exercise the actual exchange,
+pending status, single consumption, redaction and native grant revocation during
+a delayed token response. Personal consent management and the full Slack
+OAuth/package journeys remain required.
 
 - [x] Signed generic HTTP ingress, bounded responses and precise durable admission.
   - Manifest declaration: first red/green test passes.
@@ -156,6 +176,13 @@ remote authority lookup and immediately before provider I/O. Attachment submissi
 also rechecks owner/package/admission authority after download, after waiting for
 the shared quota lock and before publishing file metadata or the message. These
 paths share the ordinary attachment quota and clean up unpublished file bytes.
+
+Resource OAuth renewal also retains the handler's original routed participant and
+loaded package approval through its refresh lock, provider exchange and credential
+publication. The refresh claim and replacement transactions check that same native
+proof. Real-worker fixtures cover participant removal before the provider request
+and during the exchange, plus a healthy renewal and approval replacement. An
+already consumed refresh remains consumed when its source loses authority.
 
 Setup and resource editors reuse the shared field normalization contract on web
 and Android, including exact choice IDs, numeric values, empty values and secret
@@ -2045,15 +2072,16 @@ grants and credentials. The direct caller must remain authorized. It introduces
 no stored field/key/envelope or migration; KV measurements above do not time these
 additional authority reads or remote policy checks.
 
-### Native agent configuration explains its execution restriction
+### Native agent configuration explains its required delegation
 
-Resource eligibility retains the owner's ability to select a native agent and
-adds an informational `reason` using its existing response field. Root, inert
-setup and resource-route editors in both clients explain that external bot inputs
-lack a verified Cairn host identity and cannot start native work. They recommend
-an isolated agent for receiving bot requests. Saving configuration still grants
-no host authority; the existing unknown-provenance refusal remains mandatory.
-This is configuration guidance, not delivery of native Slack sessions/streaming.
+Root and inert setup editors in both clients explain that a native bot requires
+the installation owner's current native delegation. Saving or reapproving an
+instance with that authority records the explicit delegation from ADR-0068; an
+external sender gains no Cairn account identity. Resource routes cannot yet retain
+that delegation: their editors recommend an isolated agent, and eligibility keeps
+the restriction in its existing informational `reason` field. Native agents remain
+selectable and saveable; actual host admission still requires the current grant.
+Native Slack resource routes, sessions and streaming remain incomplete.
 
 ### Delegated-task controls retain the calling source
 
@@ -2161,3 +2189,69 @@ and exact source reapproval are checked even when active files remain identical.
 The regressions cross the production probe/publication interface with real Luau
 workers and retire authority between those two steps. Full Q1–Q20, remaining
 mutation/setup parity and live Slack qualification remain required.
+
+
+## Target approval during resource operations
+
+A resource operation retains the exact target approval captured for its host
+capability call. The resource grant and any original requester proof remain
+required too. Reapproving identical package files does not let an in-flight
+request use the new approval: native checks retain the original approval through
+provider I/O, effect transactions, receipt publication and result return.
+
+The regression crosses the granted tool and command interfaces with real Luau
+workers and a controlled HTTP provider. It holds either an authenticated read
+before a write, or the response to an already received write. Reapproval prevents
+the first write in the former case and prevents a confirmed receipt or result in
+the latter. An already sent write stays uncertain; a fresh invocation with the
+same idempotency key cannot repeat it. Unchanged approval allows both interfaces
+to complete normally. These eight scenarios use fixtures, not a live Slack app.
+They do not complete whole-tree qualification or any remaining Q1–Q20 gate.
+
+## Personal disconnect keeps its original authority
+
+An authenticated personal disconnect retains the resource, package approval,
+owner access and membership generation selected before its remote status checks.
+It rechecks that person after those checks and verifies the original target in
+the deletion transaction. Reapproving identical package files or replacing a
+membership cannot let an old request erase the current personal consent.
+
+Three HTTP regressions use actual authorization callbacks and a controlled
+membership service: an unchanged requester can disconnect, while a replaced
+approval or a new membership's consent survives the retired request. These are
+synthetic provider fixtures, not live Slack qualification. No stored field, key,
+envelope or public interface is changed. The existing Store measurements exclude
+these additional remote authority checks. All Q1–Q20 delivery gates remain open.
+
+## Installed ingress and nonpersonal resource consent
+
+An installed one-shot webhook retains the exact package approval captured before
+reading its body. Capabilities and final result publication recheck that original
+approval. Reapproving identical files during handler HTTP I/O refuses the old
+delivery without reserving its inbound event; a fresh delivery may still proceed.
+The regression uses signed HTTP and a real Luau worker, not a Slack account.
+
+`manage_plugin_oauth` now exposes nonpersonal resource consent start, finish,
+redacted status and disconnect for active instances and inert drafts. Owner HTTP,
+public owner MCP and the installation tool share the existing consent engine.
+Native active operations still need the agent's separate instance grant; private
+inert consent remains owner-only, consistent with root setup consent. Installation
+management cannot borrow a person's identity or private draft credentials.
+
+Consent completion carries the original management requester through the token
+exchange and authorization transaction. Disconnect advances the resource revision
+in its actual active or draft namespace, retiring an in-flight exchange. Fixture
+tests cover unchanged completion, native grant revocation during exchange, and
+draft disconnect during exchange. No new stored key, envelope or field is added.
+These focused checks do not establish complete mutation parity, live Slack
+qualification or completion of Q1–Q20. The PR remains a draft.
+
+Personal status reads retain the initial owner/member generation through their
+remote checks, then recheck the original package and read target, resource and
+consent together in one database snapshot. A missing consent is read under those
+same checks. Reapproval, membership replacement and resource deletion during the
+lookup refuse the old response instead of publishing its former authorized status
+and subject. Public HTTP fixtures reproduce all three failures before the fix;
+the healthy read and existing disconnect races pass afterward. This changes no
+stored representation. Primitive Store measurements exclude the extra remote
+membership lookup and this complete status-read workload.

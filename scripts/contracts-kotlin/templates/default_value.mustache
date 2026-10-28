@@ -1,1 +1,1 @@
-{{#isString}}{{&defaultValue.kotlinString}}{{/isString}}{{^isString}}{{&defaultValue}}{{/isString}}
+{{#type}}{{#NULL}}null{{/NULL}}{{#INTEGER}}{{&defaultValue}}{{/INTEGER}}{{#STRING}}{{&defaultValue.kotlinString}}{{/STRING}}{{#BOOLEAN}}{{&defaultValue}}{{/BOOLEAN}}{{#ARRAY}}listOf({{#defaultValue}}{{>default_value}}{{^last}}, {{/last}}{{/defaultValue}}){{/ARRAY}}{{/type}}

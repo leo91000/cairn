@@ -275,3 +275,8 @@ impl ProjectFixture for Service {
         Ok(serde_json::to_value(project)?)
     }
 }
+
+pub mod agent_fixture;
+
+#[allow(unused_imports)]
+pub use agent_fixture::{AgentFixture, StoreAgentFixture};

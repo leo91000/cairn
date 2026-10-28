@@ -39,7 +39,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-const DATABASE_VERSION: i64 = 2;
+const DATABASE_VERSION: i64 = 3;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -83,7 +83,7 @@ impl Store {
         if fresh {
             let tx = writer.transaction()?;
             tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind!='projects'),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('projects','agents')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS records_kind ON records(kind,updated_at DESC);
 CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,project_id TEXT NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,data TEXT NOT NULL,dedupe TEXT UNIQUE);
@@ -108,6 +108,7 @@ CREATE INDEX IF NOT EXISTS events_user_input ON events(run_id,id) WHERE type='ch
 CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload,'$.item.id'),id) WHERE json_extract(payload,'$.item.type')='agent_message';")?;
             tx.execute_batch(crate::nodes::shared_blocks::SCHEMA)?;
             tx.execute_batch(crate::projects::SCHEMA)?;
+            tx.execute_batch(crate::agents::SCHEMA)?;
             tx.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS records_chat_slug ON records(json_extract(data,'$.slug')) WHERE kind='chats';")?;
             tx.commit()?;
         }
@@ -401,8 +402,8 @@ impl Db<'_> {
     }
 
     pub fn put(&self, kind: &str, value: &Value) -> Result<Value> {
-        if kind == "projects" {
-            return Err(Error::bad("Use typed project commands."));
+        if matches!(kind, "projects" | "agents") {
+            return Err(Error::bad("Use typed domain commands."));
         }
         let mut chat;
         let value = if kind == "chats" {
@@ -851,18 +852,25 @@ pub fn merge(value: &mut Value, patch: &Value) {
 #[cfg(test)]
 mod schema_tests {
     use super::*;
+    use crate::agent_fixture::StoreAgentFixture;
 
     #[tokio::test]
     async fn initial_schema_reopens_with_events_and_records_intact() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
         store
-            .put("agents", json!({ "id": "example", "name": "Agent" }))
+            .put_agent_fixture(
+                json!({ "id": "00000000-0000-4000-8000-000000000099", "name": "Agent" }),
+            )
             .await
             .unwrap();
         let reopened = Store::open(root.path()).unwrap();
         assert_eq!(
-            reopened.get("agents", "example").await.unwrap().unwrap()["name"],
+            reopened
+                .agent_snapshot("00000000-0000-4000-8000-000000000099")
+                .await
+                .unwrap()
+                .unwrap()["name"],
             "Agent"
         );
         let db = Connection::open(root.path().join("manager.db")).unwrap();

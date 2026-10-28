@@ -20,7 +20,7 @@ pub enum Scope {
     /// The owner, through one instance: views, actions and tests.
     Instance(Box<Connection>, Arc<super::operations::Owner>),
     /// A signed public request. It has no Cairn account or owner authority.
-    Ingress(Box<Connection>),
+    Ingress(Box<Connection>, Arc<LocalAuthority>),
     /// A signed setup challenge. Pure Luau only, with no operational capabilities.
     Setup(Box<super::setup::SetupDraft>),
     ResourceAgent(Box<super::grants::Authorization>),
@@ -188,7 +188,7 @@ impl Scope {
         match self {
             Scope::Managed(scope, _) => scope.instances(),
             Scope::Instance(connection, _)
-            | Scope::Ingress(connection)
+            | Scope::Ingress(connection, _)
             | Scope::Draft(connection, _) => {
                 vec![summary(connection)]
             }
@@ -219,6 +219,7 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
         scope
     };
     match scope {
+        Scope::Ingress(_, authority) => authority.recheck(s).await?,
         Scope::Instance(_, owner) => owner.recheck(s).await?,
         Scope::Draft(_, values) => {
             if let Some(resource) = &values.resource {
@@ -281,7 +282,7 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
         Scope::Managed(..) | Scope::Draft(..) | Scope::ResourceAgent(_) | Scope::Setup(_) => {
             unreachable!()
         }
-        Scope::Instance(connection, _) | Scope::Ingress(connection) => {
+        Scope::Instance(connection, _) | Scope::Ingress(connection, _) => {
             if requested.is_some_and(|id| id != connection.id) {
                 return Err(Error::forbidden("Another instance is not available here."));
             }
@@ -327,7 +328,7 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
     let unchanged = connection.revision == expected.revision;
     let granted = match scope {
         Scope::Instance(..) | Scope::Draft(..) => true,
-        Scope::Ingress(_) => connection.enabled,
+        Scope::Ingress(..) => connection.enabled,
         Scope::Managed(..) | Scope::ResourceAgent(_) | Scope::Setup(_) => unreachable!(),
         Scope::Agent(agent) => connection.grants(&agent.agent_id),
     };
@@ -363,7 +364,7 @@ pub async fn call(
         return Err(Error::forbidden("The plugin approval changed."));
     }
     if let Scope::ResourceAgent(authorization) = scope {
-        return super::grants::call(s, package, authorization, method, args).await;
+        return super::grants::call(s, &approved, authorization, method, args).await;
     }
     let draft = match scope {
         Scope::Draft(_, draft) => Some(draft.clone()),
@@ -390,6 +391,7 @@ pub async fn call(
         resource_grant: None,
         management: management.clone(),
         local_authority: match scope {
+            Scope::Ingress(_, authority) => Some(authority.clone()),
             Scope::Agent(agent) => Some(Arc::new(LocalAuthority {
                 agent: Some(agent.as_ref().clone()),
                 approval: approved.snapshot(),
@@ -398,7 +400,7 @@ pub async fn call(
             _ => None,
         },
     };
-    if matches!(scope, Scope::Ingress(_)) && matches!(method, "inbound.accept" | "inbound.deliver")
+    if matches!(scope, Scope::Ingress(..)) && matches!(method, "inbound.accept" | "inbound.deliver")
     {
         return capabilities::approved(s, &context, &package.digest, method, args.clone()).await;
     }
@@ -423,8 +425,10 @@ pub async fn call(
     .await?;
     // Revocation or a changed secret during slow I/O must not deliver its result.
     let bound_form = matches!(scope, Scope::Draft(_, values) if values.setup.is_some() || values.resource.is_some() || values.root.is_some());
-    if (matches!(scope, Scope::Agent(_) | Scope::Instance(..))
-        || bound_form
+    if (matches!(
+        scope,
+        Scope::Agent(_) | Scope::Instance(..) | Scope::Ingress(..)
+    ) || bound_form
         || management.is_some())
         && (matches!(method, "exec.run" | "http.request") || method.starts_with("files."))
     {

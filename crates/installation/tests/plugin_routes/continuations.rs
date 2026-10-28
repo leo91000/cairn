@@ -1,5 +1,7 @@
 //! Native lifecycle/occupancy fixtures. Actual Slack provider/manager recovery
 //! is proved separately by slack::recovery, without seeded execution results.
+use crate::common::AgentFixture;
+
 #[path = "agent_effects.rs"]
 mod agent_effects;
 #[path = "controls_approval.rs"]
@@ -36,7 +38,7 @@ impl Started {
         let (root, s, instance, resource, app) = configured_fixture_with_runner(None, runner).await;
         s.plugins.route_http_to(origin.clone());
         let agent = s
-            .agent(
+            .agent_fixture(
                 json!({
                     "name": "Dedicated helper",
                     "access": { "projects": [], "installation": installation },
@@ -74,7 +76,7 @@ impl Started {
             }),
         )
         .await;
-        assert_eq!(admitted.1["status"], "accepted");
+        assert_eq!(admitted.1["status"], "accepted", "{admitted:?}");
         let package = registry::active(&s, "router").await.unwrap();
         let connection = connections::get(&s, "router", &instance).await.unwrap();
         let mut session = s

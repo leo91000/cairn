@@ -74,6 +74,10 @@ pub struct Connection {
     pub agent_id: String,
     pub project_id: Option<String>,
     pub granted_access: Value,
+    /// Native authority committed when the owner selects the answering agent.
+    /// Older/unscoped connections carry no native grant until saved by an authorized caller.
+    #[serde(default)]
+    pub native_authority: Value,
     pub owner_access_id: Option<String>,
     pub access_mode: AccessMode,
     pub user_ids: Vec<String>,
@@ -103,6 +107,7 @@ impl Connection {
             agent_id: String::new(),
             project_id: None,
             granted_access: Value::Null,
+            native_authority: Value::Null,
             owner_access_id: None,
             access_mode: AccessMode::Allowlist,
             user_ids: Vec::new(),
@@ -139,7 +144,7 @@ pub(crate) fn delegation_access(
     _mode: AccessMode,
 ) -> Result<Value> {
     let agent = db
-        .get("agents", agent_id)?
+        .agent_snapshot(agent_id)?
         .ok_or_else(|| Error::bad("Agent not found."))?;
     let access = policy(&agent);
     project_access(db, project, &access)?;
@@ -170,7 +175,7 @@ pub(crate) fn delegation_eligibility(
         }
     }
     let items = db
-        .list("agents")?
+        .agent_snapshots()?
         .iter()
         .map(|agent| {
             let id = text(agent, "id");
@@ -253,7 +258,7 @@ pub(crate) fn authorize(db: &Db<'_>, expected: &Connection) -> Result<Connection
         return super::routes::authorize(db, current, binding);
     }
     if !current.agent_id.is_empty() {
-        let agent = db.get("agents", &current.agent_id)?.ok_or_else(denied)?;
+        let agent = db.agent_snapshot(&current.agent_id)?.ok_or_else(denied)?;
         if policy(&agent) != current.granted_access {
             return Err(denied());
         }
@@ -683,6 +688,7 @@ pub(crate) struct Prepared {
     root: Option<std::sync::Arc<super::resources::target::Target>>,
     one_per_agent: bool,
     package_name: String,
+    origin: crate::native::policy::Origin,
 }
 
 pub async fn save(
@@ -832,6 +838,7 @@ pub(crate) async fn prepare(
     };
     let manifest = package.manifest.clone();
     let owner = crate::relay::task_author_policy(s).await?;
+    let origin = crate::native::policy::origin();
     let name = text(input, "name").trim();
     if name.is_empty() || name.chars().count() > 100 {
         return Err(Error::bad("Enter a connection name."));
@@ -864,6 +871,7 @@ pub(crate) async fn prepare(
         .map(str::to_owned);
     if delegates {
         uuid(agent_id)?;
+        crate::native::policy::refresh_agent(s, agent_id).await?;
     }
     if let Some(project) = &project {
         uuid(project)?;
@@ -1097,7 +1105,8 @@ pub(crate) async fn prepare(
         agent_id: agent_id.to_owned(),
         project_id: project,
         granted_access: Value::Null,
-        owner_access_id: owner.map(|policy| policy.owner.access_id),
+        native_authority: Value::Null,
+        owner_access_id: owner.as_ref().map(|policy| policy.owner.access_id.clone()),
         access_mode,
         user_ids,
         people,
@@ -1116,6 +1125,7 @@ pub(crate) async fn prepare(
         root,
         one_per_agent: super::run_credentials::one_per_package(&manifest),
         package_name: manifest.name.clone(),
+        origin,
     })
 }
 
@@ -1130,6 +1140,7 @@ impl Prepared {
             root,
             one_per_agent,
             package_name,
+            origin,
         } = self;
         if let Some(root) = root {
             root.current(db)?;
@@ -1147,7 +1158,7 @@ impl Prepared {
             ));
         }
         for agent in &connection.agent_ids {
-            if db.get("agents", agent)?.is_none() {
+            if db.agent_snapshot(agent)?.is_none() {
                 return Err(Error::bad("A selected agent no longer exists."));
             }
         }
@@ -1174,6 +1185,10 @@ impl Prepared {
                 connection.project_id.as_deref(),
                 connection.access_mode,
             )?;
+            let agent = db
+                .agent_snapshot(&connection.agent_id)?
+                .ok_or_else(|| Error::bad("Agent not found."))?;
+            connection.native_authority = native_authority(db, &connection, &agent, &origin)?;
         }
         if connection.access_mode != AccessMode::Requests {
             for request in db.list("plugin-requests")? {
@@ -1242,7 +1257,38 @@ pub(crate) async fn load(s: &Service, connection_id: &str) -> Result<Connection>
 
 /// Approves the agent's saved access for a delegation that answers as this agent,
 /// as saving the instance again would. Runs in the agent's save transaction.
-pub(crate) fn reapprove(db: &Db<'_>, connection_id: &str, agent: &Value) -> Result<()> {
+fn native_authority(
+    db: &Db<'_>,
+    connection: &Connection,
+    agent: &Value,
+    origin: &crate::native::policy::Origin,
+) -> Result<Value> {
+    if !crate::native::policy::native(agent) {
+        return Ok(Value::Null);
+    }
+    let mut grant = crate::native::policy::authorize_origin(db, agent, origin)?;
+    let authority = db.kv("native-authority")?.unwrap_or_default();
+    let owner_access = connection
+        .owner_access_id
+        .as_deref()
+        .ok_or_else(|| Error::forbidden("The bot has no current owner delegation."))?;
+    let owner = authority["accounts"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .find(|(_, account)| account["accessId"].as_str() == Some(owner_access))
+        .map(|(id, _)| id.clone())
+        .ok_or_else(|| Error::forbidden("The bot's owner has no current native authority."))?;
+    grant["pluginOwnerAccountId"] = owner.into();
+    Ok(grant)
+}
+
+pub(crate) fn reapprove(
+    db: &Db<'_>,
+    connection_id: &str,
+    agent: &Value,
+    origin: &crate::native::policy::Origin,
+) -> Result<()> {
     let value = db
         .get(KIND, connection_id)?
         .ok_or_else(|| Error::bad("A plugin delegation to reapprove no longer exists."))?;
@@ -1260,6 +1306,7 @@ pub(crate) fn reapprove(db: &Db<'_>, connection_id: &str, agent: &Value) -> Resu
         ))
     })?;
     connection.granted_access = access;
+    connection.native_authority = native_authority(db, &connection, agent, origin)?;
     connection.revision = id();
     connection.updated_at = now();
     db.put(KIND, &serde_json::to_value(&connection)?)?;
@@ -1283,7 +1330,7 @@ pub(crate) fn delegation_effects(
     owner: Option<&str>,
 ) -> Result<Value> {
     let access = policy(agent);
-    let saved = db.get("agents", agent_id)?;
+    let saved = db.agent_snapshot(agent_id)?;
     let mut effects = Vec::new();
     for value in db.list(KIND)? {
         if value["agentId"] != agent_id {

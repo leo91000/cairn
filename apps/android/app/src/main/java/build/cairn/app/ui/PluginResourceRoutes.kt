@@ -561,7 +561,7 @@ internal fun PluginResourceRoutes(
                 )
                 if (previewFor == previewKey) {
                     val selected = state.agents.find { it.id == agentId }
-                    selected?.externalBotExecutionWarning()?.let { warning ->
+                    selected?.externalBotExecutionWarning(resourceRoute = true)?.let { warning ->
                         Notice(
                             title = "Exécution native indisponible pour ce bot",
                             text = warning,

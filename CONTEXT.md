@@ -155,12 +155,15 @@ L’emplacement d’où une skill a été importée par la source de skills d’
 
 **Délégation externe d’un plugin** :
 L’accès précis que le propriétaire accorde à des identités externes, par exemple
-à des personnes sur Slack ou Discord dans un canal, pour faire travailler un agent dédié et
+à des personnes sur Slack ou Discord dans un canal, pour faire travailler l’agent choisi et
 recevoir ses réponses. Ces identités ne deviennent pas membres de l’installation
 et n’obtiennent aucun accès général à son interface, ses conversations ou sa gestion.
 Les conversations créées restent partagées dans Cairn ; les réponses du bot sont
 visibles dans le canal externe autorisé. La délégation reste liée à l’accès courant
 du propriétaire et aux permissions d’agent qu’il a approuvées.
+Pour un agent natif, ce choix conserve l’autorité native du demandeur authentifié ;
+les messages admis agissent par cette délégation révocable, sans devenir des
+identités Cairn.
 
 **Instance de plugin** :
 Une configuration d’un plugin par le propriétaire, par exemple un bot Discord, un

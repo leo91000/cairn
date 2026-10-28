@@ -187,6 +187,7 @@ internal fun ProjectEditor(
                 sourceMode = initial?.sourceMode ?: "remote",
             )
         )
+    var baseBranch by rememberSaveable { mutableStateOf(initial?.baseBranch ?: "main") }
     var revision by rememberSaveable { mutableStateOf(initial?.revision.orEmpty()) }
     val saving = rememberResourceSave(initial?.takeIf { it.revision.isNotEmpty() }?.id.orEmpty())
     var saveError by rememberSaveable { mutableStateOf<String?>(null) }
@@ -209,6 +210,7 @@ internal fun ProjectEditor(
             instances.find { it.id == instanceChoice } ?: instances.firstOrNull()
         }
     val importing = source != null
+    fun currentSettings() = form.copy(baseBranch = baseBranch)
     Editor(
         if (saving.id.isEmpty()) "Ajouter un projet" else "Modifier le projet",
         state.busy,
@@ -224,12 +226,19 @@ internal fun ProjectEditor(
             vm.perform {
                 saveError = null
                 try {
+                    currentSettings()
+                } catch (_: IllegalArgumentException) {
+                    saveError = "Saisissez un nom de branche de base valide."
+                    return@perform
+                }
+                try {
                     saving.save(
                         api,
                         "/projects",
-                        value = { wireJson.encodeToJsonElement(form) },
+                        value = { wireJson.encodeToJsonElement(currentSettings()) },
                         createPath = if (importing) "/projects/import" else "/projects",
                         createValue = {
+                            val settings = currentSettings()
                             if (source != null && instance != null)
                                 body(
                                     "pluginId" to source.entry.id,
@@ -238,9 +247,9 @@ internal fun ProjectEditor(
                                     "id" to item,
                                     "name" to form.name,
                                     "description" to form.description,
-                                    "baseBranch" to form.baseBranch,
+                                    "baseBranch" to settings.baseBranch,
                                 )
-                            else wireJson.encodeToJsonElement(form)
+                            else wireJson.encodeToJsonElement(settings)
                         },
                         request = { method, route, payload ->
                             if (route == "/projects/import")
@@ -249,7 +258,11 @@ internal fun ProjectEditor(
                                 val saved =
                                     if (method == "PUT")
                                         api.replaceProject(
-                                            ReplaceProjectInput(saving.id, revision, form)
+                                            ReplaceProjectInput(
+                                                saving.id,
+                                                revision,
+                                                currentSettings(),
+                                            )
                                         )
                                     else {
                                         val original = JsonObject(payload.jsonObject - "creationId")
@@ -302,7 +315,7 @@ internal fun ProjectEditor(
                 form.name.length <= 100 &&
                 (if (importing) instance != null && item.isNotBlank()
                 else form.path.isNotBlank()) &&
-                form.baseBranch.isNotBlank(),
+                baseBranch.isNotBlank(),
     ) {
         if (creating) {
             val editable = !state.busy && !saving.pendingCreation
@@ -335,8 +348,8 @@ internal fun ProjectEditor(
                         form.copy(
                             name = (it.projectName?.ifBlank { null } ?: it.name).take(100),
                             description = it.description.take(500),
-                            baseBranch = it.defaultBranch.ifBlank { form.baseBranch },
                         )
+                    if (it.defaultBranch.isNotBlank()) baseBranch = it.defaultBranch
                 }
             }
         }
@@ -368,8 +381,11 @@ internal fun ProjectEditor(
         }
         Field(
             "Branche de base",
-            form.baseBranch,
-            { form = form.copy(baseBranch = it) },
+            baseBranch,
+            {
+                baseBranch = it
+                saveError = null
+            },
             keyboardOptions = InputKeyboards.Literal,
         )
     }

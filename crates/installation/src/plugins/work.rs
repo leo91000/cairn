@@ -427,6 +427,18 @@ pub(crate) async fn submission_ready(
         .await
 }
 
+fn origin(context: &Context) -> crate::native::policy::Origin {
+    use crate::native::policy::{Origin, PluginOrigin};
+    if context.connection.native_authority["nativeProvenanceUnknown"] != false {
+        return Origin::Unknown;
+    }
+    Origin::Plugin(PluginOrigin {
+        connection: context.connection.id.clone(),
+        revision: context.connection.revision.clone(),
+        author: text(&context.event, "authorId").to_owned(),
+    })
+}
+
 /// Hourly counters to increment when the submission is accepted.
 struct Counters(Vec<(String, u64)>);
 
@@ -668,6 +680,8 @@ pub(crate) async fn submit_approved(
         ));
     }
     ensure_owner(s, expected).await?;
+    let origin = origin(context);
+    crate::native::policy::refresh_agent(s, &expected.agent_id).await?;
     let content = text(args, "text").trim().to_owned();
     let thread = text(args, "thread").to_owned();
     let shared = args["shared"] == true;
@@ -705,11 +719,12 @@ pub(crate) async fn submit_approved(
 
     // Resolve (or start) the conversation first, so attachments can be stored in it.
     let resolved = {
-        let (expected, event, dedupe, thread) = (
+        let (expected, event, dedupe, thread, origin) = (
             expected.clone(),
             event.clone(),
             dedupe.clone(),
             thread.clone(),
+            origin.clone(),
         );
         let approval = package.clone();
         s.store
@@ -734,20 +749,22 @@ pub(crate) async fn submit_approved(
                 let usable = match usable {
                     Some(chat) => {
                         let previous = db.run(text(&chat, "runId"))?;
-                        let agent = db.get("agents", &connection.agent_id)?
+                        let agent = db.agent_snapshot(&connection.agent_id)?
                             .ok_or_else(|| Error::forbidden("Agent no longer exists."))?;
                         let compatible = previous.as_ref().is_none_or(|run| {
                             crate::service::covers(&agent, &run["snapshot"]["agent"])
-                        });
+                        }) && (!crate::native::policy::native(&agent)
+                            || crate::native::policy::chat_grant(db, &chat, &origin).is_ok());
                         compatible.then_some(chat)
                     }
                     None => None,
                 };
                 let chat = match usable {
                     Some(chat) => chat,
-                    None => crate::chats::create_in(
+                    None => crate::chats::create_as(
                         db,
                         json!({ "agentId": connection.agent_id, "projectId": connection.project_id }),
+                        &origin,
                     )?,
                 };
                 let chat_id = text(&chat, "id").to_owned();
@@ -789,6 +806,7 @@ pub(crate) async fn submit_approved(
         {
             let expected = expected.clone();
             let event = event.clone();
+            let origin = origin.clone();
             let resumed_chat = chat_id.clone();
             let resumed_run = run_id.to_owned();
             let resumed_thread = thread.clone();
@@ -812,7 +830,7 @@ pub(crate) async fn submit_approved(
                             return Err(Error::conflict("Only the previous request's author may resume its stopped execution. Start a new turn instead."));
                         }
                     }
-                    Ok(())
+                    crate::native::policy::authorize_run_in(db, &resumed_run, &origin)
                 })
                 .await?;
         }
@@ -882,7 +900,7 @@ pub(crate) async fn submit_approved(
                 &chat_id,
                 message,
                 principal.as_ref(),
-                &crate::native::policy::Origin::default(),
+                &origin,
             )?;
             counters.increment(db)?;
             let receipt = json!({ "chatId": chat_id, "messageId": queued["id"] });
@@ -1067,33 +1085,36 @@ pub async fn answer(s: &Service, context: &Context, args: &Value) -> Result<Valu
         chat.clone(),
     );
     let caller = context.caller();
-    let answered = s
-        .question_answer_authorized(
-            &chat,
-            question,
-            json!({ "id": id(), "answers": answers }),
-            principal,
-            false,
-            move |db, question| {
-                caller.authorize(db)?;
-                let (connection, author) = admit(db, &expected, &event)?;
-                if conversation(db, &connection, &author, &input)? != chat_id {
-                    return Err(Error::forbidden("The controlled conversation changed."));
-                }
-                if connection.routing.is_some() {
-                    let chat = db
-                        .get("chats", &chat_id)?
-                        .ok_or_else(|| Error::not_found("Conversation not found."))?;
-                    if question.run_id != text(&chat, "runId")
-                        || question.turn_id != text(&input, "delivery")
-                    {
-                        return Err(Error::forbidden(
-                            "This question belongs to another execution.",
-                        ));
+    let answered = crate::native::policy::DELEGATION
+        .scope(
+            origin(context),
+            s.question_answer_authorized(
+                &chat,
+                question,
+                json!({ "id": id(), "answers": answers }),
+                principal,
+                false,
+                move |db, question| {
+                    caller.authorize(db)?;
+                    let (connection, author) = admit(db, &expected, &event)?;
+                    if conversation(db, &connection, &author, &input)? != chat_id {
+                        return Err(Error::forbidden("The controlled conversation changed."));
                     }
-                }
-                Ok(())
-            },
+                    if connection.routing.is_some() {
+                        let chat = db
+                            .get("chats", &chat_id)?
+                            .ok_or_else(|| Error::not_found("Conversation not found."))?;
+                        if question.run_id != text(&chat, "runId")
+                            || question.turn_id != text(&input, "delivery")
+                        {
+                            return Err(Error::forbidden(
+                                "This question belongs to another execution.",
+                            ));
+                        }
+                    }
+                    Ok(())
+                },
+            ),
         )
         .await?;
     Ok(json!({ "status": answered["status"] }))

@@ -1,3 +1,5 @@
+use common::AgentFixture;
+
 mod common;
 
 use common::relay_fixture::router;
@@ -690,33 +692,37 @@ async fn plugin_project_imports_require_trusted_owner_context() {
 async fn agent_bootstrap_defaults_to_unlimited_and_preserves_configured_limits() {
     let (_root, _app, s) = app().await;
     let timeout_of_main = async |service: &Service| {
-        service.get("agents", MAIN_AGENT_ID).await.unwrap()["timeoutMinutes"].clone()
+        service.agent_snapshot(MAIN_AGENT_ID).await.unwrap()["timeoutMinutes"].clone()
     };
     assert_eq!(timeout_of_main(&s).await, 0);
     assert_eq!(
-        s.agent(json!({ "name": "New agent" }), None).await.unwrap()["timeoutMinutes"],
+        s.agent_fixture(json!({ "name": "New agent" }), None)
+            .await
+            .unwrap()["timeoutMinutes"],
         0
     );
     for minutes in [0, 1, 720] {
         let configured = json!({ "name": "Configured", "timeoutMinutes": minutes });
         assert_eq!(
-            s.agent(configured, None).await.unwrap()["timeoutMinutes"],
+            s.agent_fixture(configured, None).await.unwrap()["timeoutMinutes"],
             minutes
         );
     }
     for minutes in [-1, 721] {
         let invalid = json!({ "name": "Invalid", "timeoutMinutes": minutes });
-        assert!(s.agent(invalid, None).await.is_err());
+        assert!(s.agent_fixture(invalid, None).await.is_err());
     }
     let main_agent = |minutes: i64| json!({ "name": "Main agent", "timeoutMinutes": minutes });
     for (previous, expected) in [(90, 90), (120, 120)] {
-        s.agent(main_agent(previous), Some(MAIN_AGENT_ID))
+        s.agent_fixture(main_agent(previous), Some(MAIN_AGENT_ID))
             .await
             .unwrap();
         let restarted = Service::new(s.config.clone()).await.unwrap();
         assert_eq!(timeout_of_main(&restarted).await, expected);
     }
-    s.agent(main_agent(120), Some(MAIN_AGENT_ID)).await.unwrap();
+    s.agent_fixture(main_agent(120), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
     let restarted = Service::new(s.config.clone()).await.unwrap();
     assert_eq!(
         timeout_of_main(&restarted).await,

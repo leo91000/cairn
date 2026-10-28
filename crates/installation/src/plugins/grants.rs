@@ -288,7 +288,7 @@ pub(crate) async fn for_agent(s: &Service, agent: &str, cursor: Option<&str>) ->
     let cursor = cursor.map(str::to_owned);
     s.store
         .read(move |db| {
-            db.get("agents", &agent)?
+            db.agent_snapshot(&agent)?
                 .ok_or_else(|| Error::not_found("Agent not found."))?;
             let mut items = Vec::new();
             // One lookahead record keeps continuation truthful. Apply the ID and
@@ -440,7 +440,7 @@ pub async fn create(
                     "The resource changed. Reload before granting access.",
                 ));
             }
-            if db.get("agents", &grant.agent_id)?.is_none() {
+            if db.agent_snapshot(&grant.agent_id)?.is_none() {
                 return Err(Error::bad("Agent not found."));
             }
             if db
@@ -767,7 +767,7 @@ pub(crate) fn recheck_in(db: &Db<'_>, authorization: &Authorization) -> Result<(
             }
         }
     }
-    if db.get("agents", &grant.agent_id)?.is_none()
+    if db.agent_snapshot(&grant.agent_id)?.is_none()
         || !db
             .get(KIND, &grant.id)?
             .is_some_and(|value| value["revision"] == grant.revision)
@@ -879,13 +879,14 @@ fn request_permitted(authorization: &Authorization, args: &Value) -> bool {
     })
 }
 
-pub async fn call(
+pub(super) async fn call(
     s: &Service,
-    package: &Package,
+    approved: &registry::ApprovedPackage,
     authorization: &Authorization,
     method: &str,
     args: &Value,
 ) -> Result<Value> {
+    let package = &approved.package;
     let denied = || {
         Error::forbidden("This capability or request is outside the granted resource operation.")
     };
@@ -902,7 +903,9 @@ pub async fn call(
         "http.request" if request_permitted(authorization, args) => {
             let context = Context {
                 management: None,
-                local_authority: None,
+                local_authority: Some(std::sync::Arc::new(
+                    super::scope::LocalAuthority::for_package(approved),
+                )),
                 connection: authorization.connection.clone(),
                 manifest: package.manifest.clone(),
                 event: Value::Null,
@@ -912,15 +915,13 @@ pub async fn call(
             };
             capabilities::effect(s, &context, method, args.clone(), || async {
                 recheck(s, authorization).await?;
-                registry::require_digest(s, &package.manifest.id, &package.digest).await
+                approved.recheck(s).await
             })
             .await?
         }
         _ => return Err(denied()),
     };
     recheck(s, authorization).await?;
-    if registry::active(s, &package.manifest.id).await?.digest != package.digest {
-        return Err(Error::forbidden("The plugin approval changed."));
-    }
+    approved.recheck(s).await?;
     Ok(result)
 }

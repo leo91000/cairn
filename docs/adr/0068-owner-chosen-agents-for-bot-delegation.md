@@ -33,6 +33,21 @@ changing the agent's access suspends the bot until it is reapproved. People
 outside the list are ignored or become requests, the hourly limits still apply,
 and only listed people or a conversation's starter can answer for it or stop it.
 
+For a native agent, selecting or reapproving it records the authenticated caller's
+existing native authority in the same configuration transaction. Admitted plugin
+messages use that explicit delegation; they do not claim to be a Cairn person.
+Native work retains the connection revision, external author, owner binding and
+node ceiling. Admission and lease renewal recheck the connection, its approved
+agent policy, allowed people and fresh owner access. Disabling or replacing the
+delegation revokes its work and descendants. Questions and resumed turns retain
+the same provenance.
+
+This extends ADR-0050 only for known, explicitly approved plugin delegations.
+Unknown callers, historical connections without that saved grant, and MCP
+management requests without native authority cannot mint a native delegation.
+Saving an existing bot through the authenticated owner configuration records its
+grant without another approval step or a change to the selected agent.
+
 ## Consequences
 
 An owner who lets anyone in a public channel reach a broad agent exposes that

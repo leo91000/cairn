@@ -1,3 +1,5 @@
+use common::AgentFixture;
+
 mod common;
 #[path = "wait_for/groups.rs"]
 mod groups;
@@ -60,7 +62,7 @@ impl Fixture {
         .await
         .unwrap();
         github.attach(&s);
-        s.agent(
+        s.agent_fixture(
             json!({ "name": "Main agent", "access": { "installation": true, "delegation": delegation } }),
             Some(MAIN_AGENT_ID),
         )
@@ -292,7 +294,7 @@ async fn run_wait_survives_restart_and_only_resumes_after_target_completion() {
 async fn installation_access_can_wait_for_another_agents_run() {
     let f = Fixture::new().await;
     let agent =
-        f.s.agent(json!({ "name": "Delegated worker" }), None)
+        f.s.agent_fixture(json!({ "name": "Delegated worker" }), None)
             .await
             .unwrap();
     let task =
@@ -1043,7 +1045,7 @@ async fn projects_registered_with_ssh_remotes_can_wait_for_their_ci() {
 async fn scoped_agent_token_removal_never_falls_back_to_shared_credentials() {
     let f = Fixture::new().await;
     let agent =
-        f.s.agent(
+        f.s.agent_fixture(
             json!({
                 "name": "Scoped watcher",
                 "access": { "projects": [f.project], "installation": true },
@@ -1851,7 +1853,7 @@ async fn observations_captured_before_a_merge_are_retried_under_the_destination(
     for refused in [false, true] {
         let f = Fixture::new().await;
         let source =
-            f.s.agent(
+            f.s.agent_fixture(
                 json!({
                     "name": "Original observer", "access": { "installation": true },
                 }),
@@ -1943,7 +1945,7 @@ async fn observations_captured_before_a_merge_are_retried_under_the_destination(
         drop(probes);
         assert_eq!(f.calls().len(), if refused { 1 } else { 2 });
 
-        f.s.merge_agents(json!({
+        f.s.merge_agents_fixture(json!({
             "sourceId": source["id"], "targetId": MAIN_AGENT_ID, "confirm": true,
         }))
         .await

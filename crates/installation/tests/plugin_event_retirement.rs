@@ -1,3 +1,5 @@
+use crate::common::AgentFixture;
+
 mod common;
 
 use axum::{Json, Router};
@@ -24,9 +26,9 @@ async fn service() -> (TempDir, Arc<Service>, Value) {
     common::relay_fixture::claimed(&s).await.unwrap();
     s.plugins.use_worker(worker());
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({ "name": "Handler fixture agent", "access": {
-        "projects": [], "skills": [], "mcps": [], "github": false, "installation": false,
+        "projects": [], "skills": [], "mcps": [], "installation": false,
     } }),
             None,
         )

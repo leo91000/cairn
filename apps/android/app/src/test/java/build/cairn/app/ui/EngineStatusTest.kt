@@ -284,7 +284,26 @@ class EngineStatusTest {
                 "run",
                 status = "running",
                 accountWaitReason = "Usage exhausted.",
-                snapshot = Snapshot(agent = Agent(provider = "claude")),
+                snapshot =
+                    Snapshot(
+                        agent =
+                            Agent(
+                                exclusiveNodes = emptyList(),
+                                plugins = emptyList(),
+                                id = "00000000-0000-4000-8000-000000000000",
+                                name = "",
+                                revision = "",
+                                createdAt = 0,
+                                access =
+                                    AccessPolicy(
+                                        mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                                        projects = null,
+                                        skills = null,
+                                        mcps = null,
+                                    ),
+                                provider = "claude",
+                            )
+                    ),
             )
         val quota = chatQuota(run, listOf(failed))!!
         assertEquals("Your usage allowance is used up for now.", quota.message)

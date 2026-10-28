@@ -1,3 +1,5 @@
+use crate::common::AgentFixture;
+
 mod common;
 
 use axum::{http::StatusCode, response::IntoResponse};
@@ -75,7 +77,13 @@ async fn fixture() -> (TempDir, axum::Router, String, Value) {
         "/api/plugins/management-pages/connections/{instance}/resources/workspace/{}",
         text(&resource, "id")
     );
-    let agent = s.agent(json!({"name": "Dedicated", "access": {"projects": [], "installation": false, "github": false}}), None).await.unwrap();
+    let agent = s
+        .agent_fixture(
+            json!({"name": "Dedicated", "access": {"projects": [], "installation": false}}),
+            None,
+        )
+        .await
+        .unwrap();
     let app = cairn_installation::http::router(Arc::clone(&s))
         .await
         .unwrap();

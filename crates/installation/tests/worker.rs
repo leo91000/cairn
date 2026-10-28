@@ -1,3 +1,6 @@
+use common::AgentFixture;
+use common::StoreAgentFixture;
+
 mod common;
 
 use axum::{
@@ -951,9 +954,9 @@ async fn chats_continue_with_equivalent_access_but_not_reduced_access() {
         })
         .await;
 
-    let mut agent = s.get("agents", MAIN_AGENT_ID).await.unwrap();
+    let mut agent = s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
     agent["access"]["sandbox"] = "read-only".into();
-    s.store.put("agents", agent).await.unwrap();
+    s.store.put_agent_fixture(agent).await.unwrap();
     s.chat_send(&chat_id, message("Continue with less access."))
         .await
         .unwrap();
@@ -1520,7 +1523,7 @@ const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfixture";
 async fn condition_wait_yields_the_only_slot_to_its_dependency_and_resumes_the_same_session() {
     let mut fixture = Fixture::with_concurrency(1).await;
     let s = fixture.service.clone();
-    s.agent(
+    s.agent_fixture(
         json!({ "name": "Main agent", "access": { "installation": true } }),
         Some(MAIN_AGENT_ID),
     )
@@ -2595,7 +2598,7 @@ async fn vm_chat_protocol_runs_receive_one_frame_with_plugin_instructions() {
     .await
     .unwrap();
     let agent = s
-        .agent(json!({ "name": "Claude", "provider": "claude" }), None)
+        .agent_fixture(json!({ "name": "Claude", "provider": "claude" }), None)
         .await
         .unwrap();
     cairn_installation::plugins::connections::save(
@@ -2869,14 +2872,14 @@ async fn queued_work_uses_current_node_grants_without_rejecting_unrelated_policy
     let mut fixture = Fixture::new().await;
     fixture.stop(false).await;
     let s = &fixture.service;
-    let mut agent = s.get("agents", MAIN_AGENT_ID).await.unwrap();
+    let mut agent = s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
     agent["access"]["nodes"] = Value::Null;
-    s.store.put("agents", agent.clone()).await.unwrap();
+    s.store.put_agent_fixture(agent.clone()).await.unwrap();
     let run = fixture
         .enqueue("Inspect the fixture after a node policy change")
         .await;
     agent["access"]["nodes"] = json!([LOCAL_NODE_ID]);
-    s.store.put("agents", agent).await.unwrap();
+    s.store.put_agent_fixture(agent).await.unwrap();
     fixture.start().await;
     let completed = fixture.until_finished(text(&run, "id")).await;
     assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
@@ -2896,9 +2899,9 @@ async fn queued_work_continues_with_equivalent_or_wider_access_but_not_reduced_a
         .enqueue("Inspect the fixture after an equivalent access change")
         .await;
     let id = text(&run, "id");
-    let mut agent = s.get("agents", MAIN_AGENT_ID).await.unwrap();
+    let mut agent = s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
     agent["name"] = "Renamed agent".into();
-    s.store.put("agents", agent.clone()).await.unwrap();
+    s.store.put_agent_fixture(agent.clone()).await.unwrap();
     fixture.start().await;
     let completed = fixture.until_finished(id).await;
     assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
@@ -2908,7 +2911,7 @@ async fn queued_work_continues_with_equivalent_or_wider_access_but_not_reduced_a
         .enqueue("Inspect the fixture after a reduction")
         .await;
     agent["access"]["sandbox"] = "read-only".into();
-    s.store.put("agents", agent).await.unwrap();
+    s.store.put_agent_fixture(agent).await.unwrap();
     fixture.start().await;
     let failed = fixture.until_finished(text(&reduced_run, "id")).await;
     assert_eq!(failed["status"], RunStatus::Failed, "{failed}");
@@ -2941,11 +2944,11 @@ async fn queued_work_waits_for_node_capacity_without_failing() {
     };
     s.store.put("nodes", put_node("Laptop")).await.unwrap();
     let mut agent = s
-        .get("agents", cairn_installation::config::MAIN_AGENT_ID)
+        .agent_snapshot(cairn_installation::config::MAIN_AGENT_ID)
         .await
         .unwrap();
     agent["access"]["nodes"] = json!([node]);
-    s.store.put("agents", agent).await.unwrap();
+    s.store.put_agent_fixture(agent).await.unwrap();
     let run = fixture.enqueue("Waits for shared RAM headroom").await;
     let run_id = text(&run, "id");
     let resources = json!({"cpu": 2, "memoryMiB": 4096, "diskMiB": 32768});

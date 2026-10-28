@@ -1,17 +1,5 @@
 [
   {
-    "name": "list_agents",
-    "description": "List configured Codex agent profiles.",
-    "scope": "read",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {},
-      "additionalProperties": false
-    }
-  },
-  {
     "name": "list_models",
     "description": "List the models a coding agent offers on its enabled accounts: reasoning levels and, for Codex, the speeds (service tiers) each model offers with Codex's own description of their usage. Use a serviceTiers id, or \"standard\", as an agent or message speed. A tier marked limited is missing from some accounts; runs that ask for it prefer an account that offers it and otherwise run at Standard with a notice.",
     "scope": "read",
@@ -31,447 +19,6 @@
         }
       },
       "required": [],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "save_agent",
-    "description": "Create an agent profile. Execution access is explicit.",
-    "scope": "manage",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 100
-        },
-        "provider": {
-          "default": "codex",
-          "type": "string",
-          "enum": [
-            "codex",
-            "claude",
-            "opencode"
-          ]
-        },
-        "description": {
-          "default": "",
-          "type": "string",
-          "maxLength": 500
-        },
-        "model": {
-          "default": "",
-          "type": "string",
-          "maxLength": 100
-        },
-        "reasoning": {
-          "default": "high",
-          "type": "string",
-          "maxLength": 40,
-          "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
-        },
-        "speed": {
-          "default": "",
-          "type": "string",
-          "maxLength": 40,
-          "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
-        },
-        "instructions": {
-          "default": "",
-          "type": "string",
-          "maxLength": 20000
-        },
-        "timeoutMinutes": {
-          "default": 0,
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 720
-        },
-        "access": {
-          "default": {
-            "backend": "firecracker",
-            "nodes": [
-              "00000000-0000-4000-8000-000000000002"
-            ],
-            "projects": null,
-            "skills": null,
-            "mcps": null,
-            "mcpTools": {},
-            "installation": false,
-            "delegation": false,
-            "sandbox": "yolo"
-          },
-          "type": "object",
-          "properties": {
-            "backend": {
-              "default": "firecracker",
-              "type": "string",
-              "enum": [
-                "firecracker",
-                "native"
-              ]
-            },
-            "nodes": {
-              "default": [
-                "00000000-0000-4000-8000-000000000002"
-              ],
-              "anyOf": [
-                {
-                  "maxItems": 100,
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "projects": {
-              "default": null,
-              "anyOf": [
-                {
-                  "maxItems": 100,
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "skills": {
-              "default": null,
-              "anyOf": [
-                {
-                  "maxItems": 100,
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "maxLength": 160
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "mcps": {
-              "default": null,
-              "anyOf": [
-                {
-                  "maxItems": 100,
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "mcpTools": {
-              "default": {},
-              "type": "object",
-              "propertyNames": {
-                "type": "string",
-                "format": "uuid",
-                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-              },
-              "additionalProperties": {
-                "maxItems": 500,
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 200
-                }
-              }
-            },
-            "installation": {
-              "default": false,
-              "type": "boolean"
-            },
-            "delegation": {
-              "default": false,
-              "type": "boolean"
-            },
-            "sandbox": {
-              "default": "yolo",
-              "type": "string",
-              "enum": [
-                "yolo",
-                "workspace-write",
-                "read-only"
-              ]
-            }
-          },
-          "required": [
-            "backend",
-            "nodes",
-            "projects",
-            "skills",
-            "mcps",
-            "mcpTools",
-            "installation",
-            "delegation",
-            "sandbox"
-          ],
-          "additionalProperties": false
-        },
-        "nativeNodeReviews": {
-          "description": "Owner confirmation of specifically reviewed administrator node IDs already covered by access.nodes, including wildcard access. Reviews only these nodes while preserving the placement selection. These grant unrestricted passwordless sudo on the real host, including access to locally present credentials and services. Never infer confirmation from an all-node grant or conversion. Not saved on the agent; delegated installation agents cannot approve it.",
-          "maxItems": 100,
-          "type": "array",
-          "items": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          }
-        }
-      },
-      "required": [
-        "name",
-        "provider",
-        "description",
-        "model",
-        "reasoning",
-        "speed",
-        "instructions",
-        "timeoutMinutes",
-        "access"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "update_agent",
-    "description": "Update an existing agent, including MCP connection and tool access. Omitted fields retain their current values; access, when supplied, replaces the entire access policy. Changes apply to new runs. Explicit access to a native administrator node grants host administration only after owner review; all-node and future-node grants never silently grant root. Review unapproved administrator access from node details.",
-    "scope": "manage",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "id": {
-          "type": "string",
-          "format": "uuid",
-          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-        },
-        "agent": {
-          "type": "object",
-          "properties": {
-            "provider": {
-              "type": "string",
-              "enum": [
-                "codex",
-                "claude",
-                "opencode"
-              ]
-            },
-            "name": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 100
-            },
-            "description": {
-              "type": "string",
-              "maxLength": 500
-            },
-            "model": {
-              "type": "string",
-              "maxLength": 100
-            },
-            "reasoning": {
-              "type": "string",
-              "maxLength": 40,
-              "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
-            },
-            "speed": {
-              "type": "string",
-              "maxLength": 40,
-              "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
-            },
-            "instructions": {
-              "type": "string",
-              "maxLength": 20000
-            },
-            "timeoutMinutes": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 720
-            },
-            "access": {
-              "type": "object",
-              "properties": {
-                "backend": {
-                  "type": "string",
-                  "enum": [
-                    "firecracker",
-                    "native"
-                  ]
-                },
-                "nodes": {
-                  "anyOf": [
-                    {
-                      "maxItems": 100,
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "format": "uuid",
-                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                      }
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "projects": {
-                  "default": null,
-                  "anyOf": [
-                    {
-                      "maxItems": 100,
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "format": "uuid",
-                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                      }
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "skills": {
-                  "default": null,
-                  "anyOf": [
-                    {
-                      "maxItems": 100,
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "maxLength": 160
-                      }
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "mcps": {
-                  "default": null,
-                  "anyOf": [
-                    {
-                      "maxItems": 100,
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "format": "uuid",
-                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                      }
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "mcpTools": {
-                  "default": {},
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  },
-                  "additionalProperties": {
-                    "maxItems": 500,
-                    "type": "array",
-                    "items": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 200
-                    }
-                  }
-                },
-                "installation": {
-                  "type": "boolean"
-                },
-                "delegation": {
-                  "type": "boolean"
-                },
-                "sandbox": {
-                  "default": "yolo",
-                  "type": "string",
-                  "enum": [
-                    "yolo",
-                    "workspace-write",
-                    "read-only"
-                  ]
-                }
-              },
-              "required": [
-                "projects",
-                "skills",
-                "mcps",
-                "mcpTools",
-                "sandbox"
-              ],
-              "additionalProperties": false
-            },
-            "nativeNodeReviews": {
-              "description": "Owner confirmation of specifically reviewed administrator node IDs already covered by access.nodes, including wildcard access. Reviews only these nodes while preserving the placement selection. These grant unrestricted passwordless sudo on the real host, including access to locally present credentials and services. Never infer confirmation from an all-node grant or conversion. Not saved on the agent; delegated installation agents cannot approve it.",
-              "maxItems": 100,
-              "type": "array",
-              "items": {
-                "type": "string",
-                "format": "uuid",
-                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-              }
-            }
-          },
-          "additionalProperties": false
-        }
-      },
-      "required": [
-        "id",
-        "agent"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "delete_agent",
-    "description": "Delete an unused agent and its saved credentials, portrait and 1Password assignments. Main, agents referenced by tasks (including archived tasks), and agents with active work cannot be deleted. Completed run history is preserved.",
-    "scope": "manage",
-    "destructive": true,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "id": {
-          "type": "string",
-          "format": "uuid",
-          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-        }
-      },
-      "required": [
-        "id"
-      ],
       "additionalProperties": false
     }
   },
@@ -2175,151 +1722,6 @@
     }
   },
   {
-    "name": "list_plugin_packages",
-    "description": "List bounded plugin package cards and saved access summaries. Follow nextCursor for every page. These summaries confer no execution access.",
-    "scope": "read",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "cursor": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 80,
-          "pattern": "^[A-Za-z0-9+-][A-Za-z0-9.+-]*$"
-        }
-      },
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "get_plugin_package",
-    "description": "Read one chosen plugin manifest for its resource collections, operations and permission profiles. Does not return instance settings, secrets or source files.",
-    "scope": "read",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "pluginId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 80,
-          "pattern": "^[A-Za-z0-9+-][A-Za-z0-9.+-]*$"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "pluginId"
-      ]
-    }
-  },
-  {
-    "name": "list_plugin_instance_access",
-    "description": "List bounded saved instance metadata, delegated agents, root and resource memberships and diagnostic state. Includes unavailable packages; saved rules are not current execution authority.",
-    "scope": "read",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "cursor": {
-          "type": "string",
-          "format": "uuid"
-        }
-      },
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "list_plugin_agent_grant_counts",
-    "description": "List complete saved resource-rule totals per agent, including held rules whose resource or instance was removed. Follow nextCursor; a count is not effective permission.",
-    "scope": "read",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "cursor": {
-          "type": "string",
-          "format": "uuid"
-        }
-      },
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "list_plugin_resource_choices",
-    "description": "List resource IDs, names and parent metadata of one chosen collection without settings or secret field names. Disabled resources remain visible as saved choices. Follow nextCursor.",
-    "scope": "read",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "pluginId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 80,
-          "pattern": "^[A-Za-z0-9+-][A-Za-z0-9.+-]*$"
-        },
-        "instanceId": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "collection": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 100,
-          "pattern": "^[a-z0-9][a-z0-9_-]*$"
-        },
-        "cursor": {
-          "type": "string",
-          "format": "uuid"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "pluginId",
-        "instanceId",
-        "collection"
-      ]
-    }
-  },
-  {
-    "name": "merge_agents",
-    "description": "Merge an idle Firecracker agent into an existing profile, transferring all tasks (including archived), chats (including trash) and run identities atomically. Existing runs retain their engine, model and settings; future task runs use destination defaults. Destination access and live grants must already cover the source. Main can only be the destination. Rejects active/recovering work, native agents and plugin delegations. Does not change destination permissions or credentials. Requires explicit confirmation.",
-    "scope": "manage",
-    "destructive": true,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "sourceId": {
-          "type": "string",
-          "format": "uuid",
-          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-        },
-        "targetId": {
-          "type": "string",
-          "format": "uuid",
-          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-        },
-        "confirm": {
-          "type": "boolean",
-          "const": true
-        }
-      },
-      "required": [
-        "sourceId",
-        "targetId",
-        "confirm"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
     "name": "list_nodes",
     "description": "List execution nodes, their immutable backends, budgets, trusted people, agent grants and storage status. Read this before configuring or replacing a node.",
     "scope": "read",
@@ -2725,6 +2127,119 @@
     }
   },
   {
+    "name": "list_plugin_packages",
+    "description": "List bounded plugin package cards and saved access summaries. Follow nextCursor for every page. These summaries confer no execution access.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[A-Za-z0-9+-][A-Za-z0-9.+-]*$"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_plugin_package",
+    "description": "Read one chosen plugin manifest for its resource collections, operations and permission profiles. Does not return instance settings, secrets or source files.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "pluginId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[A-Za-z0-9+-][A-Za-z0-9.+-]*$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pluginId"
+      ]
+    }
+  },
+  {
+    "name": "list_plugin_instance_access",
+    "description": "List bounded saved instance metadata, delegated agents, root and resource memberships and diagnostic state. Includes unavailable packages; saved rules are not current execution authority.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_plugin_agent_grant_counts",
+    "description": "List complete saved resource-rule totals per agent, including held rules whose resource or instance was removed. Follow nextCursor; a count is not effective permission.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_plugin_resource_choices",
+    "description": "List resource IDs, names and parent metadata of one chosen collection without settings or secret field names. Disabled resources remain visible as saved choices. Follow nextCursor.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "pluginId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[A-Za-z0-9+-][A-Za-z0-9.+-]*$"
+        },
+        "instanceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "collection": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[a-z0-9][a-z0-9_-]*$"
+        },
+        "cursor": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pluginId",
+        "instanceId",
+        "collection"
+      ]
+    }
+  },
+  {
     "name": "manage_plugin_setup",
     "description": "Prepare an inert plugin setup before activation. list/get return bounded redacted drafts; save creates or replaces complete name/settings/secrets with a saved revision when editing; form evaluates saved draft settings; delete and activate require data.revision. signin starts root OAuth using the saved revision, signin_status/signin_cancel use flowId; consent takes place in the owner browser and save consumes data.credentialFlow. Agent grants cannot be edited here. Installation access never grants a draft's saved private credentials: those configuration actions require the owner through public MCP or the owner plugin page.",
     "scope": "manage",
@@ -2846,7 +2361,7 @@
   },
   {
     "name": "manage_plugin_oauth",
-    "description": "Read the redacted OAuth status or disconnect a nonpersonal resource authorization on an active plugin instance, using the same owner UI validation. Status includes granted/requested scopes and expiry, never tokens. Revoking saved authorization requires the native agent's separate existing instance grant; installation management cannot grant itself private access. Disconnect also invalidates in-flight consent. Personal and inert authorization, starting consent and finishing consent are not available through this operation.",
+    "description": "Start or finish owner-connected OAuth consent, read redacted status, or disconnect a nonpersonal resource authorization. Choose exactly one active instanceId or inert draftId. Start needs data.scopes, optional data.directOrigin, and data.setupRevision for a draft; show the returned provider URL to the authorized person. Finish needs data.state after the callback and returns pending until consent arrives. Status includes scopes and expiry, never tokens. On active instances, native start/finish/revoke require the agent's separate existing instance grant. Inert private consent belongs to the owner: use public owner MCP or the owner's plugin page; native management may read redacted setup status but cannot borrow private setup credentials. Draft revoke requires data.setupRevision. State retains the exact owner/app/resource; disconnect invalidates in-flight consent. Personal consent never inherits an owner's identity from installation management.",
     "scope": "manage",
     "destructive": true,
     "inputSchema": {
@@ -2858,6 +2373,10 @@
           "maxLength": 80
         },
         "instanceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "draftId": {
           "type": "string",
           "format": "uuid"
         },
@@ -2879,21 +2398,61 @@
           "type": "string",
           "enum": [
             "status",
-            "revoke"
+            "revoke",
+            "start",
+            "finish"
           ]
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "scopes": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string"
+              }
+            },
+            "directOrigin": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "minLength": 43,
+              "maxLength": 43
+            },
+            "setupRevision": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
         }
       },
       "required": [
         "pluginId",
-        "instanceId",
         "collection",
         "resourceId",
         "provider",
         "action"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "instanceId"
+          ]
+        },
+        {
+          "required": [
+            "draftId"
+          ]
+        }
+      ]
     }
   },
+
   {
     "name": "manage_plugin_route",
     "description": "List, create, replace or delete conversation routes on an active plugin resource, with the same owner UI validation. Save requires complete route name/enabled/match/agentId/projectId?/accessMode/userIds/people?/hourly limits; editing and deletion require data.revision from the latest list/save. routeId selects a saved route. List is bounded with cursor. Installation management grants neither saved credentials nor plugin access to agents; agentIds and exclusive permissions remain owner-only. Inert setup drafts cannot have live routes. requests lists at most 50 route-local access requests per instance. people selects routeId/userId and data.action approve, deny or remove, plus the latest data.revision. Each approval/removal preserves other participants and invalidates only the changed person's admitted generation. eligibility returns selectable agents for optional data.projectId and data.accessMode, including any native execution limitation; it grants nothing.",

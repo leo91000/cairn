@@ -479,7 +479,7 @@ pub(crate) fn slots(node: &Value) -> u64 {
 pub async fn inventory(s: &Service) -> Result<Vec<Value>> {
     let attempts = s.store.list("node-attempts").await?;
     let volumes = s.store.list("node-volumes").await?;
-    let agents = s.store.list("agents").await?;
+    let agents = s.store.agent_snapshots().await?;
     let stale = stale_disks(s, &volumes, &attempts).await?;
     let usage = Usage {
         attempts: &attempts,
@@ -776,7 +776,7 @@ pub(crate) async fn configure_node(
             // Older clients still send this list; the grants live on each agent.
             if let Some(agents) = request.exclusive_agents {
                 for agent in &agents {
-                    db.get("agents", agent)?
+                    db.agent_snapshot(agent)?
                         .ok_or_else(|| Error::bad("Exclusive agent missing."))?;
                 }
                 crate::agent_grants::set_node_agents(db, &mut record, &agents)?;
@@ -938,7 +938,7 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
             if record["revoked"] == true {
                 return Err(Error::conflict("This node is revoked."));
             }
-            for agent in db.list("agents")? {
+            for agent in db.agent_snapshots()? {
                 let granted = request.agent_ids.iter().any(|id| agent["id"] == *id);
                 if request.add && !granted {
                     continue;
@@ -1011,7 +1011,7 @@ fn set_node_grant(db: &Db<'_>, mut agent: Value, node: &str, granted: bool) -> R
         crate::agent_grants::release_node(db, &mut agent, node)?;
     }
     crate::service::touch(&mut agent);
-    db.put("agents", &agent)?;
+    db.save_agent_permissions(&agent)?;
     Ok(())
 }
 
@@ -1051,7 +1051,7 @@ pub(crate) async fn revoke(
                     db.delete(&key)?;
                 }
             }
-            for mut agent in db.list("agents")? {
+            for mut agent in db.agent_snapshots()? {
                 let Some(nodes) = agent["access"]["nodes"].as_array_mut() else {
                     continue;
                 };
@@ -1059,7 +1059,7 @@ pub(crate) async fn revoke(
                 nodes.retain(|id| id != &node);
                 if nodes.len() != before {
                     crate::service::touch(&mut agent);
-                    db.put("agents", &agent)?;
+                    db.save_agent_permissions(&agent)?;
                 }
             }
             crate::agent_grants::forget_resource(db, crate::agent_grants::EXCLUSIVE_NODES, &node)?;
@@ -1425,7 +1425,7 @@ fn renew_leases(db: &Db<'_>, node_id: &str, lease_ms: u64) -> Result<Vec<Lease>>
         let run_id = text(&attempt, "runId");
         let run = db.run(run_id)?.unwrap_or_default();
         let checkpoint = db_checkpoint(db, run_id)?;
-        let agent = db.get("agents", run_agent(&run))?.unwrap_or_default();
+        let agent = db.agent_snapshot(run_agent(&run))?.unwrap_or_default();
         let owns_execution = run["status"] == RunStatus::Running
             && run["cancelRequestedAt"].is_null()
             && checkpoint["runnerId"] == attempt["id"]

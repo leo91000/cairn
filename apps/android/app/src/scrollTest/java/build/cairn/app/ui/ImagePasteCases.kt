@@ -28,7 +28,22 @@ abstract class ImagePasteCases {
             val app = ApplicationProvider.getApplicationContext<Application>()
             val uploads = CopyOnWriteArrayList<Pair<String, Long>>()
             val sent = CopyOnWriteArrayList<JsonObject>()
-            val agent = Agent(MAIN_AGENT_ID, "Agent principal")
+            val agent =
+                Agent(
+                    exclusiveNodes = emptyList(),
+                    plugins = emptyList(),
+                    revision = "",
+                    createdAt = 0,
+                    access =
+                        AccessPolicy(
+                            mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                            projects = null,
+                            skills = null,
+                            mcps = null,
+                        ),
+                    id = MAIN_AGENT_ID,
+                    name = "Agent principal",
+                )
             val run = Run("run", status = "succeeded", snapshot = Snapshot(agent = agent))
             val chat =
                 Chat("chat", title = "Capture", runId = "run", agentName = agent.name, run = run)
@@ -76,7 +91,9 @@ abstract class ImagePasteCases {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
-                                    wireJson.encodeToString(listOf(agent))
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(listOf(agent))
+                                    )
                                 "/api/installations/fixture/api/chats/chat/messages" -> {
                                     sent +=
                                         wireJson
@@ -93,6 +110,11 @@ abstract class ImagePasteCases {
                                             ?.endsWith("/api/projects") == true
                                     )
                                         """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
                                     else "[]"
                             }
                         return MockResponse().setBody(body)

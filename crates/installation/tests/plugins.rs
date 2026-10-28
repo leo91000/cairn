@@ -1,3 +1,4 @@
+use common::AgentFixture;
 use common::ProjectFixture;
 
 mod common;
@@ -105,10 +106,10 @@ async fn service() -> (TempDir, Arc<Service>, Value) {
     common::relay_fixture::claimed(&s).await.unwrap();
     s.plugins.use_worker(worker());
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Discord agent",
-                "access": { "projects": [], "skills": [], "mcps": [], "github": false, "installation": false },
+                "access": { "projects": [], "skills": [], "mcps": [], "installation": false },
             }),
             None,
         )
@@ -1019,10 +1020,10 @@ async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is
     let (_root, s, connection) = fixture().await;
     let (mock, server) = mock(&s).await;
     let support = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Support",
-                "access": { "projects": [], "skills": [], "mcps": [], "github": false, "installation": false, "sandbox": "read-only" },
+                "access": { "projects": [], "skills": [], "mcps": [], "installation": false, "sandbox": "read-only" },
             }),
             None,
         )
@@ -1043,7 +1044,7 @@ async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is
     };
     let channel = json!({ "guildId": "100", "channelId": "200", "messageContent": true, "everyMessage": true });
     // The owner chooses the agent, even one that can run commands for anyone in a channel.
-    let broad = s.get("agents", &connection.agent_id).await.unwrap();
+    let broad = s.agent_snapshot(&connection.agent_id).await.unwrap();
     connections::save(
         &s,
         "discord",
@@ -1389,9 +1390,11 @@ async fn rate_limits_and_changed_agent_access_stop_admission() {
         403
     );
 
-    let mut agent = s.get("agents", &connection.agent_id).await.unwrap();
+    let mut agent = s.agent_snapshot(&connection.agent_id).await.unwrap();
     agent["access"]["projects"] = Value::Null;
-    s.agent(agent, Some(&connection.agent_id)).await.unwrap();
+    s.agent_fixture(agent, Some(&connection.agent_id))
+        .await
+        .unwrap();
     assert_eq!(
         accept(&s, &connection, message("505", "300", "<@400> hi"))
             .await
@@ -1421,7 +1424,7 @@ async fn rate_limits_and_changed_agent_access_stop_admission() {
         .await
         .unwrap();
     let elsewhere = s
-        .agent(
+        .agent_fixture(
             json!({ "name": "Elsewhere", "access": { "projects": [], "installation": false } }),
             None,
         )
@@ -2047,9 +2050,9 @@ async fn revoked_and_deleted_deliveries_do_not_stop_other_people() {
 #[tokio::test]
 async fn public_question_partial_answers_require_the_starters_authority() {
     let (_root, s, connection) = fixture().await;
-    let agent = s.agent(json!({
+    let agent = s.agent_fixture(json!({
         "name": "Support",
-        "access": { "projects": [], "skills": [], "mcps": [], "github": false, "installation": false, "sandbox": "read-only" },
+        "access": { "projects": [], "skills": [], "mcps": [], "installation": false, "sandbox": "read-only" },
     }), None).await.unwrap();
     let mut saved = serde_json::to_value(&connection).unwrap();
     saved["agentId"] = agent["id"].clone();
@@ -2415,9 +2418,11 @@ async fn reviewed_reduced_agent_grants_start_a_fresh_conversation() {
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let mut agent = s.get("agents", &connection.agent_id).await.unwrap();
+    let mut agent = s.agent_snapshot(&connection.agent_id).await.unwrap();
     agent["access"]["sandbox"] = json!("read-only");
-    s.agent(agent, Some(&connection.agent_id)).await.unwrap();
+    s.agent_fixture(agent, Some(&connection.agent_id))
+        .await
+        .unwrap();
     let saved = connections::save(
         &s,
         "discord",

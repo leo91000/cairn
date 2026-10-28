@@ -1,6 +1,8 @@
 //! The Discord package runs entirely in Luau: its Gateway session over the generic
 //! `socket` capability, its setup form, its test and its panel. Discord is simulated
 //! by local HTTP and WebSocket servers.
+use common::AgentFixture;
+
 mod common;
 
 use axum::{
@@ -38,10 +40,10 @@ async fn service() -> (TempDir, Arc<Service>, Value) {
     s.plugins
         .use_worker(PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Discord agent",
-                "access": { "projects": [], "skills": [], "mcps": [], "github": false, "installation": false },
+                "access": { "projects": [], "skills": [], "mcps": [], "installation": false },
             }),
             None,
         )
@@ -1376,20 +1378,23 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     // Instructions are not part of the approved access.
     let mut described = agent.clone();
     described["instructions"] = "Be brief.".into();
-    let preview = s.agent_preview(described, &id).await.unwrap();
+    let preview = s.agent_preview_fixture(described, &id).await.unwrap();
     assert_eq!(effect(&preview)["id"], connection);
     assert_eq!(effect(&preview)["suspended"], false);
 
     // A stricter sandbox changes the access the owner approved for Discord people.
     let mut stricter = agent.clone();
     stricter["access"]["sandbox"] = "read-only".into();
-    let preview = s.agent_preview(stricter.clone(), &id).await.unwrap();
+    let preview = s
+        .agent_preview_fixture(stricter.clone(), &id)
+        .await
+        .unwrap();
     assert_eq!(effect(&preview)["suspended"], true);
     assert_eq!(effect(&preview)["blocked"], Value::Null);
     assert_eq!(effect(&preview)["alreadySuspended"], false);
 
     stricter["reapproveDelegations"] = json!([connection]);
-    let updated = s.agent(stricter, Some(&id)).await.unwrap();
+    let updated = s.agent_fixture(stricter, Some(&id)).await.unwrap();
     let stored: Connection = serde_json::from_value(
         s.store
             .get(connections::KIND, &connection)
@@ -1407,16 +1412,19 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     // The owner may approve installation access for Discord people too.
     let mut installation = updated.clone();
     installation["access"]["installation"] = true.into();
-    let preview = s.agent_preview(installation.clone(), &id).await.unwrap();
+    let preview = s
+        .agent_preview_fixture(installation.clone(), &id)
+        .await
+        .unwrap();
     assert_eq!(effect(&preview)["suspended"], true);
     assert_eq!(effect(&preview)["blocked"], Value::Null);
     installation["reapproveDelegations"] = json!([connection]);
-    let updated = s.agent(installation, Some(&id)).await.unwrap();
+    let updated = s.agent_fixture(installation, Some(&id)).await.unwrap();
 
     // Without reapproval the save succeeds and the bot waits for the owner.
     let mut wider = updated.clone();
     wider["access"]["sandbox"] = "yolo".into();
-    let widened = s.agent(wider, Some(&id)).await.unwrap();
+    let widened = s.agent_fixture(wider, Some(&id)).await.unwrap();
     let stored = s
         .store
         .get(connections::KIND, &connection)
@@ -1430,7 +1438,7 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     // A later unrelated edit reports that the bot was already suspended.
     let mut renamed = widened.clone();
     renamed["description"] = "Renamed".into();
-    let preview = s.agent_preview(renamed.clone(), &id).await.unwrap();
+    let preview = s.agent_preview_fixture(renamed.clone(), &id).await.unwrap();
     assert_eq!(effect(&preview)["suspended"], true);
     assert_eq!(effect(&preview)["alreadySuspended"], true);
 
@@ -1440,7 +1448,7 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     s.store.put(connections::KIND, previous).await.unwrap();
     let mut restored = renamed.clone();
     restored["access"] = updated["access"].clone();
-    let preview = s.agent_preview(restored, &id).await.unwrap();
+    let preview = s.agent_preview_fixture(restored, &id).await.unwrap();
     assert_eq!(effect(&preview)["suspended"], false);
     assert!(effect(&preview)["blocked"].is_string());
     assert_eq!(effect(&preview)["alreadySuspended"], true);
@@ -1478,12 +1486,12 @@ async fn plugin_grants_keep_a_bot_anyone_can_reach_answering() {
     // The approved policy is unchanged: the owner chose who may reach this agent.
     let mut secret = agent.clone();
     secret["plugins"] = json!([account["id"]]);
-    let preview = s.agent_preview(secret.clone(), &id).await.unwrap();
+    let preview = s.agent_preview_fixture(secret.clone(), &id).await.unwrap();
     let effect = &preview["delegations"][0];
     assert_eq!(effect["id"], saved["id"]);
     assert_eq!(effect["suspended"], false);
     assert_eq!(effect["blocked"], Value::Null);
-    s.agent(secret, Some(&id)).await.unwrap();
+    s.agent_fixture(secret, Some(&id)).await.unwrap();
     let stored: Connection = serde_json::from_value(
         s.store
             .get(connections::KIND, text(&saved, "id"))

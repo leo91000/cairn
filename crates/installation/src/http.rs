@@ -492,8 +492,11 @@ impl Input {
         );
         let limit = if path.starts_with("/internal/node-workspace/") && large {
             2_000_000
-        } else if skill_batch {
-            // A folder move can carry hundreds of paths even when all file contents are staged.
+        } else if skill_batch
+            || path.ends_with("/avatar/upload")
+            || matches!(path, "/mcp" | "/api/mcp" | "/mcp-installation")
+        {
+            // Batch skill moves and base64 avatar uploads use the existing bounded transport limit.
             cairn_protocol::MAX_BODY
         } else if plugin_configuration {
             // Expanding declared defaults can make a valid configuration larger

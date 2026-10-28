@@ -1,3 +1,7 @@
+use crate::common::AgentFixture;
+
+#[path = "slack/active_forms.rs"]
+mod active_forms;
 #[path = "slack/admission.rs"]
 mod admission;
 #[path = "slack/capacity.rs"]
@@ -9,6 +13,8 @@ mod common;
 mod controller;
 #[path = "slack/interactions.rs"]
 mod interactions;
+#[path = "common/management.rs"]
+mod management;
 #[path = "slack/recovery.rs"]
 mod recovery;
 #[path = "slack/reset.rs"]
@@ -790,7 +796,7 @@ async fn exchange(scenario: DeliveryScenario) {
     assert_eq!(resource["settings"]["externalId"], "TTEST");
     assert_eq!(resource["settings"]["botId"], "UBOT");
     assert!(!resource.to_string().contains(BOT_TOKEN));
-    let agent = service.agent(json!({"name": "Slack helper", "access": {"projects": [], "skills": [], "mcps": [], "installation": false}}), None).await.unwrap();
+    let agent = service.agent_fixture(json!({"name": "Slack helper", "access": {"projects": [], "skills": [], "mcps": [], "installation": false}}), None).await.unwrap();
     let route = save(&app, &format!("{base}/{}/routes", text(&resource,"id")), json!({
         "name": "Authorized channel", "enabled": true, "match": {"channel": "CTEST"}, "agentId": agent["id"],
         "accessMode": "allowlist", "userIds": ["UALICE"], "maxMessagesPerHour": 10, "maxPerPersonPerHour": 5

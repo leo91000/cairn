@@ -1,3 +1,5 @@
+use crate::common::AgentFixture;
+
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -42,7 +44,7 @@ async fn consent_recovery(callback_during_finish: bool) {
     let (origin, provider_server) = common::serve_locally(provider).await;
     s.plugins.route_http_to(Some(origin));
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Consent recovery",
                 "access": {"projects": [], "installation": false},

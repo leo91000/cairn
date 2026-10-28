@@ -330,16 +330,18 @@ test('finishing the first step keeps an agent allowed while it was open', async 
     }
 
     const response = await route.fetch()
-    const agents = await response.json()
+    const { agents } = await response.json()
     const main = agents.find((item: { id: string }) => item.id === MAIN_AGENT_ID)
     await route.fulfill({
       response,
-      json: [...agents, {
-        ...main,
-        id: randomUUID(),
-        name: 'Native helper',
-        access: { ...main.access, backend: 'native', nodes: [randomUUID()] },
-      }],
+      json: {
+        agents: [...agents, {
+          ...main,
+          id: randomUUID(),
+          name: 'Native helper',
+          access: { ...main.access, backend: 'native', nodes: [randomUUID()] },
+        }],
+      },
     })
   })
   // The finishing request is observed below, so it must go through HTTP.

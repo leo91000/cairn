@@ -1,3 +1,4 @@
+use common::AgentFixture;
 use common::ProjectFixture;
 
 mod common;
@@ -199,10 +200,10 @@ async fn restricted_agents_cannot_escalate_projects_skills_or_the_main_policy() 
             "sandbox": "read-only",
         },
     });
-    let agent = s.agent(restricted, None).await.unwrap();
+    let agent = s.agent_fixture(restricted, None).await.unwrap();
     assert!(service::isolated(&agent));
     let main = json!({ "name": "Main", "access": { "projects": [] } });
-    assert!(s.agent(main, Some(MAIN_AGENT_ID)).await.is_err());
+    assert!(s.agent_fixture(main, Some(MAIN_AGENT_ID)).await.is_err());
     let foreign = json!({
         "name": "Foreign",
         "agentId": agent["id"],
@@ -370,10 +371,6 @@ async fn binary_vault_records_preserve_bytes_and_reject_wrong_scope_or_damage() 
 
 #[test]
 fn schemas_apply_defaults_but_reject_ambiguous_questions_and_bad_mcp() {
-    let agent = parse("agent", json!({ "name": " Alice ", "unknown": true })).unwrap();
-    assert_eq!(agent["name"], "Alice");
-    assert!(agent.get("unknown").is_none());
-    assert_eq!(agent["access"]["sandbox"], "yolo");
     assert!(
         parse(
             "questions",

@@ -16,6 +16,7 @@ import {
 import { providers as codingAgents } from '../../../../packages/contracts/accounts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { createProject } from '../../../../packages/contracts/generated/createProject'
+import { deleteAgent } from '../../../../packages/contracts/generated/deleteAgent'
 import { deleteProject } from '../../../../packages/contracts/generated/deleteProject'
 import { replaceProject } from '../../../../packages/contracts/generated/replaceProject'
 import { accessSummary } from '../agent-access'
@@ -269,7 +270,7 @@ async function remove() {
 
   try {
     if (isAgent.value)
-      await api(`/agents/${deleting.value.id}`, { method: 'DELETE' })
+      await deleteAgent(api, { agentId: deleting.value.id })
     else
       await deleteProject(api, { projectId: deleting.value.id })
     await refresh()

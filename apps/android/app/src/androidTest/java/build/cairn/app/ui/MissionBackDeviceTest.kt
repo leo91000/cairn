@@ -22,7 +22,22 @@ class MissionBackDeviceTest {
     @get:Rule val compose = createComposeRule()
 
     private val now = System.currentTimeMillis()
-    private val main = Agent(MAIN_AGENT_ID, "Agent principal")
+    private val main =
+        Agent(
+            exclusiveNodes = emptyList(),
+            plugins = emptyList(),
+            revision = "",
+            createdAt = 0,
+            access =
+                AccessPolicy(
+                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                    projects = null,
+                    skills = null,
+                    mcps = null,
+                ),
+            id = MAIN_AGENT_ID,
+            name = "Agent principal",
+        )
     private val daily =
         Task(
             "daily",
@@ -89,7 +104,11 @@ class MissionBackDeviceTest {
                             path == "/api/installations" -> json(beaconInstallationsFixture())
                             path == "/api/account/session" -> json(beaconAccountFixture("fixture"))
                             path == "/api/installations/fixture/api/agents" ->
-                                json(wireJson.encodeToString(listOf(main)))
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(listOf(main))
+                                    )
+                                )
                             path == "/api/installations/fixture/api/tasks" ->
                                 json(wireJson.encodeToString(listOf(daily)))
                             path == "/api/installations/fixture/api/tasks/activity" ->
@@ -113,6 +132,11 @@ class MissionBackDeviceTest {
                                             ?.endsWith("/api/projects") == true
                                     )
                                         """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
                                     else "[]"
                                 )
                         }

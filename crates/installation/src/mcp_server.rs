@@ -9,7 +9,7 @@ use crate::{
     http::{App, Input},
     mcp_client::{LEGACY, MODERN, VERSIONS},
     rpc::jsonrpc::{Frame, Message},
-    service::{AgentEditor, Service},
+    service::Service,
     store::Db,
     validation::{parse, text},
 };
@@ -553,6 +553,11 @@ pub(crate) fn operations() -> Vec<Value> {
             .expect("serializable tool descriptor")
         })
         .collect();
+    operations.extend(
+        crate::capabilities::AGENT_OPERATIONS
+            .iter()
+            .map(crate::capabilities::AgentOperation::descriptor),
+    );
     operations.push(crate::capabilities::RESUME_RUN.descriptor());
     operations.extend(
         crate::capabilities::PROJECT_OPERATIONS
@@ -589,6 +594,15 @@ pub(crate) async fn operation(
     name: &str,
     args: Value,
 ) -> Result<Value> {
+    if let Some(op) = crate::capabilities::agent_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(scopes.to_vec()),
+            )
+            .await;
+    }
     if let Some(op) = crate::capabilities::project_operation(name) {
         return op
             .invoke(
@@ -795,7 +809,6 @@ pub(crate) async fn invoke(
         | "set_chat_paused"
         | "stop_chat"
         | "delete_chat" => chat_tools::invoke(s, name, args, bearer).await,
-        "list_agents" => Ok(s.store.list("agents").await?.into()),
         "list_models" => {
             crate::provider::Provider::parse(text(&args, "provider"))?
                 .adapter()
@@ -803,33 +816,8 @@ pub(crate) async fn invoke(
                 .await
         }
         "list_tasks" => Ok(s.store.list("tasks").await?.into()),
-        "save_agent" => {
-            s.agent_authorized(args, None, AgentEditor::Installation, authorize)
-                .await
-        }
         "create_task" => s.task(args, None).await,
-        "update_agent" => {
-            let id = text(&args, "id");
-            let mut agent = s.get("agents", id).await?;
-            let patch = &args["agent"];
-            crate::store::merge(&mut agent, patch);
-            // Moving to a coding agent without speeds drops Codex's unless one is sent.
-            if patch.get("provider").is_some()
-                && patch.get("speed").is_none()
-                && text(&agent, "provider") != "codex"
-            {
-                agent["speed"] = "".into();
-            }
-            s.agent_authorized(agent, Some(id), AgentEditor::Installation, authorize)
-                .await
-        }
         "update_task" => s.task(args["task"].clone(), Some(text(&args, "id"))).await,
-        "delete_agent" => {
-            s.remove_authorized("agents", text(&args, "id"), authorize)
-                .await?;
-            Ok(json!({ "deleted": true }))
-        }
-        "merge_agents" => s.merge_agents_authorized(args, authorize).await,
         "run_task" => s.enqueue(text(&args, "taskId"), "mcp", None).await,
         "convert_run_to_chat" => {
             s.chat_from_run_authorized(text(&args, "runId"), authorize)

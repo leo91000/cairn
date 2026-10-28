@@ -1,3 +1,5 @@
+use crate::common::AgentFixture;
+
 mod common;
 #[path = "common/management.rs"]
 mod management;
@@ -142,7 +144,7 @@ async fn route_tools_refuse_stale_edits_wrong_targets_and_self_grants() {
     assert_eq!(current["items"][0]["revision"], route["revision"]);
     assert_eq!(current["items"][0]["userIds"], json!(["U_ALICE"]));
     assert_eq!(
-        f.s.get("agents", text(&f.main, "id")).await.unwrap()["plugins"],
+        f.s.agent_snapshot(text(&f.main, "id")).await.unwrap()["plugins"],
         json!([])
     );
 }
@@ -235,7 +237,7 @@ async fn route_management_rechecks_permissions_and_target_after_authority_io() {
                 replaced.store(true, Ordering::SeqCst);
             }
             _ => {
-                f.s.agent(
+                f.s.agent_fixture(
                     json!({"name": "Main agent", "access": {"installation": false}}),
                     Some(text(&f.main, "id")),
                 )

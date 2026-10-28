@@ -1,6 +1,8 @@
 //! Occupancy is synthetic; accepted requests use the actual Luau/HTTP path.
 //! The after-admission case releases capacity, then runs the real adapter/process
 //! to produce its answer. No completed conversation or answer is seeded.
+use crate::common::AgentFixture;
+
 use super::*;
 
 pub(super) async fn occupy(service: &Service, instance: &Value) -> Vec<String> {
@@ -164,7 +166,7 @@ async fn a_full_reply_queue_refuses_admission_without_a_permanent_duplicate_mark
         .unwrap();
     let (instance, resource) = configure(&app, &service).await;
     let agent = service
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Capacity helper",
                 "access": { "projects": [], "skills": [], "mcps": [], "installation": false },

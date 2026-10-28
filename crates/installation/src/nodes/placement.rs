@@ -352,7 +352,7 @@ struct Snapshot {
 impl Snapshot {
     fn load(db: &Db<'_>, run: &Value, configured: bool) -> Result<Self> {
         let agent = db
-            .get("agents", super::run_agent(run))?
+            .agent_snapshot(super::run_agent(run))?
             .ok_or_else(|| Error::forbidden("Agent removed."))?;
         let mut nodes = db.list("nodes")?;
         // Existing development execution stays available without a controller.
@@ -739,7 +739,7 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
         .run(run)?
         .ok_or_else(|| Error::not_found("Conversation not found."))?;
     let agent = db
-        .get("agents", super::run_agent(&record))?
+        .agent_snapshot(super::run_agent(&record))?
         .ok_or_else(|| Error::forbidden("Agent removed."))?;
     let access = policy(&agent);
     if let Some(input) = input {
@@ -803,7 +803,7 @@ pub async fn renew_local(s: &Service, run_id: &str) -> Result<()> {
                 .run(&run_id)?
                 .ok_or_else(|| Error::not_found("Conversation removed."))?;
             let agent = db
-                .get("agents", super::run_agent(&run))?
+                .agent_snapshot(super::run_agent(&run))?
                 .unwrap_or_default();
             let mut record = db
                 .get("node-attempts", &owned)?

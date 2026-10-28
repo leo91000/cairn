@@ -1,4 +1,6 @@
 //! A saved workspace keeps its verified external namespace and its access rules.
+use crate::common::AgentFixture;
+
 use super::*;
 
 const OTHER_TOKEN: &str = "xoxb-synthetic-other-workspace";
@@ -103,7 +105,7 @@ async fn workspace_identity(inert: bool) {
     let routes = format!("{path}/routes");
     let before_routes = if !inert {
         let agent = service
-            .agent(
+            .agent_fixture(
                 json!({
                     "name": "Original workspace",
                     "access": {"projects": [], "skills": [], "mcps": [], "installation": false},

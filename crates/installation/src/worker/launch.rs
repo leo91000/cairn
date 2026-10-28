@@ -295,7 +295,7 @@ impl Execution<'_> {
     async fn refresh_access(&mut self) -> Result<()> {
         let s = self.s;
         let current = s
-            .get("agents", text(&self.run["snapshot"]["agent"], "id"))
+            .agent_snapshot(text(&self.run["snapshot"]["agent"], "id"))
             .await?;
         nodes::require_node(&current)?;
         if !covers(&current, &self.run["snapshot"]["agent"]) {

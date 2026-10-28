@@ -20,6 +20,9 @@ hosts = [
 instanceForm = true
 instanceView = true
 
+[agentAccess]
+description = "Agents with installation management access can configure this Slack app when the owner also grants access to it. This does not grant Slack people permission to start work."
+
 [brand]
 color = "#611f69"
 path = "M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z"

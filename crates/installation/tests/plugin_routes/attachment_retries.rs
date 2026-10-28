@@ -1,3 +1,5 @@
+use crate::common::AgentFixture;
+
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -39,7 +41,7 @@ async fn post_upload_retry(case: Retry) {
     let changed = matches!(case, Retry::Changed);
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({"name": "Attachment retry", "access": {"projects": []}}),
             None,
         )

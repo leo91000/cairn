@@ -1,3 +1,7 @@
+use crate::common::AgentFixture;
+
+#[path = "plugin_grants/approval.rs"]
+mod approval;
 mod common;
 
 use axum::{body::Body, http::StatusCode};
@@ -186,7 +190,7 @@ async fn resource_profiles_and_scope_limits_apply_to_tools_commands_and_the_actu
             .is_none()
     );
     let retired = s
-        .agent(json!({"name": "Unused resource agent"}), None)
+        .agent_fixture(json!({"name": "Unused resource agent"}), None)
         .await
         .unwrap();
     let mut request = common::request("POST", &path)
@@ -412,7 +416,10 @@ async fn agent_pages_discover_and_revoke_scoped_rules_without_granting_the_insta
     )
     .await
     .unwrap();
-    let other = s.agent(json!({ "name": "Other" }), None).await.unwrap();
+    let other = s
+        .agent_fixture(json!({ "name": "Other" }), None)
+        .await
+        .unwrap();
     let app = cairn_installation::http::router(s.clone()).await.unwrap();
     let request = |method: &str, path: &str, value: serde_json::Value, role| {
         let mut req = common::request(method, path)
@@ -501,7 +508,11 @@ async fn agent_pages_discover_and_revoke_scoped_rules_without_granting_the_insta
     assert_eq!(catalog["resourceGrantCounts"][MAIN_AGENT_ID], 33);
     assert_eq!(catalog["resourceGrantCounts"][text(&other, "id")], 1);
     assert_eq!(
-        s.store.get("agents", MAIN_AGENT_ID).await.unwrap().unwrap()["plugins"],
+        s.store
+            .agent_snapshot(MAIN_AGENT_ID)
+            .await
+            .unwrap()
+            .unwrap()["plugins"],
         json!([])
     );
     assert_eq!(
@@ -550,7 +561,10 @@ async fn agent_pages_discover_and_revoke_scoped_rules_without_granting_the_insta
 async fn large_saved_rules_keep_byte_bounded_pages_without_skipping_matching_ids() {
     let root = TempDir::new().unwrap();
     let s = Service::new(common::config(root.path())).await.unwrap();
-    let other = s.agent(json!({ "name": "Other" }), None).await.unwrap();
+    let other = s
+        .agent_fixture(json!({ "name": "Other" }), None)
+        .await
+        .unwrap();
     let other = text(&other, "id").to_owned();
     let instance = cairn_installation::config::id();
     let resource = cairn_installation::config::id();

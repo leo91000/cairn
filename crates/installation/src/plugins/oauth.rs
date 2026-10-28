@@ -424,12 +424,13 @@ pub async fn start(
         resource,
         provider,
         Initiator {
+            caller: capabilities::Caller::default(),
             account: account.into(),
             owner_access,
             actor,
             external: None,
             source_event: String::new(),
-            setup_target: None,
+            target: None,
         },
         input,
     )
@@ -437,12 +438,13 @@ pub async fn start(
 }
 
 struct Initiator {
+    caller: capabilities::Caller,
     account: String,
     owner_access: String,
     actor: Option<Actor>,
     external: Option<requesters::External>,
     source_event: String,
-    setup_target: Option<Arc<resources::target::Target>>,
+    target: Option<Arc<resources::target::Target>>,
 }
 
 async fn begin(
@@ -455,12 +457,13 @@ async fn begin(
     input: &Value,
 ) -> Result<Value> {
     let Initiator {
+        caller,
         account,
         owner_access,
         actor,
         external,
         source_event,
-        setup_target,
+        target,
     } = initiator;
     let approved = registry::approved(s, &package.manifest.id).await?;
     if approved.package.digest != package.digest {
@@ -548,7 +551,7 @@ async fn begin(
         None
     };
     let start_url = external.as_ref().map(|_| url.to_string());
-    let setup = setup_target
+    let setup = target
         .as_ref()
         .and_then(|target| target.setup_snapshot())
         .cloned()
@@ -583,9 +586,11 @@ async fn begin(
     let key = pending_key(&state);
     let vault = s.vault.clone();
     approved.recheck(s).await?;
+    caller.recheck(s).await?;
     s.store
         .transaction(move |db| {
-            if let Some(target) = setup_target {
+            caller.authorize(db)?;
+            if let Some(target) = target {
                 target.current(db)?;
             }
             current(db, &pending)?;
@@ -901,7 +906,16 @@ pub async fn finish(
             "This authorization belongs to another requester or resource.",
         ));
     }
-    finish_pending(s, &package, &provider, key, value, pending).await
+    finish_pending(
+        s,
+        &package,
+        &provider,
+        key,
+        value,
+        pending,
+        capabilities::Caller::default(),
+    )
+    .await
 }
 
 async fn check_initiator(s: &Service, provider: &OAuth, pending: &Pending) -> Result<()> {
@@ -940,7 +954,9 @@ async fn finish_pending(
     key: String,
     value: Value,
     pending: Pending,
+    caller: capabilities::Caller,
 ) -> Result<Value> {
+    caller.recheck(s).await?;
     check_initiator(s, provider, &pending).await?;
     let (plugin, instance, collection) = (
         package.manifest.id.as_str(),
@@ -963,9 +979,11 @@ async fn finish_pending(
         .await?;
     let expected = pending.clone();
     let key_claim = key.clone();
+    let claim_caller = caller.clone();
     let claimed = s
         .store
         .transaction(move |db| {
+            claim_caller.authorize(db)?;
             current(db, &expected)?;
             let stored = db.kv(&stored_key(&key_claim))?.ok_or_else(expired)?;
             // Claim only the inspected snapshot. A callback arriving during an
@@ -1005,6 +1023,7 @@ async fn finish_pending(
         instance,
         fields,
         || async {
+            caller.recheck(s).await?;
             check_initiator(s, provider, &pending).await?;
             pending
                 .approval
@@ -1013,8 +1032,12 @@ async fn finish_pending(
                 .recheck(s, &pending.digest)
                 .await?;
             let expected = pending.clone();
+            let caller = caller.clone();
             s.store
-                .transaction(move |db| current(db, &expected).map(|_| ()))
+                .transaction(move |db| {
+                    caller.authorize(db)?;
+                    current(db, &expected).map(|_| ())
+                })
                 .await
         },
     )
@@ -1109,6 +1132,7 @@ async fn finish_pending(
         }
     }
     let vault = s.vault.clone();
+    caller.recheck(s).await?;
     let membership = crate::relay::task_author_policy(s)
         .await?
         .ok_or_else(|| Error::forbidden("The installation has no verified membership."))?;
@@ -1119,6 +1143,7 @@ async fn finish_pending(
         .recheck(s, &pending.digest)
         .await?;
     s.store.transaction(move |db| {
+        caller.authorize(db)?;
         let owner_current = membership.owner.access_id == pending.owner_access
             && (pending.actor.is_some() || pending.external.is_some()
                 || membership.owner.account_id == pending.account);
@@ -1239,27 +1264,51 @@ pub async fn status(
     }
     let resource = resources::get_for(s, target.clone(), collection, resource).await?;
     let connection = target.connection();
-    let package = target.package();
-    let (_, actor) = authority(s, provider, account).await?;
-    let Some(value) = s
-        .vault
-        .get(&authorization_key(&resource.id, name, actor.as_ref()))
-        .await?
-    else {
-        return Ok(json!({ "status": "disconnected" }));
-    };
-    let authorization: Authorization = serde_json::from_value(value)?;
-    let owner_access = crate::relay::task_author_policy(s)
-        .await?
-        .map(|policy| policy.owner.access_id);
-    Ok(status_summary(
-        &authorization,
-        &connection,
-        &resource,
-        &package.digest,
-        owner_access.as_deref(),
-        actor.as_ref(),
-    ))
+    let digest = target.package().digest.clone();
+    let original_authority = authority(s, provider, account).await?;
+    if authority(s, provider, account).await? != original_authority {
+        return Err(Error::forbidden(
+            "Installation access changed. Reload personal connections.",
+        ));
+    }
+    target.recheck_package(s).await?;
+    let (owner_access, actor) = original_authority;
+    let key = authorization_key(&resource.id, name, actor.as_ref());
+    let vault = s.vault.clone();
+    s.store
+        .read(move |db| {
+            // Target, resource and consent must belong to one current read snapshot.
+            let transaction = rusqlite::Transaction::new_unchecked(
+                db.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let db = &Db(&transaction);
+            target.current(db)?;
+            let resource_current = target.get(db, &resource.id)?.is_some_and(|current| {
+                current["revision"] == resource.revision
+                    && current["connectionId"] == connection.id
+                    && current["collection"] == resource.collection
+            });
+            if !resource_current {
+                return Err(Error::forbidden(
+                    "The personal authorization resource changed.",
+                ));
+            }
+            let Some(value) = vault.get_in(db, &key)? else {
+                return Ok(json!({"status": "disconnected"}));
+            };
+            let authorization: Authorization = serde_json::from_value(value)?;
+            Ok(status_summary(
+                &authorization,
+                &connection,
+                &resource,
+                &digest,
+                Some(&owner_access),
+                actor.as_ref(),
+                None,
+            ))
+        })
+        .await
 }
 
 fn status_summary(
@@ -1269,9 +1318,19 @@ fn status_summary(
     digest: &str,
     owner_access: Option<&str>,
     actor: Option<&Actor>,
+    setup: Option<&super::setup::SetupDraft>,
 ) -> Value {
     let mut summary = summary(authorization);
-    if authorization.setup.is_some()
+    let setup_current = match (authorization.setup.as_deref(), setup) {
+        (None, None) => true,
+        (Some(saved), Some(expected)) => {
+            authorization.personal.is_none()
+                && saved.id == expected.id
+                && saved.revision == expected.revision
+        }
+        _ => false,
+    };
+    if !setup_current
         || owner_access != Some(authorization.owner_access.as_str())
         || authorization
             .personal
@@ -1317,18 +1376,28 @@ pub async fn revoke(
             resources::configuration::Configuration::owner(owner),
         )
         .await?
-        .revoke(s)
+        .revoke(s, &Value::Null)
         .await;
     }
-    let (_, actor) = authority(s, provider, account).await?;
-    status(s, plugin, instance, collection, resource, name, account).await?;
-    let resource = resources::get(s, plugin, instance, collection, resource).await?;
+    let resource = resources::get_for(s, target.clone(), collection, resource).await?;
+    let original_authority = authority(s, provider, account).await?;
+
+    status(s, plugin, instance, collection, &resource.id, name, account).await?;
+    if authority(s, provider, account).await? != original_authority {
+        return Err(Error::forbidden(
+            "Installation access changed. Retry the personal disconnect.",
+        ));
+    }
+
+    target.recheck_package(s).await?;
+    let (_, actor) = original_authority;
     let key = authorization_key(&resource.id, name, actor.as_ref());
     let vault = s.vault.clone();
     let resource_id = resource.id.clone();
     let provider_name = name.to_owned();
     s.store
         .transaction(move |db| {
+            target.current(db)?;
             let mut current = db.get(resources::KIND, &resource.id)?.ok_or_else(expired)?;
             if current["revision"] != resource.revision {
                 return Err(expired());
@@ -1365,6 +1434,7 @@ pub(crate) async fn credential_for(
     resource: &resources::Access,
     name: &str,
 ) -> Result<(String, Reference)> {
+    let caller = context.caller();
     let selected = resource.resource();
     let provider = provider(&context.manifest, name, &selected.collection)?;
     let mut subject_link = None;
@@ -1402,6 +1472,7 @@ pub(crate) async fn credential_for(
     };
     let key = selected_key.unwrap_or_else(|| authorization_key(&selected.id, name, actor.as_ref()));
     let _lock = s.plugins.oauth.lock(&key).await;
+    caller.recheck(s).await?;
     let value = s
         .vault
         .get(&key)
@@ -1473,6 +1544,7 @@ pub(crate) async fn credential_for(
         super::grants::recheck(s, grant).await?;
     }
     approval.recheck(s, &authorization.digest).await?;
+    caller.recheck(s).await?;
     if authorization
         .tokens
         .expires_at
@@ -1495,9 +1567,11 @@ pub(crate) async fn credential_for(
         let connection = context.connection.clone();
         let grant = context.resource_grant.clone();
         let approved = approval.clone();
+        let claiming = caller.clone();
         let expires_at = resource.setup().map(|draft| draft.expires_at);
         s.store
             .transaction(move |db| {
+                claiming.authorize(db)?;
                 approved.recheck_in(db)?;
                 access.current(db, &connection)?;
                 if let Some(grant) = &grant {
@@ -1536,14 +1610,17 @@ pub(crate) async fn credential_for(
                     super::grants::recheck(s, grant).await?;
                 }
                 approval.recheck(s, &authorization.digest).await?;
+                caller.recheck(s).await?;
                 let connection = context.connection.clone();
                 let resource = resource.clone();
                 let grant = context.resource_grant.clone();
                 let reference = check.clone();
                 let approval = approval.clone();
+                let sending = caller.clone();
                 let vault = s.vault.clone();
                 s.store
                     .transaction(move |db| {
+                        sending.authorize(db)?;
                         approval.recheck_in(db)?;
                         resource.current(db, &connection)?;
                         if let Some(grant) = &grant {
@@ -1583,6 +1660,7 @@ pub(crate) async fn credential_for(
         resource.recheck(s, context).await?;
         recheck(s, &check).await?;
         approval.recheck(s, &authorization.digest).await?;
+        caller.recheck(s).await?;
         authorization.tokens = tokens;
         authorization.refreshing = false;
         authorization.revision = id();
@@ -1595,9 +1673,11 @@ pub(crate) async fn credential_for(
         let connection = context.connection.clone();
         let grant = context.resource_grant.clone();
         let approved = approval.clone();
+        let publishing = caller.clone();
         let expires_at = resource.setup().map(|draft| draft.expires_at);
         s.store
             .transaction(move |db| {
+                publishing.authorize(db)?;
                 approved.recheck_in(db)?;
                 access.current(db, &connection)?;
                 if let Some(grant) = &grant {
@@ -1613,6 +1693,7 @@ pub(crate) async fn credential_for(
     }
     resource.recheck(s, context).await?;
     approval.recheck(s, &authorization.digest).await?;
+    caller.recheck(s).await?;
     Ok((
         authorization.tokens.access,
         Reference {

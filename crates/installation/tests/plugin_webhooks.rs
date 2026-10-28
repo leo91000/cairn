@@ -1,5 +1,8 @@
 mod common;
 
+#[path = "plugin_webhooks/approval.rs"]
+mod approval;
+
 use aws_lc_rs::hmac;
 use axum::{
     Router,
@@ -58,6 +61,7 @@ async fn fixture_with_settings(
             "manifest": {
                 "id": "inbox", "name": "Inbox", "version": "1", "apiVersion": 2,
                 "capabilities": requested,
+                "hosts": if capabilities.contains(&"http") { vec!["api.example.test"] } else { vec![] },
                 "settings": fields,
                 "webhooks": [{ "name": "events", "signature": {
                     "secret": "signingSecret", "header": "x-example-signature", "prefix": "v0=",

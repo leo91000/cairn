@@ -1,3 +1,5 @@
+use crate::common::AgentFixture;
+
 use super::*;
 
 use super::management;
@@ -25,7 +27,7 @@ struct QueuedInput {
 async fn queued_input() -> QueuedInput {
     let (root, service, instance, resource, app) = fixture().await;
     let agent = service
-        .agent(json!({ "name": "Queued input" }), None)
+        .agent_fixture(json!({ "name": "Queued input" }), None)
         .await
         .unwrap();
     let route = create_route(

@@ -185,6 +185,7 @@ async fn run(
         "credential": draft.credential.is_some(),
         "secrets": secret_keys,
         "instance": instance,
+        "urls": draft.urls,
         "setup": draft.setup.as_ref().map(|setup| json!({
             "revision": setup.revision,
             "expiresAt": setup.expires_at,
@@ -317,12 +318,18 @@ async fn form_authorized(
         Some(id) => secret_values(s, id).await?,
         None => Map::new(),
     };
+    let urls = match instance.as_deref() {
+        Some(id) if !manifest.webhooks.is_empty() || !manifest.oauth.is_empty() => {
+            Some(setup_urls(s, manifest, id, input).await?)
+        }
+        _ => None,
+    };
     let draft = Draft {
         management,
         credential: credential.filter(|_| manifest.credential.is_some()),
         secrets: secrets(manifest, &input["secrets"], saved),
         setup: None,
-        urls: None,
+        urls,
         owner: Some(owner),
         resource: None,
         root,

@@ -25,19 +25,65 @@ class SkillMentionLogicTest {
             )
         assertEquals(
             listOf("$project/deploy", "$project/review"),
-            chatSkills(skills, Agent(), project).map { "${it.scope}/${it.name}" },
+            chatSkills(
+                    skills,
+                    Agent(
+                        exclusiveNodes = emptyList(),
+                        plugins = emptyList(),
+                        id = "00000000-0000-4000-8000-000000000000",
+                        name = "",
+                        revision = "",
+                        createdAt = 0,
+                        access =
+                            AccessPolicy(
+                                mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                                projects = null,
+                                skills = null,
+                                mcps = null,
+                            ),
+                    ),
+                    project,
+                )
+                .map { "${it.scope}/${it.name}" },
         )
         assertEquals(
             listOf("deploy", "review", "secret"),
-            chatSkills(skills, Agent(), null).map { it.name },
+            chatSkills(
+                    skills,
+                    Agent(
+                        exclusiveNodes = emptyList(),
+                        plugins = emptyList(),
+                        id = "00000000-0000-4000-8000-000000000000",
+                        name = "",
+                        revision = "",
+                        createdAt = 0,
+                        access =
+                            AccessPolicy(
+                                mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                                projects = null,
+                                skills = null,
+                                mcps = null,
+                            ),
+                    ),
+                    null,
+                )
+                .map { it.name },
         )
         val limited =
             Agent(
+                exclusiveNodes = emptyList(),
+                plugins = emptyList(),
+                id = "00000000-0000-4000-8000-000000000000",
+                name = "",
+                revision = "",
+                createdAt = 0,
                 access =
                     AccessPolicy(
+                        mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                        mcps = null,
                         projects = listOf(project),
                         skills = listOf("global/review", "$other/secret"),
-                    )
+                    ),
             )
         assertEquals(
             listOf("global/review"),

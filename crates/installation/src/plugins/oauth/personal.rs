@@ -160,6 +160,7 @@ pub(crate) async fn list(s: &Service, account: &str, cursor: Option<&str>) -> Re
                             &package.digest,
                             Some(&initial.owner_access),
                             Some(&initial.actor),
+                            None,
                         )
                     }
                     None => json!({"status": "disconnected"}),

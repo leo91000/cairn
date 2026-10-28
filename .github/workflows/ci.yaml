@@ -72,7 +72,7 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
@@ -136,6 +136,12 @@ jobs:
           git diff --exit-code -- crates/installation/schemas/
       - name: Check the C3 candidate-selection snapshot model
         run: python3 -m unittest discover -s scripts/tests -p test_chat_candidates_study.py -v
+      - name: Check native reference selection for all workflow events
+        run: python3 -m unittest discover -s scripts/tests -p test_native_reference.py -v
+      - name: Check native qualification RPC diagnostics
+        run: python3 -m unittest discover -s scripts/tests -p test_native_chat_fixture.py -v
+      - name: Check native Compose service readiness
+        run: python3 -m unittest discover -s scripts/tests -p test_native_docker_workload.py -v
   rust-check:
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
@@ -331,7 +337,10 @@ jobs:
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
     # Allow slow kernel-module installation and the complete native qualification.
-    timeout-minutes: 30
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/download-artifact@v8.0.1
@@ -341,7 +350,12 @@ jobs:
       - name: Prepare disposable host block storage and synthetic S3
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends e2fsprogs python3-venv sudo
+          sudo apt-get install -y --no-install-recommends e2fsprogs python3-venv sudo uidmap iproute2 iptables libcap2-bin
+          sudo modprobe tun
+          sudo modprobe ip_tables
+          sudo modprobe iptable_nat
+          sudo modprobe ip6_tables
+          sudo modprobe ip6table_nat
           if ! sudo modprobe ublk_drv; then
             sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
             sudo modprobe ublk_drv
@@ -349,11 +363,98 @@ jobs:
           test -c /dev/ublk-control
           python3 -m venv .native-s3-test
           .native-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
+          .native-s3-test/bin/python -m unittest discover -s scripts/tests -p test_native_s3_memory.py -v
+      - run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Identify the exact reference build
+        id: native-reference-key
+        env:
+          EVENT_REFERENCE_SHA: ${{ github.event.pull_request.base.sha || (github.ref == 'refs/heads/main' && github.event.before) || '' }}
+        run: |
+          native_reference_sha="$(python3 scripts/native_reference.py)"
+          echo "sha=$native_reference_sha" >> "$GITHUB_OUTPUT"
+          echo "key=native-reference-v2-$native_reference_sha-$ImageOS-$ImageVersion-rust1.97.1-dev0-default" >> "$GITHUB_OUTPUT"
+          echo "artifact=native-reference-v2-$native_reference_sha-$ImageOS-$ImageVersion-rust1.97.1-dev0-default" >> "$GITHUB_OUTPUT"
+      - name: Find the exact reference from an earlier attempt of this run
+        id: native-reference-artifact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NATIVE_REFERENCE_ARTIFACT: ${{ steps.native-reference-key.outputs.artifact }}
+        run: |
+          native_reference_found="$(python3 scripts/native_reference.py artifact-available)"
+          echo "found=$native_reference_found" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v8.0.1
+        if: steps.native-reference-artifact.outputs.found == 'true'
+        with:
+          name: ${{ steps.native-reference-key.outputs.artifact }}
+          path: reference-native/
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+      - uses: actions/cache/restore@v6.1.0
+        if: steps.native-reference-artifact.outputs.found != 'true'
+        id: native-reference-cache
+        with:
+          path: reference-native/
+          key: ${{ steps.native-reference-key.outputs.key }}
+      - name: Build the exact base reference
+        if: steps.native-reference-artifact.outputs.found != 'true' && steps.native-reference-cache.outputs.cache-hit != 'true'
+        env:
+          REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
+          CARGO_PROFILE_DEV_DEBUG: '0'
+          CARGO_INCREMENTAL: '0'
+        run: |
+          sudo apt-get install -y --no-install-recommends libclang-dev
+          git fetch --no-tags origin "$REFERENCE_SHA"
+          git worktree add --detach /tmp/cairn-native-reference "$REFERENCE_SHA"
+          CARGO_TARGET_DIR="$PWD/reference-target" cargo +1.97.1 build --locked --manifest-path /tmp/cairn-native-reference/Cargo.toml --bin cairn --example native_storage_qualifier
+          mkdir -p reference-native/examples
+          cp reference-target/debug/cairn reference-native/cairn
+          cp reference-target/debug/examples/native_storage_qualifier reference-native/examples/native_storage_qualifier
+          python3 - <<'PYREF'
+          import hashlib, json, os
+          from pathlib import Path
+          binaries = ['cairn', 'examples/native_storage_qualifier']
+          checksums = {name: hashlib.sha256((Path('reference-native') / name).read_bytes()).hexdigest() for name in binaries}
+          Path('reference-native/revision.json').write_text(json.dumps(dict(headSha=os.environ['REFERENCE_SHA'], profile='development, debug=0, incremental=0', features='default (ublk required)', rust='1.97.1', image=os.environ['ImageVersion'], buildRun=os.environ['GITHUB_RUN_ID'], sha256=checksums), indent=2))
+          PYREF
+      - uses: actions/cache/save@v6.1.0
+        if: steps.native-reference-artifact.outputs.found != 'true' && steps.native-reference-cache.outputs.cache-hit != 'true'
+        with:
+          path: reference-native/
+          key: ${{ steps.native-reference-key.outputs.key }}
+      - name: Verify the exact reference binaries
+        env:
+          REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
+        run: |
+          python3 - <<'PYREF'
+          import hashlib, json, os
+          from pathlib import Path
+          metadata = json.loads(Path('reference-native/revision.json').read_text())
+          assert metadata['headSha'] == os.environ['REFERENCE_SHA']
+          assert metadata['image'] == os.environ['ImageVersion']
+          assert metadata['rust'] == '1.97.1' and metadata['features'] == 'default (ublk required)'
+          assert metadata['profile'] == 'development, debug=0, incremental=0'
+          assert set(metadata['sha256']) == {'cairn', 'examples/native_storage_qualifier'}
+          for name, checksum in metadata['sha256'].items():
+              assert hashlib.sha256((Path('reference-native') / name).read_bytes()).hexdigest() == checksum
+          Path('native-storage-evidence/reference').mkdir(parents=True)
+          Path('native-storage-evidence/reference/revision.json').write_text(json.dumps(metadata, indent=2))
+          PYREF
+      - uses: actions/upload-artifact@v7.0.1
+        if: steps.native-reference-artifact.outputs.found != 'true'
+        with:
+          name: ${{ steps.native-reference-key.outputs.artifact }}
+          path: reference-native/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Qualify the exact reference on the current disposable host
+        run: |
+          chmod +x reference-native/cairn reference-native/examples/native_storage_qualifier
+          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" .native-s3-test/bin/python scripts/tests/node_s3_test.py --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
       - name: Qualify real ublk, S3, eviction, systemd ownership and crash recovery
         run: |
           chmod +x target/debug/cairn target/debug/examples/native_storage_qualifier
           mkdir -p native-storage-evidence
-          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" .native-s3-test/bin/python scripts/tests/node_s3_test.py --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
+          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" .native-s3-test/bin/python scripts/tests/node_s3_test.py --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:

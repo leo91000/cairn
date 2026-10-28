@@ -6,7 +6,8 @@ local function notice()
 end
 
 local function rootForm(event)
-    local url = event.setup and event.setup.urls.webhooks.events
+    local urls = event.urls or (event.setup and event.setup.urls)
+    local url = urls and urls.webhooks.events
     local socketMode = event.values.transport == "socket"
     local manifest = {
         display_information = { name = "Cairn" },
@@ -25,14 +26,17 @@ local function rootForm(event)
     end
     local view = {
         notice(),
-        { type = "text", text = "Create a private Slack app from this manifest. Copy its app ID and signing secret from Basic Information. Install it, then add a Workspace resource with its bot token and a public channel. Invite the app there. Activate the completed draft, then configure the workspace’s allowed-person route and agent; activation alone admits nobody. Choose signed HTTP or Socket Mode. Socket Mode also needs an app-level token with connections:write; bot tokens remain on the workspace resources. Other accepted Slack features are still being implemented." },
+        { type = "text", text = "Create or update a private Slack app from this manifest. Copy its app ID and signing secret from Basic Information. Install it, then add a Workspace resource with its bot token and a public channel. Invite the app there. For a new app, activate the completed draft, then configure the workspace’s allowed-person route and agent; activation alone admits nobody. Choose signed HTTP or Socket Mode. Socket Mode also needs an app-level token with connections:write; bot tokens remain on the workspace resources. Other accepted Slack features are still being implemented." },
         { type = "text", text = "Changing the app ID requires verifying each workspace again with a bot token for that app. Workspaces saved without an app identity also need verification before receiving or sending messages." },
         { type = "link", label = "Create a Slack app", url = "https://api.slack.com/apps?new_app=1" },
         { type = "code", text = cairn.json.encode(manifest) },
     }
     if url and not socketMode then
         table.insert(view, { type = "code", text = url })
-        table.insert(view, { type = "text", text = "Save the app ID and signing secret in this draft before asking Slack to verify the Events URL. URL verification is supported before activation; ordinary events are not." })
+        local verification = if event.setup
+            then "Save the app ID and signing secret in this draft before asking Slack to verify the Events URL. URL verification is supported before activation; ordinary events are not."
+            else "Save the app ID and signing secret before asking Slack to verify this Events URL. Keep this Slack app enabled in Cairn for verification."
+        table.insert(view, { type = "text", text = verification })
     end
     local errors = {}
     if event.submit and socketMode and not table.find(event.secrets or {}, "appToken") then

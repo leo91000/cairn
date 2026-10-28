@@ -42,6 +42,10 @@ pub struct WebhookTimestamp {
     pub max_age_seconds: u16,
 }
 
+fn credential_header(name: &str) -> bool {
+    matches!(name, "authorization" | "cookie" | "proxy-authorization")
+}
+
 pub(crate) fn validate(manifest: &Manifest) -> Result<(), &'static str> {
     if manifest.webhooks.is_empty() == manifest.permits_capability("webhooks") {
         return Err("Plugin manifest must list endpoints exactly when it requests webhooks.");
@@ -58,6 +62,12 @@ pub(crate) fn validate(manifest: &Manifest) -> Result<(), &'static str> {
         let remaining = template
             .replace("{{body}}", "")
             .replace("{{timestamp}}", "");
+        if credential_header(&signature.header)
+            || timestamp.is_some_and(|rule| credential_header(&rule.header))
+        {
+            return Err("Public endpoint signatures and timestamps cannot use credential headers.");
+        }
+
         if !slug(&webhook.name, 40)
             || names.contains(&webhook.name.as_str())
             || !manifest

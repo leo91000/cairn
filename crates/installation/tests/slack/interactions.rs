@@ -1,4 +1,6 @@
 //! Actual provider questions and cancellation through the shipped Luau package.
+use crate::common::AgentFixture;
+
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -879,7 +881,7 @@ impl Live {
             .unwrap();
         let (instance, resource) = configure_transport(&app, &service, socket_mode).await;
         let agent = service
-            .agent(
+            .agent_fixture(
                 json!({
                     "name": "Slack questions helper",
                     "access": { "projects": [], "skills": [], "mcps": [], "installation": false },

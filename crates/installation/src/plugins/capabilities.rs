@@ -58,6 +58,7 @@ pub struct Context {
 pub(crate) struct Caller {
     management: Option<Arc<super::management::Authority>>,
     local: Option<Arc<super::scope::LocalAuthority>>,
+    routed: Option<Arc<Connection>>,
 }
 
 impl Caller {
@@ -65,6 +66,7 @@ impl Caller {
         Self {
             management: authority.cloned().map(Arc::new),
             local: None,
+            routed: None,
         }
     }
 
@@ -74,6 +76,9 @@ impl Caller {
         }
         if let Some(authority) = &self.local {
             authority.recheck_in(db)?;
+        }
+        if let Some(connection) = &self.routed {
+            authorize(db, connection)?;
         }
         Ok(())
     }
@@ -85,6 +90,10 @@ impl Caller {
         if let Some(authority) = &self.local {
             authority.recheck(s).await?;
         }
+        if self.routed.is_some() {
+            let expected = self.clone();
+            s.store.read(move |db| expected.authorize(db)).await?;
+        }
         Ok(())
     }
 }
@@ -94,6 +103,11 @@ impl Context {
         Caller {
             management: self.management.clone().map(Arc::new),
             local: self.local_authority.clone(),
+            routed: self
+                .connection
+                .routing
+                .as_ref()
+                .map(|_| Arc::new(self.connection.clone())),
         }
     }
 }

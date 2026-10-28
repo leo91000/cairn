@@ -1,3 +1,5 @@
+use crate::common::AgentFixture;
+
 #[path = "plugin_routes/attachment_retries.rs"]
 mod attachment_retries;
 #[path = "plugin_routes/authority_outages.rs"]
@@ -14,8 +16,12 @@ mod delegation_storage;
 mod management;
 #[path = "plugin_routes/metadata.rs"]
 mod metadata;
+#[path = "plugin_routes/oauth_dispatch.rs"]
+mod oauth_dispatch;
 #[path = "plugin_routes/oauth_recovery.rs"]
 mod oauth_recovery;
+#[path = "plugin_routes/oauth_refresh.rs"]
+mod oauth_refresh;
 #[path = "plugin_routes/queued_inputs.rs"]
 mod queued_inputs;
 
@@ -62,6 +68,14 @@ async fn configured_fixture(
 async fn configured_fixture_with_runner(
     public_origin: Option<&str>,
     runner: &str,
+) -> (TempDir, Arc<Service>, String, String, axum::Router) {
+    configured_fixture_with_resource_oauth(public_origin, runner, false).await
+}
+
+async fn configured_fixture_with_resource_oauth(
+    public_origin: Option<&str>,
+    runner: &str,
+    owner_oauth: bool,
 ) -> (TempDir, Arc<Service>, String, String, axum::Router) {
     let root = TempDir::new().unwrap();
     std::fs::create_dir_all(root.path().join("home")).unwrap();
@@ -193,6 +207,10 @@ async fn configured_fixture_with_runner(
             end,
             message = function(event)
                 if event.failHandler then error('Synthetic package handler failure') end
+                if event.refreshOwner then
+                    return cairn.http.request({url = 'https://api.example.test/messages',
+                        auth = {resource = event.resource, oauth = 'bot'}}).json
+                end
                 if event.uncertainWrite then
                     cairn.http.request({url = 'https://api.example.test/uncertain-write', method = 'POST',
                         json = {id = event.id}, idempotencyKey = 'uncertain:' .. event.id})
@@ -255,6 +273,20 @@ async fn configured_fixture_with_runner(
             end
         }"#,
     });
+    if owner_oauth {
+        let mut provider = input["manifest"]["oauth"][0].clone();
+        provider["name"] = json!("bot");
+        provider["title"] = json!("Workspace");
+        provider.as_object_mut().unwrap().remove("personal");
+        provider["token"] = json!({
+            "accessToken": "/access_token", "refreshToken": "/refresh_token",
+            "expiresIn": "/expires_in", "scope": "/scope"
+        });
+        input["manifest"]["oauth"]
+            .as_array_mut()
+            .unwrap()
+            .push(provider);
+    }
     if public_origin.is_some() {
         input["manifest"]["settings"]
             .as_array_mut()
@@ -365,13 +397,12 @@ async fn route_summary_pages_report_only_their_own_usage_and_pending_people() {
     }
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Summary helper",
                 "access": {
                     "projects": [],
                     "installation": false,
-                    "github": false,
                 },
             }),
             None,
@@ -546,8 +577,20 @@ async fn route_summary_pages_report_only_their_own_usage_and_pending_people() {
 #[tokio::test]
 async fn resource_routes_choose_the_owner_agent_and_keep_channels_and_workspaces_separate() {
     let (_root, s, instance, resource, app) = fixture().await;
-    let first = s.agent(json!({ "name": "First", "access": { "projects": [], "installation": false, "github": false } }), None).await.unwrap();
-    let second = s.agent(json!({ "name": "Second", "access": { "projects": [], "installation": false, "github": false } }), None).await.unwrap();
+    let first = s
+        .agent_fixture(
+            json!({ "name": "First", "access": { "projects": [], "installation": false } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let second = s
+        .agent_fixture(
+            json!({ "name": "Second", "access": { "projects": [], "installation": false } }),
+            None,
+        )
+        .await
+        .unwrap();
     for (channel, agent) in [("C1", &first), ("C2", &second)] {
         create_route(
             &app,
@@ -641,10 +684,10 @@ async fn resource_routes_choose_the_owner_agent_and_keep_channels_and_workspaces
 async fn disabled_ambiguous_and_revised_routes_cannot_fall_back_or_keep_queued_authority() {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Scoped",
-                "access": { "projects": [], "installation": false, "github": false },
+                "access": { "projects": [], "installation": false },
             }),
             None,
         )
@@ -806,9 +849,15 @@ async fn an_ambiguous_route_retires_only_its_pending_delivery() {
     let (origin, server) = common::serve_locally(platform).await;
     let (_root, s, instance, resource, app) = fixture().await;
     s.plugins.route_http_to(Some(origin));
-    let agent = s.agent(json!({
-        "name": "Scoped", "access": { "projects": [], "installation": false, "github": false },
-    }), None).await.unwrap();
+    let agent = s
+        .agent_fixture(
+            json!({
+                "name": "Scoped", "access": { "projects": [], "installation": false },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     for channel in ["C1", "C2"] {
         create_route(
             &app,
@@ -940,10 +989,10 @@ async fn an_ambiguous_route_retires_only_its_pending_delivery() {
 async fn access_requests_and_approvals_are_isolated_to_the_selected_route() {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Scoped",
-                "access": { "projects": [], "installation": false, "github": false },
+                "access": { "projects": [], "installation": false },
             }),
             None,
         )
@@ -1040,10 +1089,10 @@ async fn access_requests_and_approvals_are_isolated_to_the_selected_route() {
 async fn only_the_current_delivery_author_can_stop_a_shared_resource_conversation() {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Scoped",
-                "access": { "projects": [], "installation": false, "github": false },
+                "access": { "projects": [], "installation": false },
             }),
             None,
         )
@@ -1174,10 +1223,10 @@ async fn queued_question_answers_recheck_routes_packages_and_owner_authority() {
 async fn queued_control_after_source_change(change: &str) {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Scoped",
-                "access": { "projects": [], "installation": false, "github": false },
+                "access": { "projects": [], "installation": false },
             }),
             None,
         )
@@ -1661,10 +1710,10 @@ async fn routed_personal_oauth(delegated: bool, owner_answer: bool) {
     .await;
     assert_eq!(finished.status(), StatusCode::OK);
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Scoped",
-                "access": { "projects": [], "installation": false, "github": false, "delegation": delegated },
+                "access": { "projects": [], "installation": false, "delegation": delegated },
             }),
             None,
         )
@@ -1991,10 +2040,10 @@ async fn an_external_run_cannot_select_another_workspace_or_escape_its_channel_r
     .await
     .unwrap();
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Scoped",
-                "access": { "projects": [], "installation": false, "github": false },
+                "access": { "projects": [], "installation": false },
             }),
             None,
         )
@@ -2212,10 +2261,10 @@ async fn an_external_run_cannot_select_another_workspace_or_escape_its_channel_r
 async fn a_worker_loaded_before_approval_cannot_use_a_newly_reviewed_route() {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Scoped",
-                "access": { "projects": [], "installation": false, "github": false },
+                "access": { "projects": [], "installation": false },
             }),
             None,
         )
@@ -2350,10 +2399,10 @@ async fn an_admitted_external_person_can_authorize_without_an_installation_accou
     let (origin, server) = common::serve_locally(provider).await;
     s.plugins.route_http_to(Some(origin));
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Scoped",
-                "access": {"projects": [], "installation": false, "github": false},
+                "access": {"projects": [], "installation": false},
             }),
             None,
         )
@@ -2657,10 +2706,10 @@ async fn external_oauth_uses_only_the_owner_configured_https_callback_origin() {
         let (upstream, server) = common::serve_locally(upstream).await;
         s.plugins.route_http_to(Some(upstream));
         let agent = s
-            .agent(
+            .agent_fixture(
                 json!({
                     "name": "Scoped",
-                    "access": {"projects": [], "installation": false, "github": false},
+                    "access": {"projects": [], "installation": false},
                 }),
                 None,
             )
@@ -2744,10 +2793,10 @@ async fn assert_consent_replay(interleave: bool, remove_instance: bool) {
     let (upstream, server) = common::serve_locally(upstream).await;
     s.plugins.route_http_to(Some(upstream));
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Scoped",
-                "access": {"projects": [], "installation": false, "github": false},
+                "access": {"projects": [], "installation": false},
             }),
             None,
         )
@@ -2951,10 +3000,10 @@ async fn an_interrupted_external_code_exchange_is_never_replayed() {
     let (origin, server) = common::serve_locally(provider).await;
     s.plugins.route_http_to(Some(origin));
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Scoped",
-                "access": { "projects": [], "installation": false, "github": false },
+                "access": { "projects": [], "installation": false },
             }),
             None,
         )
@@ -3130,10 +3179,10 @@ async fn repeated_question_ids_are_delivered_for_their_own_shared_turn() {
     let (origin, server) = common::serve_locally(upstream).await;
     s.plugins.route_http_to(Some(origin));
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Scoped",
-                "access": { "projects": [], "installation": false, "github": false },
+                "access": { "projects": [], "installation": false },
             }),
             None,
         )
@@ -3311,10 +3360,10 @@ async fn a_queued_new_turn_can_follow_a_stopped_author_without_inheriting_their_
     let (origin, server) = common::serve_locally(upstream).await;
     s.plugins.route_http_to(Some(origin));
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Scoped",
-                "access": { "projects": [], "installation": false, "github": false },
+                "access": { "projects": [], "installation": false },
             }),
             None,
         )
@@ -3675,10 +3724,10 @@ async fn pending_new_turn_scenarios(scenarios: &[&str]) {
         let scenario = case.strip_suffix("-after-success").unwrap_or(case);
         let (_root, s, instance, resource, app) = fixture().await;
         let agent = s
-            .agent(
+            .agent_fixture(
                 json!({
                     "name": "Scoped",
-                    "access": { "projects": [], "installation": false, "github": false },
+                    "access": { "projects": [], "installation": false },
                 }),
                 None,
             )
@@ -4094,11 +4143,11 @@ async fn abandoned_delivery_scenarios(scenarios: &[(bool, bool, bool)]) {
             configured_fixture_with_runner(None, &origin).await;
         s.plugins.route_http_to(Some(origin));
         let agent = s
-            .agent(
+            .agent_fixture(
                 json!({
                     "name": "Scoped",
                     "provider": "codex",
-                    "access": { "projects": [], "installation": false, "github": false },
+                    "access": { "projects": [], "installation": false },
                 }),
                 None,
             )
@@ -4417,10 +4466,10 @@ async fn abandoned_delivery_scenarios(scenarios: &[(bool, bool, bool)]) {
 async fn a_sending_ordinary_request_keeps_its_place_before_an_independent_request() {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Scoped",
-                "access": { "projects": [], "installation": false, "github": false },
+                "access": { "projects": [], "installation": false },
             }),
             None,
         )
@@ -4624,10 +4673,10 @@ async fn an_authorized_participant_can_reset_a_settled_thread_without_erasing_it
     let (origin, server) = common::serve_locally(upstream).await;
     s.plugins.route_http_to(Some(origin));
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Scoped",
-                "access": { "projects": [], "installation": false, "github": false },
+                "access": { "projects": [], "installation": false },
             }),
             None,
         )
@@ -4918,15 +4967,15 @@ async fn an_authorized_participant_can_reset_a_settled_thread_without_erasing_it
 #[tokio::test]
 async fn route_eligibility_uses_native_resource_grants_without_disclosing_owner_data() {
     let (_root, s, instance, resource, app) = fixture().await;
-    let safe = s.agent(json!({
+    let safe = s.agent_fixture(json!({
         "name": "Dedicated read-only",
-        "access": {"sandbox": "read-only", "projects": [], "installation": false, "github": false, "mcps": []},
+        "access": {"sandbox": "read-only", "projects": [], "installation": false, "mcps": []},
     }), None).await.unwrap();
     let broad_agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Installation agent",
-                "access": {"projects": [], "installation": true, "github": false, "mcps": []},
+                "access": {"projects": [], "installation": true, "mcps": []},
             }),
             None,
         )
@@ -5044,9 +5093,15 @@ async fn route_eligibility_uses_native_resource_grants_without_disclosing_owner_
 #[tokio::test]
 async fn stale_route_edits_cannot_restore_a_revoked_participant() {
     let (_root, s, instance, resource, app) = fixture().await;
-    let agent = s.agent(json!({
-        "name": "Dedicated", "access": {"projects": [], "installation": false, "github": false, "mcps": []},
-    }), None).await.unwrap();
+    let agent = s
+        .agent_fixture(
+            json!({
+                "name": "Dedicated", "access": {"projects": [], "installation": false, "mcps": []},
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     let mut original = json!({
         "name": "Support", "enabled": true, "match": {"channel": "C1"},
         "agentId": agent["id"], "accessMode": "allowlist", "userIds": ["alice", "bob"],
@@ -5192,7 +5247,7 @@ async fn external_route_configuration_does_not_grant_native_host_provenance() {
     });
     s.store.put("nodes", node.clone()).await.unwrap();
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Native external candidate",
                 "access": {
@@ -5200,7 +5255,6 @@ async fn external_route_configuration_does_not_grant_native_host_provenance() {
                     "nodes": [node["id"]],
                     "projects": [],
                     "installation": false,
-                    "github": false,
                     "mcps": [],
                     "sandbox": "read-only",
                 },
@@ -5295,13 +5349,12 @@ async fn route_eligibility_requires_the_selected_project_and_allows_paused_confi
         .await
         .unwrap();
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Project helper",
                 "access": {
                     "projects": [project["id"]],
                     "installation": false,
-                    "github": false,
                     "mcps": [],
                     "sandbox": "read-only",
                 },
@@ -5428,13 +5481,12 @@ async fn route_eligibility_requires_the_selected_project_and_allows_paused_confi
 async fn reapproving_a_participant_never_revives_their_old_admitted_work() {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Dedicated",
                 "access": {
                     "projects": [],
                     "installation": false,
-                    "github": false,
                     "mcps": [],
                 },
             }),
@@ -5562,13 +5614,12 @@ async fn reapproving_a_person_cannot_release_their_old_http_result() {
         .await
         .unwrap();
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Dedicated",
                 "access": {
                     "projects": [],
                     "installation": false,
-                    "github": false,
                     "mcps": [],
                 },
             }),
@@ -5734,13 +5785,12 @@ async fn reapproving_a_person_cannot_release_their_old_http_result() {
 async fn unversioned_routed_admissions_do_not_acquire_a_persons_current_grant() {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Dedicated",
                 "access": {
                     "projects": [],
                     "installation": false,
-                    "github": false,
                     "mcps": [],
                 },
             }),
@@ -5826,10 +5876,10 @@ async fn root_scope_call(
 async fn root_scopes_keep_the_source_participants_authority(command: bool) {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Dedicated",
-                "access": { "projects": [], "installation": false, "github": false, "mcps": [] },
+                "access": { "projects": [], "installation": false, "mcps": [] },
             }),
             None,
         )
@@ -6101,9 +6151,15 @@ async fn a_source_package_root_grant_does_not_replace_a_route_scope(command: boo
     registry::approve(&s, "router", "2", text(&installed, "digest"))
         .await
         .unwrap();
-    let agent = s.agent(json!({
-        "name": "Dedicated", "access": {"projects": [], "installation": false, "github": false, "mcps": []},
-    }), None).await.unwrap();
+    let agent = s
+        .agent_fixture(
+            json!({
+                "name": "Dedicated", "access": {"projects": [], "installation": false, "mcps": []},
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     connections::save(
         &s,
         "router",
@@ -6310,10 +6366,10 @@ async fn submit_after_held_attachment_authority_change(
         .await
         .unwrap();
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Attachment reader",
-                "access": {"projects": [], "installation": false, "github": false}
+                "access": {"projects": [], "installation": false}
             }),
             None,
         )
@@ -6530,9 +6586,9 @@ async fn owner_resource_grants_keep_everyone_routes_and_independent_admission() 
     let (_root, s, instance, resource, app) = fixture().await;
     let mut agents = Vec::new();
     for name in ["Public route agent", "Restricted agent"] {
-        agents.push(s.agent(json!({
+        agents.push(s.agent_fixture(json!({
             "name": name,
-            "access": {"sandbox": "read-only", "projects": [], "installation": false, "github": false, "mcps": []},
+            "access": {"sandbox": "read-only", "projects": [], "installation": false, "mcps": []},
         }), None).await.unwrap());
     }
     let public = &agents[0];
@@ -6652,13 +6708,13 @@ async fn queued_routed_request_for_execution(mode: &str, host: bool) -> QueuedRo
             .await
             .unwrap();
     }
-    let mut access = json!({"projects": [], "installation": false, "github": false});
+    let mut access = json!({"projects": [], "installation": false});
     if mode == "everyone" {
         access["sandbox"] = json!("read-only");
         access["mcps"] = json!([]);
     }
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({"name": "Queued request fixture", "access": access}),
             None,
         )
@@ -7141,10 +7197,10 @@ async fn revoking_a_person_during_a_question_keeps_other_routes_running() {
     let (origin, server) = common::serve_locally(platform).await;
     s.plugins.route_http_to(Some(origin));
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Scoped",
-                "access": {"projects": [], "installation": false, "github": false},
+                "access": {"projects": [], "installation": false},
             }),
             None,
         )
@@ -7313,13 +7369,12 @@ async fn approval_replacement_during_ingress_authority_check_keeps_no_content_or
 
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Dedicated",
                 "access": {
                     "projects": [],
                     "installation": false,
-                    "github": false,
                 },
             }),
             None,

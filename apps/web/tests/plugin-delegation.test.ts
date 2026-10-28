@@ -1,6 +1,6 @@
 import type { Agent } from '../../../packages/contracts/contracts'
 import { expect, it } from 'vitest'
-import { delegationRisks, listed } from '../src/plugins'
+import { delegationRisks, externalBotExecutionWarning, listed } from '../src/plugins'
 
 function agent(access: Partial<Agent['access']>): Agent {
   return {
@@ -15,6 +15,18 @@ function agent(access: Partial<Agent['access']>): Agent {
     },
   } as Agent
 }
+
+it('explains the owner approval required for a native instance without granting it', () => {
+  expect(externalBotExecutionWarning(agent({ backend: 'native' })))
+    .toContain('requires the installation owner\'s current native delegation')
+  expect(externalBotExecutionWarning(agent({ backend: 'firecracker' }))).toBe('')
+})
+
+it('keeps the native execution restriction visible for resource routes', () => {
+  expect(externalBotExecutionWarning(agent({ backend: 'native' }), true))
+    .toContain('External bot messages cannot start work with a native agent')
+  expect(externalBotExecutionWarning(agent({ backend: 'firecracker' }), true)).toBe('')
+})
 
 it('warns about broad agents for listed people without refusing any', () => {
   expect(delegationRisks(agent({}), [], false)).toEqual([])

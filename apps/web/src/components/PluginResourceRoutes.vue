@@ -42,7 +42,7 @@ const eligibility = ref<RouteEligibility[]>([])
 const eligibilityReady = ref(false)
 const eligibilityError = ref('')
 const chosenAgent = computed(() => state.agents.find(item => item.id === agent.value))
-const chosenExecutionWarning = computed(() => chosenAgent.value ? externalBotExecutionWarning(chosenAgent.value) : '')
+const chosenExecutionWarning = computed(() => chosenAgent.value ? externalBotExecutionWarning(chosenAgent.value, true) : '')
 const chosenRisks = computed(() => chosenAgent.value && eligibilityReady.value
   ? delegationRisks(chosenAgent.value, [], mode.value === 'everyone', eligibility.value.find(item => item.agentId === agent.value)?.pluginAccess ? [agent.value] : [])
   : [])

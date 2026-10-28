@@ -557,7 +557,7 @@ test('tool choices stay visible and editable when every MCP connection is grante
   // Choosing no connection saves: tool choices of connections no longer granted are not sent.
   const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${agent.id}`))
   await bar.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await saving).postDataJSON().access).toMatchObject({ mcps: [], mcpTools: {} })
+  expect((await saving).postDataJSON().settings.access).toMatchObject({ mcps: [], mcpTools: {} })
   await expect(bar).toHaveCount(0)
   expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access).toMatchObject({ mcps: [], mcpTools: {} })
 })
@@ -573,8 +573,8 @@ test('a held plugin grant whose package cannot give agents access is shown, coun
     }
 
     const response = await route.fetch()
-    const agents = await response.json()
-    await route.fulfill({ response, json: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) })
+    const { agents } = await response.json()
+    await route.fulfill({ response, json: { agents: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) } })
   })
   await page.route('**/api/plugins/packages', route => route.fulfill({ status: 404, json: { error: 'Older host has no compact directory' } }))
   await page.route('**/api/plugins', route => route.fulfill({
@@ -630,7 +630,7 @@ test('a held plugin grant whose package cannot give agents access is shown, coun
 
   const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${agent.id}`))
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
-  const body = (await saving).postDataJSON()
+  const body = (await saving).postDataJSON().settings
   expect(body.plugins).toEqual([])
   expect(body.access).not.toHaveProperty('plugins')
 })
@@ -698,8 +698,8 @@ test('a GitHub account is granted like any plugin instance, and the server refus
   await expect(review).toContainText('Added: GitHub “Work”')
   await review.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(review).toContainText(refusal)
-  expect(saves.at(-1)!.plugins).toEqual(['work', 'personal'])
-  expect(saves.at(-1)!.access).not.toHaveProperty('github')
+  expect(saves.at(-1)!.settings.plugins).toEqual(['work', 'personal'])
+  expect(saves.at(-1)!.settings.access).not.toHaveProperty('github')
   await review.getByRole('button', { name: 'Back to editing', exact: true }).click()
   // The refusal stays with the plugins section, where the owner removes one account.
   await expect(page.getByRole('alert').filter({ hasText: refusal }).first()).toBeVisible()
@@ -715,8 +715,8 @@ test('when plugins cannot be loaded, plugin access is read-only and no grant loo
     }
 
     const response = await route.fetch()
-    const agents = await response.json()
-    await route.fulfill({ response, json: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) })
+    const { agents } = await response.json()
+    await route.fulfill({ response, json: { agents: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) } })
   })
   let catalogFails = true
   await page.route('**/api/plugins/packages', route => route.fulfill({ status: 404, json: { error: 'Older host has no compact directory' } }))

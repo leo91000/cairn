@@ -6,6 +6,9 @@ mod access;
 
 use access::{active_run, call, enabled_main, public_call, result};
 
+#[path = "management/inert.rs"]
+mod inert;
+
 async fn connect(app: &axum::Router, path: &str, instance: &str) {
     let started = begin(app, path).await;
     let callback = format!(
@@ -41,6 +44,256 @@ async fn http_status(app: &axum::Router, path: &str) -> Value {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     common::read_json(response).await
+}
+
+#[tokio::test]
+async fn owner_http_resource_consent_is_the_lifecycle_reference() {
+    resource_consent_lifecycle("http").await;
+}
+
+#[tokio::test]
+async fn public_mcp_can_complete_the_resource_consent_lifecycle() {
+    resource_consent_lifecycle("public").await;
+}
+
+#[tokio::test]
+async fn installation_tool_can_complete_the_resource_consent_lifecycle() {
+    resource_consent_lifecycle("installation").await;
+}
+
+#[tokio::test]
+async fn an_unchanged_native_grant_can_finish_a_resource_consent_exchange() {
+    resource_consent_during_revocation(false).await;
+}
+
+#[tokio::test]
+async fn a_resource_consent_exchange_cannot_publish_after_its_native_grant_is_revoked() {
+    resource_consent_during_revocation(true).await;
+}
+
+async fn resource_consent_during_revocation(revoke: bool) {
+    let (_root, service, instance, resource, path, app) = fixture(false).await;
+    let main = enabled_main(&service).await;
+    connections::save(
+        &service,
+        "example",
+        &json!({
+            "name": "Example app",
+            "enabled": true,
+            "settings": {"clientId": "client-fixture"},
+            "agentIds": [MAIN_AGENT_ID],
+        }),
+        Some(&instance),
+    )
+    .await
+    .unwrap();
+    let (run, configuration) = active_run(&service, &main).await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let exchanges = Arc::new(AtomicUsize::new(0));
+    let (entering, releasing, calls) = (entered.clone(), release.clone(), exchanges.clone());
+    let provider = axum::Router::new().route(
+        "/token",
+        axum::routing::post(move || {
+            let (entered, release, calls) = (entering.clone(), releasing.clone(), calls.clone());
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                entered.notify_one();
+                release.notified().await;
+                axum::Json(json!({
+                    "access_token": "fixture-delayed-private-access",
+                    "refresh_token": "fixture-delayed-private-refresh",
+                    "scope": "messages:read",
+                    "expires_in": 3600,
+                    "team": {"id": "T111"},
+                }))
+            }
+        }),
+    );
+    let (origin, server) = common::serve_locally(provider).await;
+    service.plugins.route_http_to(Some(origin));
+    let started = begin(&app, &path).await;
+    let callback = format!(
+        "/api/plugin-oauth/{instance}/callback?state={}&code=delayed-fixture",
+        text(&started, "state")
+    );
+    let response = common::send(&app, request("GET", &callback, Value::Null, None)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let args = json!({
+        "pluginId": "example",
+        "instanceId": instance,
+        "collection": "workspace",
+        "resourceId": resource,
+        "provider": "bot",
+        "action": "finish",
+        "data": {"state": started["state"]},
+    });
+    let routed = service.clone();
+    let pending =
+        tokio::spawn(
+            async move { call(&routed, &configuration, "manage_plugin_oauth", args).await },
+        );
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .expect("The native management call must reach the actual token endpoint");
+    if revoke {
+        service
+            .mcps
+            .revoke_run(&service, text(&run, "id"))
+            .await
+            .unwrap();
+    }
+    release.notify_one();
+    let response = pending.await.unwrap();
+    if revoke {
+        assert_eq!(response["result"]["isError"], true);
+    } else {
+        assert_eq!(result(&response)["status"], "authorized");
+    }
+    assert!(!response.to_string().contains("fixture-delayed-private"));
+    assert_eq!(
+        http_status(&app, &path).await["status"],
+        if revoke { "disconnected" } else { "authorized" }
+    );
+    // The exchange consumed its code before provider I/O; refusal must not make
+    // that uncertain code reusable by the owner or a subsequent management run.
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            &format!("{path}/finish"),
+            json!({"state": started["state"]}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_ne!(response.status(), StatusCode::OK);
+    assert_eq!(exchanges.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+async fn resource_consent_lifecycle(source: &str) {
+    let (_root, service, instance, resource, path, app) = fixture(false).await;
+    let main = enabled_main(&service).await;
+    connections::save(
+        &service,
+        "example",
+        &json!({
+            "name": "Example app",
+            "enabled": true,
+            "settings": {"clientId": "client-fixture"},
+            "agentIds": [MAIN_AGENT_ID],
+        }),
+        Some(&instance),
+    )
+    .await
+    .unwrap();
+    let (_, configuration) = active_run(&service, &main).await;
+    let exchanges = Arc::new(AtomicUsize::new(0));
+    let calls = exchanges.clone();
+    let provider = axum::Router::new().route(
+        "/token",
+        axum::routing::post(move || {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({
+                    "access_token": "fixture-managed-consent-private-access",
+                    "refresh_token": "fixture-managed-consent-private-refresh",
+                    "scope": "messages:read",
+                    "expires_in": 3600,
+                    "team": {"id": "T111"},
+                }))
+            }
+        }),
+    );
+    let (origin, server) = common::serve_locally(provider).await;
+    service.plugins.route_http_to(Some(origin));
+    let args = json!({
+        "pluginId": "example",
+        "instanceId": instance,
+        "collection": "workspace",
+        "resourceId": resource,
+        "provider": "bot",
+        "action": "start",
+        "data": {"scopes": ["messages:read"]},
+    });
+    let response =
+        configured_action(&service, &app, &path, &configuration, source, args.clone()).await;
+    assert_eq!(response.0, StatusCode::OK);
+    let started = if source == "http" {
+        &response.1
+    } else {
+        result(&response.1)
+    };
+    let url = url::Url::parse(text(started, "url")).unwrap();
+    assert_eq!(
+        url.origin().ascii_serialization(),
+        "https://api.example.test"
+    );
+    assert_eq!(url.path(), "/authorize");
+    assert!(
+        url.query_pairs()
+            .any(|(key, value)| key == "scope" && value == "messages:read")
+    );
+    let state = text(started, "state");
+    let mut finish = args;
+    finish["action"] = json!("finish");
+    finish["data"] = json!({"state": state});
+    let response = configured_action(
+        &service,
+        &app,
+        &path,
+        &configuration,
+        source,
+        finish.clone(),
+    )
+    .await;
+    assert_eq!(response.0, StatusCode::OK);
+    let pending = if source == "http" {
+        &response.1
+    } else {
+        result(&response.1)
+    };
+    assert_eq!(pending["status"], "pending");
+    assert_eq!(exchanges.load(Ordering::SeqCst), 0);
+
+    let callback =
+        format!("/api/plugin-oauth/{instance}/callback?state={state}&code=managed-fixture");
+    let response = common::send(&app, request("GET", &callback, Value::Null, None)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = configured_action(
+        &service,
+        &app,
+        &path,
+        &configuration,
+        source,
+        finish.clone(),
+    )
+    .await;
+    assert_eq!(response.0, StatusCode::OK);
+    let finished = if source == "http" {
+        &response.1
+    } else {
+        result(&response.1)
+    };
+    assert_eq!(finished["status"], "authorized");
+    assert_eq!(finished["scopes"], json!(["messages:read"]));
+    assert!(
+        !finished
+            .to_string()
+            .contains("fixture-managed-consent-private")
+    );
+    assert!(!finished.to_string().contains("client-secret-fixture"));
+    assert_eq!(http_status(&app, &path).await, *finished);
+    let repeated = configured_action(&service, &app, &path, &configuration, source, finish).await;
+    if source == "http" {
+        assert_ne!(repeated.0, StatusCode::OK);
+    } else {
+        assert_eq!(repeated.1["result"]["isError"], true);
+    }
+    assert_eq!(exchanges.load(Ordering::SeqCst), 1);
+    server.abort();
 }
 
 #[tokio::test]
@@ -362,16 +615,15 @@ async fn configured_action(
     args: Value,
 ) -> (StatusCode, Value) {
     if source == "http" {
-        let method = if text(&args, "action") == "status" {
-            "GET"
-        } else {
-            "DELETE"
+        let (method, path) = match text(&args, "action") {
+            "status" => ("GET", path.to_owned()),
+            "revoke" => ("DELETE", path.to_owned()),
+            "start" => ("POST", path.to_owned()),
+            "finish" => ("POST", format!("{path}/finish")),
+            action => panic!("Unknown fixture authorization action: {action}"),
         };
-        let response = common::send(
-            app,
-            request(method, path, Value::Null, Some("fixture-owner")),
-        )
-        .await;
+        let body = args.get("data").cloned().unwrap_or(Value::Null);
+        let response = common::send(app, request(method, &path, body, Some("fixture-owner"))).await;
         return (response.status(), common::read_json(response).await);
     }
     let reply = if source == "public" {

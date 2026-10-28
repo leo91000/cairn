@@ -275,6 +275,7 @@ pub(crate) async fn call(
                 reference.resource,
                 provider,
                 Initiator {
+                    caller: context.caller(),
                     account: String::new(),
                     owner_access: context
                         .connection
@@ -284,7 +285,7 @@ pub(crate) async fn call(
                     actor: None,
                     external: Some(*person),
                     source_event: source_event.into(),
-                    setup_target: None,
+                    target: None,
                 },
                 &json!({"scopes": scopes}),
             )
@@ -322,7 +323,16 @@ pub(crate) async fn call(
                     "This consent belongs to another person or source route.",
                 ));
             }
-            let result = finish_pending(s, &package, provider, key.clone(), value, pending).await;
+            let result = finish_pending(
+                s,
+                &package,
+                provider,
+                key.clone(),
+                value,
+                pending,
+                context.caller(),
+            )
+            .await;
             let authority_unavailable = result.as_ref().is_err_and(Error::is_authority_unavailable);
             if !result
                 .as_ref()
@@ -344,6 +354,8 @@ pub(crate) async fn call(
             result
         }
         "oauth.disconnect" => {
+            let caller = context.caller();
+            caller.recheck(s).await?;
             let (connection, person, resource, name) = (
                 context.connection.clone(),
                 person,
@@ -352,6 +364,7 @@ pub(crate) async fn call(
             );
             s.store
                 .transaction(move |db| {
+                    caller.authorize(db)?;
                     requesters::external_in(db, &person)?;
                     resources::reference_in(db, &connection, &package.manifest, &resource)?;
                     disconnect_subject(db, &resource, &name, &person.subject)?;

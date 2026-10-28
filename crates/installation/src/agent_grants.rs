@@ -1,21 +1,17 @@
 //! Live grants an agent holds on resources: exclusive reservations of nodes and
 //! plugin instances such as 1Password service accounts.
 //!
-//! The owner edits them on the agent (`exclusiveNodes`, `plugins`). Nodes and plugin
-//! instances keep a copy (`exclusiveAgents`, `agentIds`) written in the same
-//! transaction: enforcement reads it, and so do releases that predate agent-side
-//! grants. Those releases only edit the copy, so at startup any difference means the
-//! copy is newer and the agent side is rebuilt from it.
+//! Until A3, nodes and plugin instances keep their existing permission lists
+//! (`exclusiveAgents`, `agentIds`). These explicit adapters update typed SQL
+//! profiles and resource lists in the same transaction. There is no startup
+//! reconstruction or reader for profiles from older installations.
 //!
-//! These grants are live, not part of a run's snapshot. They sit beside `access`
-//! rather than in it: [`crate::service::policy`] (and the previous release's, which
-//! merges every `access` key) never sees them, so changing them neither blocks queued
-//! work nor changes the access a plugin delegation approved, before or after a
-//! rollback. Granting a plugin instance still suspends a delegation open to everyone,
-//! which must never reach secrets.
+//! These grants are live, outside a run's access snapshot. Changing them does not
+//! broaden its frozen policy. Granting a plugin still suspends an externally
+//! open delegation, which must never reach secrets.
 
 use crate::{
-    error::{Error, Result},
+    error::{Error, Result, required},
     plugins::connections::KIND as PLUGIN_INSTANCES,
     store::Db,
     validation::text,
@@ -53,19 +49,6 @@ pub fn plugins(agent: &Value) -> Vec<String> {
     ids(&agent[PLUGINS])
 }
 
-/// Stores both grant lists without duplicates. Exclusive reservations need permission
-/// to run on the node and a Firecracker agent, so losing either also removes them.
-pub(crate) fn normalize(agent: &mut Value) {
-    let access = crate::service::policy(agent);
-    let native = crate::native::policy::native(agent);
-    let exclusive = exclusive_nodes(agent)
-        .into_iter()
-        .filter(|node| !native && crate::service::allowed(&access["nodes"], node))
-        .collect::<Vec<_>>();
-    agent[EXCLUSIVE_NODES] = json!(exclusive);
-    agent[PLUGINS] = json!(plugins(agent));
-}
-
 /// Exclusive reservations suspend Firecracker VMs, so only a Firecracker agent can
 /// reserve a Firecracker node.
 fn reservable(agent: &Value, node: &Value) -> bool {
@@ -77,7 +60,7 @@ fn reservable(agent: &Value, node: &Value) -> bool {
 /// while their package awaits review, so unrelated edits still save.
 pub(crate) fn validate(db: &Db<'_>, agent: &Value, accepts_agents: &[String]) -> Result<()> {
     let held = db
-        .get("agents", text(agent, "id"))?
+        .agent_snapshot(text(agent, "id"))?
         .map(|saved| plugins(&saved))
         .unwrap_or_default();
     let nodes = exclusive_nodes(agent);
@@ -115,7 +98,7 @@ pub(crate) fn validate(db: &Db<'_>, agent: &Value, accepts_agents: &[String]) ->
 }
 
 /// Copies the agent's grants to every node and plugin instance, adding or removing
-/// the agent so the resources list exactly the grants saved on the agent.
+/// the agent so enforcement sees exactly the grants saved on the typed profile.
 pub(crate) fn mirror(db: &Db<'_>, agent: &Value) -> Result<()> {
     let id = text(agent, "id");
     let nodes = exclusive_nodes(agent);
@@ -165,11 +148,11 @@ fn set_member(list: &mut Value, id: &str, present: bool) -> bool {
 /// Sets which agents hold a grant on one resource, updating those agents.
 /// Used when a client still edits grants from the resource side.
 fn grant_resource(db: &Db<'_>, key: &str, resource: &str, agents: &[String]) -> Result<()> {
-    for mut agent in db.list("agents")? {
+    for mut agent in db.agent_snapshots()? {
         let granted = agents.iter().any(|id| agent["id"] == *id);
         if set_member(&mut agent[key], resource, granted) {
             crate::service::touch(&mut agent);
-            db.put("agents", &agent)?;
+            db.save_agent_permissions(&agent)?;
         }
     }
     Ok(())
@@ -181,7 +164,7 @@ pub(crate) fn set_node_agents(db: &Db<'_>, node: &mut Value, agents: &[String]) 
     let node_id = text(node, "id").to_owned();
     let mut runnable = Vec::new();
     for agent in agents {
-        let may_run = db.get("agents", agent)?.is_some_and(|saved| {
+        let may_run = db.agent_snapshot(agent)?.is_some_and(|saved| {
             crate::service::allowed(&crate::service::policy(&saved)["nodes"], &node_id)
                 && reservable(&saved, node)
         });
@@ -223,96 +206,71 @@ pub(crate) fn forget_resource(db: &Db<'_>, key: &str, resource: &str) -> Result<
     grant_resource(db, key, resource, &[])
 }
 
-/// Rebuilds the agent side from the resource copies, drops copies that name agents
-/// which no longer exist, and gives every agent a revision. Idempotent; runs at
-/// every startup.
-pub(crate) fn reconcile(db: &Db<'_>) -> Result<()> {
-    let agents = db.list("agents")?;
-    let known = |id: &Value| agents.iter().any(|agent| agent["id"] == *id);
-
-    let mut nodes = db.list("nodes")?;
-    for node in &mut nodes {
-        let Some(list) = node["exclusiveAgents"].as_array_mut() else {
-            continue;
-        };
-        let before = list.len();
-        list.retain(known);
-        if list.len() != before {
-            db.put("nodes", node)?;
-        }
-    }
-
-    let mut instances = db.list(PLUGIN_INSTANCES)?;
-    for instance in &mut instances {
-        let Some(list) = instance["agentIds"].as_array_mut() else {
-            continue;
-        };
-        let before = list.len();
-        list.retain(known);
-        if list.len() != before {
-            db.put(PLUGIN_INSTANCES, instance)?;
-        }
-    }
-
-    for mut agent in agents.clone() {
-        let id = agent["id"].clone();
-        let lists = |resources: &[Value], key: &str, skip_revoked: bool| {
-            resources
-                .iter()
-                .filter(|resource| !(skip_revoked && resource["revoked"] == true))
-                .filter(|resource| {
-                    resource[key]
-                        .as_array()
-                        .is_some_and(|list| list.contains(&id))
-                })
-                .map(|resource| resource["id"].clone())
-                .collect::<Vec<_>>()
-        };
-        let access = crate::service::policy(&agent);
-        let (exclusive, unrunnable): (Vec<_>, Vec<_>) = lists(&nodes, "exclusiveAgents", true)
-            .into_iter()
-            .partition(|node| {
-                let record = nodes.iter().find(|record| record["id"] == *node);
-                crate::service::allowed(&access["nodes"], node.as_str().unwrap_or(""))
-                    && record.is_some_and(|record| reservable(&agent, record))
-            });
-        // A previous release can remove node access without the reservation.
-        for node in &unrunnable {
-            if let Some(record) = nodes.iter_mut().find(|record| record["id"] == *node)
-                && set_member(&mut record["exclusiveAgents"], text(&agent, "id"), false)
-            {
-                db.put("nodes", record)?;
+pub(crate) fn save_profile(
+    db: &Db<'_>,
+    profile: cairn_contracts::Agent,
+    access: &Value,
+    owner_review: bool,
+    native_reviews: &[String],
+) -> Result<cairn_contracts::Agent> {
+    let mut agent = serde_json::to_value(profile)?;
+    // Nodes held before stay accepted only while the execution backend is unchanged.
+    let previous_nodes = db
+        .agent_snapshot(text(&agent, "id"))?
+        .filter(|saved| crate::service::policy(saved)["backend"] == access["backend"])
+        .and_then(|saved| crate::service::policy(&saved)["nodes"].as_array().cloned());
+    // Serialize grants with revocation; a concurrent editor must never
+    // restore a grant that the revocation transaction just removed.
+    // Nodes the agent already held stay accepted, so unrelated edits still save.
+    let held = |node: &Value| {
+        previous_nodes
+            .as_ref()
+            .is_some_and(|nodes| nodes.iter().any(|held| held == node))
+    };
+    for node in access["nodes"].as_array().into_iter().flatten() {
+        if node == crate::nodes::LOCAL_NODE_ID {
+            // The current runner only runs Firecracker VMs.
+            if access["backend"] == "native" && !held(node) {
+                return Err(Error::bad(
+                    "Native agents need explicit native nodes: the current runner only runs Firecracker VMs.",
+                ));
             }
+            continue;
         }
-        let instance_grants = lists(&instances, "agentIds", false);
-        let same = |key: &str, expected: &[Value]| {
-            let saved = ids(&agent[key]);
-            agent[key].is_array()
-                && saved.len() == expected.len()
-                && expected
-                    .iter()
-                    .all(|id| saved.iter().any(|known| id == known))
-        };
-        let changed = !(same(EXCLUSIVE_NODES, &exclusive) && same(PLUGINS, &instance_grants));
-        // Drafts of this change stored the grants inside `access`, where the previous
-        // release would merge them into the delegation policy.
-        let nested = agent["access"].as_object_mut().is_some_and(|access| {
-            let exclusive = access.remove(EXCLUSIVE_NODES).is_some();
-            let plugins = access.remove(PLUGINS).is_some();
-            exclusive || plugins
-        });
-        // Agents saved before revisions existed get one, so editors detect later changes.
-        let unversioned = !agent["revision"]
-            .as_str()
-            .is_some_and(|revision| !revision.is_empty());
-        if changed || nested || unversioned {
-            agent[EXCLUSIVE_NODES] = exclusive.into();
-            agent[PLUGINS] = instance_grants.into();
-            crate::service::touch(&mut agent);
-            db.put("agents", &agent)?;
+        let record = required(
+            db.get("nodes", node.as_str().unwrap_or(""))?,
+            "Node not found",
+        )?;
+        if record["revoked"] == true {
+            return Err(Error::bad("A revoked node cannot be authorized."));
+        }
+        if !held(node)
+            && crate::native::policy::node_native(&record) != (access["backend"] == "native")
+        {
+            return Err(Error::bad(
+                "Choose nodes that use this agent's execution backend.",
+            ));
         }
     }
-    Ok(())
+    // Read the latest portrait inside the save transaction: editing an agent
+    // must not overwrite an upload or background generation that just finished.
+    if let Some(existing) = db.agent_snapshot(text(&agent, "id"))?
+        && let Some(avatar) = existing.get("avatar")
+    {
+        agent["avatar"] = avatar.clone();
+    }
+    crate::nodes::native_mode::review_agent(
+        db,
+        &agent,
+        db.agent_snapshot(text(&agent, "id"))?.as_ref(),
+        owner_review,
+        native_reviews,
+    )?;
+    crate::service::touch(&mut agent);
+    db.save_agent_permissions(&agent)?;
+    crate::agent_grants::mirror(db, &agent)?;
+    db.audit("agent.saved", &json!({ "id": agent["id"] }))?;
+    Ok(serde_json::from_value(agent)?)
 }
 
 #[cfg(test)]

@@ -3,6 +3,8 @@ mod common;
 mod integration;
 #[path = "plugin_oauth/management.rs"]
 mod management;
+#[path = "plugin_oauth/personal_revoke.rs"]
+mod personal_revoke;
 #[path = "plugin_oauth/receipts.rs"]
 mod receipts;
 

@@ -504,11 +504,13 @@ export function delegationRisks(agent: Agent, connections: (Pick<PluginConnectio
   return risks
 }
 
-/** Configuration never grants the bot's external sender native host authority. */
-export function externalBotExecutionWarning(agent: Agent) {
-  return agent.access.backend === 'native'
-    ? 'External bot messages cannot start work with a native agent because they do not carry a verified Cairn host identity. Choose an isolated agent for this bot.'
-    : ''
+/** Instance delegation requires the owner; resource routes cannot yet retain it. */
+export function externalBotExecutionWarning(agent: Agent, resourceRoute = false) {
+  if (agent.access.backend !== 'native')
+    return ''
+  return resourceRoute
+    ? 'External bot messages cannot start work with a native agent because this route has no native delegation. Choose an isolated agent for this route.'
+    : 'Running this bot with a native agent requires the installation owner\'s current native delegation. Save or reapprove the bot as the owner to record that delegation.'
 }
 
 /** `a, b and c`. */

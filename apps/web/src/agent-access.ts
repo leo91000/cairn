@@ -8,22 +8,7 @@ import { LOCAL_NODE_ID } from '../../../packages/contracts/nodes'
 
 // Everything an agent can reach or do is edited on its page, as one draft.
 export type AgentAccess = Agent['access']
-export interface AgentDraft {
-  name: string
-  description: string
-  instructions: string
-  provider: Agent['provider']
-  model: string
-  reasoning: string
-  /** Codex speed; empty runs at Standard. */
-  speed: string
-  timeoutMinutes: number
-  access: AgentAccess
-  // Live grants, kept beside `access` rather than inside it: nodes the agent may reserve
-  // exclusively and plugin instances it may use.
-  exclusiveNodes: string[]
-  plugins: string[]
-}
+export type AgentDraft = import('../../../packages/contracts/generated/typescript/AgentSettings').AgentSettings
 
 export type SectionId
   = | 'identity'
@@ -92,7 +77,7 @@ export function newAgentDraft(): AgentDraft {
     instructions: '',
     provider: 'codex',
     model: '',
-    reasoning: '',
+    reasoning: 'high',
     speed: '',
     timeoutMinutes: 0,
     access: {
@@ -121,7 +106,7 @@ export function draftOf(agent: Agent): AgentDraft {
     provider: agent.provider ?? 'codex',
     model: agent.model ?? '',
     reasoning: agent.reasoning ?? '',
-    speed: agent.speed ?? '',
+    speed: agent.speed,
     timeoutMinutes: agent.timeoutMinutes ?? 0,
     access: {
       backend: access.backend ?? 'firecracker',
@@ -569,28 +554,9 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
 }
 
 /** A plugin delegation answering as the agent, as `POST /agents/{id}/preview` reports it. */
-export interface DelegationEffect {
-  id: string
-  pluginId: string
-  name: string
-  enabled: boolean
-  suspended: boolean
-  // The saved agent already no longer matches the delegation's approval, before this edit.
-  alreadySuspended?: boolean
-  // Why the new access cannot be reapproved, when it cannot.
-  blocked: string | null
-}
+export type DelegationEffect = import('../../../packages/contracts/generated/typescript/AgentDelegationEffect').AgentDelegationEffect
+export type Preview = import('../../../packages/contracts/generated/typescript/AgentPreview').AgentPreview
 
-export interface Preview {
-  runs: { queued: number, running: number }
-  delegations: DelegationEffect[]
-}
-
-/**
- * Whether saving needs the review first: a power or a secret added, interrupted work, or a
- * delegation this edit suspends. A delegation already suspended by an earlier change, blocked or
- * not, is listed when the review opens, but never opens it.
- */
 export function needsReview(lines: ReviewLine[], preview: Preview | null) {
   const runs = preview ? preview.runs.queued + preview.runs.running : 0
   const delegations = preview?.delegations.some(item => item.suspended && !item.alreadySuspended) ?? false

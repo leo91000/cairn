@@ -1,3 +1,5 @@
+use crate::common::AgentFixture;
+
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -14,7 +16,7 @@ async fn a_confirmed_notification_receipt_keeps_a_safe_submission_retry_queued()
 async fn submission_limit_after_notification(receipted: bool) {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({"name": "Quota handler", "access": {"projects": []}}),
             None,
         )
@@ -128,7 +130,7 @@ async fn accepted_events_survive_authority_outages_during_the_first_capability()
 async fn owner_policy_outage(failing_lookup: usize) {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({"name": "Routed outage", "access": {"projects": [], "installation": false}}),
             None,
         )
@@ -262,7 +264,7 @@ async fn owner_policy_outage(failing_lookup: usize) {
 async fn package_handler_failures_still_exhaust_their_finite_retry_budget() {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({"name": "Failing handler", "access": {"projects": []}}),
             None,
         )
@@ -332,7 +334,7 @@ async fn package_handler_failures_still_exhaust_their_finite_retry_budget() {
 async fn uncertain_provider_writes_do_not_acquire_unlimited_authority_retries() {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({"name": "Uncertain write", "access": {"projects": []}}),
             None,
         )
@@ -568,7 +570,7 @@ async fn measure_authority_retry_attachment_storage() {
         std::fs::create_dir_all(root.path().join("home")).unwrap();
         let s = Service::new(common::config(root.path())).await.unwrap();
         let agent = s
-            .agent(json!({"name": "Storage observation"}), None)
+            .agent_fixture(json!({"name": "Storage observation"}), None)
             .await
             .unwrap();
         let chat = s

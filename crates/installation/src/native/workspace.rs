@@ -165,7 +165,17 @@ fn measure_with_seen(
     let directory = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(root)?;
+        .open(root);
+    let directory = match directory {
+        Ok(directory) => directory,
+        Err(error)
+            if matches!(basis, Measurement::ExclusiveCredit)
+                && error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(0);
+        }
+        Err(error) => return Err(error.into()),
+    };
     let entries = std::fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))?;
     let mut stack = vec![(directory, entries)];
     let mut total = 0u64;
@@ -244,6 +254,25 @@ pub(crate) fn filesystem(path: &Path) -> Result<libc::statvfs> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_temporary_directory_has_no_reservation_credit() {
+        let root = tempfile::tempdir().unwrap();
+        let temporary = root.path().join("tmp");
+
+        assert_eq!(credit_bytes(&temporary).unwrap(), 0);
+    }
+
+    #[test]
+    fn temporary_credit_still_rejects_a_symlink_root() {
+        let root = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let temporary = root.path().join("tmp");
+        std::os::unix::fs::symlink(target.path(), &temporary).unwrap();
+
+        assert!(credit_bytes(&temporary).is_err());
+        assert!(measure(&root.path().join("missing"), false).is_err());
+    }
 
     #[test]
     fn temporary_credit_counts_a_concurrently_renamed_inode_at_most_once() {

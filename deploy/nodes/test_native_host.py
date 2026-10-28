@@ -1,4 +1,6 @@
 """Downloader and update recovery tests; no services, drivers or real credentials."""
+import ast
+import contextlib
 import hashlib
 import importlib.util
 import io
@@ -25,6 +27,79 @@ def release(**changes):
 
 
 class NativeHostTests(unittest.TestCase):
+    def test_entrypoint_exposes_only_allowlisted_prerequisite_diagnostics(self):
+        source = Path(SPEC.origin).read_text()
+        entrypoint = ast.parse(source).body[-1]
+        self.assertIsInstance(entrypoint, ast.If)
+        code = compile(ast.Module(body=[entrypoint], type_ignores=[]), SPEC.origin, 'exec')
+        for error, expected in [
+            (host.PrerequisiteError('uidmap'), 'distribution uidmap package'),
+            (host.PrerequisiteError('subids'), '/etc/subuid and /etc/subgid'),
+            (host.PrerequisiteError('tun'), '/dev/net/tun'),
+            (host.PrerequisiteError('systemd'), 'systemd 255'),
+            (ValueError('synthetic-private-credential'), 'Native node failed: ValueError'),
+            (OSError('synthetic-private-credential'), 'Native node failed: OSError'),
+        ]:
+            with self.subTest(error=type(error).__name__, expected=expected):
+                scope = dict(vars(host), __name__='__main__', install=Mock(side_effect=error))
+                output = io.StringIO()
+                with patch.object(host.os, 'geteuid', return_value=0), \
+                        patch.object(host.signal, 'signal'), \
+                        patch.object(host.sys, 'argv', ['native-host.py', 'install', 'https://manager.example.test']), \
+                        contextlib.redirect_stderr(output), self.assertRaises(SystemExit) as exit_status:
+                    exec(code, scope)
+                self.assertEqual(exit_status.exception.code, 1)
+                scope['install'].assert_called_once_with('https://manager.example.test')
+                self.assertIn(expected, output.getvalue())
+                self.assertNotIn('synthetic-private-credential', output.getvalue())
+
+    def test_missing_uidmap_reports_a_controlled_prerequisite(self):
+        with patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 255')), \
+                patch.object(host.Path, 'exists', return_value=False), \
+                patch.object(host.shutil, 'which', return_value=None), \
+                self.assertRaisesRegex(host.PrerequisiteError, 'distribution uidmap package'):
+            host.require_docker_host()
+
+    def test_apparmor_profile_failure_does_not_expose_arbitrary_os_error(self):
+        with patch.object(host.Path, 'exists', return_value=True), \
+                patch.object(host.Path, 'read_text', return_value='1'), \
+                patch.object(host.Path, 'write_text', side_effect=PermissionError('synthetic-private-credential')), \
+                patch.object(host.shutil, 'which', return_value='/synthetic/apparmor_parser'), \
+                self.assertRaisesRegex(host.PrerequisiteError, 'AppArmor tooling') as error:
+            host.configure_docker_apparmor(Path('/synthetic/docker'))
+        self.assertNotIn('synthetic-private-credential', str(error.exception))
+
+    def test_mapping_helpers_accept_only_their_effective_global_file_capability(self):
+        metadata = Mock(st_uid=0, st_mode=host.stat.S_IFREG | 0o755)
+        def capability(*words):
+            return b''.join(word.to_bytes(4, 'little') for word in words)
+        for bit in (1 << 7, 1 << 6):
+            for data, expected in [
+                (capability(0x02000001, bit, 0, 0, 0), True),
+                (capability(0x03000001, bit, 0, 0, 0, 0), True),
+                (capability(0x02000000, bit, 0, 0, 0), False),
+                (capability(0x02000001, bit | 1, 0, 0, 0), False),
+                (capability(0x03000001, bit, 0, 0, 0, 1000), False),
+            ]:
+                with patch.object(host.Path, 'stat', return_value=metadata), patch.object(host.os, 'getxattr', return_value=data):
+                    self.assertEqual(expected, host.trusted_mapping_helper('/synthetic', bit))
+        with patch.object(host.Path, 'stat', return_value=Mock(st_uid=0, st_mode=host.stat.S_IFREG | 0o4755)):
+            self.assertTrue(host.trusted_mapping_helper('/synthetic', 1 << 7))
+
+    def test_disabled_user_namespaces_fail_without_changing_global_restrictions(self):
+        with patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 255')), \
+                patch.object(host.Path, 'exists', return_value=True), \
+                patch.object(host.Path, 'read_text', return_value='0'), \
+                patch.object(host.Path, 'write_text') as write, \
+                self.assertRaisesRegex(ValueError, 'enabled unprivileged user namespaces'):
+            host.require_docker_host()
+        write.assert_not_called()
+
+    def test_rootless_mapping_fails_before_enrollment_on_implicit_nnp_systemd(self):
+        with patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 252')), \
+                self.assertRaisesRegex(ValueError, 'systemd 255'):
+            host.require_docker_host()
+
     def test_codex_companion_is_extracted_and_rechecked_before_reuse(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -80,7 +155,7 @@ class NativeHostTests(unittest.TestCase):
                 if controllers is not None:
                     (root / 'cgroup.controllers').write_text(controllers)
                 with patch.object(host, 'ROOT', root / 'state'), patch.object(host, 'CGROUP_ROOT', root), \
-                        patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 252')), \
+                        patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 255')), \
                         patch.object(host.getpass, 'getpass') as enrollment, patch.object(host, 'prepare') as prepare:
                     with self.assertRaisesRegex(ValueError, 'cgroup v2'):
                         host.install('https://manager.example.test')
@@ -281,6 +356,9 @@ class NativeHostTests(unittest.TestCase):
                     child.poll.return_value = None
                 with patch.object(host, 'ROOT', root), patch.object(host, 'INSTALL', install), \
                         patch.object(host, 'STOP', False), patch.object(host, 'require_storage'), \
+                        patch.object(host, 'require_docker_host'), \
+                        patch.object(host, 'prepare_docker_tools', return_value=install / 'docker-tools'), \
+                        patch.object(host, 'configure_docker_apparmor') as apparmor, \
                         patch.object(host, 'start_node', side_effect=children), \
                         patch.object(host, 'terminate', side_effect=terminate), \
                         patch.object(host, 'prepare', return_value=candidate), \
@@ -303,6 +381,7 @@ class NativeHostTests(unittest.TestCase):
                     self.assertIsNone(maintenance)
                     self.assertFalse((root / 'update-pending.json').exists())
                     self.assertEqual(len(completions), 2 if lost_reply else 1)
+                    apparmor.assert_called_with(install / 'docker-tools')
 
 
 if __name__ == '__main__':
