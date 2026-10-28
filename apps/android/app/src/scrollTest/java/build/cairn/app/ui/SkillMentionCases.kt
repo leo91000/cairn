@@ -71,7 +71,7 @@ abstract class SkillMentionCases {
                 if (noSkills) emptyList()
                 else
                     listOf(
-                        Skill("review", "Relire les changements en cours"),
+                        Skill("review", "Relire les changements en cours", usageCount = 3),
                         Skill("deploy", "Publier une version"),
                         Skill("broken", "Invalide", valid = false),
                     )
@@ -246,6 +246,18 @@ abstract class SkillMentionCases {
                 compose.onNodeWithTag("skill-suggestions").assertIsDisplayed()
                 compose.onNodeWithTag("skill-suggestion-review").assertIsDisplayed()
                 compose.onNodeWithTag("skill-suggestion-deploy").assertIsDisplayed()
+                assertTrue(
+                    compose
+                        .onNodeWithTag("skill-suggestion-review")
+                        .fetchSemanticsNode()
+                        .boundsInRoot
+                        .top <
+                        compose
+                            .onNodeWithTag("skill-suggestion-deploy")
+                            .fetchSemanticsNode()
+                            .boundsInRoot
+                            .top
+                )
                 compose.onNodeWithTag("skill-suggestion-broken").assertDoesNotExist()
                 field.performTextInput("re")
                 gone(hasTestTag("skill-suggestion-deploy"))

@@ -44,6 +44,20 @@ through one of the owner's instances.
 Each listing item adds `files`, `bytes` and `executables` (counts over the
 whole directory) and `source` (see below, or `null`).
 
+`usageCount` counts delivered messages invoking `$name` among the installation's
+last 1,000 submitted chat messages. Each name counts once per message; code,
+unknown names, queued and cancelled messages do not count. Counts follow the
+token name across global and project scopes and are shared by installation
+members. They are computed from existing history, with no new stored counters;
+deleting a conversation removes its contribution. The public MCP and built-in
+`cairn_installation` operation `list_skills` return the same counts.
+
+Web and Android refresh the catalog when opening `$` suggestions. Within each
+text relevance group, higher usage wins, followed by the existing length/name
+tie-breaks. An empty query therefore shows the most frequently invoked skills
+first, while an exact name still beats a popular partial match. Unused skills
+keep the existing ordering, and access filtering and project shadowing still apply.
+
 ### `GET /skills/:scope/:name/bundle`
 
 ```json

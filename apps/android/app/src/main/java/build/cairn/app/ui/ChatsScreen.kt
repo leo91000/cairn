@@ -562,6 +562,16 @@ internal fun ChatPage(
             mention.start != dismissedMention &&
             (suggestions.isNotEmpty() || mention.query.firstOrNull()?.isDigit() != true)
     BackHandler(selected && showSkills) { dismissedMention = mention?.start }
+    LaunchedEffect(selected && showSkills) {
+        if (selected && showSkills) {
+            try {
+                vm.refreshSkills()
+            } catch (error: Exception) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                // Keep the loaded catalog usable when the connection is unavailable.
+            }
+        }
+    }
     val projects =
         state.projects.filter {
             selectedAgent?.access?.projects == null ||

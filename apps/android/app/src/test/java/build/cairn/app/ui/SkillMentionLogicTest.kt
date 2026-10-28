@@ -143,4 +143,24 @@ class SkillMentionLogicTest {
         assertEquals(listOf(4..10), mentionRanges(text, setOf("review")))
         assertEquals(1, highlightSkills(text, setOf("review"), SpanStyle()).spanStyles.size)
     }
+
+    @Test
+    fun `frequent skills rank within text relevance groups before limiting`() {
+        val skills =
+            listOf(
+                SkillOption("review", "", "global"),
+                SkillOption("reviewer", "", "global", 3),
+                SkillOption("review-code", "", "global", 12),
+                SkillOption("code-review", "", "global", 100),
+                SkillOption("ship", "", "global", 12),
+            )
+        assertEquals(
+            listOf("code-review", "review-code", "ship"),
+            matchSkills(skills, "", 3).map { it.name },
+        )
+        assertEquals(
+            listOf("review", "review-code", "reviewer", "code-review"),
+            matchSkills(skills, "review").map { it.name },
+        )
+    }
 }

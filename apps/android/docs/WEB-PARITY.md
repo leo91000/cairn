@@ -1,5 +1,15 @@
 # Android 0.6.0 / web parity
 
+## Skill suggestion frequency (2026-10-27)
+
+Web and Android prefer frequently invoked skill names in `$` suggestions, within
+the existing text relevance groups. Both use server `usageCount` from delivered
+messages in the last 1,000 submitted messages and refresh it when opening the menu.
+Counts are shared across devices and installation members; no local usage store
+or platform difference. Access filtering, project shadowing and unused-skill
+tie-breaks remain. Public MCP and `cairn_installation` expose the same counts through
+`list_skills`, with their existing authorization checks.
+
 Reference: web commit `2e9868233295af713eede804c7d70b9f514df04b` (v0.21.12).
 This audit compares user actions and information, with native Android presentation.
 It does not assert pixel equality between a browser and Material components.

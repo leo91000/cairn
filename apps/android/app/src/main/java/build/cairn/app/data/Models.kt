@@ -77,6 +77,7 @@ data class Skill(
     val content: String = "",
     val path: String = "",
     val valid: Boolean = true,
+    val usageCount: Int = 0,
     val error: String? = null,
     /** Counts over the whole skill directory; see docs/SKILLS.md. */
     val files: Int = 0,

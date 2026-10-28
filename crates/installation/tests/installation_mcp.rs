@@ -1686,6 +1686,19 @@ async fn installation_access_can_save_global_and_project_skills() {
     let project_id = project["id"].clone();
 
     let content = "---\nname: independent-review\ndescription: Review until clean.\n---\n\nReview, fix, and repeat.\n";
+    s.store
+        .write(|db| {
+            db.put_message(&json!({
+                "id": "skill-usage",
+                "chatId": "another-device",
+                "text": "$independent-review $independent-review",
+                "status": "delivered",
+                "createdAt": 1,
+            }))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     for scope in [None, Some(project_id.clone())] {
         let mut args = json!({ "name": "independent-review", "content": content });
         let mut list = json!({});
@@ -1701,7 +1714,9 @@ async fn installation_access_can_save_global_and_project_skills() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|skill| skill["name"] == "independent-review" && skill["content"] == content)
+                .any(|skill| skill["name"] == "independent-review"
+                    && skill["content"] == content
+                    && skill["usageCount"] == 1)
         );
     }
 

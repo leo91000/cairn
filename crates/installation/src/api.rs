@@ -367,6 +367,7 @@ async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resu
                 items.extend(s.skills.list(&project.id.to_string(), Some(path)).await?);
             }
             sources::attach(s, &mut items).await?;
+            s.attach_skill_usage(&mut items).await?;
             items.into()
         }
         ("POST", ["skills", scope, "import"]) => {

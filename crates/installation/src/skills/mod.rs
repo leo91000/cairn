@@ -1,6 +1,7 @@
 pub mod bundle;
 pub mod diff;
 pub mod sources;
+mod usage;
 pub mod zip;
 
 use crate::{

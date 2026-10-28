@@ -939,7 +939,11 @@ async fn skills_tool(s: &Service, name: &str, args: &Value, bearer: Option<&str>
     let scope = project_id.unwrap_or("global");
     let skill = text(args, "name");
     match name {
-        "list_skills" => Ok(s.skills.list(scope, project).await?.into()),
+        "list_skills" => {
+            let mut skills = s.skills.list(scope, project).await?;
+            s.attach_skill_usage(&mut skills).await?;
+            Ok(skills.into())
+        }
         "read_skill" => {
             if let Some(path) = args["path"].as_str() {
                 return s.skills.read(skill, path, project).await;

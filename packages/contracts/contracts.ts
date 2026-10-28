@@ -32,6 +32,8 @@ export interface Skill {
   content: string
   path: string
   valid: boolean
+  /** Messages invoking this name among the installation's last 1000 chat messages. */
+  usageCount?: number
   error?: string
   files?: number
   bytes?: number
