@@ -65,7 +65,7 @@ async fn incompatible_model_routes_are_not_reported_as_exhausted_usage_or_busy_s
     assert!(error.message.contains("supports"), "{}", error.message);
     assert!(!error.message.contains("available usage"));
     assert!(!error.message.contains("free OpenCode account slot"));
-    s.accounts.release(s, &lease).await.unwrap();
+    s.accounts.release(&s, &lease).await.unwrap();
 }
 
 #[tokio::test]
@@ -196,7 +196,7 @@ async fn run(s: &Service, plan: Value) -> (cairn_installation::error::Result<()>
     .await
     .expect("native turn must finish or fail without hanging");
     drop(broker);
-    s.accounts.release(&s, &lease).await.unwrap();
+    s.accounts.release(s, &lease).await.unwrap();
     (result, output.await.unwrap())
 }
 
