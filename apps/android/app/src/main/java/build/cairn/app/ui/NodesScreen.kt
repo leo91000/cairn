@@ -104,9 +104,17 @@ fun NodesScreen(
             "Nodes",
             "Gérez vos machines et leur capacité. L’accès des agents se règle sur leur fiche.",
         )
+        val active = nodes.filter { !it.revoked }
+        val live = active.filter { it.local || it.status == "online" }
+        val attention = active.count {
+            nodeHealth(it).state in
+                listOf(NodeHealthState.OFFLINE, NodeHealthState.ATTENTION, NodeHealthState.SETUP)
+        }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                nodes.count { !it.revoked }.let { if (it == 1) "1 machine" else "$it machines" },
+                "${live.size}/${active.size} connectée${if (live.size > 1) "s" else ""} · " +
+                    "${live.sumOf { it.occupiedSlots }}/${live.sumOf { it.slots ?: 0 }} slots utilisés" +
+                    if (attention > 0) " · $attention à vérifier" else "",
                 Modifier.weight(1f),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -123,21 +131,35 @@ fun NodesScreen(
             .filter { showRevoked || !it.revoked }
             .forEach { node ->
                 Panel {
-                    Text(node.name, style = MaterialTheme.typography.titleMedium)
+                    val health = nodeHealth(node)
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            node.name,
+                            Modifier.weight(1f, fill = false),
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        NodeHealthPill(health)
+                    }
                     Text(
-                        if (node.capabilities.backend == "native")
-                            "Processus natif · GPU partagé · personnes de confiance"
-                        else "VM Firecracker",
+                        (if (node.local) "Runner intégré · " else "") +
+                            if (node.capabilities.backend == "native")
+                                "Processus natif · GPU partagé · personnes de confiance"
+                            else "VM Firecracker",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Text(
-                        when (node.status) {
-                            "online" -> "Connectée"
-                            "offline" -> "Déconnectée"
-                            "revoked" -> "Révoquée"
-                            "local" -> "Runner du master"
-                            else -> node.status
-                        }
+                        health.detail,
+                        color =
+                            if (
+                                health.state == NodeHealthState.OFFLINE ||
+                                    health.state == NodeHealthState.ATTENTION
+                            )
+                                signal.attention
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     if (node.revoked) {
                         Text(
@@ -628,6 +650,23 @@ fun NodesScreen(
 }
 
 /** The last step of a guided backend switch: revoke the previous node, or keep both for now. */
+/** A node's health: green when it takes work, amber when it waits, coral when it needs you. */
+@Composable
+private fun NodeHealthPill(health: NodeHealth) {
+    val (container, content) =
+        when (health.state) {
+            NodeHealthState.READY -> signal.success.copy(alpha = 0.14f) to signal.success
+            NodeHealthState.OFFLINE,
+            NodeHealthState.ATTENTION -> signal.attentionSoft to signal.attention
+            NodeHealthState.PAUSED,
+            NodeHealthState.REVOKED ->
+                MaterialTheme.colorScheme.surfaceVariant to
+                    MaterialTheme.colorScheme.onSurfaceVariant
+            else -> signal.warningSoft to signal.warning
+        }
+    Pill(health.label, container, content)
+}
+
 @Composable
 internal fun RetireNode(
     previous: ExecutionNode,

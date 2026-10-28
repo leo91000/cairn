@@ -46,7 +46,7 @@ async function save() {
 
 <template>
   <UiButton variant="default" @click="open">
-    <Icon :name="HardDrive" :size="15" /> Storage
+    <Icon :name="HardDrive" :size="15" /> Edit storage settings
   </UiButton>
   <Modal
     v-if="policy"

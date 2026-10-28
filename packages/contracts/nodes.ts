@@ -26,6 +26,16 @@ export function nativeModeLabel(mode: NativeMode) {
   return mode === 'administrator' ? 'Native administrator' : 'Native protected'
 }
 
+/** Native nodes report the confirmed privileges, or the requested ones until the supervisor confirms them. */
+export function nodeAdministrator(node: ExecutionNode) {
+  return node.capabilities.backend === 'native' && (node.nativeModeObserved ?? node.nativeModeRequest)?.mode === 'administrator'
+}
+
+/** Percentage of a limit in use, between 0 and 100. */
+export function usedPercent(used: number, limit: number) {
+  return limit > 0 ? Math.min(100, Math.max(0, used / limit * 100)) : 0
+}
+
 export interface ExclusiveReservation {
   id: string
   nodeId: string
@@ -73,6 +83,49 @@ export function relativeAge(since: number, now = Date.now()) {
   if (hours < 48)
     return `${hours} h ago`
   return `${Math.floor(hours / 24)} days ago`
+}
+
+export type NodeHealthState = 'ready' | 'full' | 'busy' | 'reserved' | 'paused' | 'updating' | 'setup' | 'attention' | 'offline' | 'revoked'
+
+export interface NodeHealth {
+  state: NodeHealthState
+  label: string
+  detail: string
+}
+
+/** Whether a node can take work, as one state and a short sentence; the first blocker wins. */
+export function nodeHealth(node: ExecutionNode, now = Date.now()): NodeHealth {
+  if (node.revoked)
+    return { state: 'revoked', label: 'Revoked', detail: 'No longer has access' }
+  if (!node.local && node.status === 'offline')
+    return { state: 'offline', label: 'Offline', detail: node.lastSeen != null ? `Last contact ${relativeAge(node.lastSeen, now)}` : 'Never connected' }
+
+  const native = node.capabilities.backend === 'native'
+  if (!native && !node.capabilities.kvm)
+    return { state: 'attention', label: 'Needs attention', detail: 'KVM is unavailable' }
+  if (native && !node.capabilities.ublk)
+    return { state: 'attention', label: 'Needs attention', detail: 'ublk is unavailable' }
+  if (node.maintenance)
+    return { state: 'updating', label: 'Updating', detail: node.maintenanceError ? 'The update failed' : 'New work waits for the update' }
+  if (node.executionReady === false)
+    return { state: 'attention', label: 'Needs attention', detail: node.budgetError ? 'The shared budget could not be applied' : 'The runtime is not ready' }
+  if (native && (!node.nativeEnabled || !node.nativeAccounts?.length))
+    return { state: 'setup', label: 'Setup needed', detail: 'Enable native execution and choose trusted people' }
+  if (!node.agents?.length)
+    return { state: 'setup', label: 'Setup needed', detail: 'No agent can use this machine yet' }
+  if (!node.accepting)
+    return { state: 'paused', label: 'Paused', detail: 'New work is paused' }
+  if (node.exclusiveReservation)
+    return { state: 'reserved', label: 'Reserved', detail: node.exclusiveReservation.reason }
+  if (node.pressure)
+    return { state: 'busy', label: 'Busy', detail: node.pressure === 'memory' ? 'Shared RAM is under pressure' : 'Shared disk space is low' }
+
+  const slots = node.slots ?? 0
+  const free = node.availableSlots ?? slots
+  if (slots > 0 && free <= 0)
+    return { state: 'full', label: 'Full', detail: `All ${slots} slots in use` }
+  const running = node.occupiedSlots ?? 0
+  return { state: 'ready', label: 'Ready', detail: running ? `${running} running · ${free} of ${slots} slots free` : `${free} of ${slots} slots free` }
 }
 
 /** Why a node cannot take new work right now; empty when it can. */

@@ -1,3 +1,4 @@
+import type { Locator, Page } from '@playwright/test'
 import type { ExecutionNode } from '../../packages/contracts/nodes'
 import { randomUUID } from 'node:crypto'
 import { MAIN_AGENT_ID } from '../../packages/contracts/constants'
@@ -8,6 +9,34 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+
+function escape(text: string) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** A machine's row in the fleet list. */
+function nodeRow(page: Page, name: string) {
+  return page.getByRole('list', { name: 'Machines' }).getByRole('button', { name: new RegExp(`^${escape(name)},`) })
+}
+
+/** Opens a machine's side panel on one of its sections. */
+async function openNode(page: Page, name: string, section?: 'Overview' | 'Access' | 'Storage' | 'Settings') {
+  await nodeRow(page, name).click()
+  const panel = page.getByRole('dialog', { name: new RegExp(`^${escape(name)}`) })
+  await expect(panel).toBeVisible()
+  if (section)
+    await showSection(panel, section)
+  return panel
+}
+
+async function showSection(panel: Locator, section: 'Overview' | 'Access' | 'Storage' | 'Settings') {
+  await panel.getByRole('group', { name: 'Node sections' }).getByRole('button', { name: section, exact: true }).click()
+}
+
+/** The value beside a label in a panel's figures. */
+function figure(region: Locator, label: string) {
+  return region.locator(`dt:text-is("${label}")`).locator('xpath=following-sibling::dd[1]')
+}
 
 test('shows disk accounting and keeps the storage draft revision through inventory polling', async ({ page, workspace }) => {
   test.setTimeout(60000)
@@ -92,16 +121,17 @@ test('shows disk accounting and keeps the storage draft revision through invento
   await page.route('**/api/nodes', route => route.fulfill({ json: [node] }))
   await page.goto(workspacePath('/nodes'))
   await workspace.signIn(page)
-  const details = page.getByRole('region', { name: 'Disk capacity details' })
-  await expect(details).toContainText('80 GiB stored locally')
-  await expect(details).toContainText('16 GiB reclaimable')
-  await expect(details).toContainText('8 GiB of unpublished journal data')
+  const panel = await openNode(page, 'Disk capacity fixture', 'Storage')
+  const details = panel.getByRole('region', { name: 'Disk capacity details' })
+  await expect(figure(details, 'Stored locally')).toHaveText('80 GiB')
+  await expect(figure(details, 'Reclaimable')).toHaveText('16 GiB')
+  await expect(figure(details, 'Not yet synchronized')).toHaveText('8 GiB')
   await expect(details).toContainText('without the one-hour delay')
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(details).toBeVisible()
   expect(await details.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
   await page.screenshot({ path: 'test-results/nodes-disk-accounting-phone.png', fullPage: true })
-  await page.getByRole('button', { name: 'Storage', exact: true }).click()
+  await panel.getByRole('button', { name: 'Edit storage settings', exact: true }).click()
   const editor = page.getByRole('dialog', { name: 'Storage · Disk capacity fixture' })
   await editor.getByLabel('Shared memory cache (MiB)', { exact: true }).fill('1024')
   const requests: { revision: string, storage: ExecutionNode['storage'] }[] = []
@@ -129,7 +159,7 @@ test('shows disk accounting and keeps the storage draft revision through invento
   expect(requests[0]?.revision).toBe('fixture')
   expect(node.storage.reservePercent).toBe(10)
   await editor.getByRole('button', { name: 'Close dialog', exact: true }).click()
-  await page.getByRole('button', { name: 'Storage', exact: true }).click()
+  await panel.getByRole('button', { name: 'Edit storage settings', exact: true }).click()
   await expect(editor.getByLabel('Minimum free disk (%)', { exact: true })).toHaveValue('10')
   await editor.getByLabel('Shared memory cache (MiB)', { exact: true }).fill('1024')
   await editor.getByRole('button', { name: 'Save storage settings', exact: true }).click()
@@ -181,28 +211,36 @@ test('registers, configures and revokes a node through the owner interface', asy
   await grant.getByRole('checkbox', { name: 'Main agent', exact: true }).check()
   await grant.getByRole('button', { name: 'Finish', exact: true }).click()
   await expect(grant).toHaveCount(0)
-  const node = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Browser Linux' }) })
-  await expect(node).toContainText('online')
-  await expect(node).toContainText('1 agent can run here: Main agent')
-  await expect(node).not.toContainText('No agent can use this machine yet.')
-  await expect(node.getByRole('button', { name: /Choose agents|^Agents$/ })).toHaveCount(0)
-  await expect(node.getByRole('link', { name: 'Manage access from the agents ›' })).toBeVisible()
+  const row = nodeRow(page, 'Browser Linux')
+  await expect(row).toBeVisible()
+  await expect(row).not.toContainText('No agent can use this machine yet')
   // It asks only once: the next refresh leaves the machine alone.
   await page.waitForResponse(reply => new URL(reply.url()).pathname.endsWith('/nodes') && reply.request().method() === 'GET', { timeout: 15000 })
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await page.screenshot({ path: 'test-results/nodes-desktop.png' })
+  const node = await openNode(page, 'Browser Linux', 'Access')
+  await expect(node.getByRole('list', { name: 'Agents allowed' })).toContainText('Main agent')
+  await expect(node).not.toContainText('No agent can run here yet.')
+  await expect(node.getByRole('button', { name: /Choose agents|^Agents$/ })).toHaveCount(0)
+  await expect(node.getByRole('link', { name: 'Manage access from the agents ›' })).toBeVisible()
+  await showSection(node, 'Overview')
+  await page.screenshot({ path: 'test-results/nodes-desktop-panel.png' })
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.screenshot({ path: 'test-results/nodes-desktop-dark.png' })
   await page.setViewportSize({ width: 390, height: 844 })
   await page.screenshot({ path: 'test-results/nodes-phone.png', fullPage: true })
-  await node.getByRole('button', { name: 'Storage', exact: true }).click()
+  await showSection(node, 'Storage')
+  await node.getByRole('button', { name: 'Edit storage settings', exact: true }).click()
   const storage = page.getByRole('dialog', { name: 'Storage · Browser Linux' })
   await expect(storage.getByLabel('Clean disk cache budget (MiB)')).toBeVisible()
   await expect(storage.getByLabel('Shared memory cache (MiB)')).toHaveValue('256')
   await page.screenshot({ path: 'test-results/storage-phone.png' })
   await page.keyboard.press('Escape')
+  await expect(storage).toHaveCount(0)
+  await expect(node).toBeVisible()
+  await showSection(node, 'Settings')
   await node.getByRole('button', { name: 'Configure' }).click()
-  const dialog = page.getByRole('dialog')
+  const dialog = page.getByRole('dialog', { name: 'Configure node' })
   // Agent access is shown read-only; it is granted on each agent's page.
   await expect(dialog.getByRole('group', { name: 'Exclusive reservations' })).toHaveCount(0)
   await expect(dialog.getByRole('region', { name: 'Agents' })).toContainText('1 agent can run here: Main agent')
@@ -219,24 +257,33 @@ test('registers, configures and revokes a node through the owner interface', asy
   await dialog.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(dialog).toHaveCount(0)
   expect((await configuring).postDataJSON()).not.toHaveProperty('exclusiveAgents')
-  await expect(node).toContainText('4 cores')
-  await expect(node).toContainText('fast · linux')
-  await expect(node).toContainText('12 of 12')
+  await expect(figure(node, 'Shared CPU budget')).toHaveText('4 of 8 cores')
+  await expect(figure(node, 'Tags')).toHaveText('fast · linux')
+  await expect(figure(node, 'Execution slots')).toHaveText('12')
+  await showSection(node, 'Overview')
+  await expect(figure(node, 'CPU')).toContainText('4 cores')
+  await expect(figure(node, 'Slots')).toContainText('12 of 12 free')
   const configured = (await workspace.api('/api/nodes')).find((value: { name: string }) => value.name === 'Browser Linux')
   expect(configured.limits.diskMiB).toBe(98304)
-  await page.getByText('Advanced: S3 synchronization and timeouts').click()
-  await page.getByRole('button', { name: 'Configure synchronization' }).click()
-  await dialog.getByLabel('Synchronization target (seconds)').fill('45')
-  await dialog.getByLabel('Pause after disconnection (seconds)').fill('30')
-  await expect(dialog.getByLabel('Recovery points to retain')).toHaveCount(0)
-  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
-  await expect(dialog).toHaveCount(0)
-  expect(await workspace.api('/api/nodes/settings')).toMatchObject({ intervalSeconds: 45, disconnectTimeoutSeconds: 30 })
-  await node.getByRole('button', { name: 'Revoke', exact: true }).click()
-  await page.getByRole('dialog').getByRole('button', { name: 'Revoke node' }).click()
+  await page.keyboard.press('Escape')
   await expect(node).toHaveCount(0)
+  await page.getByRole('button', { name: 'Synchronization settings' }).click()
+  const synchronization = page.getByRole('dialog', { name: 'S3 synchronization' })
+  await synchronization.getByLabel('Synchronization target (seconds)').fill('45')
+  await synchronization.getByLabel('Pause after disconnection (seconds)').fill('30')
+  await expect(synchronization.getByLabel('Recovery points to retain')).toHaveCount(0)
+  await synchronization.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(synchronization).toHaveCount(0)
+  expect(await workspace.api('/api/nodes/settings')).toMatchObject({ intervalSeconds: 45, disconnectTimeoutSeconds: 30 })
+  await openNode(page, 'Browser Linux', 'Settings')
+  await node.getByRole('button', { name: 'Revoke', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Revoke node' }).getByRole('button', { name: 'Revoke node' }).click()
+  await expect(node).toHaveCount(0)
+  await expect(row).toHaveCount(0)
   await page.getByRole('button', { name: 'Show revoked machines (1)' }).click()
-  await expect(node).toContainText('revoked')
+  await expect(row).toContainText('Revoked')
+  await openNode(page, 'Browser Linux')
+  await expect(node).toContainText('This machine no longer has access')
   await expect(node.getByRole('button', { name: 'Configure' })).toHaveCount(0)
 })
 
@@ -611,23 +658,28 @@ test('native enrollment requires explicit people and native agent grants', async
   await grant.getByRole('button', { name: 'Finish', exact: true }).click()
   await expect(grant).toHaveCount(0)
   expect((await finishing).postDataJSON()).toEqual({ agentIds: [agent.id], add: true })
-  const node = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Native desktop' }) })
+  await expect(nodeRow(page, 'Native desktop')).toContainText('ublk is unavailable')
+  const node = await openNode(page, 'Native desktop')
   await expect(node).toContainText('Native process')
+  await expect(node.getByRole('list', { name: 'Why Native desktop cannot take new work' })).toContainText('ublk is unavailable')
+  await expect(figure(node, 'Platform')).toContainText('ublk unavailable')
   // Native ublk disks honor the node storage policy like VM disks.
-  await expect(node.getByRole('button', { name: 'Storage', exact: true })).toBeVisible()
-  await expect(node).toContainText('ublk is unavailable')
-  await node.getByText('Technical details', { exact: true }).click()
-  await expect(node).toContainText('ublk unavailable')
+  await showSection(node, 'Storage')
+  await expect(node.getByRole('button', { name: 'Edit storage settings', exact: true })).toBeVisible()
+  await showSection(node, 'Settings')
   await node.getByRole('button', { name: 'Revoke', exact: true }).click()
   const revoke = page.getByRole('dialog', { name: 'Revoke node', exact: true })
   await expect(revoke).toContainText('mounts=$(findmnt -rno TARGET)')
   await expect(revoke).toContainText('the command lists it and stops before deleting anything')
   await page.keyboard.press('Escape')
   await expect(revoke).toHaveCount(0)
-  // Agents are granted on their own page; the card lists them read-only.
-  await expect(node).toContainText(`1 agent can run here: ${agent.name}`)
+  // Agents are granted on their own page; the panel lists them read-only.
+  await showSection(node, 'Access')
+  await expect(node.getByRole('list', { name: 'Agents allowed' })).toContainText(agent.name)
+  await expect(node).toContainText('Enabled · 1 trusted person')
   expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access.nodes).toContain(desktop)
 
+  await showSection(node, 'Settings')
   await node.getByRole('button', { name: 'Configure', exact: true }).click()
   await expect(dialog.getByLabel('Execution slots')).toHaveValue('6')
   await expect(dialog.getByLabel(callers[0].email, { exact: true })).toBeChecked()
@@ -676,7 +728,10 @@ test('switching a machine to native enrolls it again and retires the previous no
   await useRelayForHttpMocks(page)
   await page.goto(workspacePath('/nodes'))
   await authenticateWorkspace(page)
-  await page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Workstation' }) }).getByRole('button', { name: 'Switch to native', exact: true }).click()
+  const workstation = await openNode(page, 'Workstation', 'Settings')
+  await workstation.getByRole('button', { name: 'Switch to native', exact: true }).click()
+  // The panel closes: the switch continues in its own steps.
+  await expect(workstation).toHaveCount(0)
   const switching = page.getByRole('dialog', { name: 'Switch Workstation to native process', exact: true })
   await expect(switching.getByLabel('Machine name')).toHaveValue('Workstation')
   // The backend is the point of the switch: it is not offered again.
@@ -851,7 +906,7 @@ test('previews node administrator powers and keeps failed transitions visibly bl
   })
   await page.goto(workspacePath('/nodes'))
   await authenticateWorkspace(page)
-  const card = page.getByRole('article').filter({ hasText: 'Disposable administrator' })
+  const card = await openNode(page, 'Disposable administrator', 'Access')
   await expect(card).toContainText('Native protected')
   await card.getByRole('button', { name: 'Switch to Native administrator', exact: true }).click()
   const review = page.getByRole('dialog', { name: 'Switch Disposable administrator to Native administrator?' })

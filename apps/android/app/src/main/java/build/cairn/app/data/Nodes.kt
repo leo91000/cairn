@@ -150,6 +150,87 @@ fun relativeAge(since: Long, now: Long = System.currentTimeMillis()): String {
     return "il y a ${hours / 24} jours"
 }
 
+enum class NodeHealthState {
+    READY,
+    FULL,
+    BUSY,
+    RESERVED,
+    PAUSED,
+    UPDATING,
+    SETUP,
+    ATTENTION,
+    OFFLINE,
+    REVOKED,
+}
+
+data class NodeHealth(val state: NodeHealthState, val label: String, val detail: String)
+
+/** Whether a node can take work, as one state and a short sentence; the first blocker wins. */
+fun nodeHealth(node: ExecutionNode, now: Long = System.currentTimeMillis()): NodeHealth {
+    if (node.revoked) return NodeHealth(NodeHealthState.REVOKED, "Révoquée", "N’a plus accès")
+    if (!node.local && node.status == "offline")
+        return NodeHealth(
+            NodeHealthState.OFFLINE,
+            "Hors ligne",
+            node.lastSeen?.let { "Dernier contact ${relativeAge(it, now)}" } ?: "Jamais connectée",
+        )
+    val native = node.capabilities.backend == NATIVE_BACKEND
+    if (!native && !node.capabilities.kvm)
+        return NodeHealth(NodeHealthState.ATTENTION, "À vérifier", "KVM indisponible")
+    if (native && !node.capabilities.ublk)
+        return NodeHealth(NodeHealthState.ATTENTION, "À vérifier", "ublk indisponible")
+    if (node.maintenance != null)
+        return NodeHealth(
+            NodeHealthState.UPDATING,
+            "Mise à jour",
+            if (node.maintenanceError != null) "La mise à jour a échoué"
+            else "Les nouveaux travaux attendent la mise à jour",
+        )
+    if (!node.executionReady)
+        return NodeHealth(
+            NodeHealthState.ATTENTION,
+            "À vérifier",
+            if (node.budgetError != null) "Le budget partagé n’a pas pu être appliqué"
+            else "Le runtime n’est pas prêt",
+        )
+    if (native && (!node.nativeEnabled || node.nativeAccounts.isEmpty()))
+        return NodeHealth(
+            NodeHealthState.SETUP,
+            "À configurer",
+            "Activez l’exécution native et choisissez les personnes de confiance",
+        )
+    if (node.agents.isEmpty())
+        return NodeHealth(
+            NodeHealthState.SETUP,
+            "À configurer",
+            "Aucun agent ne peut encore utiliser cette machine",
+        )
+    if (!node.accepting)
+        return NodeHealth(NodeHealthState.PAUSED, "En pause", "Nouveaux travaux suspendus")
+    node.exclusiveReservation?.let {
+        return NodeHealth(NodeHealthState.RESERVED, "Réservée", it.reason)
+    }
+    node.pressure?.let {
+        return NodeHealth(
+            NodeHealthState.BUSY,
+            "Chargée",
+            if (it == "memory") "RAM partagée sous pression"
+            else "Espace disque partagé insuffisant",
+        )
+    }
+    val slots = node.slots ?: 0
+    val free = node.availableSlots
+    if (slots > 0 && free <= 0)
+        return NodeHealth(NodeHealthState.FULL, "Pleine", "Les $slots slots sont occupés")
+    val running = node.occupiedSlots
+    return NodeHealth(
+        NodeHealthState.READY,
+        "Prête",
+        if (running > 0) "$running en cours · $free slots libres sur $slots"
+        else "$free slots libres sur $slots",
+    )
+}
+
 /** Why a node cannot take new work right now; empty when it can. */
 fun nodeDiagnostics(node: ExecutionNode, now: Long = System.currentTimeMillis()): List<String> {
     if (node.revoked) return emptyList()

@@ -42,6 +42,61 @@ class NodesTest {
         )
 
     @Test
+    fun healthNamesTheFirstBlocker() {
+        val ready = node.copy(slots = 4, availableSlots = 3, occupiedSlots = 1)
+        assertEquals(
+            NodeHealth(NodeHealthState.READY, "Prête", "1 en cours · 3 slots libres sur 4"),
+            nodeHealth(ready),
+        )
+        assertEquals(
+            NodeHealthState.FULL,
+            nodeHealth(ready.copy(availableSlots = 0, occupiedSlots = 4)).state,
+        )
+        assertEquals(NodeHealthState.REVOKED, nodeHealth(ready.copy(revoked = true)).state)
+        assertEquals(
+            NodeHealth(NodeHealthState.OFFLINE, "Hors ligne", "Dernier contact il y a 3 h"),
+            nodeHealth(ready.copy(status = "offline", agents = emptyList()), 3 * 3_600_000),
+        )
+        assertEquals(
+            "Jamais connectée",
+            nodeHealth(ready.copy(status = "offline", lastSeen = null)).detail,
+        )
+        assertEquals(
+            NodeHealthState.ATTENTION,
+            nodeHealth(ready.copy(capabilities = ready.capabilities.copy(kvm = false))).state,
+        )
+        assertEquals(
+            NodeHealthState.UPDATING,
+            nodeHealth(ready.copy(maintenance = "draining", executionReady = false)).state,
+        )
+        assertEquals(
+            "Aucun agent ne peut encore utiliser cette machine",
+            nodeHealth(ready.copy(agents = emptyList(), accepting = false)).detail,
+        )
+        assertEquals(
+            NodeHealthState.PAUSED,
+            nodeHealth(ready.copy(accepting = false, pressure = "memory")).state,
+        )
+        assertEquals(
+            "Espace disque partagé insuffisant",
+            nodeHealth(ready.copy(pressure = "disk")).detail,
+        )
+        assertEquals(
+            NodeHealthState.READY,
+            nodeHealth(ready.copy(local = true, status = "local")).state,
+        )
+        val native =
+            ready.copy(
+                capabilities = ready.capabilities.copy(backend = NATIVE_BACKEND, ublk = true)
+            )
+        assertEquals(NodeHealthState.SETUP, nodeHealth(native).state)
+        assertEquals(
+            NodeHealthState.READY,
+            nodeHealth(native.copy(nativeEnabled = true, nativeAccounts = listOf("person"))).state,
+        )
+    }
+
+    @Test
     fun sizesAndAgesAreReadable() {
         assertEquals("512 Mio", formatMiB(512))
         assertEquals("32 Gio", formatMiB(32768))

@@ -11,9 +11,8 @@ import { createNodeEnrollment } from '../../../../packages/contracts/generated/c
 import { revokeNode } from '../../../../packages/contracts/generated/revokeNode'
 import {
   diskCapacity,
-  formatBytes,
   formatMiB,
-  nodeDiagnostics,
+  nodeHealth,
 } from '../../../../packages/contracts/nodes'
 import { nodeBackend } from '../agent-access'
 import {
@@ -24,15 +23,14 @@ import {
 } from '../api'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
-import NativeNodeMode from '../components/NativeNodeMode.vue'
-import NodeStorage from '../components/NodeStorage.vue'
+import NodeDetail from '../components/NodeDetail.vue'
+import NodeRow from '../components/NodeRow.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import VirtualSelect from '../components/VirtualSelect.vue'
 import {
   Plus,
-  Server,
-  Settings2,
+  RefreshCw,
 } from '../icons'
 
 const nodes = ref<ExecutionNode[]>([])
@@ -83,9 +81,18 @@ const granting = computed({
 const cleaning = ref<ExecutionNode | null>(null)
 const granted = ref<string[]>([])
 const showRevoked = ref(false)
+// The machine shown in the side panel, followed through polling by its id.
+const openedId = ref<string | null>(null)
+const opened = computed(() => nodes.value.find(node => node.id === openedId.value) ?? null)
 const active = computed(() => nodes.value.filter(node => !node.revoked))
 const revoked = computed(() => nodes.value.filter(node => node.revoked))
 const visible = computed(() => showRevoked.value ? nodes.value : active.value)
+const healths = computed(() => active.value.map(node => nodeHealth(node)))
+const connected = computed(() => active.value.filter(node => node.local || node.status === 'online').length)
+const live = computed(() => active.value.filter(node => node.local || node.status === 'online'))
+const totalSlots = computed(() => live.value.reduce((total, node) => total + (node.slots ?? 0), 0))
+const usedSlots = computed(() => live.value.reduce((total, node) => total + (node.occupiedSlots ?? 0), 0))
+const attention = computed(() => healths.value.filter(health => ['offline', 'attention', 'setup'].includes(health.state)).length)
 let timer: ReturnType<typeof setInterval> | undefined
 // The newly enrolled native node whose "Who can use it?" step follows its configuration.
 let grantAfterConfigure: string | null = null
@@ -173,6 +180,12 @@ function switchBackend(node: ExecutionNode) {
   enrollment.value = null
   error.value = ''
   adding.value = true
+}
+
+// The switch continues in its own steps; the panel would show the node being replaced.
+function switchFromPanel(node: ExecutionNode) {
+  openedId.value = null
+  switchBackend(node)
 }
 
 // The last step of a guided switch, once the replacement's setup is done or skipped.
@@ -343,28 +356,64 @@ function saveRecovery() {
   })
 }
 
-function statusLabel(node: ExecutionNode) {
-  return node.status === 'local' ? 'master runner' : node.status
+function revoke() {
+  const node = revoking.value
+  if (!node)
+    return
+  return action(async () => {
+    await revokeNode(api, { nodeId: node.id, releasePlacements: false })
+    revoking.value = null
+    if (openedId.value === node.id)
+      openedId.value = null
+  })
 }
 </script>
 
 <template>
   <div class="mx-auto max-w-240 px-8 py-8 phone:px-4">
-    <header class="nodes-heading">
+    <header class="page-heading mb-6 flex items-end justify-between gap-5 phone:mb-5 phone:items-center">
       <div>
-        <p class="eyebrow">
-          Infrastructure
-        </p><h1>Nodes</h1><p class="mt-2 text-muted">
-          A home for your agents’ work. Manage machines, capacity and access.
+        <h1>Nodes</h1>
+        <p class="mt-2 text-[13px] text-muted phone:hidden">
+          Machines that run your agents’ conversations.
         </p>
-      </div><UiButton @click="addMachine">
-        <Icon :name="Plus" :size="16" /> Add a machine
-      </UiButton>
+      </div>
+      <div class="flex shrink-0 gap-2">
+        <UiButton aria-label="Synchronization settings" title="Synchronization settings" @click="configureRecovery">
+          <Icon :name="RefreshCw" :size="15" /><span class="phone:hidden">Synchronization</span>
+        </UiButton>
+        <UiButton variant="primary" aria-label="Add a machine" @click="addMachine">
+          <Icon :name="Plus" :size="16" /><span class="phone:hidden">Add a machine</span>
+        </UiButton>
+      </div>
     </header>
-    <div class="fleet-summary">
-      <span class="inline-flex gap-1"><strong>{{ active.length }}</strong><span>{{ active.length === 1 ? 'machine' : 'machines' }}</span></span><span class="inline-flex gap-1"><strong>{{ active.filter(n => n.local || n.status === 'online').length }}</strong><span>connected</span></span><span>Linux · managed executions</span>
-    </div>
-    <UiAlert v-if="error && !adding" class="mt-4">
+    <dl class="mb-5 grid grid-cols-3 gap-3 phone:gap-2" aria-label="Fleet summary">
+      <div class="rounded-xl border border-line bg-surface flex flex-col-reverse px-4 py-3 phone:px-3">
+        <dt class="text-xs text-muted">
+          connected
+        </dt>
+        <dd class="font-heading text-xl font-bold tabular-nums">
+          {{ connected }}<span class="text-sm font-normal text-muted"> / {{ active.length }}</span>
+        </dd>
+      </div>
+      <div class="rounded-xl border border-line bg-surface flex flex-col-reverse px-4 py-3 phone:px-3">
+        <dt class="text-xs text-muted">
+          slots in use
+        </dt>
+        <dd class="font-heading text-xl font-bold tabular-nums">
+          {{ usedSlots }}<span class="text-sm font-normal text-muted"> / {{ totalSlots }}</span>
+        </dd>
+      </div>
+      <div class="rounded-xl border bg-surface flex flex-col-reverse px-4 py-3 phone:px-3" :class="attention ? 'border-coral/40' : 'border-line'">
+        <dt class="text-xs text-muted">
+          {{ attention === 1 ? 'needs attention' : 'need attention' }}
+        </dt>
+        <dd class="font-heading text-xl font-bold tabular-nums" :class="{ 'text-coral': attention }">
+          {{ attention }}
+        </dd>
+      </div>
+    </dl>
+    <UiAlert v-if="error && !adding" class="mb-4">
       {{ error }}
     </UiAlert>
     <Modal
@@ -449,134 +498,22 @@ function statusLabel(node: ExecutionNode) {
         </div>
       </section>
     </Modal>
-    <div class="grid gap-4">
-      <article v-for="node in visible" :key="node.id" class="node-card">
-        <div class="flex items-center justify-between gap-4">
-          <div class="flex min-w-0 items-center gap-3">
-            <span class="node-symbol"><Icon :name="Server" :size="20" /></span><h2 class="break-words">
-              {{ node.name }}
-            </h2>
-          </div><span class="node-status" :class="{ connected: !node.revoked && (node.local || node.status === 'online') }">{{ statusLabel(node) }}</span>
-        </div>
-        <p class="mt-2 text-sm text-muted">
-          {{ node.capabilities.backend === 'native' ? 'Native process · shared host GPU · trusted people only' : 'Firecracker VM' }}
-        </p>
-        <NativeNodeMode v-if="node.capabilities.backend === 'native'" :node="node" @changed="load" />
-        <UiButton v-if="!node.revoked && node.nativeModeRequest?.mode === 'administrator'" @click="grant(node)">
-          Review agent access to this host
-        </UiButton>
-        <template v-if="!node.revoked">
-          <div class="capacity-grid" aria-label="Shared capacity">
-            <div><span>Slots available</span><strong>{{ node.availableSlots ?? node.slots }} <small>of {{ node.slots }}</small></strong><span>{{ node.occupiedSlots ?? 0 }} active or reserved</span></div>
-            <div><span>Shared CPU</span><strong>{{ node.limits.cpu }} <small>cores</small></strong><span>shared by all slots</span></div>
-            <div><span>Shared RAM</span><strong>{{ formatMiB(node.limits.memoryMiB) }}</strong><span>{{ node.usage ? `${formatMiB(node.usage.memoryMiB)} in use` : 'usage unavailable' }}</span></div>
-            <div><span>Shared disk</span><strong>{{ formatMiB(node.limits.diskMiB) }}</strong><span>{{ node.usage ? `${formatMiB(node.usage.diskMiB)} on this node` : 'usage unavailable' }}</span></div>
-          </div>
-          <section v-if="node.diskAccounting" class="mt-2 grid gap-1 rounded-xl border border-line px-4 py-3 text-sm" aria-label="Disk capacity details">
-            <p><strong>Disk capacity</strong> · {{ formatBytes(node.diskAccounting.localBytes) }} stored locally · {{ formatBytes(node.diskAccounting.unusedGrantedBytes) }} granted but unused</p>
-            <p>{{ formatBytes(node.diskAccounting.hostFreeBytes) }} free on the host · {{ formatBytes(node.diskAccounting.hostReserveBytes) }} kept free for the host · {{ formatBytes(node.diskAccounting.poolReserveBytes) }} pool reserve</p>
-            <p>At least {{ formatBytes(node.diskAccounting.reclaimableBytes) }} reclaimable from synchronized inactive conversations</p>
-            <p>{{ formatBytes(node.diskAccounting.unsynchronizedBytes) }} of unpublished journal data last reported; retained until synchronization succeeds.</p>
-            <p class="text-xs text-muted">
-              These figures overlap. Under pressure, synchronized inactive copies are reclaimed without the one-hour delay; waiting conversations take priority over further growth.
-            </p>
-          </section>
-          <section class="mt-2 grid gap-1 rounded-xl border border-line px-4 py-3 text-sm" :aria-label="`Agents on ${node.name}`">
-            <p>
-              <template v-if="node.agents?.length">
-                {{ node.agents.length }} {{ node.agents.length === 1 ? 'agent can' : 'agents can' }} run here: <span class="text-muted">{{ node.agents.map(agent => agent.allNodes ? `${agent.name} (all nodes)` : agent.name).join(', ') }}</span>
-              </template>
-              <template v-else>
-                No agent can run here yet.
-              </template>
-            </p>
-            <p v-if="node.exclusiveAgents?.length">
-              {{ node.exclusiveAgents.length }} can reserve it exclusively: <span class="text-muted">{{ agentNames(node.exclusiveAgents) }}</span>
-            </p>
-            <p class="text-xs text-muted">
-              Access is set on each agent’s page. <RouterLink to="/agents" class="text-accent hover:underline">
-                Manage access from the agents ›
-              </RouterLink>
-            </p>
-          </section>
-          <div v-if="node.exclusiveReservation" role="status" class="mt-3 rounded-lg border border-line p-3 text-sm">
-            <p><strong>Exclusive reservation · {{ node.exclusiveReservation.state }}</strong></p>
-            <p>{{ node.exclusiveReservation.reason }}</p>
-            <p>{{ node.exclusiveReservation.pausedRunIds.length }} conversations suspended<span v-if="node.exclusiveReservation.expiresAt"> · until {{ new Date(node.exclusiveReservation.expiresAt).toLocaleTimeString() }}</span></p>
-            <RouterLink :to="`/runs/${node.exclusiveReservation.ownerRunId}`">
-              View reservation owner
-            </RouterLink>
-            <UiButton
-              class="ml-2"
-              size="small"
-              variant="default"
-              :disabled="busy || node.exclusiveReservation.state === 'releasing'"
-              @click="releaseExclusive(node)"
-            >
-              Release reservation
-            </UiButton>
-          </div>
-          <p v-if="node.staleDisks?.count" class="mt-2 text-sm">
-            Old disks: {{ formatMiB(node.staleDisks.diskMiB) }} kept from {{ node.staleDisks.count }} conversation{{ node.staleDisks.count > 1 ? 's' : '' }}
-            <UiButton
-              class="ml-2"
-              size="small"
-              variant="default"
-              @click="cleaning = node"
-            >
-              Free old disks
-            </UiButton>
-          </p>
-          <p v-if="node.maintenance" role="status" class="mt-2">
-            {{ node.maintenance === 'draining' ? 'Pausing and saving conversations for an update' : 'Ready to restart for the update' }}
-          </p>
-          <p v-if="node.maintenance && node.maintenanceError" role="alert" class="mt-1 text-coral">
-            {{ node.maintenanceError }}
-          </p>
-          <ul v-if="nodeDiagnostics(node).length" class="mt-2 list-disc pl-5 text-sm text-coral" :aria-label="`Why ${node.name} cannot take new work`">
-            <li v-for="reason in nodeDiagnostics(node)" :key="reason">
-              {{ reason }}
-            </li>
-          </ul>
-          <p v-if="node.tags.length || node.systemTags?.length" class="mt-2 text-sm">
-            <template v-if="node.tags.length">
-              {{ node.tags.join(' · ') }}
-            </template>
-            <span v-if="node.systemTags?.length" class="text-muted"> Detected tags: {{ node.systemTags.join(' · ') }}</span>
-          </p>
-          <details class="mt-2 text-xs text-muted">
-            <summary>Technical details</summary>
-            <p class="mt-2">
-              Detected {{ node.capabilities.cpu }} CPU · {{ formatMiB(node.capabilities.memoryMiB) }} RAM · {{ formatMiB(node.capabilities.diskMiB) }} disk · {{ node.capabilities.os }} {{ node.capabilities.arch }} · {{ node.capabilities.backend === 'native' ? `ublk ${node.capabilities.ublk ? 'available' : 'unavailable'}` : `KVM ${node.capabilities.kvm ? 'available' : 'unavailable'}` }}
-            </p>
-            <p v-if="node.lastSeen">
-              Last contact {{ new Date(node.lastSeen).toLocaleString() }}
-            </p>
-            <p v-if="node.imageDigest" class="break-all">
-              Version: {{ node.imageDigest }}
-            </p>
-            <p v-if="node.runtimeId" class="break-all">
-              Runtime: {{ node.runtimeId }}
-            </p>
-          </details>
-          <div class="node-actions">
-            <UiButton variant="default" @click="edit(node)">
-              <Icon :name="Settings2" :size="15" /> Configure
-            </UiButton>
-            <NodeStorage :node="node" @saved="load" />
-            <UiButton v-if="!node.local" variant="default" @click="switchBackend(node)">
-              {{ nodeBackend(node) === 'native' ? 'Switch to VM' : 'Switch to native' }}
-            </UiButton>
-            <UiButton v-if="!node.local" variant="default" @click="revoking = node">
-              Revoke
-            </UiButton>
-          </div>
-        </template>
-        <p v-else class="mt-2 text-sm text-muted">
-          This machine no longer has access. Register it again with a new code to reconnect it.
-        </p>
-      </article>
-    </div>
+    <section class="overflow-hidden rounded-2xl border border-line bg-surface shadow-arcade" aria-labelledby="machines-heading">
+      <h2 id="machines-heading" class="sr-only">
+        Machines
+      </h2>
+      <div class="grid grid-cols-[minmax(0,1fr)_7rem_5.5rem_8.5rem_4.5rem_1rem] gap-4 bg-inset px-4.5 py-2 text-[10.5px] tracking-[.06em] text-muted uppercase tablet:grid-cols-[minmax(0,1fr)_7rem_5.5rem_1rem] phone:hidden" aria-hidden="true">
+        <span>Machine</span><span>Runtime</span><span>Slots</span><span class="tablet:hidden">Usage</span><span class="tablet:hidden">Agents</span><span />
+      </div>
+      <ul aria-label="Machines" class="[&>li:first-child>button]:border-t-0">
+        <li v-for="node in visible" :key="node.id">
+          <NodeRow :node="node" :selected="node.id === openedId" @open="openedId = node.id" />
+        </li>
+      </ul>
+      <p v-if="!visible.length" class="px-4.5 py-6 text-sm text-muted">
+        No machine yet. Add one to run your agents’ conversations on it.
+      </p>
+    </section>
     <UiButton
       v-if="revoked.length"
       class="mt-4"
@@ -586,15 +523,20 @@ function statusLabel(node: ExecutionNode) {
     >
       {{ showRevoked ? 'Hide revoked machines' : `Show revoked machines (${revoked.length})` }}
     </UiButton>
-    <details class="mt-6 rounded-xl border border-line bg-surface p-5">
-      <summary>Advanced: S3 synchronization and timeouts</summary>
-      <p class="mt-2 text-sm text-muted">
-        How often disk changes are published to S3 and how long nodes wait before pausing. The defaults suit most setups.
-      </p>
-      <UiButton class="mt-3" variant="default" @click="configureRecovery">
-        Configure synchronization
-      </UiButton>
-    </details>
+    <NodeDetail
+      v-if="opened"
+      :key="opened.id"
+      :node="opened"
+      :busy="busy"
+      @close="openedId = null"
+      @changed="load"
+      @configure="edit(opened)"
+      @grant="grant(opened)"
+      @clean="cleaning = opened"
+      @release="releaseExclusive(opened)"
+      @switch="switchFromPanel(opened)"
+      @revoke="revoking = opened"
+    />
     <Modal
       v-if="recovery"
       sheet
@@ -850,7 +792,7 @@ function statusLabel(node: ExecutionNode) {
           If a conversation disk is still mounted, the command lists it and stops before deleting anything: start cairn-native-node so its recovery releases owned disks, then run the command again.
         </p>
         <div>
-          <UiButton variant="danger" :disabled="busy" @click="action(async () => { await revokeNode(api, { nodeId: revoking!.id, releasePlacements: false }); revoking = null })">
+          <UiButton variant="danger" :disabled="busy" @click="revoke">
             Revoke node
           </UiButton>
         </div>
@@ -899,20 +841,6 @@ function statusLabel(node: ExecutionNode) {
 </template>
 
 <style scoped>
-.nodes-heading { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
-.eyebrow { text-transform: uppercase; letter-spacing: .12em; font-size: 10px; color: var(--color-muted); margin-bottom: 6px; }
-.fleet-summary { display: flex; flex-wrap: wrap; gap: 12px 24px; padding: 24px 0; color: var(--color-muted); font-size: 12px; }
-.fleet-summary strong { color: var(--color-ink); }
-.node-card { border: 1px solid var(--color-line); border-radius: 18px; background: var(--color-surface); padding: 24px; }
-.node-symbol { display: grid; place-items: center; padding: 10px; border-radius: 12px; background: var(--color-inset); color: var(--color-accent); }
-.node-status { border: 1px solid var(--color-line); border-radius: 100px; padding: 4px 10px; font-size: 11px; white-space: nowrap; color: var(--color-muted); }
-.node-status.connected { color: var(--color-accent); background: var(--color-inset); }
-.capacity-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 1px; margin: 22px 0; border: 1px solid var(--color-line); border-radius: 12px; overflow: hidden; background: var(--color-line); }
-.capacity-grid > div { display: grid; gap: 5px; background: var(--color-inset); padding: 14px; }
-.capacity-grid span { font-size: 11px; color: var(--color-muted); }
-.capacity-grid strong { font-size: 19px; font-weight: 600; }
-.capacity-grid small { font-size: 11px; font-weight: 400; color: var(--color-muted); }
-.node-actions { display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--color-line); padding-top: 16px; margin-top: 18px; }
 .node-form { display: grid; gap: 20px; padding: 24px; }
 .node-form label:not(.access-row) { display: grid; gap: 6px; font-size: 12px; color: var(--color-muted); }
 .node-form input:not([type=checkbox]) { width: 100%; min-width: 0; color: var(--color-ink); }
@@ -923,5 +851,5 @@ function statusLabel(node: ExecutionNode) {
 .form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
 .access-row { display: flex; flex-direction: row; align-items: center; gap: 12px; border: 1px solid var(--color-line); background: var(--color-inset); border-radius: 10px; padding: 14px; font-size: 13px; color: var(--color-ink); }
 .access-row input { width: 16px; height: 16px; flex-shrink: 0; margin: 0; }
-@media (max-width: 640px) { .nodes-heading { align-items: start; flex-direction: column; gap: 16px; } .node-card { padding: 16px; } .capacity-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } .capacity-grid strong { font-size: 15px; } .capacity-grid > div { padding: 10px; } .node-form { padding: 20px; } .form-grid { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .node-form { padding: 20px; } .form-grid { grid-template-columns: 1fr; } }
 </style>
