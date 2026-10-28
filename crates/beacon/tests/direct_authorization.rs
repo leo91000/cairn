@@ -1889,7 +1889,20 @@ async fn saturated_direct_signaling_preserves_credited_fallback_streams() {
             .json(&json!({ "kind": "offer", "sdp": sdp }));
         signals.spawn(async move { request.send().await.unwrap().status() });
     }
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    // A fixed delay cannot establish saturation when the HTTP/database work is
+    // contended. Observe a refused signal while the tunnel is still paused before
+    // requiring renewals to hit the same full queue.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(status) = signals.join_next().await {
+            if status.unwrap() == StatusCode::SERVICE_UNAVAILABLE {
+                return;
+            }
+        }
+
+        panic!("signal workload completed without saturating the direct queue");
+    })
+    .await
+    .expect("direct signaling must be saturated before testing renewal refusal");
     let mut renewals = tokio::task::JoinSet::new();
     for grant in &grants {
         let request = relay
