@@ -22,9 +22,9 @@
   person's Cairn account, whose authority an installation grant does not confer.
   Account access to agents is owner-only on web/Android and excluded from public
   MCP and `cairn_installation`. Through `cairn_installation`, agents may read and
-  reduce agent grants but never widen them, may not lift an owner's emergency pause
-  of a hook rule or delete another account's rule, and edit only the rules of the
-  account they work for
+  reduce agent grants but never widen them; they write hook rules only for the author
+  of the turn's latest human input (none in turns without one), and never pause,
+  delete or unpause another account's rule
   ([ADR-0075](docs/adr/0075-plugin-hooks-rules-and-scoped-grants.md)).
 - Separate logical steps with blank lines. Give complex expressions descriptive
   intermediate names when that makes the flow easier to follow. Avoid arbitrary

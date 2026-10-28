@@ -244,7 +244,7 @@ _Avoid_ : webhook (le mécanisme HTTP), trigger
 
 **Règle de hook** :
 Ce que son créateur décide, sans code, de faire quand un hook se produit : un arbre de
-conditions, de boucles et d’actions (déclencher un agent, orienter une conversation,
+conditions, de boucles et d’actions (démarrer un agent, orienter une conversation,
 appeler un outil…). Elle agit avec l’autorité de son créateur, seul à pouvoir la
 modifier. Un plugin peut proposer des modèles de règles prêts à l’emploi.
 _Avoid_ : hook (l’événement auquel elle réagit), automation, workflow

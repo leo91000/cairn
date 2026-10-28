@@ -2,7 +2,7 @@
 
 Date : 2026-10-28.
 
-Cette décision remplace la délégation externe d’[ADR-0038](0038-luau-installation-plugins-and-external-bot-delegation.md), d’[ADR-0045](0045-declarative-plugin-contributions.md), d’[ADR-0046](0046-plugin-transports-and-forms-in-luau.md), d’[ADR-0057](0057-guided-plugin-setup.md), d’[ADR-0059](0059-delegated-tasks.md) et d’[ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) ; remplace en partie les droits par instance d’[ADR-0045](0045-declarative-plugin-contributions.md) et d’[ADR-0051](0051-agent-centric-permissions.md) ; étend les rôles d’[ADR-0029](0029-sharing-whole-installations.md) ; précise [ADR-0064](0064-opt-in-installation-tools-for-agents.md).
+Cette décision remplace la délégation externe d’[ADR-0038](0038-luau-installation-plugins-and-external-bot-delegation.md), d’[ADR-0045](0045-declarative-plugin-contributions.md), d’[ADR-0046](0046-plugin-transports-and-forms-in-luau.md), d’[ADR-0057](0057-guided-plugin-setup.md), d’[ADR-0059](0059-delegated-tasks.md) et d’[ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) ; remplace en partie les droits par instance d’[ADR-0045](0045-declarative-plugin-contributions.md), d’[ADR-0051](0051-agent-centric-permissions.md) et d’[ADR-0056](0056-plugin-oauth-file-transfers-and-gmail.md), la couverture des tâches déléguées d’[ADR-0059](0059-delegated-tasks.md) et le rôle de membre d’[ADR-0029](0029-sharing-whole-installations.md) ; précise [ADR-0050](0050-trusted-native-execution.md) et [ADR-0064](0064-opt-in-installation-tools-for-agents.md).
 
 ## Constat
 
@@ -57,9 +57,14 @@ hiérarchie que Cairn résout lui-même (un fil de #general est refusé quand se
 à #support n’empêche pas son auteur d’être n’importe qui. Une entrée ou une payload
 qui ne désigne aucune ressource identifiable d’un type restreint, ou des ressources
 contradictoires, est refusée.
-Les identifiants de run et les instructions ajoutées au prompt s’accordent aussi un
-par un, sans restriction ; les conditions d’attente restent bornées par l’accès aux
-projets. Rien n’est accordé par défaut. `cairn_installation` peut lire et réduire ces
+Les identifiants de run, les instructions ajoutées au prompt et les conditions
+d’attente s’accordent aussi un par un, sans restriction de ressource ; les conditions
+restent bornées par l’accès aux projets. Des identifiants de run donnent au service
+tout ce que permet le compte de l’instance : les accorder rend vaines les restrictions
+de ressource de ses outils. La règle d’une seule instance par package pour les
+identifiants de run ([ADR-0053](0053-github-as-a-bundled-plugin.md)) ne vaut que pour
+eux, et une contribution accordée compte comme une instance accordée pour les étapes
+partagées de configuration ([ADR-0057](0057-guided-plugin-setup.md)). Rien n’est accordé par défaut. `cairn_installation` peut lire et réduire ces
 droits, jamais les accorder. Un agent délégué
 ([ADR-0059](0059-delegated-tasks.md)) doit être couvert par son demandeur contribution
 par contribution et ressource par ressource, pas seulement instance par instance ; la
@@ -114,7 +119,8 @@ une règle qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l�
   sans effet de bord ni boucle, et son coût d’évaluation est borné.
 - **Actions** : démarrer un agent, orienter une conversation, appeler un outil,
   annuler la conversation d’une clé, répondre à la question d’un agent, mémoriser une
-  valeur, attendre puis reprendre. Chaque action peut utiliser la payload et le
+  valeur, attendre puis reprendre (sept jours au plus, avec un nombre borné de
+  déclenchements en attente par règle). Chaque action peut utiliser la payload et le
   résultat des actions précédentes (`{{steps.post.messageId}}`) et ne fait qu’une
   chose : démarrer un agent avec une clé déjà liée échoue, et c’est l’arbre qui
   choisit d’orienter la conversation existante.
@@ -161,9 +167,6 @@ s’ils ont tous les droits qu’elle utilise, le duplicata leur appartenant et 
 désactivé pour ne pas répondre deux fois au même événement. Le propriétaire peut
 supprimer n’importe quelle règle ou la mettre en pause en urgence, sans la modifier ;
 la pause arrête aussi ses déclenchements en cours, et seul le propriétaire la lève.
-Lever cette pause et supprimer la règle d’un autre restent hors de
-`cairn_installation` ; un agent n’y modifie ou ne supprime que les règles dont le
-créateur est le compte pour lequel il travaille.
 
 Quand le créateur perd l’accès à l’agent d’exécution, ou que cet agent perd le hook
 de plugin écouté, la règle est suspendue, pas supprimée ; elle repart quand le droit revient.
@@ -174,15 +177,17 @@ propriétaire peut la supprimer et un membre la dupliquer. Comme pour les tâche
 planifiées, un déclenchement exige une adhésion vérifiée récemment ; si elle ne peut
 pas l’être, il attend.
 
-Un agent qui a l’accès à l’installation peut créer des règles. Leur créateur est le
-compte pour lequel son tour travaille : celui qui a écrit le message qui a lancé le
-tour, conservé par ses réveils, ses attentes et les réponses à ses questions ;
-l’auteur de la tâche pour une exécution planifiée (le propriétaire pour une mission
-créée par un agent, [ADR-0064](0064-opt-in-installation-tools-for-agents.md)) ; le
-compte de la conversation demandeuse pour une tâche déléguée ; le créateur de la règle
-pour un tour qu’une règle a lancé. Il ne peut accorder de
-droits à aucun agent ni à aucun compte. Une règle créée par le MCP public a pour
-créateur le propriétaire qui a autorisé ce client.
+Un agent qui a l’accès à l’installation n’écrit des règles que pour la personne qui
+lui donne ses instructions : l’auteur de la dernière intervention humaine du tour
+(message, orientation ou réponse à une question ; pour une tâche déléguée, celle du
+tour demandeur). Il crée des règles à son nom, et ne modifie, met en pause, relance ou
+supprime que les règles de cette personne. Un tour sans intervention humaine (tâche
+planifiée, mission créée par un agent, tour lancé par une règle, réveil sans message)
+ne peut écrire aucune règle : ni une injection dans un contenu externe ni une mission
+ne peut agir au nom d’un autre compte. Il ne peut accorder de droits à aucun agent ni
+à aucun compte, ni mettre en pause ou supprimer la règle d’un autre compte, ni lever
+la pause d’urgence du propriétaire. Une règle créée par le MCP public a pour créateur
+le propriétaire qui a autorisé ce client.
 
 Une règle n’atteint un agent dont la politique autorise l’exécution native, ou une
 conversation qui s’exécute en natif, que si son créateur détenait l’autorité native

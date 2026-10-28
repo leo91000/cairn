@@ -1,4 +1,4 @@
-> Statut : précisée par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) : avoir accès à un agent qui a l’accès à l’installation revient à avoir accès à tous les agents ; un tel agent ne peut pas donner à un compte l’accès à un agent, et les règles qu’il crée ont pour créateur le compte pour lequel il travaille ; il ne lève pas la pause d’urgence du propriétaire et ne modifie que les règles de ce compte.
+> Statut : précisée par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) : avoir accès à un agent qui a l’accès à l’installation revient à avoir accès à tous les agents ; un tel agent ne peut pas donner à un compte l’accès à un agent, et il n’écrit des règles que pour l’auteur de la dernière intervention humaine de son tour, et aucune dans un tour sans intervention humaine ; il ne met pas en pause ni ne supprime la règle d’un autre compte et ne lève pas la pause d’urgence du propriétaire.
 
 # Accès explicite d’un agent à l’installation courante
 
