@@ -296,8 +296,8 @@ async fn account_settings_replace_rejects_stale_revision_and_never_returns_priva
             InstallationRole::Owner,
             "owner",
         )),
-        query: Default::default(),
-        headers: Default::default(),
+        query: std::collections::HashMap::new(),
+        headers: axum::http::HeaderMap::new(),
     };
     for body in [json!([]), json!("invalid"), json!(true)] {
         let malformed = Input {

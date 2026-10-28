@@ -2,6 +2,7 @@
 use super::*;
 use cairn_installation::{
     accounts::{Account, AccountState, Exhaustion},
+    error::Result,
     provider::Provider,
 };
 
@@ -26,8 +27,10 @@ impl StorageEntity for Account {
         db.list(Self::KIND)
             .unwrap()
             .into_iter()
-            .map(|value| Account::from_value(value).unwrap())
-            .count()
+            .map(Account::from_value)
+            .collect::<Result<Vec<_>>>()
+            .unwrap()
+            .len()
     }
 
     fn write(&self, db: &Db<'_>, _: bool) {
@@ -58,10 +61,10 @@ impl StorageEntity for Account {
                     .get_mut(usage)
                     .and_then(|exhausted| exhausted.get_mut("usage"))
             };
-            if let Some(object) = value.and_then(Value::as_object_mut) {
-                if object.get("useBalance") == Some(&Value::Bool(false)) {
-                    object.remove("useBalance");
-                }
+            if let Some(object) = value.and_then(Value::as_object_mut)
+                && object.get("useBalance") == Some(&Value::Bool(false))
+            {
+                object.remove("useBalance");
             }
         }
         db.0.prepare_cached("INSERT INTO records VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at").unwrap().execute(params![self.id,Self::KIND,value.to_string(),now()]).unwrap();

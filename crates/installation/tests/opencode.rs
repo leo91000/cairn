@@ -65,7 +65,7 @@ async fn incompatible_model_routes_are_not_reported_as_exhausted_usage_or_busy_s
     assert!(error.message.contains("supports"), "{}", error.message);
     assert!(!error.message.contains("available usage"));
     assert!(!error.message.contains("free OpenCode account slot"));
-    s.accounts.release(&s, &lease).await.unwrap();
+    s.accounts.release(s, &lease).await.unwrap();
 }
 
 #[tokio::test]
