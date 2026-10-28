@@ -56,19 +56,19 @@ abstract class ChatProviderCases {
                     accountWaitReason =
                         "Reconnect your Claude Code account in Connections to continue.",
                     accountRequired = "claude",
-                    chatExecution = ChatExecution("message"),
+                    chatExecution = ChatExecution(messageId = "message"),
                     taskId = "",
                 )
             val chat =
                 Chat(
-                    "chat",
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
                     title = "Conversation en attente",
                     runId = "run",
                     run = run,
                     messages =
                         listOf(
                             ChatMessage(
-                                "message",
+                                id = "message",
                                 text = "Améliore cette interface",
                                 status = "sending",
                             )
@@ -78,7 +78,10 @@ abstract class ChatProviderCases {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
+                        if (
+                            path ==
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream"
+                        ) {
                             val frame =
                                 "event: batch\nid: 0\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(chat = chat, run = run), true, false))}\n\n"
                             return MockResponse()
@@ -148,7 +151,7 @@ abstract class ChatProviderCases {
                         ChatScreen(
                             vm,
                             state,
-                            "chat",
+                            "6cc6efab-10af-54c7-a91b-dcff664166a1",
                             openChat = {},
                             openRun = {},
                             openConnections = { openedConnections = true },
@@ -214,7 +217,7 @@ abstract class ChatProviderCases {
                 )
             val chat =
                 Chat(
-                    "chat",
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
                     title = "Contexte conservé",
                     runId = "run",
                     agentName = agent.name,
@@ -224,7 +227,10 @@ abstract class ChatProviderCases {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
+                        if (
+                            path ==
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream"
+                        ) {
                             val frame =
                                 "event: batch\nid: 0\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(chat = chat, run = run), true, false))}\n\n"
                             return MockResponse()
@@ -244,12 +250,16 @@ abstract class ChatProviderCases {
                                     wireJson.encodeToString(
                                         build.cairn.contracts.ListAgentsOutput(listOf(agent))
                                     )
-                                "/api/installations/fixture/api/chats/chat/messages" -> {
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/messages" -> {
                                     sent +=
                                         wireJson
                                             .parseToJsonElement(request.body.readUtf8())
                                             .jsonObject
-                                    "{}"
+                                    wireJson.encodeToString(
+                                        ChatMessage(
+                                            id = sent.last().getValue("id").jsonPrimitive.content
+                                        )
+                                    )
                                 }
                                 "/api/installations/fixture/api/codex/models" ->
                                     """{"models":[{"model":"fixture-deep","displayName":"Deep thinker","supportedReasoningEfforts":[{"reasoningEffort":"ultra"}]}]}"""
@@ -300,7 +310,13 @@ abstract class ChatProviderCases {
                 }
                 CairnTheme {
                     if (state.session.authenticated)
-                        ChatScreen(vm, state, "chat", openChat = {}, openRun = {})
+                        ChatScreen(
+                            vm,
+                            state,
+                            "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                            openChat = {},
+                            openRun = {},
+                        )
                 }
             }
             compose.waitUntil(20000) {
@@ -505,7 +521,7 @@ abstract class ChatProviderCases {
                 )
             val chat =
                 Chat(
-                    "chat",
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
                     title = "Contexte conservé",
                     runId = run.id,
                     run = run,
@@ -515,7 +531,10 @@ abstract class ChatProviderCases {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
+                        if (
+                            path ==
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream"
+                        ) {
                             val frame =
                                 "event: batch\nid: 0\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(chat = chat, run = run), true, false))}\n\n"
                             return MockResponse()
@@ -537,19 +556,23 @@ abstract class ChatProviderCases {
                                     )
                                 "/api/installations/fixture/api/opencode/models" ->
                                     """{"models":[{"model":"auto/gpt-5-6-luna","displayName":"GPT 5.6 Luna","isDefault":true},{"model":"auto/deepseek-v4-1-flash","displayName":"DeepSeek","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}"""
-                                "/api/installations/fixture/api/chats/chat/messages" -> {
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/messages" -> {
                                     sent +=
                                         wireJson
                                             .parseToJsonElement(request.body.readUtf8())
                                             .jsonObject
-                                    "{}"
+                                    wireJson.encodeToString(
+                                        ChatMessage(
+                                            id = sent.last().getValue("id").jsonPrimitive.content
+                                        )
+                                    )
                                 }
-                                "/api/installations/fixture/api/chats/chat/pause" -> {
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/pause" -> {
                                     retries +=
                                         wireJson
                                             .parseToJsonElement(request.body.readUtf8())
                                             .jsonObject
-                                    "{}"
+                                    wireJson.encodeToString(chat)
                                 }
                                 "/api/installations/fixture/api/overview" -> "{}"
                                 else ->
@@ -600,7 +623,7 @@ abstract class ChatProviderCases {
                         ChatScreen(
                             vm,
                             state,
-                            "chat",
+                            "6cc6efab-10af-54c7-a91b-dcff664166a1",
                             openChat = {},
                             openRun = {},
                             create = { created.value = true },

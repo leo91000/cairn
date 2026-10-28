@@ -157,7 +157,8 @@ impl Fixture {
         } else {
             tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()
         };
-        let url = format!("http://localhost:{}", listener.local_addr().unwrap().port());
+        let address = listener.local_addr().unwrap();
+        let url = format!("http://localhost:{}", address.port());
         let browser_origin = if subdomains {
             url.replace("localhost", "cairn.localhost")
         } else {
@@ -187,7 +188,12 @@ impl Fixture {
         Self {
             url,
             browser_origin,
-            client: Client::new(),
+            // Keep the account origin's localhost name, while connecting to this
+            // fixture's IPv4 listener rather than another service on ::1.
+            client: Client::builder()
+                .resolve("localhost", address)
+                .build()
+                .unwrap(),
             mail,
             pool,
             admin,

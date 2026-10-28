@@ -111,7 +111,7 @@ fun attachmentSubtitle(attachment: ChatAttachment, summary: AttachmentSummary? =
     listOfNotNull(
             attachmentLabel(attachment.name).ifEmpty { "Fichier" },
             attachmentDetail(attachment, summary),
-            fileSize(attachment.size),
+            fileSize(attachment.size.toLong()),
         )
         .joinToString(" · ")
 

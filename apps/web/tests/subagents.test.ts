@@ -385,6 +385,16 @@ describe('delegated tasks', () => {
     status: 'completed',
   })
   const view = (id: string, values: Partial<ChatView> = {}): ChatView => ({
+    questions: [],
+    run: null,
+    messages: [],
+    slug: '',
+    revision: '',
+    lifecycle: 'active',
+    sessionRestartRequested: false,
+    canRequestNewSession: false,
+    unread: false,
+
     id,
     title: id,
     agentId: 'main',

@@ -66,7 +66,14 @@ abstract class SkillMentionCases {
                     taskId = "",
                 )
             val chat =
-                Chat("chat", title = "Skills", runId = "run", agentName = agent.name, run = run)
+                Chat(
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                    title = "Skills",
+                    agentId = agent.id,
+                    runId = "run",
+                    agentName = agent.name,
+                    run = run,
+                )
             val skills =
                 if (noSkills) emptyList()
                 else
@@ -88,7 +95,10 @@ abstract class SkillMentionCases {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
+                        if (
+                            path ==
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream"
+                        ) {
                             val frame =
                                 "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(history, LiveState(chat = chat, run = run), true, false))}\n\n"
                             return MockResponse()
@@ -110,12 +120,16 @@ abstract class SkillMentionCases {
                                     )
                                 "/api/installations/fixture/api/skills" ->
                                     wireJson.encodeToString(skills)
-                                "/api/installations/fixture/api/chats/chat/messages" -> {
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/messages" -> {
                                     sent +=
                                         wireJson
                                             .parseToJsonElement(request.body.readUtf8())
                                             .jsonObject
-                                    "{}"
+                                    wireJson.encodeToString(
+                                        ChatMessage(
+                                            id = sent.last().getValue("id").jsonPrimitive.content
+                                        )
+                                    )
                                 }
                                 "/api/installations/fixture/api/codex/models" -> """{"models":[]}"""
                                 "/api/installations/fixture/api/overview" -> "{}"
@@ -172,7 +186,13 @@ abstract class SkillMentionCases {
                         }
                         CairnTheme {
                             if (state.session.authenticated)
-                                ChatScreen(vm, state, "chat", openChat = {}, openRun = {})
+                                ChatScreen(
+                                    vm,
+                                    state,
+                                    "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                                    openChat = {},
+                                    openRun = {},
+                                )
                         }
                     }
                 }
