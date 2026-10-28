@@ -26,7 +26,7 @@ export function nativeModeLabel(mode: NativeMode) {
   return mode === 'administrator' ? 'Native administrator' : 'Native protected'
 }
 
-/** Native nodes report the confirmed privileges, or the requested ones until the supervisor confirms them. */
+/** Native nodes report the observed privileges, or the requested ones until the supervisor reports any. */
 export function nodeAdministrator(node: ExecutionNode) {
   return node.capabilities.backend === 'native' && (node.nativeModeObserved ?? node.nativeModeRequest)?.mode === 'administrator'
 }
@@ -93,12 +93,18 @@ export interface NodeHealth {
   detail: string
 }
 
+/** The server's heartbeat timeout; listing nodes refreshes the built-in runner within it when reachable. */
+const HEARTBEAT_TIMEOUT_MS = 60_000
+
 /** Whether a node can take work, as one state and a short sentence; the first blocker wins. */
 export function nodeHealth(node: ExecutionNode, now = Date.now()): NodeHealth {
   if (node.revoked)
     return { state: 'revoked', label: 'Revoked', detail: 'No longer has access' }
   if (!node.local && node.status === 'offline')
     return { state: 'offline', label: 'Offline', detail: node.lastSeen != null ? `Last contact ${relativeAge(node.lastSeen, now)}` : 'Never connected' }
+  // The built-in runner always reports "local"; a stale contact means it stopped answering.
+  if (node.local && node.lastSeen != null && now - node.lastSeen >= HEARTBEAT_TIMEOUT_MS)
+    return { state: 'offline', label: 'Offline', detail: `Built-in runner unreachable · last contact ${relativeAge(node.lastSeen, now)}` }
 
   const native = node.capabilities.backend === 'native'
   if (!native && !node.capabilities.kvm)

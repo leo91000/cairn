@@ -114,8 +114,11 @@ describe('node health', () => {
     expect(nodeHealth(partial)).toMatchObject({ state: 'full', detail: 'All 4 slots in use' })
   })
 
-  it('keeps the built-in runner online without a heartbeat status', () => {
-    expect(nodeHealth(node({ local: true, status: 'local' })).state).toBe('ready')
+  it('keeps the built-in runner online without a heartbeat status, until its contact goes stale', () => {
+    expect(nodeHealth(node({ local: true, status: 'local', lastSeen: null })).state).toBe('ready')
+    expect(nodeHealth(node({ local: true, status: 'local', lastSeen: 0 }), 30_000).state).toBe('ready')
+    expect(nodeHealth(node({ local: true, status: 'local', lastSeen: 0 }), 120_000)).toEqual({ state: 'offline', label: 'Offline', detail: 'Built-in runner unreachable · last contact 2 min ago' })
+    expect(nodeHealth(node({ local: true, status: 'local', lastSeen: null }), 120_000).state).toBe('ready')
   })
 
   it('asks for native activation before a native node takes work', () => {

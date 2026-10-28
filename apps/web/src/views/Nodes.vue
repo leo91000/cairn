@@ -89,12 +89,14 @@ const loaded = ref(false)
 // A failed inventory refresh concerns the page, not the machine whose panel is open; the next success clears it.
 const refreshError = ref('')
 const shownError = computed(() => error.value || refreshError.value)
+const errorNodeId = ref<string | null>(null)
 const opened = computed(() => nodes.value.find(node => node.id === openedId.value) ?? null)
 const active = computed(() => nodes.value.filter(node => !node.revoked))
 const revoked = computed(() => nodes.value.filter(node => node.revoked))
 const visible = computed(() => showRevoked.value ? nodes.value : active.value)
 const healths = computed(() => active.value.map(node => nodeHealth(node)))
-const live = computed(() => active.value.filter(node => node.local || node.status === 'online'))
+// Connected machines answer heartbeats; the built-in runner too, unless its contact went stale.
+const live = computed(() => active.value.filter((node, index) => (node.local || node.status === 'online') && healths.value[index].state !== 'offline'))
 const totalSlots = computed(() => live.value.reduce((total, node) => total + (node.slots ?? 0), 0))
 const usedSlots = computed(() => live.value.reduce((total, node) => total + (node.occupiedSlots ?? 0), 0))
 const attention = computed(() => healths.value.filter(health => ['offline', 'attention', 'setup'].includes(health.state)).length)
@@ -147,17 +149,20 @@ onMounted(() => {
 })
 onBeforeUnmount(() => clearInterval(timer))
 
-async function action(operation: () => Promise<void>) {
+// `nodeId` names the machine an action concerns, so its panel shows only its own errors.
+async function action(operation: () => Promise<void>, nodeId: string | null = null) {
   if (busy.value)
     return
   busy.value = true
   error.value = ''
+  errorNodeId.value = null
   try {
     await operation()
     await load()
   }
   catch (e) {
     error.value = (e as Error).message
+    errorNodeId.value = nodeId
   }
   finally {
     busy.value = false
@@ -223,7 +228,7 @@ function retire() {
     retiring.value = null
     const released = result.releasedPlacements ?? 0
     notify(released ? `${pair.previous.name} revoked; ${released} ${released === 1 ? 'conversation returns' : 'conversations return'} to automatic placement` : `${pair.previous.name} revoked`)
-  })
+  }, pair.previous.id)
 }
 
 function edit(node: ExecutionNode) {
@@ -262,7 +267,7 @@ function save() {
       grantAfterConfigure = null
       grant(node)
     }
-  })
+  }, node.id)
 }
 
 function closeEditor() {
@@ -294,7 +299,7 @@ function releaseExclusive(node: ExecutionNode) {
   return action(async () => {
     await api(`/nodes/${node.id}/exclusive/${reservation.id}/release`, { method: 'POST', body: '{}' })
     notify('Exclusive release requested; suspended work resumes after confirmation')
-  })
+  }, node.id)
 }
 
 function saveGrants() {
@@ -312,7 +317,7 @@ function saveGrants() {
     notify(`${node.name} is ready`)
     await refresh()
     offerRetirement(node.id)
-  })
+  }, node.id)
 }
 
 function freeStaleDisks() {
@@ -323,7 +328,7 @@ function freeStaleDisks() {
     const result = await api<{ freedMiB: number, failed: number }>(`/nodes/${node.id}/stale-disks/delete`, { method: 'POST', body: '{}' })
     cleaning.value = null
     notify(result.failed ? `Freed ${formatMiB(result.freedMiB)}; ${result.failed} disks are in use or the node is unreachable` : `Freed ${formatMiB(result.freedMiB)}`)
-  })
+  }, node.id)
 }
 
 /** Why an agent cannot run on the node being granted: the server only accepts agents of its backend. */
@@ -384,7 +389,7 @@ function revoke() {
     }
 
     revoking.value = null
-  })
+  }, node.id)
 }
 </script>
 
@@ -557,7 +562,7 @@ function revoke() {
       :key="opened.id"
       :node="opened"
       :busy="busy"
-      :error="error"
+      :error="errorNodeId === opened.id ? error : ''"
       @close="openedId = null"
       @changed="load"
       @configure="edit(opened)"

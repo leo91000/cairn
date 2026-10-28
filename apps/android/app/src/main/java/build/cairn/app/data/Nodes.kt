@@ -165,6 +165,12 @@ enum class NodeHealthState {
 
 data class NodeHealth(val state: NodeHealthState, val label: String, val detail: String)
 
+/**
+ * The server's heartbeat timeout; listing nodes refreshes the built-in runner within it when
+ * reachable.
+ */
+private const val HEARTBEAT_TIMEOUT_MS = 60_000L
+
 /** Whether a node can take work, as one state and a short sentence; the first blocker wins. */
 fun nodeHealth(node: ExecutionNode, now: Long = System.currentTimeMillis()): NodeHealth {
     if (node.revoked) return NodeHealth(NodeHealthState.REVOKED, "Révoquée", "N’a plus accès")
@@ -173,6 +179,13 @@ fun nodeHealth(node: ExecutionNode, now: Long = System.currentTimeMillis()): Nod
             NodeHealthState.OFFLINE,
             "Hors ligne",
             node.lastSeen?.let { "Dernier contact ${relativeAge(it, now)}" } ?: "Jamais connectée",
+        )
+    // The built-in runner always reports "local"; a stale contact means it stopped answering.
+    if (node.local && node.lastSeen != null && now - node.lastSeen >= HEARTBEAT_TIMEOUT_MS)
+        return NodeHealth(
+            NodeHealthState.OFFLINE,
+            "Hors ligne",
+            "Runner du master injoignable · dernier contact ${relativeAge(node.lastSeen, now)}",
         )
     val native = node.capabilities.backend == NATIVE_BACKEND
     if (!native && !node.capabilities.kvm)

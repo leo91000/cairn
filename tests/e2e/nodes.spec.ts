@@ -260,6 +260,9 @@ test('registers, configures and revokes a node through the owner interface', asy
   await page.screenshot({ path: 'test-results/nodes-desktop-panel.png' })
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.screenshot({ path: 'test-results/nodes-desktop-dark.png' })
+  await page.setViewportSize({ width: 800, height: 844 })
+  await expect(row.getByText('Usage unavailable')).toBeHidden()
+  await expect(row.getByText('VM', { exact: true })).toBeVisible()
   await page.setViewportSize({ width: 390, height: 844 })
   await page.screenshot({ path: 'test-results/nodes-phone.png', fullPage: true })
   // On phones a row keeps the name and the free slots; the name gets the width.
@@ -970,4 +973,95 @@ test('previews node administrator powers and keeps failed transitions visibly bl
   expect(requests[1]).toEqual({ mode: 'administrator', previewId: 'preview-one', confirm: true })
   await card.getByRole('button', { name: 'Switch to Native administrator', exact: true }).click()
   expect(requests.at(-1)).toEqual({ mode: 'administrator', previewId: null, confirm: false })
+})
+
+test('the overview links an agent\'s privilege request to its review, and keeps other machines\' errors out', async ({ page, workspace: _workspace }) => {
+  await useRelayForHttpMocks(page)
+  const machine = (name: string, extra: object) => ({
+    id: randomUUID(),
+    name,
+    revision: 'fixture',
+    local: false,
+    accepting: true,
+    status: 'online',
+    revoked: false,
+    executionReady: true,
+    tags: [],
+    systemTags: [],
+    slots: 2,
+    occupiedSlots: 0,
+    availableSlots: 2,
+    agents: [{ id: 'builder', name: 'Builder', allNodes: false }],
+    exclusiveAgents: [],
+    staleDisks: { count: 0, diskMiB: 0 },
+    storage: {
+      cacheMiB: 102400,
+      memoryCacheMiB: 256,
+      reserveMiB: 10240,
+      reservePercent: 5,
+      backupSeconds: 60,
+      maxDirtySeconds: 300,
+    },
+    limits: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 },
+    lastSeen: Date.now(),
+    ...extra,
+  })
+  const requested = machine('Requested host', {
+    nativeEnabled: true,
+    nativeAccounts: ['trusted'],
+    capabilities: {
+      os: 'linux',
+      arch: 'x86_64',
+      backend: 'native',
+      ublk: true,
+      nativeModeProtocol: 1,
+      kvm: false,
+      cpu: 4,
+      memoryMiB: 8192,
+      diskMiB: 65536,
+    },
+    nativeModeObserved: { mode: 'protected', generation: null, status: 'applied' },
+    nativeModeProposal: { previewId: 'proposal', mode: 'administrator', status: 'pending' },
+  })
+  const other = machine('Other host', {
+    capabilities: {
+      os: 'linux',
+      arch: 'x86_64',
+      backend: 'firecracker',
+      kvm: true,
+      cpu: 4,
+      memoryMiB: 8192,
+      diskMiB: 65536,
+    },
+    staleDisks: { count: 1, diskMiB: 1024 },
+  })
+  await page.route('**/api/nodes', route => route.fulfill({ json: [requested, other] }))
+  await page.route('**/api/nodes/native-callers', route => route.fulfill({ json: [] }))
+  await page.route(`**/api/nodes/${other.id}/stale-disks/delete`, route => route.fulfill({ status: 503, json: { error: 'Other host is unreachable.' } }))
+  await page.goto(workspacePath('/nodes'))
+  await authenticateWorkspace(page)
+
+  // A pending request needs the owner, even on a machine that otherwise takes work.
+  await expect(nodeRow(page, 'Requested host')).toContainText('An agent requested Native administrator')
+  await expect(page.getByRole('region', { name: 'Fleet summary' }).locator('div').filter({ hasText: 'attention' }).locator('dd')).toHaveText('1')
+  const panel = await openNode(page, 'Requested host')
+  await panel.getByRole('button', { name: 'Review the request', exact: true }).click()
+  await expect(panel.getByRole('heading', { name: 'Agents allowed' })).toBeFocused()
+  await expect(panel.getByRole('button', { name: 'Review requested mode', exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(panel).toHaveCount(0)
+
+  // A failed action on one machine is reported in its own panel only.
+  const failing = await openNode(page, 'Other host', 'Storage')
+  await failing.getByRole('button', { name: 'Free old disks', exact: true }).click()
+  const cleaning = page.getByRole('dialog', { name: 'Free old disks on Other host' })
+  await cleaning.getByRole('button', { name: 'Delete 1 GiB', exact: true }).click()
+  await expect(cleaning.getByRole('alert')).toContainText('Other host is unreachable.')
+  await cleaning.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  await expect(failing.getByRole('alert')).toContainText('Other host is unreachable.')
+  await page.keyboard.press('Escape')
+  await nodeRow(page, 'Requested host').click()
+  const unrelated = page.getByRole('dialog', { name: /^Requested host/ })
+  await expect(unrelated).toBeVisible()
+  await expect(unrelated.getByRole('alert')).toHaveCount(0)
 })

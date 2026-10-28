@@ -118,7 +118,19 @@ class NodesTest {
         )
         assertEquals(
             NodeHealthState.READY,
-            nodeHealth(ready.copy(local = true, status = "local")).state,
+            nodeHealth(ready.copy(local = true, status = "local", lastSeen = null)).state,
+        )
+        assertEquals(
+            NodeHealthState.READY,
+            nodeHealth(ready.copy(local = true, status = "local", lastSeen = 0), 30_000).state,
+        )
+        assertEquals(
+            NodeHealth(
+                NodeHealthState.OFFLINE,
+                "Hors ligne",
+                "Runner du master injoignable · dernier contact il y a 2 min",
+            ),
+            nodeHealth(ready.copy(local = true, status = "local", lastSeen = 0), 120_000),
         )
         val native =
             ready.copy(

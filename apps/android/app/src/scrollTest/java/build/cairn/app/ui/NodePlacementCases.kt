@@ -1413,6 +1413,8 @@ abstract class NodePlacementCases {
                     substring = true,
                 )
                 .assertExists()
+            // The fleet summary counts connected machines and slots in use.
+            compose.onNodeWithText("1/1 connectée · ", substring = true).assertExists()
             capture("nodes")
             compose.onNodeWithText("Stockage").performScrollTo().performClick()
             compose.onNodeWithText("Cache mémoire partagé (Mio)").performTextReplacement("1024")
