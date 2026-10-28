@@ -120,8 +120,6 @@ async function load() {
   if (connected) {
     enrollment.value = null
     adding.value = false
-    // The new machine's setup dialogs follow; a panel about another machine would sit beneath them.
-    openedId.value = null
     notify(`${connected.name} is connected`)
     if (replacing.value) {
       replacement = { previous: replacing.value.id, next: connected.id }
@@ -534,10 +532,10 @@ function revoke() {
           <NodeRow :node="node" :selected="node.id === openedId" @open="openNode(node)" />
         </li>
       </ul>
-      <p v-if="!loaded" class="px-4.5 py-6 text-sm text-muted" role="status">
+      <p v-if="!loaded && !error" class="px-4.5 py-6 text-sm text-muted" role="status">
         Loading machines…
       </p>
-      <p v-else-if="!visible.length" class="px-4.5 py-6 text-sm text-muted">
+      <p v-else-if="loaded && !visible.length" class="px-4.5 py-6 text-sm text-muted">
         {{ revoked.length ? 'No active machine. Revoked machines are hidden.' : 'No machine yet. Add one to run your agents’ conversations on it.' }}
       </p>
     </section>

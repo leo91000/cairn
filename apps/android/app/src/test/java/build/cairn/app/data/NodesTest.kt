@@ -69,6 +69,19 @@ class NodesTest {
             NodeHealthState.UPDATING,
             nodeHealth(ready.copy(maintenance = "draining", executionReady = false)).state,
         )
+        // A saved budget turns readiness off until the next heartbeat applies it: not a fault.
+        assertEquals(
+            NodeHealth(
+                NodeHealthState.UPDATING,
+                "En préparation",
+                "Le runtime applique sa configuration",
+            ),
+            nodeHealth(ready.copy(executionReady = false)),
+        )
+        assertEquals(
+            NodeHealthState.ATTENTION,
+            nodeHealth(ready.copy(executionReady = false, updateError = "image")).state,
+        )
         assertEquals(
             "Aucun agent ne peut encore utiliser cette machine",
             nodeHealth(ready.copy(agents = emptyList(), accepting = false)).detail,

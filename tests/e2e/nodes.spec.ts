@@ -895,6 +895,8 @@ test('previews node administrator powers and keeps failed transitions visibly bl
     tags: [],
     slots: 2,
     occupiedSlots: 2,
+    availableSlots: 0,
+    executionReady: true,
     agents: [{ id: 'builder', name: 'Builder', allNodes: true }],
     capabilities: {
       os: 'linux',

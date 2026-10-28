@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import type { ExecutionNode } from '../../../../packages/contracts/nodes'
-import { computed, ref } from 'vue'
+import {
+  computed,
+  nextTick,
+  ref,
+  watch,
+} from 'vue'
 import {
   formatBytes,
   formatMiB,
@@ -40,6 +45,21 @@ const emit = defineEmits<{
 type Section = 'overview' | 'access' | 'storage' | 'settings'
 
 const section = ref<Section>('overview')
+const content = ref<HTMLElement>()
+const accessHeading = ref<HTMLElement>()
+
+async function reviewRequest() {
+  section.value = 'access'
+  await nextTick()
+  accessHeading.value?.focus()
+}
+
+// A control that did its job disappears (old disks freed, reservation released): keep focus in the panel.
+watch(() => [props.node.staleDisks?.count, props.node.exclusiveReservation?.id], async () => {
+  await nextTick()
+  if (!content.value?.contains(document.activeElement) && (document.activeElement === document.body || !document.activeElement?.isConnected))
+    content.value?.focus()
+})
 const sections: { value: Section, label: string }[] = [
   { value: 'overview', label: 'Overview' },
   { value: 'access', label: 'Access' },
@@ -83,7 +103,7 @@ const reserve = computed(() => {
         </span>
       </span>
     </template>
-    <div class="flex flex-1 flex-col">
+    <div ref="content" class="flex flex-1 flex-col outline-none" tabindex="-1">
       <div v-if="error" class="px-6.5 pt-3 phone:px-5">
         <UiAlert>{{ error }}</UiAlert>
       </div>
@@ -117,7 +137,7 @@ const reserve = computed(() => {
             </div>
             <p v-if="native && node.nativeModeProposal" class="text-xs">
               An agent requested {{ nativeModeLabel(node.nativeModeProposal.mode) }}.
-              <button type="button" class="font-semibold text-accent hover:underline" @click="section = 'access'">
+              <button type="button" class="font-semibold text-accent hover:underline" @click="reviewRequest">
                 Review the request
               </button>
             </p>
@@ -275,7 +295,7 @@ const reserve = computed(() => {
         <template v-else-if="section === 'access'">
           <section class="border-b border-line px-6.5 py-5 phone:px-5" :aria-label="`Agents on ${node.name}`">
             <div class="mb-3.5 flex items-baseline justify-between gap-3">
-              <h3 class="eyebrow">
+              <h3 ref="accessHeading" class="eyebrow outline-none" tabindex="-1">
                 Agents allowed
               </h3>
               <RouterLink to="/agents" class="text-xs font-semibold text-accent hover:underline">

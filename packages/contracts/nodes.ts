@@ -105,8 +105,9 @@ export function nodeHealth(node: ExecutionNode, now = Date.now()): NodeHealth {
     return { state: 'attention', label: 'Needs attention', detail: 'KVM is unavailable' }
   if (native && !node.capabilities.ublk)
     return { state: 'attention', label: 'Needs attention', detail: 'ublk is unavailable' }
-  // A privilege change blocks placements until the supervisor confirms it.
-  if (native && (node.nativeModeStatus === 'failed' || node.nativeModeObserved?.status === 'failed'))
+  // A privilege change blocks placements until the supervisor confirms it. The server reports
+  // a failure only for the current request; an older failed attempt is still pending.
+  if (native && node.nativeModeStatus === 'failed')
     return { state: 'attention', label: 'Needs attention', detail: 'The privilege change failed' }
   // Supervisors without the privilege protocol never confirm a mode: the status stays pending.
   if (native && node.capabilities.nativeModeProtocol !== 1)
@@ -117,8 +118,16 @@ export function nodeHealth(node: ExecutionNode, now = Date.now()): NodeHealth {
     return { state: 'attention', label: 'Needs attention', detail: 'The update failed' }
   if (node.maintenance)
     return { state: 'updating', label: 'Updating', detail: 'New work waits for the update' }
-  if (node.executionReady === false)
-    return { state: 'attention', label: 'Needs attention', detail: node.budgetError ? 'The shared budget could not be applied' : 'The runtime is not ready' }
+  // Without a reported error the runtime is getting ready, as after a budget change until the next heartbeat.
+  // A missing flag reads as not ready, like the generated Kotlin contract.
+  if (!node.executionReady) {
+    if (node.budgetError)
+      return { state: 'attention', label: 'Needs attention', detail: 'The shared budget could not be applied' }
+    if (node.updateError)
+      return { state: 'attention', label: 'Needs attention', detail: 'The runtime reported an error' }
+    return { state: 'updating', label: 'Getting ready', detail: 'The runtime is applying its configuration' }
+  }
+
   if (native && node.nativeModeProposal)
     return { state: 'attention', label: 'Needs attention', detail: `An agent requested ${nativeModeLabel(node.nativeModeProposal.mode)}` }
   if (native && (!node.nativeEnabled || !node.nativeAccounts?.length))

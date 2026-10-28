@@ -66,6 +66,12 @@ describe('node health', () => {
     expect(nodeHealth(node({ status: 'offline', lastSeen: null })).detail).toBe('Never connected')
     expect(nodeHealth(node({ capabilities: { ...node().capabilities, kvm: false }, agents: [] }))).toMatchObject({ state: 'attention', detail: 'KVM is unavailable' })
     expect(nodeHealth(node({ executionReady: false, budgetError: 'cgroup' }))).toMatchObject({ state: 'attention', detail: 'The shared budget could not be applied' })
+    expect(nodeHealth(node({ executionReady: false, updateError: 'image mismatch' }))).toMatchObject({ state: 'attention', detail: 'The runtime reported an error' })
+    // A saved budget turns readiness off until the next heartbeat applies it: not a fault.
+    expect(nodeHealth(node({ executionReady: false }))).toEqual({ state: 'updating', label: 'Getting ready', detail: 'The runtime is applying its configuration' })
+    const unreported = node()
+    delete (unreported as Partial<ExecutionNode>).executionReady
+    expect(nodeHealth(unreported).state).toBe('updating')
     expect(nodeHealth(node({ maintenance: 'draining', executionReady: false })).state).toBe('updating')
     expect(nodeHealth(node({ agents: [], accepting: false }))).toMatchObject({ state: 'setup', detail: 'No agent can use this machine yet' })
     expect(nodeHealth(node({ accepting: false, pressure: 'memory' })).state).toBe('paused')
@@ -87,6 +93,13 @@ describe('node health', () => {
     expect(nodeHealth({ ...native, nativeModeProposal: { mode: 'administrator' } as ExecutionNode['nativeModeProposal'] })).toMatchObject({ state: 'attention', detail: 'An agent requested Native administrator' })
     expect(nodeHealth({ ...native, nativeModeStatus: 'pending', executionReady: false })).toMatchObject({ state: 'updating', detail: 'Privilege change in progress' })
     expect(nodeHealth({ ...native, nativeModeStatus: 'failed', executionReady: false })).toMatchObject({ state: 'attention', detail: 'The privilege change failed' })
+    // A failure observed for an earlier request: the server reports the retry as pending.
+    expect(nodeHealth({
+      ...native,
+      nativeModeStatus: 'pending',
+      nativeModeObserved: { mode: 'administrator', status: 'failed' } as ExecutionNode['nativeModeObserved'],
+      executionReady: false,
+    }).state).toBe('updating')
     expect(nodeHealth(node({ maintenance: 'draining', maintenanceError: 'disk full' }))).toMatchObject({ state: 'attention', detail: 'The update failed' })
   })
 

@@ -179,10 +179,9 @@ fun nodeHealth(node: ExecutionNode, now: Long = System.currentTimeMillis()): Nod
         return NodeHealth(NodeHealthState.ATTENTION, "À vérifier", "KVM indisponible")
     if (native && !node.capabilities.ublk)
         return NodeHealth(NodeHealthState.ATTENTION, "À vérifier", "ublk indisponible")
-    // A privilege change blocks placements until the supervisor confirms it.
-    if (
-        native && (node.nativeModeStatus == "failed" || node.nativeModeObserved?.status == "failed")
-    )
+    // A privilege change blocks placements until the supervisor confirms it. The server reports
+    // a failure only for the current request; an older failed attempt is still pending.
+    if (native && node.nativeModeStatus == "failed")
         return NodeHealth(
             NodeHealthState.ATTENTION,
             "À vérifier",
@@ -209,13 +208,29 @@ fun nodeHealth(node: ExecutionNode, now: Long = System.currentTimeMillis()): Nod
             "Mise à jour",
             "Les nouveaux travaux attendent la mise à jour",
         )
+    // Without a reported error the runtime is getting ready, as after a budget change until the
+    // next heartbeat.
     if (!node.executionReady)
-        return NodeHealth(
-            NodeHealthState.ATTENTION,
-            "À vérifier",
-            if (node.budgetError != null) "Le budget partagé n’a pas pu être appliqué"
-            else "Le runtime n’est pas prêt",
-        )
+        return when {
+            node.budgetError != null ->
+                NodeHealth(
+                    NodeHealthState.ATTENTION,
+                    "À vérifier",
+                    "Le budget partagé n’a pas pu être appliqué",
+                )
+            node.updateError != null ->
+                NodeHealth(
+                    NodeHealthState.ATTENTION,
+                    "À vérifier",
+                    "Le runtime a signalé une erreur",
+                )
+            else ->
+                NodeHealth(
+                    NodeHealthState.UPDATING,
+                    "En préparation",
+                    "Le runtime applique sa configuration",
+                )
+        }
     if (native && node.nativeModeProposal != null)
         return NodeHealth(
             NodeHealthState.ATTENTION,
