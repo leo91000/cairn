@@ -31,9 +31,12 @@ objects. Unchanged blocks retain their verified shared object identities. Mounte
 disk grants pin their publications until the acknowledgement protocol releases them.
 The manager keeps no second local payload/receipt cache for shared objects.
 
-SQLite uses the single initial schema, version 1. Previous installation data is
-not read or converted. Follow [Réinstallation complète](PRODUCTION-CAIRN.md#réinstallation-complète)
-before the next release. One active manager must own a data volume. Separate
+Version-11 manager databases support the
+[data-preserving inventory upgrade to version 12](migrations/0012-typed-node-inventory.md).
+It preserves shared-object inventory and references; other manager or storage
+layouts require their own explicit compatibility checks. Preserve database,
+identity, journals and object storage during upgrades. One active manager must
+own a data volume. Separate
 installations or encryption keys do not share an inventory.
 
 ## Validation

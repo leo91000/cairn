@@ -8,6 +8,11 @@ use cairn_contracts::*;
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
+pub(crate) mod migration;
+
+#[cfg(test)]
+mod migration_tests;
+
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE nodes(
     id TEXT PRIMARY KEY NOT NULL,
