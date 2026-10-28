@@ -12,6 +12,29 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 #[tokio::test]
+async fn waiting_refresh_does_not_deadlock_multi_account_locking() {
+    let accounts = cairn_installation::accounts::Accounts::default();
+    // Reordering retains the first account while acquiring the next. A refresh
+    // waiting for that first account must leave the registry available to it.
+    let first_account = accounts.lock("first").await;
+    let mut waiting_refresh = Box::pin(accounts.lock("first"));
+    assert!(futures_util::poll!(&mut waiting_refresh).is_pending());
+
+    let next_account =
+        tokio::time::timeout(std::time::Duration::from_secs(1), accounts.lock("next"))
+            .await
+            .expect("an account waiter must not block acquisition of another account");
+
+    drop(next_account);
+    drop(first_account);
+    let refreshed_account =
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiting_refresh)
+            .await
+            .expect("refresh can proceed once reordering releases the account");
+    drop(refreshed_account);
+}
+
+#[tokio::test]
 async fn valid_available_usage_does_not_wait_for_due_account_refresh() {
     let root = TempDir::new().unwrap();
     let s = Service::new(config(&root)).await.unwrap();

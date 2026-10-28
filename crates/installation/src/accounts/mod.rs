@@ -346,14 +346,15 @@ impl Accounts {
     }
 
     pub async fn lock(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        self.locks
+        let account_lock = self
+            .locks
             .lock()
             .await
             .entry(id.into())
             .or_default()
-            .clone()
-            .lock_owned()
-            .await
+            .clone();
+
+        account_lock.lock_owned().await
     }
 
     pub async fn account(&self, s: &Service, id: &str) -> Result<Account> {
@@ -902,12 +903,11 @@ impl Accounts {
             .driver()
             .connect_api_key(s, &account, model_provider, api_key)
             .await?;
-        Ok(self
-            .list(s)
+        self.list(s)
             .await?
             .into_iter()
             .find(|a| a.id == id)
-            .ok_or_else(|| Error::not_found("Account not found."))?)
+            .ok_or_else(|| Error::not_found("Account not found."))
     }
 
     pub async fn reconnect(

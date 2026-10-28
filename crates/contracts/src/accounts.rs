@@ -214,7 +214,7 @@ pub struct ApiKeyProvider {
 )]
 pub enum ConnectAccountOutput {
     SignIn { sign_in: AccountSignIn },
-    Connected { account: CodingAgentAccount },
+    Connected { account: Box<CodingAgentAccount> },
     HumanRequired { message: String, path: String },
 }
 

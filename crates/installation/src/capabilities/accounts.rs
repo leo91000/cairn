@@ -235,17 +235,18 @@ impl AccountOperation {
                             let provider: crate::provider::Provider = input.provider.into();
                             if provider.driver().accepts_api_keys() {
                                 ConnectAccountOutput::Connected {
-                                    account: s
-                                        .accounts
-                                        .connect_api_key(
-                                            s,
-                                            provider,
-                                            &input.name,
-                                            input.model_provider.as_deref().unwrap_or(""),
-                                            input.api_key.as_deref().unwrap_or(""),
-                                            None,
-                                        )
-                                        .await?,
+                                    account: Box::new(
+                                        s.accounts
+                                            .connect_api_key(
+                                                s,
+                                                provider,
+                                                &input.name,
+                                                input.model_provider.as_deref().unwrap_or(""),
+                                                input.api_key.as_deref().unwrap_or(""),
+                                                None,
+                                            )
+                                            .await?,
+                                    ),
                                 }
                             } else {
                                 ConnectAccountOutput::SignIn {
@@ -265,17 +266,18 @@ impl AccountOperation {
                             uuid(&input.account_id)?;
                             let account = s.accounts.account(s, &input.account_id).await?;
                             ConnectAccountOutput::Connected {
-                                account: s
-                                    .accounts
-                                    .connect_api_key(
-                                        s,
-                                        account.provider,
-                                        &account.name,
-                                        &input.model_provider,
-                                        &input.api_key,
-                                        Some(&input.account_id),
-                                    )
-                                    .await?,
+                                account: Box::new(
+                                    s.accounts
+                                        .connect_api_key(
+                                            s,
+                                            account.provider,
+                                            &account.name,
+                                            &input.model_provider,
+                                            &input.api_key,
+                                            Some(&input.account_id),
+                                        )
+                                        .await?,
+                                ),
                             }
                         }
                     };
