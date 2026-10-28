@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "agentId": {
+      "default": null,
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "limit": {
+      "default": 50,
+      "format": "uint8",
+      "maximum": 100,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "offset": {
+      "default": 0,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "projectId": {
+      "default": null,
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "view": {
+      "default": "active",
+      "pattern": "^(active|trash)$",
+      "type": "string"
+    }
+  },
+  "title": "ListChatsInput",
+  "type": "object"
+}

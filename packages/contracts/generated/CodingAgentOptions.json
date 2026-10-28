@@ -1,0 +1,83 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "CodingAgentChoice": {
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "label"
+      ],
+      "type": "object"
+    },
+    "CodingAgentSwitch": {
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "choices": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/CodingAgentChoice"
+      },
+      "type": "array"
+    },
+    "provider": {
+      "default": null,
+      "pattern": "^(codex|claude|opencode)$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "runId": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "switching": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/CodingAgentSwitch"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "turnId": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "CodingAgentOptions",
+  "type": "object"
+}

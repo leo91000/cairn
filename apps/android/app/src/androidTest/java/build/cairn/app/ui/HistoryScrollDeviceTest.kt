@@ -98,7 +98,7 @@ class HistoryScrollDeviceTest {
                     createdAt = base + 1,
                     type = "chat.user",
                     text = "Question $turn : peux-tu vérifier l’étape $turn ?",
-                    runId = "long",
+                    runId = "ec1fdad0-11d4-5c4c-9cbe-0e5f6fed7090",
                 )
             ) +
                 (1..8).map { step ->
@@ -121,7 +121,7 @@ class HistoryScrollDeviceTest {
                                         }
                                 )
                             ),
-                        runId = "long",
+                        runId = "ec1fdad0-11d4-5c4c-9cbe-0e5f6fed7090",
                     )
                 } +
                 RunEvent(
@@ -143,7 +143,7 @@ class HistoryScrollDeviceTest {
                                     }
                             )
                         ),
-                    runId = "long",
+                    runId = "ec1fdad0-11d4-5c4c-9cbe-0e5f6fed7090",
                 )
         }
 
@@ -157,7 +157,12 @@ class HistoryScrollDeviceTest {
                     LiveBatch(
                         window,
                         LiveState(
-                            chat = Chat("long", "Longue conversation", agentName = "Main agent")
+                            chat =
+                                Chat(
+                                    id = "ec1fdad0-11d4-5c4c-9cbe-0e5f6fed7090",
+                                    title = "Longue conversation",
+                                    agentName = "Main agent",
+                                )
                         ),
                         reset = true,
                         more = false,
@@ -191,7 +196,10 @@ class HistoryScrollDeviceTest {
                                 )
                         }
                         // A reconnect resumes after the cursor: nothing new to send.
-                        if (path == "/api/installations/fixture/api/chats/long/stream")
+                        if (
+                            path ==
+                                "/api/installations/fixture/api/chats/ec1fdad0-11d4-5c4c-9cbe-0e5f6fed7090/stream"
+                        )
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
                                 .setBody(
@@ -242,7 +250,13 @@ class HistoryScrollDeviceTest {
                     if (visible && workspace.session.authenticated)
                         CairnTheme("dark") {
                             Surface(Modifier.fillMaxSize()) {
-                                ChatScreen(vm, workspace, "long", openChat = {}, openRun = {})
+                                ChatScreen(
+                                    vm,
+                                    workspace,
+                                    "ec1fdad0-11d4-5c4c-9cbe-0e5f6fed7090",
+                                    openChat = {},
+                                    openRun = {},
+                                )
                             }
                         }
                 }

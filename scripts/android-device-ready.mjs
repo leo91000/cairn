@@ -84,7 +84,10 @@ export async function waitForDeviceReady({
   try {
     while (now() - started < timeoutMs) {
       try {
-        const { stdout } = await adb(['shell', deviceSampleCommand], { timeout: Math.min(10000, timeoutMs - (now() - started)) })
+        const remaining = timeoutMs - (now() - started)
+        // execFile requires an integer; zero would disable its timeout.
+        const sampleTimeout = Math.max(1, Math.min(10000, Math.floor(remaining)))
+        const { stdout } = await adb(['shell', deviceSampleCommand], { timeout: sampleTimeout })
         const sample = parseDeviceSample(stdout)
         const busy = busyFraction(previous?.cpu, sample.cpu)
         const sameProcesses = previous && sample.system === previous.system && sample.ui === previous.ui

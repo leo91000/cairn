@@ -467,7 +467,7 @@ internal fun ComposerAttachments(
             TrayItem(item.name, { dismiss(item.id) }) {
                 FileCard(
                     vm,
-                    ChatAttachment(item.id, name = item.name, mediaType = item.mediaType),
+                    ChatAttachment(id = item.id, name = item.name, mediaType = item.mediaType),
                     Modifier.size(width = 176.dp, height = 64.dp).semantics {
                         contentDescription = "${item.name} refusé : ${item.reason}"
                     },
@@ -680,7 +680,7 @@ private fun DocumentCard(vm: CairnViewModel, attachment: ChatAttachment, modifie
             Column(Modifier.padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 8.dp)) {
                 AttachmentName(attachment.name, MaterialTheme.typography.labelMedium)
                 Text(
-                    attachmentDetail(attachment, summary) ?: fileSize(attachment.size),
+                    attachmentDetail(attachment, summary) ?: fileSize(attachment.size.toLong()),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,

@@ -21,6 +21,7 @@ import build.cairn.app.data.*
 import build.cairn.contracts.ResumeRunInput
 import build.cairn.contracts.RunInput
 import build.cairn.contracts.cancelRun
+import build.cairn.contracts.convertRunToChat
 import build.cairn.contracts.resumeRun
 import build.cairn.contracts.retryRun
 
@@ -311,7 +312,7 @@ fun RunScreen(
                                     onClick = {
                                         menu = false
                                         vm.perform {
-                                            val chat = api.send<Chat>("POST", "/runs/$id/chat")
+                                            val chat = api.convertRunToChat(RunInput(runId = id))
                                             openChat(chat.id)
                                         }
                                     },

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Provider } from '../../../../packages/contracts/accounts'
+import type { CodingAgentOptions } from '../../../../packages/contracts/generated/typescript/CodingAgentOptions'
 import type { ChatQuota } from '../chat-quota'
 import {
   computed,
@@ -20,15 +21,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ resume: [], switched: [provider: Provider] }>()
 
-interface Options {
-  runId: string | null
-  turnId: string | null
-  provider: Provider
-  choices: { provider: Provider, label: string }[]
-  switching: { provider: Provider, error: string | null } | null
-}
-
-const options = ref<Options>()
+const options = ref<CodingAgentOptions>()
 const pending = ref<Provider>()
 const error = ref('')
 const loadError = ref('')
@@ -57,7 +50,7 @@ async function load(epoch: number) {
   loading.value = !options.value
   let delay = 5000
   try {
-    const result = await api<Options>(`/chats/${props.chatId}/coding-agent`, { signal: request.signal })
+    const result = await api<CodingAgentOptions>(`/chats/${props.chatId}/coding-agent`, { signal: request.signal })
     if (epoch !== generation || request.signal.aborted)
       return
     options.value = result

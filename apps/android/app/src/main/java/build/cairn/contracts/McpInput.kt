@@ -26,7 +26,10 @@ data class McpInput(
     val url: String = "",
 ) {
     init {
+        require(args.size <= 100)
         require(Regex("^(none|bearer|oauth)\$").containsMatchIn(auth))
+        enabledTools?.let { require(it.size <= 500) }
+        require(removeEnv.size <= 100)
         require(Regex("^(http|stdio)\$").containsMatchIn(transport))
     }
 }

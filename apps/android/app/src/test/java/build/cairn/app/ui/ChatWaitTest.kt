@@ -624,7 +624,7 @@ class ChatWaitTest {
         )
         val waiting =
             Chat(
-                "chat",
+                id = "chat",
                 status = "succeeded",
                 run =
                     Run(
@@ -687,12 +687,12 @@ class ChatWaitTest {
             buildFeed(
                 listOf(
                     Chat(
-                        "sooner",
+                        id = "sooner",
                         status = "succeeded",
                         run = done,
                         wakeup = wakeup(wakeAt = 5000),
                     ),
-                    Chat("answered", status = "succeeded", run = done, wakeup = answered),
+                    Chat(id = "answered", status = "succeeded", run = done, wakeup = answered),
                 ),
                 emptyList(),
                 emptyList(),
@@ -785,7 +785,7 @@ class ChatWaitTest {
             buildFeed(
                 listOf(
                     Chat(
-                        "later",
+                        id = "later",
                         status = "succeeded",
                         run = done,
                         updatedAt = 3,
@@ -794,14 +794,14 @@ class ChatWaitTest {
                         wakeup = wakeup(checks, 9000),
                     ),
                     Chat(
-                        "sooner",
+                        id = "sooner",
                         status = "succeeded",
                         run = done,
                         updatedAt = 2,
                         wakeup = wakeup(wakeAt = 5000),
                     ),
                     Chat(
-                        "paused",
+                        id = "paused",
                         status = "succeeded",
                         run = done,
                         paused = true,
@@ -831,7 +831,7 @@ class ChatWaitTest {
             buildFeed(
                 listOf(
                     Chat(
-                        "later",
+                        id = "later",
                         status = "succeeded",
                         run = done,
                         wakeup = wakeup(wakeAt = 9000),

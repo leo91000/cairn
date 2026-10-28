@@ -206,7 +206,7 @@ class ConversationPresentationTest {
                     "Usage exhausted. Waiting for an available Claude Code account to resume.",
                 taskId = "",
             )
-        val chat = Chat("chat", run = run)
+        val chat = Chat(id = "chat", run = run)
         assertEquals(
             ConversationState("En attente de quota", null),
             conversationState(chat, "Agent", null),
@@ -244,7 +244,7 @@ class ConversationPresentationTest {
             )
         val chat =
             Chat(
-                "chat",
+                id = "chat",
                 run =
                     Run(
                         id = "run",
@@ -316,8 +316,8 @@ class ConversationPresentationTest {
         assertFalse(failureShown(chat.copy(run = chat.run!!.copy(error = timeLimit)), exhausted))
     }
 
-    private val first = ChatMessage("one", text = "Bonjour")
-    private val second = ChatMessage("two", text = "Ensuite")
+    private val first = ChatMessage(id = "one", text = "Bonjour")
+    private val second = ChatMessage(id = "two", text = "Ensuite")
 
     private val retryRun =
         Run(
@@ -423,7 +423,7 @@ class ConversationPresentationTest {
                 suspendedByExclusive = reservation,
                 taskId = "",
             )
-        val chat = Chat("chat", status = "running", run = running)
+        val chat = Chat(id = "chat", status = "running", run = running)
         assertEquals(
             ConversationState("Suspendue (exclusivité)", null),
             conversationState(chat, "Cairn", BackgroundWait(listOf("Build"), 1), "Maison"),
@@ -457,7 +457,7 @@ class ConversationPresentationTest {
         }
         val chat =
             Chat(
-                "chat",
+                id = "chat",
                 run =
                     Run(
                         id = "run",
@@ -488,7 +488,7 @@ class ConversationPresentationTest {
     fun `scheduled wait names the wakeup without inventing a user message`() {
         val chat =
             Chat(
-                "chat",
+                id = "chat",
                 run =
                     Run(
                         id = "run",
@@ -525,7 +525,7 @@ class ConversationPresentationTest {
     fun `follow-ups stay queued behind a scheduled wait`() {
         val chat =
             Chat(
-                "chat",
+                id = "chat",
                 run =
                     Run(
                         id = "run",
@@ -548,13 +548,13 @@ class ConversationPresentationTest {
             Run(
                 id = "run",
                 status = "queued",
-                chatExecution = ChatExecution("one"),
+                chatExecution = ChatExecution(messageId = "one"),
                 accountWaitReason =
                     "Reconnect your Claude Code account in Connections to continue.",
                 accountRequired = "claude",
                 taskId = "",
             )
-        val chat = Chat("chat", run = run, messages = listOf(first))
+        val chat = Chat(id = "chat", run = run, messages = listOf(first))
         assertEquals("Claude Code", chatWaitNotice(run)!!.account)
         assertEquals(
             "En attente d’un compte Claude Code",
@@ -578,13 +578,13 @@ class ConversationPresentationTest {
                 id = "run",
                 status = "queued",
                 accountWaitReason = reason,
-                chatExecution = ChatExecution("one"),
+                chatExecution = ChatExecution(messageId = "one"),
                 taskId = "",
             )
         assertEquals(ChatWaitNotice(reason), chatWaitNotice(run))
         assertEquals(
             "En attente de l’agent…",
-            chatDelivery(Chat("chat", run = run, messages = listOf(first)), emptyList())
+            chatDelivery(Chat(id = "chat", run = run, messages = listOf(first)), emptyList())
                 .sending
                 .single()
                 .label,
@@ -595,7 +595,8 @@ class ConversationPresentationTest {
 
     @Test
     fun `idle send is in the transcript but later followups wait`() {
-        val delivery = chatDelivery(Chat("chat", messages = listOf(first, second)), emptyList())
+        val delivery =
+            chatDelivery(Chat(id = "chat", messages = listOf(first, second)), emptyList())
         assertEquals(listOf("one"), delivery.sending.map { it.message.id })
         assertEquals(listOf("two"), delivery.queued.map { it.id })
     }
@@ -606,11 +607,14 @@ class ConversationPresentationTest {
             Run(
                 id = "run",
                 status = "running",
-                chatExecution = ChatExecution("one"),
+                chatExecution = ChatExecution(messageId = "one"),
                 taskId = "",
             )
         val delivery =
-            chatDelivery(Chat("chat", run = run, messages = listOf(first, second)), emptyList())
+            chatDelivery(
+                Chat(id = "chat", run = run, messages = listOf(first, second)),
+                emptyList(),
+            )
         assertEquals("Démarrage de l’agent…", delivery.sending.single().label)
         assertEquals("two", delivery.queued.single().id)
     }
@@ -618,9 +622,9 @@ class ConversationPresentationTest {
     @Test
     fun `paused and failed runs keep messages waiting`() {
         listOf(
-                Chat("chat", paused = true),
+                Chat(id = "chat", paused = true),
                 Chat(
-                    "chat",
+                    id = "chat",
                     run =
                         Run(
                             id = "r",
@@ -647,7 +651,11 @@ class ConversationPresentationTest {
         val privateAnswer =
             first.copy(id = "private", questionId = "question", mode = "steer", text = "secret")
         val chat =
-            Chat("chat", run = run, messages = listOf(first.copy(mode = "steer"), privateAnswer))
+            Chat(
+                id = "chat",
+                run = run,
+                messages = listOf(first.copy(mode = "steer"), privateAnswer),
+            )
         assertEquals(listOf("one"), chatDelivery(chat, emptyList()).sending.map { it.message.id })
         val ack =
             RunEvent(
@@ -665,7 +673,7 @@ class ConversationPresentationTest {
 
     @Test
     fun `local optimistic send and saved message share one identity`() {
-        val chat = Chat("chat", messages = listOf(first))
+        val chat = Chat(id = "chat", messages = listOf(first))
         assertEquals(1, chatDelivery(chat, emptyList(), first).sending.size)
     }
 
@@ -699,7 +707,7 @@ class ConversationPresentationTest {
                 startedAt = 1,
                 taskId = "",
             )
-        val chat = Chat("chat", agentName = "Cairn", projectName = "Site", run = run)
+        val chat = Chat(id = "chat", agentName = "Cairn", projectName = "Site", run = run)
         assertEquals(
             ConversationState("Cairn · Maison", "Cairn travaille"),
             conversationState(chat, "Cairn", null, "Maison"),
@@ -748,7 +756,7 @@ class ConversationPresentationTest {
 
     @Test
     fun `the header names only the agent while no installation is known`() {
-        val chat = Chat("chat", agentName = "Cairn", projectName = "Site")
+        val chat = Chat(id = "chat", agentName = "Cairn", projectName = "Site")
         assertEquals(ConversationState("Cairn", null), conversationState(chat, "Cairn", null, null))
         assertEquals(
             "Échec · Cairn",
@@ -782,21 +790,27 @@ class ConversationPresentationTest {
             )
         assertEquals(
             "La réponse s’est arrêtée avant la fin. Reprenez la conversation pour continuer.",
-            conversationError(Chat("chat", run = run)),
+            conversationError(Chat(id = "chat", run = run)),
         )
         assertEquals(
             "Usage limit reached",
-            conversationError(Chat("chat", run = run.copy(error = "Usage limit reached"))),
+            conversationError(Chat(id = "chat", run = run.copy(error = "Usage limit reached"))),
         )
         // The conversation's own error comes first.
         assertEquals(
             "Upload failed",
             conversationError(
-                Chat("chat", run = run.copy(error = "Usage limit reached"), error = "Upload failed")
+                Chat(
+                    id = "chat",
+                    run = run.copy(error = "Usage limit reached"),
+                    error = "Upload failed",
+                )
             ),
         )
-        assertNull(conversationError(Chat("chat", run = run.copy(status = "succeeded"))))
-        assertNull(conversationError(Chat("chat", run = run.copy(error = " ", status = "running"))))
+        assertNull(conversationError(Chat(id = "chat", run = run.copy(status = "succeeded"))))
+        assertNull(
+            conversationError(Chat(id = "chat", run = run.copy(error = " ", status = "running")))
+        )
         assertNull(conversationError(null))
     }
 }
