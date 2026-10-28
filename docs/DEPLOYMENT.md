@@ -295,8 +295,9 @@ guests deploy at the same version.
 
 ## Persisted data
 
-The release system does not create or retain backups. The next installation
-release requires the [complete reinstallation](PRODUCTION-CAIRN.md#réinstallation-complète).
+The release system does not create or retain backups. Version-11 installations
+support the [data-preserving upgrade](PRODUCTION-CAIRN.md#data-preserving-upgrades);
+retain a consistent database/WAL backup and all installation state before rollout.
 Subsequent update failures retain the pending candidate for repair and retry;
 recover with a reviewed forward fix.
 
@@ -424,9 +425,11 @@ qualification's exact image, or run the complete qualification themselves.
 ### Task-author security and coordinated upgrades (#59)
 
 Deploy matching current Beacon and installation binaries. Follow the
-[Beacon database recreation runbook](BEACON.md#next-release-recreate-the-beacon-database)
-for this release; historical migration ledgers cannot be upgraded in place.
-Recreate Beacon before reopening access, then claim the installations again.
+[Beacon database compatibility runbook](BEACON.md#next-release-recreate-the-beacon-database)
+before promotion. Historical incompatible migration ledgers need a separately
+prepared data-preserving migration; routine releases do not reset Beacon or
+installation data. Version-11 installations use the
+[automatic inventory upgrade](migrations/0012-typed-node-inventory.md).
 A protocol mismatch requires an update and prevents reconnection. Rollback also
 requires a matching binary set and a database created by that Beacon version;
 keep access closed until the set is consistent.
