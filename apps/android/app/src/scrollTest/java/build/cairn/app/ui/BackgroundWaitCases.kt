@@ -105,7 +105,7 @@ abstract class BackgroundWaitCases {
             assertTrue(body["requestId"]!!.jsonPrimitive.content.isNotBlank())
             compose.waitUntil(5000) {
                 compose
-                    .onAllNodesWithText("Annuler le changement")
+                    .onAllNodes(hasText("Annuler le changement") and isEnabled())
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
