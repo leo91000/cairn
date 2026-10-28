@@ -121,6 +121,12 @@ coverage used, not a claim that every production account/provider was exercised.
 
 ## Platform equivalents
 
+- File browsing uses matching left/right chevrons on both clients (including web
+  PDF pagination and attachment browsing). Web uses Lucide chevrons; Android uses
+  its shared outline icons and keeps text buttons for PDF pages. Back-to-parent
+  actions retain their back arrows. This is a presentation change to existing
+  navigation; public MCP and `cairn_installation` capabilities are unchanged.
+
 - Quota exhaustion appears once as an inline conversation card on both clients.
   It folds the current quota's assistant echo, failed-turn notice and failed-status
   notice, while the run activity retains its diagnostics. Recovered quota
