@@ -110,5 +110,11 @@ fn decode(id: &str, data: &str) -> Result<ExecutionNode> {
     if object.get("storage").is_none_or(Value::is_null) {
         object.insert("storage".into(), json!({}));
     }
-    serde_json::from_value(value).map_err(|_| invalid())
+    let node: ExecutionNode = serde_json::from_value(value).map_err(|_| invalid())?;
+    // UUID parsing accepts alternate spellings. Preserve every string reference
+    // and prevent an UPSERT from merging two differently spelled legacy keys.
+    if node.id.to_string() != id {
+        return Err(invalid());
+    }
+    Ok(node)
 }

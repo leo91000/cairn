@@ -96,6 +96,17 @@ fn insert(db: &Connection, id: &str, node: &Value) {
     .unwrap();
 }
 
+fn assert_preserved(before: &Value, after: &Value) {
+    if let Some(fields) = before.as_object() {
+        for (field, value) in fields {
+            assert!(after.get(field).is_some(), "missing field {field}");
+            assert_preserved(value, &after[field]);
+        }
+        return;
+    }
+    assert_eq!(before, after);
+}
+
 #[tokio::test]
 async fn version11_startup_conserves_inventory_credentials_and_references() {
     let root = tempfile::tempdir().unwrap();
@@ -133,9 +144,7 @@ async fn version11_startup_conserves_inventory_credentials_and_references() {
         .unwrap();
     let agent = Store::open(root.path()).unwrap();
     let node = serde_json::to_value(agent.node(NODE).await.unwrap().unwrap()).unwrap();
-    for (field, value) in legacy.as_object().unwrap() {
-        assert_eq!(&node[field], value, "field {field}");
-    }
+    assert_preserved(&legacy, &node);
     assert!(!node["revision"].as_str().unwrap().is_empty());
     assert_eq!(node["exclusiveAgents"], json!([AGENT]));
     let local_after = serde_json::to_value(
@@ -146,9 +155,7 @@ async fn version11_startup_conserves_inventory_credentials_and_references() {
             .unwrap(),
     )
     .unwrap();
-    for (field, value) in local.as_object().unwrap() {
-        assert_eq!(&local_after[field], value, "local field {field}");
-    }
+    assert_preserved(&local, &local_after);
     assert!(agent.list("nodes").await.unwrap().is_empty());
     let after: Vec<(String, String, Option<i64>)> = db
         .prepare("SELECT * FROM kv ORDER BY key")
@@ -282,4 +289,38 @@ async fn empty_version11_inventory_upgrades_without_creating_a_node() {
             .unwrap(),
         12
     );
+}
+
+#[tokio::test]
+async fn noncanonical_uuid_cannot_rename_or_overwrite_an_existing_node() {
+    for alternative in [
+        "00000000000040008000000000000019",
+        "{00000000-0000-4000-8000-000000000019}",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let db = version11(root.path()).await;
+        let canonical = legacy_node();
+        insert(&db, NODE, &canonical);
+        let mut duplicate = canonical.clone();
+        duplicate["id"] = alternative.into();
+        duplicate["name"] = "Must never overwrite original".into();
+        insert(&db, alternative, &duplicate);
+        assert!(Store::open(root.path()).is_err());
+        assert!(!db.table_exists(None, "nodes").unwrap());
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            11
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM records WHERE kind='nodes'", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        let retained: String = db
+            .query_row("SELECT data FROM records WHERE id=?", [NODE], |r| r.get(0))
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&retained).unwrap(), canonical);
+    }
 }
