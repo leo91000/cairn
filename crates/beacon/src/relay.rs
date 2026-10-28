@@ -1,6 +1,9 @@
 pub(crate) mod direct;
 pub(crate) mod nodes;
 
+#[cfg(test)]
+mod session_expiry_tests;
+
 use super::{ApiError, Service, digest, installations};
 use axum::{
     body::{Body, to_bytes},
@@ -91,6 +94,8 @@ impl Tunnel {
 
 #[derive(Clone, Default)]
 pub struct Relay {
+    #[cfg(test)]
+    identity_checks: Arc<Mutex<session_expiry_tests::IdentityChecks>>,
     stun_url: Arc<Mutex<Option<String>>>,
     connections: Arc<Mutex<HashMap<String, Arc<Tunnel>>>>,
     closing: Arc<AtomicBool>,
@@ -276,6 +281,9 @@ async fn identity_is_current(
     installation: &str,
     token_digest: &str,
 ) -> Result<bool, ApiError> {
+    #[cfg(test)]
+    let _check = session_expiry_tests::track_identity_check(&service.relay);
+
     let row: Option<(String,)> = query_as(
         "SELECT id FROM installations WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL",
     )
