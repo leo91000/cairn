@@ -618,7 +618,7 @@ pub async fn answer(s: &Service, context: &Context, args: &Value) -> Result<Valu
         {
             return Err(Error::bad("Invalid answer."));
         }
-        answers.insert(field.clone(), json!([value]));
+        answers.insert(field.clone(), json!({ "selected": [], "comment": value }));
     }
     let answered = crate::native::policy::DELEGATION
         .scope(

@@ -11,7 +11,7 @@ while the account is executing. When discovery fails, the UI marks the catalog
 unavailable rather than inventing current model capabilities.
 
 Claude agents support scheduled tasks, chats, streaming text and tool results,
-image/file attachments, queued follow-ups, steering, native questions, cancellation,
+image/file attachments, queued follow-ups, steering, common Cairn questionnaires, cancellation,
 and resumption. Changing a model applies to the next queued turn. The chat composer
 also switches between Codex and Claude Code without creating another visible chat.
 The server waits for the current turn to finish, starts a fresh native session,

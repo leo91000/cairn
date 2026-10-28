@@ -106,9 +106,11 @@ pub(crate) fn validate(
         if record["revoked"] == true {
             return Err(Error::bad("A revoked node cannot be reserved."));
         }
-        if settings.access.backend == "native" || crate::native::policy::node_native(&record) {
+        if settings.access.backend != "auto"
+            && crate::native::policy::node_native(&record) != (settings.access.backend == "native")
+        {
             return Err(Error::bad(
-                "Exclusive reservations need a Firecracker VM node used by a Firecracker agent.",
+                "Exclusive reservations need a node using this agent's execution backend.",
             ));
         }
     }

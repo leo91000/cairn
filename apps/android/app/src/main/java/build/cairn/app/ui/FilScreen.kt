@@ -212,6 +212,13 @@ internal fun buildFeed(
                             chat.error?.lineSequence()?.firstOrNull()?.ifBlank { null }
                                 ?: statusLabel(chat.status),
                         )
+                !chat.paused &&
+                    !chat.exclusiveSuspended &&
+                    isQuotaWait(
+                        chat.status,
+                        chat.accountWaitReason ?: chat.run?.accountWaitReason,
+                        chat.accountRequired ?: chat.run?.accountRequired,
+                    ) -> waiting += item(FeedKind.WAITING_CHAT, "En attente de quota")
                 !chat.paused && chat.status in setOf("running", "queued") ->
                     running +=
                         item(
@@ -305,6 +312,9 @@ internal fun buildFeed(
                                 condition = run.wakeup?.condition != null,
                                 resolved = run.wakeup?.observation != null,
                             )
+                run.suspendedByExclusive == null &&
+                    isQuotaWait(run.status, run.accountWaitReason, run.accountRequired) ->
+                    waiting += item(FeedKind.WAITING_TASK, "En attente de quota")
                 run.active ->
                     running +=
                         item(
@@ -372,7 +382,7 @@ internal fun buildFeed(
         running.sortedBy { it.startedAt ?: Long.MAX_VALUE },
         recent.sortedByDescending { it.stamp },
         // A wait whose result arrived resumes first, before any deadline.
-        waiting.sortedWith(compareBy({ !it.resolved }, { it.wakeAt })),
+        waiting.sortedWith(compareBy({ !it.resolved }, { it.wakeAt ?: Long.MAX_VALUE })),
     )
 }
 
@@ -585,7 +595,8 @@ fun FilScreen(
                 onDelete = item.chatId?.let { id -> { trash.trash(id) } },
             ) {
                 Text(
-                    waitLeft(item.wakeAt ?: now, item.condition, item.resolved, now),
+                    item.wakeAt?.let { waitLeft(it, item.condition, item.resolved, now) }
+                        ?: "Selon disponibilité",
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.primary,

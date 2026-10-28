@@ -471,7 +471,13 @@ class ChatJourneyTest {
                     .jsonObject
             assertEquals(
                 "Application entière",
-                answer["answers"]!!.jsonObject["scope"]!!.jsonArray.single().jsonPrimitive.content,
+                answer["answers"]!!
+                    .jsonObject["scope"]!!
+                    .jsonObject["selected"]!!
+                    .jsonArray
+                    .single()
+                    .jsonPrimitive
+                    .content,
             )
             // Queued follow-ups stay next to the composer, outside the scrolling history.
             compose.onNodeWithTag("conversation-queue").assertIsDisplayed()

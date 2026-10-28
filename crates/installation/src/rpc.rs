@@ -459,9 +459,14 @@ impl Rpc {
     }
 
     pub async fn reject(&self, id: Value) -> Result<()> {
+        self.reject_with_message(id, "Interactive tool requests are unavailable.")
+            .await
+    }
+
+    pub async fn reject_with_message(&self, id: Value, message: &str) -> Result<()> {
         let error = ErrorObject {
             code: METHOD_NOT_FOUND,
-            message: "Interactive tool requests are unavailable. Ask the user in a plain assistant message instead.".into(),
+            message: message.into(),
             data: None,
         };
         self.send(Message::Error { id, error }).await

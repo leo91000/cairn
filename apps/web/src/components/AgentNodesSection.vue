@@ -8,7 +8,6 @@ import {
   backendOptions,
   effectiveExclusive,
   nativeHelp,
-  nodeBackend,
   nodeName,
   nodesFor,
   nodeState,
@@ -194,8 +193,6 @@ function setExclusive(node: string, on: boolean) {
 function exclusiveBlocked(node: ExecutionNode) {
   if (!runsOn(access.value, node.id))
     return 'Requires permission to run'
-  if (nodeBackend(node) === 'native')
-    return 'Unavailable for native execution'
   if (!supportsExclusive(node))
     return 'Unavailable on this runtime'
   return ''

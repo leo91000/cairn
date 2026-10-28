@@ -93,7 +93,7 @@ test('OpenCode connects a Zen key, selects native models and runs a conversation
   expect(errors).toEqual([])
 })
 
-test('OpenCode answers native questions, steers a busy session and replaces an idle key', async ({ workspace }) => {
+test('OpenCode answers common questionnaires, steers a busy session and replaces an idle key', async ({ workspace }) => {
   test.setTimeout(90000)
   initializeRepository(workspace.projectPath)
   let account = (await workspace.api('/api/accounts')).accounts.find((a: { modelProvider?: string }) => a.modelProvider === 'opencode')
@@ -112,7 +112,7 @@ test('OpenCode answers native questions, steers a busy session and replaces an i
     id: crypto.randomUUID(),
     provider: 'opencode',
     model,
-    text: 'fixture:opencode-question',
+    text: 'fixture:cairn-question',
   })
   try {
     await expect.poll(async () => {
@@ -132,9 +132,10 @@ test('OpenCode answers native questions, steers a busy session and replaces an i
   }
 
   const question = (await workspace.api(`/api/chats/${chat.id}`)).questions.find((q: { status: string }) => q.status === 'pending')
-  await workspace.api(`/api/chats/${chat.id}/questions/${question.id}/answer`, 'POST', { id: crypto.randomUUID(), answers: { 0: ['Compact'] } })
+  await workspace.api(`/api/chats/${chat.id}/questions/${question.id}/answer`, 'POST', { id: crypto.randomUUID(), answers: { layout: { selected: ['compact'], comment: 'Compact layout' } } })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).questions.find((q: { id: string }) => q.id === question.id)?.status).toBe('answered')
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
-  expect((await workspace.api(`/api/chats/${chat.id}`)).run.summary).toContain('Compact layout')
+  expect((await workspace.api(`/api/chats/${chat.id}`)).run.summary).toContain('compact status panel')
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'fixture:opencode-hang' })
   await expect.poll(async () => {
     const detail = await workspace.api(`/api/chats/${chat.id}`)

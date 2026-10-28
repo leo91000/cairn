@@ -217,12 +217,10 @@ impl AgentSettings {
         let mut seen_plugins = std::collections::HashSet::new();
         self.plugins.retain(|id| seen_plugins.insert(id.clone()));
         self.exclusive_nodes.retain(|node| {
-            self.access.backend != "native"
-                && self
-                    .access
-                    .nodes
-                    .as_ref()
-                    .is_none_or(|nodes| nodes.contains(node))
+            self.access
+                .nodes
+                .as_ref()
+                .is_none_or(|nodes| nodes.contains(node))
         });
         let mut seen_exclusive_nodes = std::collections::HashSet::new();
         self.exclusive_nodes
@@ -411,6 +409,24 @@ fn agent_creation_id<'de, D: serde::Deserializer<'de>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exclusive_grants_keep_node_access_filtering_for_every_backend() {
+        let allowed = "00000000-0000-4000-8000-000000000002";
+        let other = "00000000-0000-4000-8000-000000000003";
+        for backend in ["native", "firecracker", "auto"] {
+            let mut settings: AgentSettings = serde_json::from_value(serde_json::json!({
+                "name": "Reserved", "access": { "backend": backend, "nodes": [allowed], "mcpTools": {} },
+                "exclusiveNodes": [allowed, other, allowed], "plugins": [],
+            }))
+            .unwrap();
+            settings.validate().unwrap();
+            assert_eq!(settings.exclusive_nodes, vec![allowed]);
+            settings.access.nodes = Some(vec![]);
+            settings.validate().unwrap();
+            assert!(settings.exclusive_nodes.is_empty());
+        }
+    }
 
     #[test]
     fn agent_corpus_shares_defaults_and_rejects_invalid_profiles() {

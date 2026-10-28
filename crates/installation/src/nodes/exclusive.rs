@@ -27,7 +27,7 @@ fn pending_requests(db: &Db<'_>) -> Result<Vec<Value>> {
 pub fn acquire_tool() -> Value {
     json!({
         "name": "acquire_exclusive",
-        "description": "Reserve this execution node exclusively for this run and explicitly included active dependencies. Cairn suspends other VMs without restarting their commands, blocks new work and confirms acquisition only after the controller acknowledges suspension and the requested RAM headroom. Requires the installation owner's explicit node permission. Use for CPU-intensive local work; release before remote waiting. Requests queue fairly and expire automatically; existing commands, security leases and external services retain their own semantics. Repeating the same request does not extend its duration. Memory reclamation is capability-qualified and fails explicitly when unavailable.",
+        "description": "Reserve this execution node exclusively for this run and explicitly included active dependencies. Cairn suspends other Cairn workloads without restarting their commands, blocks new work and confirms acquisition only after the controller acknowledges suspension and the requested RAM headroom. Requires the installation owner's explicit node permission. Native reservations leave external host applications and GPU allocations unchanged; administrator enforcement is cooperative. Use for CPU-intensive local work; release before remote waiting. Requests queue fairly and expire automatically; existing commands, security leases and external services retain their own semantics. Repeating the same request does not extend its duration. Memory reclamation is capability-qualified and fails explicitly when unavailable.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -150,10 +150,15 @@ fn authorize_run(db: &Db<'_>, run: &Value, node_id: &str) -> Result<String> {
         .as_str()
         .unwrap_or(super::LOCAL_NODE_ID)
         != node_id
-        || checkpoint["prepared"]["backend"] != "firecracker"
+        || checkpoint["prepared"]["backend"]
+            != if crate::native::policy::node_native(&node) {
+                "native"
+            } else {
+                "firecracker"
+            }
     {
         return Err(Error::conflict(
-            "Exclusivity requires an active VM on this node.",
+            "Exclusivity requires an active execution of this node's backend.",
         ));
     }
     let attempt = text(&checkpoint, "runnerId");

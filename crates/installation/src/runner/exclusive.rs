@@ -18,7 +18,7 @@ const MAX_MEMBERS: usize = 32;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct Acquisition {
+pub(crate) struct Acquisition {
     pub id: String,
     pub epoch: u64,
     pub owner_attempt_id: String,
@@ -98,18 +98,18 @@ impl Acquisition {
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct Release {
+pub(crate) struct Release {
     pub id: String,
     pub epoch: u64,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct Ledger {
+pub(crate) struct Ledger {
     #[serde(default)]
     highest_epoch: u64,
     #[serde(default)]
-    reservation: Option<Reservation>,
+    pub(crate) reservation: Option<Reservation>,
     #[serde(default)]
     last_released: Option<(String, u64)>,
     #[serde(skip)]
@@ -118,8 +118,8 @@ pub(super) struct Ledger {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Reservation {
-    request: Acquisition,
+pub(crate) struct Reservation {
+    pub(crate) request: Acquisition,
     created_at: i64,
     #[serde(default)]
     created_boot_ms: u64,
@@ -128,7 +128,7 @@ struct Reservation {
     state: String,
     #[serde(default)]
     #[serde(rename = "pausedAttemptIds")]
-    paused_attempts: Vec<String>,
+    pub(crate) paused_attempts: Vec<String>,
 }
 
 impl Reservation {
@@ -178,12 +178,38 @@ fn boot_deadline(duration: u64) -> Result<(u64, u64)> {
     Ok((boot, deadline))
 }
 
-impl Broker {
+/// Shared durable reservation protocol; runtimes own admission and CPU transitions.
+#[async_trait::async_trait]
+pub(crate) trait Reservations: Send + Sync + Sized {
+    fn state(&self) -> &std::path::Path;
+
+    fn admission(&self) -> &tokio::sync::Mutex<()>;
+
+    fn ledger(&self) -> &tokio::sync::Mutex<Ledger>;
+
+    fn stop_token(&self) -> &tokio_util::sync::CancellationToken;
+
+    fn check_exclusive(&self) -> Result<()>;
+
+    async fn active_attempts(&self) -> Vec<String>;
+
+    async fn validate_members(&self, request: &Acquisition) -> Result<()>;
+
+    async fn set_exclusive(&self, enabled: bool) -> Result<()>;
+
+    async fn qualify_exclusive_memory(&self, ledger: &Ledger, required: u64) -> Result<()>;
+
+    async fn transition_exclusive(&self, id: &str, reason: &Reason, paused: bool) -> Result<()>;
+
+    async fn stop_exclusive_attempt(&self, id: &str) -> Result<()>;
+
+    async fn administrative_ms(&self, id: &str) -> Result<u64>;
+
     async fn read_exclusive(&self, ledger: &mut Ledger) -> Result<()> {
         if ledger.loaded {
             return Ok(());
         }
-        match tokio::fs::read(self.state.join(FILE)).await {
+        match tokio::fs::read(self.state().join(FILE)).await {
             Ok(bytes) => *ledger = serde_json::from_slice(&bytes)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
@@ -193,8 +219,8 @@ impl Broker {
     }
 
     async fn save_exclusive(&self, ledger: &Ledger) -> Result<()> {
-        atomic_write(&self.state.join(FILE), &serde_json::to_vec(ledger)?).await?;
-        let state = self.state.clone();
+        atomic_write(&self.state().join(FILE), &serde_json::to_vec(ledger)?).await?;
+        let state = self.state().to_owned();
         tokio::task::spawn_blocking(move || std::fs::File::open(state)?.sync_all())
             .await
             .map_err(Error::internal)??;
@@ -202,9 +228,9 @@ impl Broker {
     }
 
     /// Startup has already fenced the previous controller's complete PID namespace.
-    pub async fn recover_exclusive(&self) -> Result<()> {
-        let _admission = self.admission.lock().await;
-        let mut ledger = self.exclusive.lock().await;
+    async fn recover_exclusive(&self) -> Result<()> {
+        let _admission = self.admission().lock().await;
+        let mut ledger = self.ledger().lock().await;
         self.read_exclusive(&mut ledger).await?;
         if let Some(reservation) = ledger.reservation.take() {
             ledger.last_released = Some((reservation.request.id, reservation.request.epoch));
@@ -214,8 +240,8 @@ impl Broker {
     }
 
     /// Called while holding admission, including throughout slow pool reservation.
-    pub async fn allow_exclusive_admission(&self, attempt: &str) -> Result<()> {
-        let mut ledger = self.exclusive.lock().await;
+    async fn allow_exclusive_admission(&self, attempt: &str) -> Result<()> {
+        let mut ledger = self.ledger().lock().await;
         self.read_exclusive(&mut ledger).await?;
         if ledger.reservation.as_ref().is_some_and(|reservation| {
             reservation.state != "acquired" || !reservation.request.contains(attempt)
@@ -227,7 +253,7 @@ impl Broker {
         Ok(())
     }
 
-    pub async fn acquire_exclusive(&self, mut request: Acquisition) -> Result<Value> {
+    async fn acquire_exclusive(&self, mut request: Acquisition) -> Result<Value> {
         request.minimum_available_memory_mi_b = request
             .minimum_available_memory_mi_b
             .filter(|value| *value > 0);
@@ -235,10 +261,10 @@ impl Broker {
         request.validate(received_at)?;
         let (received_boot_ms, deadline_boot_ms) =
             boot_deadline(request.duration_ms(received_at)?)?;
-        let _admission = self.admission.lock().await;
-        let mut ledger = self.exclusive.lock().await;
+        let _admission = self.admission().lock().await;
+        let mut ledger = self.ledger().lock().await;
         self.read_exclusive(&mut ledger).await?;
-        if self.stop.is_cancelled() {
+        if self.stop_token().is_cancelled() {
             return Err(Error::conflict("Node controller is stopping."));
         }
         if let Some(current) = &mut ledger.reservation {
@@ -287,6 +313,220 @@ impl Broker {
         self.exclusive_response(&ledger).await
     }
 
+    async fn confirm_exclusive(&self, ledger: &mut Ledger) -> Result<()> {
+        self.set_exclusive(true).await?;
+        let request = ledger.reservation.as_ref().unwrap().request.clone();
+        let attempts = self
+            .active_attempts()
+            .await
+            .into_iter()
+            .filter(|id| !request.contains(id))
+            .collect::<Vec<_>>();
+        for attempt in attempts {
+            // Persist every target before its CPU transition, including uncertain responses.
+            ledger
+                .reservation
+                .as_mut()
+                .unwrap()
+                .paused_attempts
+                .push(attempt.clone());
+            self.save_exclusive(ledger).await?;
+            self.transition_exclusive(&attempt, &request.pause_reason(), true)
+                .await?;
+        }
+        self.validate_members(&request).await?;
+        if ledger
+            .reservation
+            .as_ref()
+            .unwrap()
+            .expired(crate::nodes::boot_ms())
+            || self.stop_token().is_cancelled()
+        {
+            return Err(Error::conflict(
+                "Exclusive acquisition expired before confirmation.",
+            ));
+        }
+        if let Some(required) = request.minimum_available_memory_mi_b {
+            self.qualify_exclusive_memory(ledger, required).await?;
+        }
+        self.validate_members(&request).await?;
+        if ledger
+            .reservation
+            .as_ref()
+            .unwrap()
+            .expired(crate::nodes::boot_ms())
+            || self.stop_token().is_cancelled()
+        {
+            return Err(Error::conflict(
+                "Exclusive acquisition expired during memory qualification.",
+            ));
+        }
+        self.check_exclusive()?;
+        ledger.reservation.as_mut().unwrap().state = "acquired".into();
+        self.save_exclusive(ledger).await
+    }
+
+    async fn release_exclusive(&self, request: Release) -> Result<Value> {
+        uuid(&request.id)?;
+        let _admission = self.admission().lock().await;
+        let mut ledger = self.ledger().lock().await;
+        self.read_exclusive(&mut ledger).await?;
+        if let Some(current) = &ledger.reservation {
+            if current.request.id != request.id || current.request.epoch != request.epoch {
+                return Err(Error::conflict("Exclusive reservation was replaced."));
+            }
+            self.release_current(&mut ledger, false).await?;
+        } else if ledger.last_released.as_ref() != Some(&(request.id.clone(), request.epoch)) {
+            if request.epoch == 0 || request.epoch < ledger.highest_epoch {
+                return Err(Error::conflict("Exclusive reservation was replaced."));
+            }
+            // A release that overtakes its acquisition installs a durable tombstone.
+            // A late HTTP request with this epoch can never close admission again.
+            ledger.highest_epoch = request.epoch;
+            ledger.last_released = Some((request.id, request.epoch));
+            self.save_exclusive(&ledger).await?;
+        }
+        self.exclusive_response(&ledger).await
+    }
+
+    /// Fence the privileged group before returning peers to the shared envelope.
+    async fn release_current(&self, ledger: &mut Ledger, rollback: bool) -> Result<()> {
+        let Some(reservation) = ledger.reservation.as_mut() else {
+            return Ok(());
+        };
+        let request = reservation.request.clone();
+        reservation.state = "releasing".into();
+        self.save_exclusive(ledger).await?;
+        if !rollback {
+            for id in std::iter::once(&request.owner_attempt_id).chain(&request.member_attempt_ids)
+            {
+                if self
+                    .transition_exclusive(id, &request.pause_reason(), true)
+                    .await
+                    .is_err()
+                {
+                    // An uncertain CPU fence is settled by reaping the privileged VMM.
+                    self.stop_exclusive_attempt(id).await?;
+                }
+            }
+        }
+        let peers = ledger.reservation.as_ref().unwrap().paused_attempts.clone();
+        for id in peers {
+            if self
+                .transition_exclusive(&id, &request.pause_reason(), false)
+                .await
+                .is_err()
+            {
+                // A failed VM cannot hold healthy neighbors suspended indefinitely.
+                // Reap it before considering its CPU fence released.
+                self.stop_exclusive_attempt(&id).await?;
+            }
+        }
+        for id in std::iter::once(&request.owner_attempt_id).chain(&request.member_attempt_ids) {
+            self.transition_exclusive(id, &request.pause_reason(), false)
+                .await?;
+        }
+        self.set_exclusive(false).await?;
+        ledger.last_released = Some((request.id, request.epoch));
+        ledger.reservation = None;
+        self.save_exclusive(ledger).await
+    }
+
+    async fn administrative_pause(&self, attempt: &str) -> Result<Value> {
+        uuid(attempt)?;
+        Ok(json!({
+            "administrativePausedMs": self.administrative_ms(attempt).await?
+        }))
+    }
+
+    async fn exclusive_response(&self, ledger: &Ledger) -> Result<Value> {
+        let attempts = self.active_attempts().await;
+        let mut administrative = BTreeMap::new();
+        for attempt in attempts {
+            administrative.insert(attempt.clone(), self.administrative_ms(&attempt).await?);
+        }
+        Ok(json!({
+            "reservation": ledger.reservation.as_ref().map(Reservation::public).transpose()?,
+            "highestEpoch": ledger.highest_epoch,
+            "administrativePausedMs": administrative
+        }))
+    }
+
+    async fn inspect_exclusive(&self) -> Result<Value> {
+        // Read the last durable transition without waiting behind a slow VM pause.
+        let ledger = match tokio::fs::read(self.state().join(FILE)).await {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ledger::default(),
+            Err(error) => return Err(error.into()),
+        };
+        self.exclusive_response(&ledger).await
+    }
+
+    async fn monitor_exclusive(self) {
+        loop {
+            tokio::select! {
+                () = self.stop_token().cancelled() => return,
+                () = tokio::time::sleep(Duration::from_millis(500)) => {}
+            }
+            let _admission = self.admission().lock().await;
+            let mut ledger = self.ledger().lock().await;
+            if let Err(error) = self.read_exclusive(&mut ledger).await {
+                tracing::error!(message = %error.message, "Could not load exclusive reservation");
+                continue;
+            }
+            let release = match &ledger.reservation {
+                Some(reservation) => {
+                    reservation.state != "acquired"
+                        || reservation.expired(crate::nodes::boot_ms())
+                        || self.validate_members(&reservation.request).await.is_err()
+                }
+                None => false,
+            };
+            if release && let Err(error) = self.release_current(&mut ledger, false).await {
+                tracing::warn!(message = %error.message, "Exclusive release remains pending");
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Reservations for Broker {
+    fn state(&self) -> &std::path::Path {
+        &self.state
+    }
+
+    fn admission(&self) -> &tokio::sync::Mutex<()> {
+        &self.admission
+    }
+
+    fn ledger(&self) -> &tokio::sync::Mutex<Ledger> {
+        &self.exclusive
+    }
+
+    fn stop_token(&self) -> &tokio_util::sync::CancellationToken {
+        &self.stop
+    }
+
+    fn check_exclusive(&self) -> Result<()> {
+        self.pool.ensure_not_quarantined()
+    }
+
+    async fn active_attempts(&self) -> Vec<String> {
+        self.active.lock().await.keys().cloned().collect()
+    }
+
+    async fn set_exclusive(&self, enabled: bool) -> Result<()> {
+        self.pool.set_exclusive(enabled).await
+    }
+
+    async fn stop_exclusive_attempt(&self, id: &str) -> Result<()> {
+        self.stop(id).await
+    }
+
+    async fn administrative_ms(&self, id: &str) -> Result<u64> {
+        suspension::administrative_suspended_ms(&self.state, id).await
+    }
+
     async fn validate_members(&self, request: &Acquisition) -> Result<()> {
         let active = self.active.lock().await;
         for id in std::iter::once(&request.owner_attempt_id).chain(&request.member_attempt_ids) {
@@ -308,73 +548,6 @@ impl Broker {
             }
         }
         Ok(())
-    }
-
-    async fn confirm_exclusive(&self, ledger: &mut Ledger) -> Result<()> {
-        self.pool.set_exclusive(true).await?;
-        let request = ledger.reservation.as_ref().unwrap().request.clone();
-        let attempts = self
-            .active
-            .lock()
-            .await
-            .keys()
-            .filter(|id| !request.contains(id))
-            .cloned()
-            .collect::<Vec<_>>();
-        for attempt in attempts {
-            // Persist every target before its CPU transition, including uncertain responses.
-            ledger
-                .reservation
-                .as_mut()
-                .unwrap()
-                .paused_attempts
-                .push(attempt.clone());
-            self.save_exclusive(ledger).await?;
-            self.transition_exclusive(&attempt, &request.pause_reason(), true)
-                .await?;
-        }
-        self.validate_members(&request).await?;
-        if ledger
-            .reservation
-            .as_ref()
-            .unwrap()
-            .expired(crate::nodes::boot_ms())
-            || self.stop.is_cancelled()
-        {
-            return Err(Error::conflict(
-                "Exclusive acquisition expired before confirmation.",
-            ));
-        }
-        if let Some(required) = request.minimum_available_memory_mi_b {
-            self.qualify_exclusive_memory(ledger, required).await?;
-        }
-        self.validate_members(&request).await?;
-        if ledger
-            .reservation
-            .as_ref()
-            .unwrap()
-            .expired(crate::nodes::boot_ms())
-            || self.stop.is_cancelled()
-        {
-            return Err(Error::conflict(
-                "Exclusive acquisition expired during memory qualification.",
-            ));
-        }
-        self.pool.ensure_not_quarantined()?;
-        ledger.reservation.as_mut().unwrap().state = "acquired".into();
-        self.save_exclusive(ledger).await
-    }
-
-    async fn exclusive_memory_headroom(&self) -> Result<u64> {
-        let budget = self.pool.budget().await.ok_or_else(|| {
-            Error::unavailable("Exclusive memory admission requires shared node budgets.")
-        })?;
-        let (usage, _) = self.pool.usage().await?;
-        let memory = usage["memoryMiB"]
-            .as_u64()
-            .ok_or_else(|| Error::unavailable("Node memory usage is unavailable."))?;
-        let host = crate::microvm::hibernation::available_host_memory_mib()?;
-        Ok(budget.limits.memory_mi_b.saturating_sub(memory).min(host))
     }
 
     async fn qualify_exclusive_memory(&self, ledger: &Ledger, required: u64) -> Result<()> {
@@ -446,130 +619,19 @@ impl Broker {
             .await
             .map_err(|_| Error::unavailable("VM suspension confirmation timed out."))?
     }
+}
 
-    pub async fn release_exclusive(&self, request: Release) -> Result<Value> {
-        uuid(&request.id)?;
-        let _admission = self.admission.lock().await;
-        let mut ledger = self.exclusive.lock().await;
-        self.read_exclusive(&mut ledger).await?;
-        if let Some(current) = &ledger.reservation {
-            if current.request.id != request.id || current.request.epoch != request.epoch {
-                return Err(Error::conflict("Exclusive reservation was replaced."));
-            }
-            self.release_current(&mut ledger, false).await?;
-        } else if ledger.last_released.as_ref() != Some(&(request.id.clone(), request.epoch)) {
-            if request.epoch == 0 || request.epoch < ledger.highest_epoch {
-                return Err(Error::conflict("Exclusive reservation was replaced."));
-            }
-            // A release that overtakes its acquisition installs a durable tombstone.
-            // A late HTTP request with this epoch can never close admission again.
-            ledger.highest_epoch = request.epoch;
-            ledger.last_released = Some((request.id, request.epoch));
-            self.save_exclusive(&ledger).await?;
-        }
-        self.exclusive_response(&ledger).await
-    }
-
-    /// Fence the privileged group before returning peers to the shared envelope.
-    async fn release_current(&self, ledger: &mut Ledger, rollback: bool) -> Result<()> {
-        let Some(reservation) = ledger.reservation.as_mut() else {
-            return Ok(());
-        };
-        let request = reservation.request.clone();
-        reservation.state = "releasing".into();
-        self.save_exclusive(ledger).await?;
-        if !rollback {
-            for id in std::iter::once(&request.owner_attempt_id).chain(&request.member_attempt_ids)
-            {
-                if self
-                    .transition_exclusive(id, &request.pause_reason(), true)
-                    .await
-                    .is_err()
-                {
-                    // An uncertain CPU fence is settled by reaping the privileged VMM.
-                    self.stop(id).await?;
-                }
-            }
-        }
-        let peers = ledger.reservation.as_ref().unwrap().paused_attempts.clone();
-        for id in peers {
-            if self
-                .transition_exclusive(&id, &request.pause_reason(), false)
-                .await
-                .is_err()
-            {
-                // A failed VM cannot hold healthy neighbors suspended indefinitely.
-                // Reap it before considering its CPU fence released.
-                self.stop(&id).await?;
-            }
-        }
-        for id in std::iter::once(&request.owner_attempt_id).chain(&request.member_attempt_ids) {
-            self.transition_exclusive(id, &request.pause_reason(), false)
-                .await?;
-        }
-        self.pool.set_exclusive(false).await?;
-        ledger.last_released = Some((request.id, request.epoch));
-        ledger.reservation = None;
-        self.save_exclusive(ledger).await
-    }
-
-    pub async fn administrative_pause(&self, attempt: &str) -> Result<Value> {
-        uuid(attempt)?;
-        Ok(json!({
-            "administrativePausedMs": suspension::administrative_suspended_ms(&self.state, attempt).await?
-        }))
-    }
-
-    async fn exclusive_response(&self, ledger: &Ledger) -> Result<Value> {
-        let attempts = self.active.lock().await.keys().cloned().collect::<Vec<_>>();
-        let mut administrative = BTreeMap::new();
-        for attempt in attempts {
-            administrative.insert(
-                attempt.clone(),
-                suspension::administrative_suspended_ms(&self.state, &attempt).await?,
-            );
-        }
-        Ok(json!({
-            "reservation": ledger.reservation.as_ref().map(Reservation::public).transpose()?,
-            "highestEpoch": ledger.highest_epoch,
-            "administrativePausedMs": administrative
-        }))
-    }
-
-    pub async fn inspect_exclusive(&self) -> Result<Value> {
-        // Read the last durable transition without waiting behind a slow VM pause.
-        let ledger = match tokio::fs::read(self.state.join(FILE)).await {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ledger::default(),
-            Err(error) => return Err(error.into()),
-        };
-        self.exclusive_response(&ledger).await
-    }
-
-    pub async fn monitor_exclusive(self) {
-        loop {
-            tokio::select! {
-                () = self.stop.cancelled() => return,
-                () = tokio::time::sleep(Duration::from_millis(500)) => {}
-            }
-            let _admission = self.admission.lock().await;
-            let mut ledger = self.exclusive.lock().await;
-            if let Err(error) = self.read_exclusive(&mut ledger).await {
-                tracing::error!(message = %error.message, "Could not load exclusive reservation");
-                continue;
-            }
-            let release = match &ledger.reservation {
-                Some(reservation) => {
-                    reservation.state != "acquired"
-                        || reservation.expired(crate::nodes::boot_ms())
-                        || self.validate_members(&reservation.request).await.is_err()
-                }
-                None => false,
-            };
-            if release && let Err(error) = self.release_current(&mut ledger, false).await {
-                tracing::warn!(message = %error.message, "Exclusive release remains pending");
-            }
-        }
+impl Broker {
+    async fn exclusive_memory_headroom(&self) -> Result<u64> {
+        let budget = self.pool.budget().await.ok_or_else(|| {
+            Error::unavailable("Exclusive memory admission requires shared node budgets.")
+        })?;
+        let (usage, _) = self.pool.usage().await?;
+        let memory = usage["memoryMiB"]
+            .as_u64()
+            .ok_or_else(|| Error::unavailable("Node memory usage is unavailable."))?;
+        let host = crate::microvm::hibernation::available_host_memory_mib()?;
+        Ok(budget.limits.memory_mi_b.saturating_sub(memory).min(host))
     }
 }
 

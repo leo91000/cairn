@@ -145,19 +145,9 @@ pub(super) async fn apply_budget(budget: &crate::microvm::budget::Budget) -> Res
             "Could not start the shared native workload slice.",
         ));
     }
-    let usage = output(
-        "/usr/bin/systemctl",
-        &["show", &slice, "--property=MemoryCurrent", "--value"],
-    )
-    .await?;
-    let current = std::str::from_utf8(&usage.stdout)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok());
-    let current = current
-        .filter(|value| *value != u64::MAX)
-        .ok_or_else(|| Error::unavailable("Native shared memory usage is unavailable."))?;
+    let current = memory_current().await?;
     let memory = budget.limits.memory_mi_b.saturating_mul(1_048_576);
-    if !usage.status.success() || current > memory {
+    if current > memory {
         return Err(Error::conflict(
             "Shared native RAM budget is below current usage.",
         ));
@@ -171,6 +161,46 @@ pub(super) async fn apply_budget(budget: &crate::microvm::budget::Budget) -> Res
         ));
     }
     Ok(())
+}
+
+/// Actual aggregate workload RAM; freezing peers does not free their memory.
+pub(super) async fn memory_current() -> Result<u64> {
+    let slice = workload_slice()?;
+    let usage = output(
+        "/usr/bin/systemctl",
+        &["show", &slice, "--property=MemoryCurrent", "--value"],
+    )
+    .await?;
+    if !usage.status.success() {
+        return Err(Error::unavailable(
+            "Native shared memory usage is unavailable.",
+        ));
+    }
+    std::str::from_utf8(&usage.stdout)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value != u64::MAX)
+        .ok_or_else(|| Error::unavailable("Native shared memory usage is unavailable."))
+}
+
+pub(super) async fn wait_started(
+    attempt: &str,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let unit = unit(attempt)?;
+    let arguments = ["show", &unit, "--property=ActiveState", "--value"];
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            tokio::select! {
+                () = stop.cancelled() => return Err(Error::conflict("Native execution stopped before CPU control was ready.")),
+                result = output("/usr/bin/systemctl", &arguments) => {
+                    let result = result?;
+                    if result.status.success() && result.stdout == b"active\n" { return Ok(()); }
+                },
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await.map_err(|_| Error::timeout("Native workload startup was not confirmed."))?
 }
 
 fn budget_properties(budget: &crate::microvm::budget::Budget) -> Vec<String> {

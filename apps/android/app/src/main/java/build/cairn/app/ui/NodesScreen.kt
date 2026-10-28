@@ -908,7 +908,7 @@ internal fun NodeEditor(
                     }
                 }
             }
-        if (node.capabilities.backend != NATIVE_BACKEND && !node.exclusiveReservations)
+        if (!node.exclusiveReservations)
             Text(
                 "Mettez à jour le runtime de cette machine pour activer les réservations exclusives.",
                 style = MaterialTheme.typography.bodySmall,

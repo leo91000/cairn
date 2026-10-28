@@ -21,11 +21,12 @@ export function evidenceArtifact(tree) {
   return `validated-image-${tree}`
 }
 
-// Write access is required to push a branch of this repository, as it is to push
-// main. Fork pull requests and manual runs can never supply release proof.
+// Scheduled validation runs on main. Historical main/PR runs remain usable;
+// fork pull requests and manual runs can never supply release proof.
 export function trustedRun(run, { repository }) {
   const sameRepository = run.head_repository?.full_name?.toLowerCase() === repository.toLowerCase()
-  const validation = run.event === 'pull_request' || (run.event === 'push' && run.head_branch === 'main')
+  const mainValidation = ['push', 'schedule'].includes(run.event) && run.head_branch === 'main'
+  const validation = run.event === 'pull_request' || mainValidation
   return sameRepository && validation && run.path === '.github/workflows/ci.yaml'
 }
 
@@ -93,7 +94,6 @@ export async function resolveRelease(config, {
   const query = new URLSearchParams({
     head_sha: config.commit,
     branch: 'main',
-    event: 'push',
     per_page: '30',
   })
   let discoveryAttempts = 0
@@ -138,8 +138,8 @@ if (import.meta.main) {
     served: process.env.SERVED_FOUND === 'true' ? { claude: process.env.SERVED_CLAUDE, opencode: process.env.SERVED_OPENCODE } : null,
   }
   let result = null
-  // Pull requests always validate. Main reuses an identical pull request tree;
-  // a tag can also wait for the main run of its own commit.
+  // A tag can reuse or wait for scheduled qualification of its exact tree.
+  // Manual and scheduled runs perform the complete qualification themselves.
   if (process.env.GITHUB_EVENT_NAME === 'push') {
     try {
       result = await resolveRelease(config, {

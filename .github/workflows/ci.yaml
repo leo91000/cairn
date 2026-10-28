@@ -1,9 +1,9 @@
 name: Quality and container
 on:
   push:
-    branches: [main]
     tags: ['v*']
-  pull_request:
+  schedule:
+    - cron: '17 2 * * *'
   workflow_dispatch:
     inputs:
       browser-workers:
@@ -120,20 +120,14 @@ jobs:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt && rustup default 1.97.1
       - name: Check formatting, lint, tests and frontend build
-        run: pnpm check
+        run: pnpm validate:pr quality
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
       - uses: gradle/actions/setup-gradle@v5
-      - name: Regenerate Rust-owned contracts without a diff
-        run: pnpm check:contracts
-      - name: Decode the shared corpus with generated Kotlin models
-        run: apps/android/gradlew -p scripts/contracts-kotlin spotlessCheck test --no-daemon
-      - name: Check generated API schemas
-        run: |
-          node --import tsx scripts/backend-schemas.mjs
-          git diff --exit-code -- crates/installation/schemas/
+      - name: Validate shared contracts and generated schemas
+        run: pnpm validate:pr contracts
       - name: Check the C3 candidate-selection snapshot model
         run: python3 -m unittest discover -s scripts/tests -p test_chat_candidates_study.py -v
       - name: Check native reference selection for all workflow events
@@ -160,7 +154,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
       - uses: ./.github/actions/cache-rust
       - name: Check all Rust targets, including the required ublk transport
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: pnpm validate:pr rust
   backend:
     services:
       postgres:
@@ -1101,7 +1095,7 @@ jobs:
           digest: ${{ needs.beacon-image.outputs.digest }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Record the validated image
-        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        if: github.ref == 'refs/heads/main' && github.event_name == 'schedule'
         env:
           IMAGE_DIGEST: ${{ needs.image.outputs.digest }}
           BEACON_IMAGE_DIGEST: ${{ needs.beacon-image.outputs.digest }}
@@ -1120,7 +1114,7 @@ jobs:
           writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 3, beaconDigest: process.env.BEACON_IMAGE_DIGEST, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), tree: process.env.GIT_TREE, commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION, claude: process.env.CLAUDE_VERSION, opencode: process.env.OPENCODE_VERSION }, served: process.env.SERVED_FOUND === 'true' ? { claude: process.env.SERVED_CLAUDE, opencode: process.env.SERVED_OPENCODE } : null }))
           JS
       - uses: actions/upload-artifact@v7.0.1
-        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        if: github.ref == 'refs/heads/main' && github.event_name == 'schedule'
         with:
           name: ${{ needs.resolve.outputs.artifact }}
           path: release-evidence/image.json
