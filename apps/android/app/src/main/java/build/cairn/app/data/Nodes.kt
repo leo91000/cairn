@@ -188,6 +188,13 @@ fun nodeHealth(node: ExecutionNode, now: Long = System.currentTimeMillis()): Nod
             "À vérifier",
             "Le changement de privilèges a échoué",
         )
+    // Supervisors without the privilege protocol never confirm a mode: the status stays pending.
+    if (native && node.capabilities.nativeModeProtocol != 1L)
+        return NodeHealth(
+            NodeHealthState.ATTENTION,
+            "À vérifier",
+            "Mettez à jour le superviseur pour confirmer les privilèges",
+        )
     if (native && node.nativeModeStatus == "pending")
         return NodeHealth(
             NodeHealthState.UPDATING,

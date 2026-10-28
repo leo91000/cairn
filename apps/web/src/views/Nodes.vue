@@ -85,6 +85,7 @@ const showRevoked = ref(false)
 // The machine shown in the side panel, followed through polling by its id.
 const openedId = ref<string | null>(null)
 const machinesHeading = ref<HTMLElement>()
+const loaded = ref(false)
 const opened = computed(() => nodes.value.find(node => node.id === openedId.value) ?? null)
 const active = computed(() => nodes.value.filter(node => !node.revoked))
 const revoked = computed(() => nodes.value.filter(node => node.revoked))
@@ -101,6 +102,7 @@ let grantAfterConfigure: string | null = null
 async function load() {
   try {
     nodes.value = await api<ExecutionNode[]>('/nodes')
+    loaded.value = true
     if (nodes.value.some(node => node.capabilities.backend === 'native'))
       nativeCallers.value = await api('/nodes/native-callers')
   }
@@ -118,6 +120,8 @@ async function load() {
   if (connected) {
     enrollment.value = null
     adding.value = false
+    // The new machine's setup dialogs follow; a panel about another machine would sit beneath them.
+    openedId.value = null
     notify(`${connected.name} is connected`)
     if (replacing.value) {
       replacement = { previous: replacing.value.id, next: connected.id }
@@ -181,6 +185,12 @@ function switchBackend(node: ExecutionNode) {
   enrollment.value = null
   error.value = ''
   adding.value = true
+}
+
+// An error from an earlier action belongs to the machine it concerned.
+function openNode(node: ExecutionNode) {
+  error.value = ''
+  openedId.value = node.id
 }
 
 // The switch continues in its own steps; the panel would show the node being replaced.
@@ -394,32 +404,34 @@ function revoke() {
         </UiButton>
       </div>
     </header>
-    <dl class="mb-5 grid grid-cols-3 gap-3 phone:gap-2" aria-label="Fleet summary">
-      <div class="rounded-xl border border-line bg-surface flex flex-col-reverse px-4 py-3 phone:px-3">
-        <dt class="text-xs text-muted">
-          connected
-        </dt>
-        <dd class="font-heading text-xl font-bold tabular-nums">
-          {{ live.length }}<span class="text-sm font-normal text-muted"> / {{ active.length }}</span>
-        </dd>
-      </div>
-      <div class="rounded-xl border border-line bg-surface flex flex-col-reverse px-4 py-3 phone:px-3">
-        <dt class="text-xs text-muted">
-          slots in use
-        </dt>
-        <dd class="font-heading text-xl font-bold tabular-nums">
-          {{ usedSlots }}<span class="text-sm font-normal text-muted"> / {{ totalSlots }}</span>
-        </dd>
-      </div>
-      <div class="rounded-xl border bg-surface flex flex-col-reverse px-4 py-3 phone:px-3" :class="attention ? 'border-coral/40' : 'border-line'">
-        <dt class="text-xs text-muted">
-          {{ attention === 1 ? 'needs attention' : 'need attention' }}
-        </dt>
-        <dd class="font-heading text-xl font-bold tabular-nums" :class="{ 'text-coral': attention }">
-          {{ attention }}
-        </dd>
-      </div>
-    </dl>
+    <section aria-label="Fleet summary">
+      <dl class="mb-5 grid grid-cols-3 gap-3 phone:gap-2">
+        <div class="rounded-xl border border-line bg-surface flex flex-col-reverse px-4 py-3 phone:px-3">
+          <dt class="text-xs text-muted">
+            connected
+          </dt>
+          <dd class="font-heading text-xl font-bold tabular-nums">
+            {{ live.length }}<span class="text-sm font-normal text-muted"> / {{ active.length }}</span>
+          </dd>
+        </div>
+        <div class="rounded-xl border border-line bg-surface flex flex-col-reverse px-4 py-3 phone:px-3">
+          <dt class="text-xs text-muted">
+            slots in use
+          </dt>
+          <dd class="font-heading text-xl font-bold tabular-nums">
+            {{ usedSlots }}<span class="text-sm font-normal text-muted"> / {{ totalSlots }}</span>
+          </dd>
+        </div>
+        <div class="rounded-xl border bg-surface flex flex-col-reverse px-4 py-3 phone:px-3" :class="attention ? 'border-coral/40' : 'border-line'">
+          <dt class="text-xs text-muted">
+            {{ attention === 1 ? 'needs attention' : 'need attention' }}
+          </dt>
+          <dd class="font-heading text-xl font-bold tabular-nums" :class="{ 'text-coral': attention }">
+            {{ attention }}
+          </dd>
+        </div>
+      </dl>
+    </section>
     <UiAlert v-if="error && !adding" class="mb-4">
       {{ error }}
     </UiAlert>
@@ -505,25 +517,28 @@ function revoke() {
         </div>
       </section>
     </Modal>
+    <h2
+      id="machines-heading"
+      ref="machinesHeading"
+      class="eyebrow mb-3 rounded focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+      tabindex="-1"
+    >
+      Machines
+    </h2>
     <section class="overflow-hidden rounded-2xl border border-line bg-surface shadow-arcade" aria-labelledby="machines-heading">
-      <h2
-        id="machines-heading"
-        ref="machinesHeading"
-        class="sr-only"
-        tabindex="-1"
-      >
-        Machines
-      </h2>
       <div class="grid grid-cols-[minmax(0,1fr)_7rem_5.5rem_8.5rem_4.5rem_1rem] gap-4 bg-inset px-4.5 py-2 text-[10.5px] tracking-[.06em] text-muted uppercase tablet:grid-cols-[minmax(0,1fr)_7rem_5.5rem_1rem] phone:hidden" aria-hidden="true">
         <span>Machine</span><span>Runtime</span><span>Slots</span><span class="tablet:hidden">Usage</span><span class="tablet:hidden">Agents</span><span />
       </div>
       <ul aria-label="Machines" class="[&>li:first-child>button]:border-t-0">
         <li v-for="node in visible" :key="node.id">
-          <NodeRow :node="node" :selected="node.id === openedId" @open="openedId = node.id" />
+          <NodeRow :node="node" :selected="node.id === openedId" @open="openNode(node)" />
         </li>
       </ul>
-      <p v-if="!visible.length" class="px-4.5 py-6 text-sm text-muted">
-        No machine yet. Add one to run your agents’ conversations on it.
+      <p v-if="!loaded" class="px-4.5 py-6 text-sm text-muted" role="status">
+        Loading machines…
+      </p>
+      <p v-else-if="!visible.length" class="px-4.5 py-6 text-sm text-muted">
+        {{ revoked.length ? 'No active machine. Revoked machines are hidden.' : 'No machine yet. Add one to run your agents’ conversations on it.' }}
       </p>
     </section>
     <UiButton
@@ -805,6 +820,9 @@ function revoke() {
         <p v-if="revoking.capabilities.backend === 'native'" class="text-sm text-muted">
           If a conversation disk is still mounted, the command lists it and stops before deleting anything: start cairn-native-node so its recovery releases owned disks, then run the command again.
         </p>
+        <UiAlert v-if="error">
+          {{ error }}
+        </UiAlert>
         <div>
           <UiButton variant="danger" :disabled="busy" @click="revoke">
             Revoke node

@@ -244,7 +244,7 @@ test('registers, configures and revokes a node through the owner interface', asy
   // Connected and set up: whatever the runtime reports, it is neither offline nor waiting for setup.
   await expect(row.locator('[data-state]')).not.toHaveAttribute('data-state', /^(offline|setup|revoked)$/)
   await expect(row).not.toContainText('No agent can use this machine yet')
-  const summary = page.locator('dl[aria-label="Fleet summary"]')
+  const summary = page.getByRole('region', { name: 'Fleet summary' })
   await expect(summary.locator('div').filter({ hasText: 'connected' }).locator('dd')).toHaveText('1 / 1')
   await expect(summary.locator('div').filter({ hasText: 'slots in use' }).locator('dd')).toHaveText('0 / 4')
   // It asks only once: the next refresh leaves the machine alone.
@@ -262,6 +262,10 @@ test('registers, configures and revokes a node through the owner interface', asy
   await page.screenshot({ path: 'test-results/nodes-desktop-dark.png' })
   await page.setViewportSize({ width: 390, height: 844 })
   await page.screenshot({ path: 'test-results/nodes-phone.png', fullPage: true })
+  // On phones a row keeps the name and the free slots; the name gets the width.
+  const name = (await row.getByText('Browser Linux', { exact: true }).boundingBox())!
+  expect(name.width).toBeGreaterThan(70)
+  expect((await row.boundingBox())!.width).toBeLessThanOrEqual(390)
   await showSection(node, 'Storage')
   await node.getByRole('button', { name: 'Edit storage settings', exact: true }).click()
   const storage = page.getByRole('dialog', { name: 'Storage · Browser Linux' })
@@ -957,7 +961,7 @@ test('previews node administrator powers and keeps failed transitions visibly bl
   await expect(review).toHaveCount(0)
   await expect(card).toContainText('Change failed; new placements are blocked')
   await expect(row).toContainText('The privilege change failed')
-  await expect(page.locator('dl[aria-label="Fleet summary"]').locator('div').filter({ hasText: 'attention' }).locator('dd')).toHaveText('1')
+  await expect(page.getByRole('region', { name: 'Fleet summary' }).locator('div').filter({ hasText: 'attention' }).locator('dd')).toHaveText('1')
   await expect(card).toContainText('Last confirmed: Native protected')
   await expect(card).toContainText('Current privileges are unconfirmed')
   await expect(card).toContainText('Native protected')

@@ -4,6 +4,7 @@ import { computed, ref } from 'vue'
 import {
   formatBytes,
   formatMiB,
+  nativeModeLabel,
   nodeDiagnostics,
   nodeHealth,
   usedPercent,
@@ -49,7 +50,7 @@ const health = computed(() => nodeHealth(props.node))
 const diagnostics = computed(() => nodeDiagnostics(props.node))
 const native = computed(() => props.node.capabilities.backend === 'native')
 const slots = computed(() => props.node.slots ?? 0)
-const free = computed(() => props.node.availableSlots ?? Math.max(0, slots.value - (props.node.occupiedSlots ?? 0)))
+const free = computed(() => props.node.availableSlots ?? 0)
 const runtime = computed(() => `${props.node.local ? 'Built-in runner · ' : ''}${native.value ? 'Native process · shares the host GPU' : 'Firecracker VM'}`)
 const banner = computed(() => ({
   ready: 'bg-success/10 text-success',
@@ -114,6 +115,12 @@ const reserve = computed(() => {
                 {{ health.detail }}
               </p>
             </div>
+            <p v-if="native && node.nativeModeProposal" class="text-xs">
+              An agent requested {{ nativeModeLabel(node.nativeModeProposal.mode) }}.
+              <button type="button" class="font-semibold text-accent hover:underline" @click="section = 'access'">
+                Review the request
+              </button>
+            </p>
             <ul v-if="diagnostics.length" class="grid list-disc gap-1 pl-5 text-xs text-coral" :aria-label="`Why ${node.name} cannot take new work`">
               <li v-for="reason in diagnostics" :key="reason">
                 {{ reason }}

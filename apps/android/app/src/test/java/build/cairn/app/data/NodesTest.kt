@@ -87,10 +87,25 @@ class NodesTest {
         )
         val native =
             ready.copy(
-                capabilities = ready.capabilities.copy(backend = NATIVE_BACKEND, ublk = true)
+                capabilities =
+                    ready.capabilities.copy(
+                        backend = NATIVE_BACKEND,
+                        ublk = true,
+                        nativeModeProtocol = 1,
+                    )
             )
         assertEquals(NodeHealthState.SETUP, nodeHealth(native).state)
         val enabled = native.copy(nativeEnabled = true, nativeAccounts = listOf("person"))
+        assertEquals(
+            "Mettez à jour le superviseur pour confirmer les privilèges",
+            nodeHealth(
+                    enabled.copy(
+                        capabilities = enabled.capabilities.copy(nativeModeProtocol = 0),
+                        nativeModeStatus = "pending",
+                    )
+                )
+                .detail,
+        )
         assertEquals(
             "Un agent demande Natif administrateur",
             nodeHealth(

@@ -108,6 +108,9 @@ export function nodeHealth(node: ExecutionNode, now = Date.now()): NodeHealth {
   // A privilege change blocks placements until the supervisor confirms it.
   if (native && (node.nativeModeStatus === 'failed' || node.nativeModeObserved?.status === 'failed'))
     return { state: 'attention', label: 'Needs attention', detail: 'The privilege change failed' }
+  // Supervisors without the privilege protocol never confirm a mode: the status stays pending.
+  if (native && node.capabilities.nativeModeProtocol !== 1)
+    return { state: 'attention', label: 'Needs attention', detail: 'Update the supervisor to confirm privileges' }
   if (native && node.nativeModeStatus === 'pending')
     return { state: 'updating', label: 'Updating', detail: 'Privilege change in progress' }
   if (node.maintenance && node.maintenanceError)
@@ -131,7 +134,7 @@ export function nodeHealth(node: ExecutionNode, now = Date.now()): NodeHealth {
 
   const slots = node.slots ?? 0
   const running = node.occupiedSlots ?? 0
-  const free = node.availableSlots ?? Math.max(0, slots - running)
+  const free = node.availableSlots ?? 0
   if (slots > 0 && free <= 0)
     return { state: 'full', label: 'Full', detail: `All ${slots} slots in use` }
   return { state: 'ready', label: 'Ready', detail: running ? `${running} running · ${free} of ${slots} slots free` : `${free} of ${slots} slots free` }
