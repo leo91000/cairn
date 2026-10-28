@@ -1,4 +1,4 @@
-> Saved plugin bot approvals disappear with external delegation ([ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md)).
+> Statut : les approbations de bots de plugins disparaissent avec la délégation externe ([ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md)) ; la couverture des droits d’un agent délégué compare désormais les contributions et les ressources accordées, pas seulement les instances.
 
 # Delegated tasks across coding agents and models
 

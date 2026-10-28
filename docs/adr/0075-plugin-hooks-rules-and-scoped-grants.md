@@ -1,4 +1,4 @@
-> Remplace la délégation externe d’[ADR-0038](0038-luau-installation-plugins-and-external-bot-delegation.md), d’[ADR-0045](0045-declarative-plugin-contributions.md), d’[ADR-0046](0046-plugin-transports-and-forms-in-luau.md), d’[ADR-0057](0057-guided-plugin-setup.md), d’[ADR-0059](0059-delegated-tasks.md) et d’[ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) ; étend les droits par instance d’[ADR-0051](0051-agent-centric-permissions.md) et les rôles d’[ADR-0029](0029-sharing-whole-installations.md).
+> Remplace la délégation externe d’[ADR-0038](0038-luau-installation-plugins-and-external-bot-delegation.md), d’[ADR-0045](0045-declarative-plugin-contributions.md), d’[ADR-0046](0046-plugin-transports-and-forms-in-luau.md), d’[ADR-0057](0057-guided-plugin-setup.md), d’[ADR-0059](0059-delegated-tasks.md) et d’[ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) ; étend les droits par instance d’[ADR-0051](0051-agent-centric-permissions.md) et les rôles d’[ADR-0029](0029-sharing-whole-installations.md) ; précise [ADR-0064](0064-opt-in-installation-tools-for-agents.md).
 
 # Hooks de plugins, règles sans code et droits restreints par ressource
 
@@ -49,25 +49,32 @@ contributions une par une. Les outils, commandes et hooks accordés un par un pe
 `message` seulement pour #support. Un droit sur une ressource couvre ses descendants
 (un salon couvre ses fils). Cairn applique la restriction avant le plugin, à chaque
 appel d’outil, et ne livre pas à une règle un événement dont la payload désigne une
-autre ressource ; une entrée ou une payload qui ne désigne aucune ressource
-identifiable est refusée. Ce qui ne passe ni par une entrée ni par une payload
-(identifiants de run, instructions ajoutées au prompt, conditions d’attente)
-s’accorde aussi un par un, sans restriction. Rien n’est accordé par défaut.
+autre ressource. Quand une entrée ou une payload désigne plusieurs ressources, toutes
+doivent être couvertes ; si elle n’en désigne aucune identifiable, elle est refusée.
+Les identifiants de run et les instructions ajoutées au prompt s’accordent aussi un
+par un, sans restriction ; les conditions d’attente restent bornées par l’accès aux
+projets. Rien n’est accordé par défaut. `cairn_installation` peut lire et réduire ces
+droits, jamais les accorder.
 
 ### Accès des comptes aux agents
 
-Un membre ne fait travailler que les agents auxquels il a accès, et ne les utilise
-que comme agents d’exécution de ses règles. L’agent agit comme un rôle : y avoir
-accès, c’est pouvoir obtenir tout ce qu’il peut faire. Un agent qui a l’accès à
-l’installation la gère entière
+Un membre ne démarre, ne poursuit, n’oriente, ne lance à la main et n’utilise comme
+agent d’exécution d’une règle que les agents auxquels il a accès ; il continue de voir
+toutes les conversations ([ADR-0029](0029-sharing-whole-installations.md)). Ses
+tâches planifiées sur un agent auquel il perd l’accès sont suspendues comme ses
+règles. L’agent agit comme un rôle : y avoir accès, c’est pouvoir obtenir tout ce
+qu’il peut faire. Un agent qui a l’accès à l’installation la gère entière, avec
+l’autorité de gestion du propriétaire
 ([ADR-0064](0064-opt-in-installation-tools-for-agents.md)) : avoir accès à cet agent
-revient à avoir accès à tous les agents.
+revient à avoir accès à tous les agents, et ce qu’un membre lui fait créer survit à
+son départ.
 
-Seul le propriétaire donne ou retire ces accès, depuis l’interface ou le MCP public ;
-`cairn_installation` ne l’expose pas, par exception à la parité des interfaces, pour
-qu’aucun agent ne puisse le faire. Le propriétaire a accès à tous les agents ; un
-nouvel agent est accessible au propriétaire et à son créateur ; à la mise en place,
-les membres gardent l’accès aux agents existants.
+Seul le propriétaire donne ou retire ces accès, et seulement depuis le web et
+Android : comme la gestion des membres, ils sont exclus du MCP public et de
+`cairn_installation`, pour qu’aucun agent ni client externe ne puisse le faire. Le
+propriétaire a accès à tous les agents ; un nouvel agent n’est accessible qu’à lui. À
+la mise en place, les membres gardent l’accès aux agents existants. Ces accès
+appartiennent à une adhésion : réinviter un membre ne les rend pas.
 
 Les personnes externes (un auteur Discord) n’ont ni identité ni droit dans Cairn :
 elles ne sont qu’une donnée de la payload, que les conditions d’une règle examinent.
@@ -100,17 +107,18 @@ une règle qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l�
   chose : déclencher un agent avec une clé déjà liée échoue, et c’est l’arbre qui
   choisit d’orienter la conversation existante.
 - **Clé de conversation** : déclencher un agent peut rattacher la conversation à une
-  clé tirée de la payload (`discord:{{threadId}}`), unique dans l’installation.
-  Orienter, annuler, répondre à une question ou mémoriser une valeur sur la
-  conversation d’une clé exige que le créateur ait accès à l’agent de cette
-  conversation.
+  clé tirée de la payload (`discord:{{threadId}}`). Les clés appartiennent au créateur
+  de la règle : deux membres qui utilisent la même clé désignent deux conversations
+  différentes, et une règle n’atteint que les clés de son créateur. Orienter, annuler,
+  répondre à une question ou mémoriser une valeur sur la conversation d’une clé exige
+  en plus que le créateur ait accès à l’agent de cette conversation.
 - **Valeurs mémorisées** : soit sur une conversation, par sa clé, partagées par les
   règles qui la touchent et supprimées avec elle, soit propres à la règle.
 - **Hooks de Cairn** : Cairn émet quatre hooks pour les conversations rattachées à
   une clé : réponse prête (texte et livrables), question posée, progression (environ
   toutes les 8 secondes, une étape courte sans détail, une seule en attente par
   conversation) et fin (terminée, échouée ou annulée). Une règle ne les reçoit que
-  pour les conversations dont son créateur a accès à l’agent.
+  pour les clés de son créateur, et tant qu’il a accès à l’agent de la conversation.
 - **Conversations démarrées** : une conversation démarrée par une règle a son créateur
   pour auteur, qui ne la rend pas privée
   ([ADR-0029](0029-sharing-whole-installations.md)) ; elle note l’auteur externe
@@ -137,25 +145,31 @@ Les autres membres la voient sans pouvoir la modifier ; ils peuvent la dupliquer
 s’ils ont tous les droits qu’elle utilise, le duplicata leur appartenant et démarrant
 désactivé pour ne pas répondre deux fois au même événement. Le propriétaire peut
 supprimer n’importe quelle règle ou la mettre en pause en urgence, sans la modifier ;
-la pause arrête aussi ses exécutions en cours.
+la pause arrête aussi ses exécutions en cours, et seul le propriétaire la lève.
 
 Quand le créateur perd l’accès à l’agent d’exécution, ou que cet agent perd le hook
-écouté, la règle est suspendue, pas supprimée ; elle repart quand le droit revient.
+de plugin écouté, la règle est suspendue, pas supprimée ; elle repart quand le droit revient.
 Comme les tâches ([ADR-0029](0029-sharing-whole-installations.md)), une règle
 appartient à une adhésion : retirer, faire partir ou supprimer le créateur la
 désactive définitivement, et le réinviter ne la relance pas. Elle reste visible ; le
-propriétaire peut la supprimer et un membre la dupliquer.
+propriétaire peut la supprimer et un membre la dupliquer. Comme pour les tâches
+planifiées, une exécution exige une adhésion vérifiée récemment ; si elle ne peut pas
+l’être, l’exécution attend.
 
-Un agent qui a l’accès à l’installation peut créer des règles : leur créateur est le
-compte pour lequel il travaille, et non le propriétaire comme pour les missions. Il
-ne peut accorder de droits à aucun agent ni à aucun compte.
+Un agent qui a l’accès à l’installation peut créer des règles. Leur créateur est
+l’auteur de la conversation ou de la tâche dans laquelle il travaille ; pour une
+mission créée par un agent, c’est le propriétaire
+([ADR-0064](0064-opt-in-installation-tools-for-agents.md)). Il ne peut accorder de
+droits à aucun agent ni à aucun compte.
 
-Une règle n’utilise un agent qui peut s’exécuter en natif que si son créateur
-détient l’autorité native ([ADR-0050](0050-trusted-native-execution.md)) dans la
-requête authentifiée qui l’enregistre. Une requête de `cairn_installation`, ou du MCP
+Une règle n’atteint un agent dont la politique autorise l’exécution native, ou une
+conversation qui s’exécute en natif, que si son créateur détenait l’autorité native
+([ADR-0050](0050-trusted-native-execution.md)) dans la requête authentifiée qui a
+enregistré cette version de la règle. Une requête de `cairn_installation`, ou du MCP
 public sans autorité native, ne peut pas l’accorder, comme pour les tâches déléguées
-([ADR-0059](0059-delegated-tasks.md)). L’autorité est conservée avec la version de la
-règle et revérifiée à chaque exécution.
+([ADR-0059](0059-delegated-tasks.md)). L’autorité est conservée avec la version et
+revérifiée à chaque action qui résout, à l’exécution, un agent ou une conversation
+natifs ; sans elle, l’action échoue.
 
 ### Budget du moteur
 
@@ -169,8 +183,8 @@ quand une action provoque un hook de Cairn, ont en plus une profondeur maximale.
 Chaque exécution est limitée en nombre de pas (blocs et itérations) et d’appels
 d’outils, sans compter les attentes ; au dépassement, elle s’arrête en erreur.
 
-Une exécution qui se termine sans effet (aucun outil appelé, aucun agent déclenché ou
-orienté, rien mémorisé) ne compte pas dans les plafonds horaires et n’est pas gardée
+Une exécution qui se termine sans effet (aucune action exécutée en dehors des blocs et
+des conditions) ne compte pas dans les plafonds horaires et n’est pas gardée
 dans l’historique, qui n’en garde que le nombre : un salon actif n’épuise pas le
 budget de la règle. La progression, déjà cadencée par Cairn, ne compte pas non plus.
 
@@ -180,7 +194,8 @@ Les bots et délégations existants sont supprimés plutôt que convertis : la s
 installation qui les utilise est celle du propriétaire du projet. Leur suppression
 révoque leur travail en cours et ses descendants. Les droits existants d’un agent sur
 une instance deviennent un accès complet à cette instance, qui comprend désormais ses
-hooks.
+hooks : par choix du propriétaire, les membres peuvent donc écouter dès la mise en
+place les instances que leurs agents utilisent, jusqu’à ce qu’il réduise ces droits.
 
 ## Options écartées
 
@@ -214,6 +229,7 @@ par des inconnus. S’il a l’accès à l’installation, un auteur externe peu
 lui faire créer des règles au nom du créateur : un agent qui répond à un salon public
 ne devrait pas avoir cet accès.
 
-Comme toute capacité de l’interface, les règles (éditeur compris), les droits par
-ressource et l’accès des comptes aux agents arrivent sur le web, Android, le MCP
-public et `cairn_installation` en même temps, sauf l’exception ci-dessus.
+Comme toute capacité de l’interface, les règles (éditeur compris) et les droits par
+ressource arrivent sur le web, Android, le MCP public et `cairn_installation` en même
+temps, avec les limites ci-dessus : `cairn_installation` n’accorde aucun droit, et
+l’accès des comptes aux agents reste au web et à Android.

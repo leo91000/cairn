@@ -34,10 +34,10 @@ Le compte Cairn auquel l’installation est rattachée. Il est le seul à gérer
 Sans propriétaire, une installation redevient non revendiquée ; la propriété ne se transfère pas.
 
 **Autorisation MCP d’une installation** :
-L’accès qu’un propriétaire accorde à un client externe pour une seule installation et des droits précis. Les membres font travailler les agents depuis l’app, sans pouvoir accorder ni utiliser cet accès externe.
+L’accès qu’un propriétaire accorde à un client externe pour une seule installation et des droits précis. Les membres font travailler les agents auxquels ils ont accès depuis l’app, sans pouvoir accorder ni utiliser cet accès externe.
 
 **Accès d’un compte à un agent** :
-Le droit, donné par le propriétaire seul, de faire travailler un agent et de l’utiliser comme agent d’exécution d’une règle. L’agent agit comme un rôle : y avoir accès, c’est pouvoir obtenir tout ce qu’il peut faire. Le propriétaire a accès à tous les agents.
+Le droit, donné par le propriétaire seul, de faire travailler un agent et de l’utiliser comme agent d’exécution d’une règle. L’agent agit comme un rôle : y avoir accès, c’est pouvoir obtenir tout ce qu’il peut faire. Le propriétaire a accès à tous les agents ; un nouvel agent n’est accessible qu’à lui.
 
 **Membre d’une installation** :
 Un compte Cairn invité par le propriétaire. Il voit toutes les conversations de l’installation et fait travailler les agents auxquels le propriétaire lui donne accès, donc avec les comptes d’agent de code et les secrets du propriétaire, sans pouvoir les gérer.
@@ -261,7 +261,8 @@ _Avoid_ : scope, portée
 
 **Clé de conversation** :
 L’identifiant externe, tiré d’un hook, auquel une règle rattache une conversation, par
-exemple un fil Discord, pour la retrouver et l’orienter lors des hooks suivants.
+exemple un fil Discord, pour la retrouver et l’orienter lors des hooks suivants. Les
+clés appartiennent au créateur de la règle.
 _Avoid_ : thread, binding
 
 **Programme déclaré** :

@@ -20,6 +20,10 @@
   members, MCP authorizations and notification devices) are UI-only: keep web/Android
   parity, but exclude them from public MCP and `cairn_installation`. They act on a
   person's Cairn account, whose authority an installation grant does not confer.
+  Account access to agents is likewise owner-only on web/Android and excluded from
+  public MCP and `cairn_installation`; `cairn_installation` may read and reduce
+  agent grants but never widen them
+  ([ADR-0075](docs/adr/0075-plugin-hooks-rules-and-scoped-grants.md)).
 - Separate logical steps with blank lines. Give complex expressions descriptive
   intermediate names when that makes the flow easier to follow. Avoid arbitrary
   function-size limits or extracting helpers solely to reduce line counts.
