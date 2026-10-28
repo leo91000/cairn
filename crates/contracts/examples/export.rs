@@ -40,6 +40,7 @@ fn main() {
     export::<AccountCodeInput>(root, &mut generator, Contract::Deserialize);
     export::<AccountMutationOutput>(root, &mut generator, Contract::Deserialize);
     export::<ApiKeyProvider>(root, &mut generator, Contract::Deserialize);
+    export::<AccountProviderInput>(root, &mut generator, Contract::Deserialize);
     export::<ConnectAccountOutput>(root, &mut generator, Contract::Deserialize);
     let account_clients = serde_json::json!([
         {"name":"listCodingAgentAccounts","input":"ListAccountsInput","output":"CodingAgentAccounts","method":"GET","path":"/accounts"},

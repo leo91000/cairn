@@ -240,13 +240,15 @@ class AccountsJourneyTest {
                                 "\"maxConcurrentRuns\":${it.jsonPrimitive.int}",
                             )
                     }
-                    update["enabled"]?.takeIf { !it.jsonPrimitive.boolean }?.let {
-                        server.accounts[0] =
-                            server.accounts[0].replace(
-                                "\"status\":\"next\"",
-                                "\"status\":\"paused\",\"enabled\":false",
-                            )
-                    }
+                    update["enabled"]
+                        ?.takeIf { !it.jsonPrimitive.boolean }
+                        ?.let {
+                            server.accounts[0] =
+                                server.accounts[0].replace(
+                                    "\"status\":\"next\"",
+                                    "\"status\":\"paused\",\"enabled\":false",
+                                )
+                        }
                     server.accounts[0]
                 } else null
             },
@@ -271,7 +273,20 @@ class AccountsJourneyTest {
             }
             assertEquals(
                 5,
-                wireJson.parseToJsonElement(server.requests.first { it.first == "PUT /api/installations/fixture/api/accounts/work" }.second).jsonObject.getValue("settings").jsonObject.getValue("maxConcurrentRuns").jsonPrimitive.int,
+                wireJson
+                    .parseToJsonElement(
+                        server.requests
+                            .first {
+                                it.first == "PUT /api/installations/fixture/api/accounts/work"
+                            }
+                            .second
+                    )
+                    .jsonObject
+                    .getValue("settings")
+                    .jsonObject
+                    .getValue("maxConcurrentRuns")
+                    .jsonPrimitive
+                    .int,
             )
             waitText("EN COURS · 1 SUR 5")
             compose
@@ -285,7 +300,18 @@ class AccountsJourneyTest {
             }
             assertEquals(
                 false,
-                wireJson.parseToJsonElement(server.requests.last { it.first == "PUT /api/installations/fixture/api/accounts/work" }.second).jsonObject.getValue("settings").jsonObject.getValue("enabled").jsonPrimitive.boolean,
+                wireJson
+                    .parseToJsonElement(
+                        server.requests
+                            .last { it.first == "PUT /api/installations/fixture/api/accounts/work" }
+                            .second
+                    )
+                    .jsonObject
+                    .getValue("settings")
+                    .jsonObject
+                    .getValue("enabled")
+                    .jsonPrimitive
+                    .boolean,
             )
             waitText("En pause")
         }

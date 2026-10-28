@@ -868,9 +868,24 @@ class SignalPresentationTest {
     fun `connection summary reports coding agents without a usable account and the best capacity`() {
         val codex =
             listOf(
-                Account(id = "a", provider = "codex", name = "Perso", state = "ready", remainingPercent = 40.0),
-                Account(id = "b", provider = "codex", name = "Pro", state = "ready", remainingPercent = 70.0),
-                Account(id = "c", provider = "codex", name = "Off",
+                Account(
+                    id = "a",
+                    provider = "codex",
+                    name = "Perso",
+                    state = "ready",
+                    remainingPercent = 40.0,
+                ),
+                Account(
+                    id = "b",
+                    provider = "codex",
+                    name = "Pro",
+                    state = "ready",
+                    remainingPercent = 70.0,
+                ),
+                Account(
+                    id = "c",
+                    provider = "codex",
+                    name = "Off",
                     enabled = false,
                     state = "ready",
                     remainingPercent = 99.0,
@@ -913,22 +928,31 @@ class SignalPresentationTest {
             "5 heures",
             windowLabel(AccountWindow(id = "w", label = "5-hour window", durationMins = 300)),
         )
-        assertEquals("Semaine", windowLabel(AccountWindow(id = "w", label = "Weekly", durationMins = 10080)))
+        assertEquals(
+            "Semaine",
+            windowLabel(AccountWindow(id = "w", label = "Weekly", durationMins = 10080)),
+        )
         assertEquals(
             "Semaine · Opus",
             windowLabel(
-                AccountWindow(id = "w", label = "Weekly · Opus", durationMins = 10080, models = listOf("opus"))
+                AccountWindow(
+                    id = "w",
+                    label = "Weekly · Opus",
+                    durationMins = 10080,
+                    models = listOf("opus"),
+                )
             ),
         )
         assertEquals(40.0, AccountWindow(id = "w", usedPercent = 60.0).remaining, 0.0)
         assertEquals(0.0, AccountWindow(id = "w", usedPercent = 105.0).remaining, 0.0)
         val usage =
             AccountUsage(
-                windows = listOf(
-                    AccountWindow(id = "week", durationMins = 10080),
-                    AccountWindow(id = "opus", models = listOf("opus")),
-                    AccountWindow(id = "five", durationMins = 300),
-                )
+                windows =
+                    listOf(
+                        AccountWindow(id = "week", durationMins = 10080),
+                        AccountWindow(id = "opus", models = listOf("opus")),
+                        AccountWindow(id = "five", durationMins = 300),
+                    )
             )
         assertEquals(listOf("five", "week"), usage.general.map { it.id })
     }

@@ -35,21 +35,17 @@ import build.cairn.app.data.*
 import build.cairn.contracts.AccountCodeInput
 import build.cairn.contracts.AccountInput
 import build.cairn.contracts.AccountSettings
+import build.cairn.contracts.ConnectAccountInput
+import build.cairn.contracts.ListAccountsInput
 import build.cairn.contracts.ReplaceAccountInput
 import build.cairn.contracts.ReplaceAccountKeyInput
-import build.cairn.contracts.ConnectAccountInput
-import build.cairn.contracts.OrderAccountsInput
-import build.cairn.contracts.ListAccountsInput
-import build.cairn.contracts.listCodingAgentAccounts
-import build.cairn.contracts.refreshCodingAgentAccounts
-import build.cairn.contracts.connectCodingAgentAccount
-import build.cairn.contracts.reconnectCodingAgentAccount
-import build.cairn.contracts.replaceCodingAgentAccountKey
-import build.cairn.contracts.replaceCodingAgentAccount
-import build.cairn.contracts.orderCodingAgentAccounts
-import build.cairn.contracts.deleteCodingAgentAccount
-import build.cairn.contracts.submitCodingAgentAccountCode
 import build.cairn.contracts.cancelCodingAgentAccountSignIn
+import build.cairn.contracts.connectCodingAgentAccount
+import build.cairn.contracts.deleteCodingAgentAccount
+import build.cairn.contracts.reconnectCodingAgentAccount
+import build.cairn.contracts.replaceCodingAgentAccount
+import build.cairn.contracts.replaceCodingAgentAccountKey
+import build.cairn.contracts.submitCodingAgentAccountCode
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -58,7 +54,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
 
 /*
  * Coding-agent accounts: one list for Codex and Claude Code, a detail sheet per account and one
@@ -475,15 +470,20 @@ internal fun AccountSheet(
     }
     fun update(vararg fields: Pair<String, JsonPrimitive>) = vm.perform {
         val changes = fields.toMap()
-        api.replaceCodingAgentAccount(ReplaceAccountInput(
-            accountId = account.id,
-            revision = account.revision,
-            settings = AccountSettings(
-                name = changes["name"]?.content ?: account.name,
-                enabled = changes["enabled"]?.content?.toBooleanStrict() ?: account.enabled,
-                maxConcurrentRuns = changes["maxConcurrentRuns"]?.content?.toLong() ?: account.maxConcurrentRuns,
-            ),
-        ))
+        api.replaceCodingAgentAccount(
+            ReplaceAccountInput(
+                accountId = account.id,
+                revision = account.revision,
+                settings =
+                    AccountSettings(
+                        name = changes["name"]?.content ?: account.name,
+                        enabled = changes["enabled"]?.content?.toBooleanStrict() ?: account.enabled,
+                        maxConcurrentRuns =
+                            changes["maxConcurrentRuns"]?.content?.toLong()
+                                ?: account.maxConcurrentRuns,
+                    ),
+            )
+        )
         changed()
     }
     val general = account.usage?.general.orEmpty()
@@ -998,9 +998,22 @@ internal fun AccountSignInSheet(
                             val accountName =
                                 name.trim().ifBlank { "Compte ${providerLabel(provider)}" }
                             if (usesKey && account != null) {
-                                api.replaceCodingAgentAccountKey(ReplaceAccountKeyInput(accountId=account.id, modelProvider=modelProvider, apiKey=apiKey))
+                                api.replaceCodingAgentAccountKey(
+                                    ReplaceAccountKeyInput(
+                                        accountId = account.id,
+                                        modelProvider = modelProvider,
+                                        apiKey = apiKey,
+                                    )
+                                )
                             } else {
-                                api.connectCodingAgentAccount(ConnectAccountInput(provider=provider, name=accountName, modelProvider=if (usesKey) modelProvider else null, apiKey=if (usesKey) apiKey else null))
+                                api.connectCodingAgentAccount(
+                                    ConnectAccountInput(
+                                        provider = provider,
+                                        name = accountName,
+                                        modelProvider = if (usesKey) modelProvider else null,
+                                        apiKey = if (usesKey) apiKey else null,
+                                    )
+                                )
                             }
                             changed()
                             if (usesKey)
@@ -1116,7 +1129,9 @@ internal fun AccountSignInSheet(
                                     modifier = Modifier.fillMaxWidth(),
                                 ) {
                                     vm.perform {
-                                        api.submitCodingAgentAccountCode(AccountCodeInput(code.trim()))
+                                        api.submitCodingAgentAccountCode(
+                                            AccountCodeInput(code.trim())
+                                        )
                                         code = ""
                                         submitted = true
                                         changed()

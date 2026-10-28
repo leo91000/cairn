@@ -1219,6 +1219,19 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "replace_project",
         "delete_project",
     ]);
+    public_names.extend([
+        "list_coding_agent_accounts",
+        "list_coding_agent_account_providers",
+        "replace_coding_agent_account",
+        "order_coding_agent_accounts",
+        "refresh_coding_agent_accounts",
+        "connect_coding_agent_account",
+        "reconnect_coding_agent_account",
+        "replace_coding_agent_account_key",
+        "submit_coding_agent_account_code",
+        "cancel_coding_agent_account_sign_in",
+        "delete_coding_agent_account",
+    ]);
     assert_eq!(installed_names, public_names);
     assert!(tools.iter().all(|tool| tool.get("_meta").is_none()));
     let deletion = tools

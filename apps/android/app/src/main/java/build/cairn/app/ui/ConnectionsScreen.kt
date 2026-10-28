@@ -11,28 +11,15 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import build.cairn.contracts.AccountInput
-import build.cairn.contracts.AccountSettings
-import build.cairn.contracts.ReplaceAccountInput
-import build.cairn.contracts.ReplaceAccountKeyInput
-import build.cairn.contracts.ConnectAccountInput
-import build.cairn.contracts.OrderAccountsInput
 import build.cairn.contracts.ListAccountsInput
+import build.cairn.contracts.OrderAccountsInput
 import build.cairn.contracts.listCodingAgentAccounts
-import build.cairn.contracts.refreshCodingAgentAccounts
-import build.cairn.contracts.connectCodingAgentAccount
-import build.cairn.contracts.reconnectCodingAgentAccount
-import build.cairn.contracts.replaceCodingAgentAccountKey
-import build.cairn.contracts.replaceCodingAgentAccount
 import build.cairn.contracts.orderCodingAgentAccounts
-import build.cairn.contracts.deleteCodingAgentAccount
-import build.cairn.contracts.submitCodingAgentAccountCode
-import build.cairn.contracts.cancelCodingAgentAccountSignIn
+import build.cairn.contracts.reconnectCodingAgentAccount
+import build.cairn.contracts.refreshCodingAgentAccounts
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.add
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
-import kotlinx.serialization.json.putJsonArray
 
 /** The accounts coding agents run on, grouped by coding agent. */
 @Composable
@@ -132,7 +119,9 @@ fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) ->
                     reorder = { ids ->
                         vm.perform {
                             val next =
-                                api.orderCodingAgentAccounts(OrderAccountsInput(provider=provider, ids=ids))
+                                api.orderCodingAgentAccounts(
+                                    OrderAccountsInput(provider = provider, ids = ids)
+                                )
                             withContext(Dispatchers.Main) { show(next) }
                         }
                     },

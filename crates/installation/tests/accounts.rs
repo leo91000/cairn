@@ -130,7 +130,11 @@ async fn sql_leases_fence_concurrent_admission_and_pause_keeps_the_running_lease
     let root = TempDir::new().unwrap();
     let s = Service::new(config(&root)).await.unwrap();
     s.accounts.initialize(&s).await.unwrap();
-    let mut account = s.accounts.create(&s,Provider::Codex,"One slot").await.unwrap();
+    let mut account = s
+        .accounts
+        .create(&s, Provider::Codex, "One slot")
+        .await
+        .unwrap();
     account.state = AccountState::Ready;
     account.max_concurrent_runs = Some(1);
     account.usage = Some(
@@ -138,7 +142,7 @@ async fn sql_leases_fence_concurrent_admission_and_pause_keeps_the_running_lease
             "checkedAt": now(),
             "windows": [{ "id": "w", "usedPercent": 10 }],
         }))
-            .unwrap(),
+        .unwrap(),
     );
     s.store.save_coding_account(&account).await.unwrap();
     let (a, b) = tokio::join!(
@@ -187,15 +191,17 @@ async fn restart_invalidates_account_leases_and_retains_typed_usage_and_exhausti
     let root = TempDir::new().unwrap();
     let s = Service::new(config(&root)).await.unwrap();
     s.accounts.initialize(&s).await.unwrap();
-    let mut account = s.accounts.create(&s,Provider::Codex,"Restart").await.unwrap();
+    let mut account = s
+        .accounts
+        .create(&s, Provider::Codex, "Restart")
+        .await
+        .unwrap();
     account.state = AccountState::Ready;
     account.usage = Some(
-        serde_json::from_value(
-            json!({
-                "checkedAt": now(),
-                "windows": [{ "id": "w", "usedPercent": 12, "models": ["model"] }],
-            }),
-        )
+        serde_json::from_value(json!({
+            "checkedAt": now(),
+            "windows": [{ "id": "w", "usedPercent": 12, "models": ["model"] }],
+        }))
         .unwrap(),
     );
     s.store.save_coding_account(&account).await.unwrap();
@@ -270,6 +276,17 @@ async fn account_settings_replace_rejects_stale_revision_and_never_returns_priva
         query: Default::default(),
         headers: Default::default(),
     };
+    for body in [json!([]), json!("invalid"), json!(true)] {
+        let malformed = Input {
+            method: input.method.clone(),
+            path: input.path.clone(),
+            query: input.query.clone(),
+            headers: input.headers.clone(),
+            identity: input.identity.clone(),
+            body,
+        };
+        assert_eq!(api::dispatch(&s, &malformed).await.unwrap_err().status, 400);
+    }
     let replaced = api::dispatch(&s, &input).await.unwrap();
     assert_eq!(replaced["name"], "Renamed");
     assert_eq!(replaced["enabled"], false);

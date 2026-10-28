@@ -104,41 +104,66 @@ CREATE UNIQUE INDEX records_chat_slug ON records(json_extract(data,'$.slug')) WH
 #[ignore = "local measurement; run alone with --ignored --nocapture --test-threads=1"]
 async fn account_storage_layouts() {
     for count in [3, 15, 30] {
-        let accounts:Vec<_>=(0..count).map(|n|{
-            let mut account=Account::new(Provider::ALL[n%3],&format!("Account {n}"),AccountState::Ready);
-            account.id=uuid::Uuid::from_u128((4_u128<<76)|(2_u128<<62)|(n as u128)).to_string();
-            account.revision=String::new();
-            account.created_at=Some(1700000000000+n as i64);
-            account.checked_at=Some(1700000001000);
-            account.last_used_at=Some(1700000000500+n as i64);
-            account.email=Some(format!("account{n}@example.test"));
-            account.identity=Some(format!("synthetic-identity-{n}"));
-            account.plan=Some("synthetic plan".into());
-            if n%3==2 {account.model_provider=Some("opencode-go".into());account.model_provider_name=Some("OpenCode Go".into());account.priority=Some(n as u64);}
-            account.enabled=n%7!=0;
-            let windows = [("five", "5-hour window", 300, 7), ("week", "Weekly", 10080, 11), ("model", "Model weekly", 10080, 13)].map(|(id,label,duration,factor)| {
-                json!({
-                    "id": id,
-                    "label": label,
-                    "usedPercent": (n * factor % 100) as f64,
-                    "resetsAt": 1900000000,
-                    "durationMins": duration,
-                    "models": if id == "model" { vec!["gpt-6.1-sol"] } else { vec![] },
-                    "reached": false,
-                })
-            });
-            account.usage = Some(serde_json::from_value(json!({
-                "allowed": true,
-                "checkedAt": 1700000001000_i64,
-                "windows": windows,
-                "resets": {
-                    "available": 1,
-                    "credits": [{ "id": "synthetic", "expiresAt": 1900000000 }],
-                },
-            })).unwrap());
-            if n%4==0 {account.exhausted=Some(Exhaustion {at:1700000000900,model:"gpt-6.1-sol".into(),usage:account.usage.clone()});}
-            account
-        }).collect();
+        let accounts: Vec<_> = (0..count)
+            .map(|n| {
+                let mut account = Account::new(
+                    Provider::ALL[n % 3],
+                    &format!("Account {n}"),
+                    AccountState::Ready,
+                );
+                account.id = uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | (n as u128))
+                    .to_string();
+                account.revision = String::new();
+                account.created_at = Some(1700000000000 + n as i64);
+                account.checked_at = Some(1700000001000);
+                account.last_used_at = Some(1700000000500 + n as i64);
+                account.email = Some(format!("account{n}@example.test"));
+                account.identity = Some(format!("synthetic-identity-{n}"));
+                account.plan = Some("synthetic plan".into());
+                if n % 3 == 2 {
+                    account.model_provider = Some("opencode-go".into());
+                    account.model_provider_name = Some("OpenCode Go".into());
+                    account.priority = Some(n as u64);
+                }
+                account.enabled = n % 7 != 0;
+                let windows = [
+                    ("five", "5-hour window", 300, 7),
+                    ("week", "Weekly", 10080, 11),
+                    ("model", "Model weekly", 10080, 13),
+                ]
+                .map(|(id, label, duration, factor)| {
+                    json!({
+                        "id": id,
+                        "label": label,
+                        "usedPercent": (n * factor % 100) as f64,
+                        "resetsAt": 1900000000,
+                        "durationMins": duration,
+                        "models": if id == "model" { vec!["gpt-6.1-sol"] } else { vec![] },
+                        "reached": false,
+                    })
+                });
+                account.usage = Some(
+                    serde_json::from_value(json!({
+                        "allowed": true,
+                        "checkedAt": 1700000001000_i64,
+                        "windows": windows,
+                        "resets": {
+                            "available": 1,
+                            "credits": [{ "id": "synthetic", "expiresAt": 1900000000 }],
+                        },
+                    }))
+                    .unwrap(),
+                );
+                if n % 4 == 0 {
+                    account.exhausted = Some(Exhaustion {
+                        at: 1700000000900,
+                        model: "gpt-6.1-sol".into(),
+                        usage: account.usage.clone(),
+                    });
+                }
+                account
+            })
+            .collect();
         measure(&accounts);
     }
 }

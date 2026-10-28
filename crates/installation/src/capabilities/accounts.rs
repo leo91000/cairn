@@ -336,7 +336,11 @@ pub(crate) async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         let provider = crate::provider::Provider::parse(provider)?;
         return account_operation("list_coding_agent_account_providers")
             .unwrap()
-            .invoke(s, json!({ "provider": provider }), ResumeContext::http(input)?)
+            .invoke(
+                s,
+                json!({ "provider": provider }),
+                ResumeContext::http(input)?,
+            )
             .await;
     }
     let mut body = input.body.clone();
@@ -355,7 +359,9 @@ pub(crate) async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
             if body.get("accountId").is_some_and(|value| value != id) {
                 return Err(Error::bad("The path and account identifier disagree."));
             }
-            body["accountId"] = (*id).into();
+            body.as_object_mut()
+                .ok_or_else(|| Error::bad("Expected an account command object."))?
+                .insert("accountId".into(), (*id).into());
             match (method, parts.as_slice()) {
                 ("PUT", [_]) => "replace_coding_agent_account",
                 ("DELETE", [_]) => "delete_coding_agent_account",
