@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0045](0045-declarative-plugin-contributions.md) et [ADR-0046](0046-plugin-transports-and-forms-in-luau.md) pour les contributions et transports, [ADR-0056](0056-plugin-oauth-file-transfers-and-gmail.md) pour le report d’OAuth générique, [ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) pour les restrictions des agents délégués, et [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) pour toute la délégation externe, remplacée par des hooks et des règles ; le socle Luau reste applicable.
+> Statut : Remplacée par [ADR-0045](0045-declarative-plugin-contributions.md) et [ADR-0046](0046-plugin-transports-and-forms-in-luau.md) pour les contributions et transports, [ADR-0056](0056-plugin-oauth-file-transfers-and-gmail.md) pour le report d’OAuth générique, et [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) pour toute la délégation externe, remplacée par des hooks et des règles ; le socle Luau reste applicable.
 
 # Luau installation plugins and explicit external bot delegation
 

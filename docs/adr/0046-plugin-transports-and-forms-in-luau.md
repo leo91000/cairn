@@ -1,3 +1,5 @@
+> Statut : les règles d’admission, la délégation et sa partie de la page d’un plugin (personnes, demandes, agent, limites) sont remplacées par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) : un transport émet des hooks, auxquels réagissent des règles.
+
 # Plugin transports and setup forms in Luau
 
 Date: 2026-10-16.

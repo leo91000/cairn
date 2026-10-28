@@ -36,8 +36,11 @@ Sans propriétaire, une installation redevient non revendiquée ; la propriété
 **Autorisation MCP d’une installation** :
 L’accès qu’un propriétaire accorde à un client externe pour une seule installation et des droits précis. Les membres font travailler les agents depuis l’app, sans pouvoir accorder ni utiliser cet accès externe.
 
+**Accès d’un compte à un agent** :
+Le droit, donné par le propriétaire seul, de faire travailler un agent et de l’utiliser comme agent d’exécution d’une règle. L’agent agit comme un rôle : y avoir accès, c’est pouvoir obtenir tout ce qu’il peut faire. Le propriétaire a accès à tous les agents.
+
 **Membre d’une installation** :
-Un compte Cairn invité par le propriétaire. Il voit toutes les conversations de l’installation et fait travailler ses agents, donc avec les comptes d’agent de code et les secrets du propriétaire, sans pouvoir les gérer.
+Un compte Cairn invité par le propriétaire. Il voit toutes les conversations de l’installation et fait travailler les agents auxquels le propriétaire lui donne accès, donc avec les comptes d’agent de code et les secrets du propriétaire, sans pouvoir les gérer.
 _Avoid_ : invité, collaborateur
 
 **Installation courante** :
@@ -186,8 +189,7 @@ _Avoid_ : connexion (réservé aux comptes des agents de code)
 **Assistant de configuration d’un plugin** :
 Les étapes que le propriétaire suit pour ajouter ou modifier une instance, dans
 l’ordre où chacune devient possible : ce qu’il crée d’abord chez le service (par
-exemple une app Google Cloud), les réglages, la connexion, les personnes et les
-agents. Le catalogue annonce ce que la connexion demande : se connecter, coller un
+exemple une app Google Cloud), les réglages, la connexion et les agents. Le catalogue annonce ce que la connexion demande : se connecter, coller un
 jeton ou créer sa propre app. Une étape partagée, comme le client OAuth d’une app,
 se configure une fois et se réutilise pour les instances suivantes du même plugin.
 _Avoid_ : wizard, onboarding
@@ -196,8 +198,9 @@ _Avoid_ : wizard, onboarding
 Ce qu’un package déclare dans son manifeste et que Cairn affiche et contrôle : le
 formulaire d’une instance (que le package peut compléter pendant la saisie), la
 connexion par appareil, les commandes et outils donnés aux agents autorisés, leurs
-instructions, les identifiants de run, les conditions d’attente, les sources de
-projets et de skills, le panneau d’une instance et son test. Le code du package ne
+instructions, les identifiants de run, les conditions d’attente, les hooks, les
+ressources et les modèles de règles, les sources de projets et de skills, le panneau
+d’une instance et son test. Le code du package ne
 fait que répondre ; il ne reçoit jamais les secrets.
 
 **Connexion par appareil** :
@@ -236,15 +239,15 @@ auteur et son fil. Un hook ne fait rien seul ; ce sont les règles de hook qui y
 _Avoid_ : webhook (le mécanisme HTTP), trigger
 
 **Règle de hook** :
-Ce que le propriétaire décide, sans code, de faire quand un hook se produit : des
-filtres puis une suite d’actions (déclencher un agent, orienter une conversation,
-appeler un outil). Elle agit avec l’autorité de son créateur, seul à pouvoir la
+Ce que son créateur décide, sans code, de faire quand un hook se produit : un arbre de
+conditions, de boucles et d’actions (déclencher un agent, orienter une conversation,
+appeler un outil…). Elle agit avec l’autorité de son créateur, seul à pouvoir la
 modifier. Un plugin peut proposer des modèles de règles prêts à l’emploi.
 _Avoid_ : hook (l’événement auquel elle réagit), automation, workflow, réponse
 
 **Agent d’exécution d’une règle** :
-L’agent dont les droits encadrent les outils qu’une règle de hook appelle elle-même.
-Le créateur de la règle doit y avoir accès.
+L’agent dont les droits encadrent le hook qu’une règle écoute et les outils qu’elle
+appelle elle-même. Le créateur de la règle doit y avoir accès.
 
 **Ressource d’un plugin** :
 Ce sur quoi portent les hooks et les outils d’un plugin, et que le plugin sait lister :

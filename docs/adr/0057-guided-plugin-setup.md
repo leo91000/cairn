@@ -1,3 +1,5 @@
+> Statut : l’étape `people` (la délégation externe) est retirée par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md).
+
 # Guided plugin setup and shared provider apps
 
 Date: 2026-10-22.
