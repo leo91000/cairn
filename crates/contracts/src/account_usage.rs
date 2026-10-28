@@ -27,7 +27,7 @@ pub struct AccountUsage {
     pub resets: Option<AccountResets>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub use_balance: bool,
 }
 
@@ -189,34 +189,6 @@ impl AccountUsage {
     }
 }
 
-pub fn empty() -> Value {
-    AccountUsage::default().to_value()
-}
-
-pub fn duration_label(minutes: Option<i64>) -> String {
-    match minutes {
-        None | Some(0) => "AccountUsage window".into(),
-        Some(10080) => "Weekly".into(),
-        Some(m) if m % 1440 == 0 => format!("{}-day window", m / 1440),
-        Some(m) if m % 60 == 0 => format!("{}-hour window", m / 60),
-        Some(m) => format!("{m}-minute window"),
-    }
-}
-
-/// The lowest remaining percentage among the windows limiting `model` ("" for any model).
-pub fn remaining(usage: &Value, model: &str) -> Option<f64> {
-    AccountUsage::from_value(usage).remaining(model)
-}
-
-pub fn blocked(usage: &Value, model: &str) -> bool {
-    AccountUsage::from_value(usage).blocked(model)
-}
-
-/// Compare each window: one can reset while another still limits total capacity.
-pub fn recovered(before: &Value, after: &Value, model: &str) -> bool {
-    AccountUsage::recovered(
-        &AccountUsage::from_value(before),
-        &AccountUsage::from_value(after),
-        model,
-    )
+fn is_false(value: &bool) -> bool {
+    !value
 }

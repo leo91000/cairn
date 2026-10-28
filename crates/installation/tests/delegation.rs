@@ -2,7 +2,6 @@ use crate::common::run_fixture::DbRunFixture;
 use common::AgentFixture;
 use common::PluginStoreFixture;
 use common::StoreAgentFixture;
-use common::account_fixture::AccountFixtures;
 
 mod common;
 

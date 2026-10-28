@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import build.cairn.app.data.*
+import build.cairn.contracts.AccountCodeInput
 import build.cairn.contracts.AccountInput
 import build.cairn.contracts.AccountSettings
 import build.cairn.contracts.ReplaceAccountInput
@@ -1115,11 +1116,7 @@ internal fun AccountSignInSheet(
                                     modifier = Modifier.fillMaxWidth(),
                                 ) {
                                     vm.perform {
-                                        api.request(
-                                            "POST",
-                                            "/accounts/sign-in/code",
-                                            body("code" to code.trim()),
-                                        )
+                                        api.submitCodingAgentAccountCode(AccountCodeInput(code.trim()))
                                         code = ""
                                         submitted = true
                                         changed()

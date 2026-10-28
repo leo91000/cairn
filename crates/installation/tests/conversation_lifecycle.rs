@@ -1,6 +1,6 @@
-use common::account_fixture::AccountFixtures;
 use crate::common::run_fixture::DbRunFixture;
 use cairn_contracts::EventKind;
+use common::account_fixture::AccountFixtures;
 use common::node_fixture::*;
 
 mod common;
@@ -1447,15 +1447,18 @@ async fn quota_switch_fixture(app: &App) -> (String, Value) {
         )
         .await
         .unwrap();
-    let mut account = serde_json::to_value(app.service
-        .accounts
-        .create(
-            &app.service,
-            cairn_installation::provider::Provider::Claude,
-            "Alternative",
-        )
-        .await
-        .unwrap()).unwrap();
+    let mut account = serde_json::to_value(
+        app.service
+            .accounts
+            .create(
+                &app.service,
+                cairn_installation::provider::Provider::Claude,
+                "Alternative",
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     account["state"] = "ready".into();
     app.service
         .store
@@ -1711,15 +1714,18 @@ async fn quota_switch_does_not_offer_or_accept_an_engine_that_cannot_preserve_th
         )
         .await
         .unwrap();
-    let mut account = serde_json::to_value(app.service
-        .accounts
-        .create(
-            &app.service,
-            cairn_installation::provider::Provider::Opencode,
-            "Alternative",
-        )
-        .await
-        .unwrap()).unwrap();
+    let mut account = serde_json::to_value(
+        app.service
+            .accounts
+            .create(
+                &app.service,
+                cairn_installation::provider::Provider::Opencode,
+                "Alternative",
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     account["state"] = "ready".into();
     account["modelProvider"] = "opencode".into();
     app.service

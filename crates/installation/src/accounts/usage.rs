@@ -91,7 +91,7 @@ mod tests {
     fn empty_usage_keeps_its_shape() {
         assert_eq!(
             empty(),
-            json!({ "allowed": true, "windows": [], "resets": null, "useBalance": false })
+            json!({ "allowed": true, "windows": [], "resets": null })
         );
     }
 

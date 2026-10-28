@@ -300,7 +300,7 @@ for (const state of ['queued', 'failed'] as const) {
     await workspace.api(endpoint, 'POST', request)
     await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.snapshot.agent.provider, { timeout: 30000 }).toBe('codex')
     await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
-    await workspace.api(`/api/accounts/${codex.id}`, 'PATCH', { enabled: false })
+    await workspace.api(`/api/accounts/${codex.id}`, 'PUT', { revision: codex.revision, settings: { name: codex.name, enabled: false, maxConcurrentRuns: codex.maxConcurrentRuns } })
     await workspace.api(endpoint, 'POST', request)
     const after = await workspace.api(`/api/chats/${chat.id}`)
     expect(after.run.id).toBe(before.id)

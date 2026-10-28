@@ -97,9 +97,9 @@ fn account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
         },
         error: row.get(10)?,
         last_used_at: row.get(11)?,
-        max_concurrent_runs: row.get::<_,Option<i64>>(12)?.map(|n|n as u64),
+        max_concurrent_runs: row.get::<_, Option<i64>>(12)?.map(|n| n as u64),
         reset_error: row.get(13)?,
-        priority: row.get::<_,Option<i64>>(14)?.map(|n|n as u64),
+        priority: row.get::<_, Option<i64>>(14)?.map(|n| n as u64),
         model_provider: row.get(15)?,
         model_provider_name: row.get(16)?,
         revision: row.get(17)?,
@@ -199,7 +199,7 @@ impl Db<'_> {
             let key: String = row.get(0)?;
             let phase: String = row.get(1)?;
             if let Some(i) = indexes.get(&key) {
-                let available = row.get::<_,Option<i64>>(7)?.map(|n|n as u64);
+                let available = row.get::<_, Option<i64>>(7)?.map(|n| n as u64);
                 let credits: Option<String> = row.get(8)?;
                 let usage = Usage {
                     allowed: row.get(2)?,
@@ -388,9 +388,11 @@ impl Store {
         let id = id.to_owned();
         self.read(move |db| db.coding_account(&id)).await
     }
+
     pub async fn coding_accounts(&self) -> Result<Vec<Account>> {
         self.read(|db| db.coding_accounts()).await
     }
+
     pub async fn save_coding_account(&self, account: &Account) -> Result<()> {
         let account = account.clone();
         self.transaction(move |db| db.save_coding_account(&account))

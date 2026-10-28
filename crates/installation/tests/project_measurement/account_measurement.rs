@@ -9,15 +9,19 @@ impl StorageEntity for Account {
     const KIND: &'static str = "agentAccounts";
     const TABLE: &'static str = "coding_agent_accounts";
     const SAVE: &'static str = "account.saved";
+
     fn id(&self) -> String {
         self.id.clone()
     }
+
     fn read(db: &Db<'_>, id: &str) -> Self {
         db.coding_account(id).unwrap().unwrap()
     }
+
     fn list(db: &Db<'_>) -> usize {
         db.coding_accounts().unwrap().len()
     }
+
     fn reference_list(db: &Db<'_>) -> usize {
         db.list(Self::KIND)
             .unwrap()
@@ -25,9 +29,16 @@ impl StorageEntity for Account {
             .map(|value| Account::from_value(value).unwrap())
             .count()
     }
+
     fn write(&self, db: &Db<'_>, _: bool) {
         db.save_coding_account(self).unwrap();
+        db.audit(Self::SAVE, &json!({ "id": self.id })).unwrap();
     }
+
+    fn encoded_bytes(db: &Db<'_>) -> Option<i64> {
+        Some(db.0.query_row("SELECT coalesce(sum(payload),0) FROM dbstat WHERE name IN ('records','records_kind','records_node_backups_run','records_chat_slug','sqlite_autoindex_records_1','coding_agent_accounts','coding_agent_accounts_identity','coding_agent_accounts_updated','sqlite_autoindex_coding_agent_accounts_1','account_usage','account_usage_windows','account_exhaustion','account_leases','account_leases_account','sqlite_autoindex_account_leases_1')",[],|row|row.get(0)).unwrap())
+    }
+
     fn reference_write(&self, db: &Db<'_>, _: bool) {
         // Frozen records mapping at 663259d9, before A15. Only field spelling /
         // absent optional fields differ; both readers return identical Account values.
@@ -46,13 +57,14 @@ impl StorageEntity for Account {
                 &mut value[usage]["usage"]
             };
             if let Some(object) = value.as_object_mut() {
-                if object["useBalance"] == false {
+                if object.get("useBalance") == Some(&Value::Bool(false)) {
                     object.remove("useBalance");
                 }
             }
         }
         db.0.prepare_cached("INSERT INTO records VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at").unwrap().execute(params![self.id,Self::KIND,value.to_string(),now()]).unwrap();
     }
+
     fn reference_schema(db: &Connection) {
         db.execute_batch("DROP TABLE account_leases;DROP TABLE account_exhaustion;DROP TABLE account_usage_windows;DROP TABLE account_usage;DROP TABLE coding_agent_accounts;DROP TABLE records;
 CREATE TABLE records(id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL,updated_at INTEGER NOT NULL);
@@ -60,6 +72,7 @@ CREATE INDEX records_kind ON records(kind,updated_at DESC);
 CREATE INDEX records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
 CREATE UNIQUE INDEX records_chat_slug ON records(json_extract(data,'$.slug')) WHERE kind='chats';").unwrap();
     }
+
     fn admission_state(db: &Db<'_>, _: &str, reference: bool) -> Option<String> {
         // Mapping and ranking portion of selection, with no CLI/network effects.
         // The pool's behavioral suites cover Driver support, speed and slot fencing.
@@ -103,11 +116,26 @@ async fn account_storage_layouts() {
             account.plan=Some("synthetic plan".into());
             if n%3==2 {account.model_provider=Some("opencode-go".into());account.model_provider_name=Some("OpenCode Go".into());account.priority=Some(n as u64);}
             account.enabled=n%7!=0;
-            account.usage=Some(serde_json::from_value(json!({"allowed":true,"checkedAt":1700000001000_i64,"windows":[
-                {"id":"five","label":"5-hour window","usedPercent":(n*7%100) as f64,"resetsAt":1900000000,"durationMins":300,"models":[],"reached":false},
-                {"id":"week","label":"Weekly","usedPercent":(n*11%100) as f64,"resetsAt":1900000000,"durationMins":10080,"models":[],"reached":false},
-                {"id":"model","label":"Model weekly","usedPercent":(n*13%100) as f64,"resetsAt":1900000000,"durationMins":10080,"models":["gpt-6.1-sol"],"reached":false}
-            ],"resets":{"available":1,"credits":[{"id":"synthetic","expiresAt":1900000000}]}})).unwrap());
+            let windows = [("five", "5-hour window", 300, 7), ("week", "Weekly", 10080, 11), ("model", "Model weekly", 10080, 13)].map(|(id,label,duration,factor)| {
+                json!({
+                    "id": id,
+                    "label": label,
+                    "usedPercent": (n * factor % 100) as f64,
+                    "resetsAt": 1900000000,
+                    "durationMins": duration,
+                    "models": if id == "model" { vec!["gpt-6.1-sol"] } else { vec![] },
+                    "reached": false,
+                })
+            });
+            account.usage = Some(serde_json::from_value(json!({
+                "allowed": true,
+                "checkedAt": 1700000001000_i64,
+                "windows": windows,
+                "resets": {
+                    "available": 1,
+                    "credits": [{ "id": "synthetic", "expiresAt": 1900000000 }],
+                },
+            })).unwrap());
             if n%4==0 {account.exhausted=Some(Exhaustion {at:1700000000900,model:"gpt-6.1-sol".into(),usage:account.usage.clone()});}
             account
         }).collect();

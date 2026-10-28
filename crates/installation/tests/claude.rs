@@ -1,8 +1,9 @@
 use common::account_fixture::AccountFixtures;
+
 mod common;
 
 use cairn_installation::{
-    accounts::{self, KIND, Lease},
+    accounts::{self, Lease},
     claude, claude_process,
     config::{Config, now},
     error::Result,
@@ -345,10 +346,7 @@ async fn sign_in_cancellation_failure_retry_identity_and_removal() {
             .unwrap()
             .is_null()
     );
-    assert!(
-        common::account_fixture::account_values(s.accounts.list(&s).await.unwrap())
-            .is_empty()
-    );
+    assert!(common::account_fixture::account_values(s.accounts.list(&s).await.unwrap()).is_empty());
     assert!(s.accounts.submit_code("fixture-code").await.is_err());
 
     let failed = serde_json::to_value(
@@ -409,25 +407,11 @@ async fn sign_in_cancellation_failure_retry_identity_and_removal() {
     );
     let second = second["accountId"].as_str().unwrap().to_owned();
     assert_eq!(view(&s, &second).await["email"], "work@example.test");
-    assert_eq!(
-        s.accounts
-            .records(&s, Provider::Claude)
-            .await
-            .unwrap()
-            .len(),
-        2
-    );
+    assert_eq!(s.accounts.of(&s, Provider::Claude).await.unwrap().len(), 2);
 
     s.accounts.remove(&s, &id).await.unwrap();
     assert!(!accounts::claude::account_home(&s.config, &id).exists());
-    assert_eq!(
-        s.accounts
-            .records(&s, Provider::Claude)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(s.accounts.of(&s, Provider::Claude).await.unwrap().len(), 1);
 }
 
 fn plan(root: &TempDir, prompt: &str) -> Value {
@@ -1860,10 +1844,7 @@ async fn usage_is_sanitized_cached_and_preserved_on_failure_without_changing_con
     s.accounts.release(&s, &lease).await.unwrap();
 
     s.accounts.remove(&s, &id).await.unwrap();
-    assert!(
-        common::account_fixture::account_values(s.accounts.list(&s).await.unwrap())
-            .is_empty()
-    );
+    assert!(common::account_fixture::account_values(s.accounts.list(&s).await.unwrap()).is_empty());
 }
 
 #[tokio::test]

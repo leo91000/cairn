@@ -250,7 +250,8 @@ async fn creation_is_nonblocking_and_portrait_survives_edits_with_private_authen
         assert!(
             f.s.accounts
                 .active(&f.s, text(&account, "id"))
-                .await?
+                .await
+                .unwrap()
                 .is_empty()
         );
     }
@@ -495,11 +496,14 @@ async fn missing_or_invalid_images_fail_without_retry_and_release_the_account() 
         let failed = f.wait(text(&agent, "id"), "failed").await;
         assert!(failed["avatar"]["url"].is_null());
         assert!(f.requests.try_recv().is_err());
-        for account in crate::account_fixture::account_values(f.s.accounts.list(&f.s).await.unwrap()) {
+        for account in
+            crate::account_fixture::account_values(f.s.accounts.list(&f.s).await.unwrap())
+        {
             assert!(
                 f.s.accounts
                     .active(&f.s, text(&account, "id"))
-                    .await?
+                    .await
+                    .unwrap()
                     .is_empty()
             );
         }
@@ -535,7 +539,8 @@ async fn close_drains_running_and_queued_portraits_and_rejects_new_jobs() {
         assert!(
             f.s.accounts
                 .active(&f.s, text(&account, "id"))
-                .await?
+                .await
+                .unwrap()
                 .is_empty()
         );
     }
@@ -583,7 +588,11 @@ async fn occupied_account_capacity_does_not_start_a_second_codex_session() {
     assert!(text(&failed["avatar"], "error").contains("No Codex account is available"));
     assert!(f.requests.try_recv().is_err());
     assert_eq!(
-        f.s.accounts.active(&f.s, text(&account, "id")).await?.len(),
+        f.s.accounts
+            .active(&f.s, text(&account, "id"))
+            .await
+            .unwrap()
+            .len(),
         1
     );
     f.s.accounts.release(&f.s, &foreground).await.unwrap();
@@ -630,10 +639,15 @@ async fn portrait_selection_respects_the_explicit_models_quota() {
     assert!(
         f.s.accounts
             .active(&f.s, text(&limited, "id"))
-            .await?
+            .await
+            .unwrap()
             .is_empty()
     );
-    let leases = f.s.accounts.active(&f.s, text(&available, "id")).await?;
+    let leases =
+        f.s.accounts
+            .active(&f.s, text(&available, "id"))
+            .await
+            .unwrap();
     assert_eq!(leases.len(), 1);
     assert_eq!(leases[0].model, "gpt-6-astra");
     reply.send(generated(png([10, 20, 30]))).unwrap();
@@ -698,7 +712,8 @@ async fn foreground_queue_and_deployment_prevent_starting_a_portrait() {
             assert!(
                 f.s.accounts
                     .active(&f.s, text(&account, "id"))
-                    .await?
+                    .await
+                    .unwrap()
                     .is_empty()
             );
         }

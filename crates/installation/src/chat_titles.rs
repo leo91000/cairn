@@ -663,7 +663,9 @@ mod tests {
                     .unwrap()
                     .is_some()
             );
-            for account in crate::account_fixture::account_values(s.accounts.list(&s).await.unwrap()) {
+            for account in
+                crate::account_fixture::account_values(s.accounts.list(&s).await.unwrap())
+            {
                 assert!(
                     s.accounts
                         .active(&s, text(&account, "id"))
@@ -986,7 +988,9 @@ mod tests {
                     .unwrap()
                     .is_some()
             );
-            for account in crate::account_fixture::account_values(s.accounts.list(&s).await.unwrap()) {
+            for account in
+                crate::account_fixture::account_values(s.accounts.list(&s).await.unwrap())
+            {
                 assert!(
                     s.accounts
                         .active(&s, text(&account, "id"))

@@ -868,12 +868,9 @@ class SignalPresentationTest {
     fun `connection summary reports coding agents without a usable account and the best capacity`() {
         val codex =
             listOf(
-                Account("a", "codex", "Perso", state = "ready", remainingPercent = 40.0),
-                Account("b", "codex", "Pro", state = "ready", remainingPercent = 70.0),
-                Account(
-                    "c",
-                    "codex",
-                    "Off",
+                Account(id = "a", provider = "codex", name = "Perso", state = "ready", remainingPercent = 40.0),
+                Account(id = "b", provider = "codex", name = "Pro", state = "ready", remainingPercent = 70.0),
+                Account(id = "c", provider = "codex", name = "Off",
                     enabled = false,
                     state = "ready",
                     remainingPercent = 99.0,
@@ -901,12 +898,12 @@ class SignalPresentationTest {
     @Test
     fun `account statuses, windows and resets read naturally in French`() {
         val now = 1_790_000_000_000
-        assertEquals("Prochain", accountStatusLabel(Account("a", name = "A", status = "next")))
-        assertNull(accountStatusLabel(Account("a", name = "A", status = "ready")))
+        assertEquals("Prochain", accountStatusLabel(Account(id = "a", name = "A", status = "next")))
+        assertNull(accountStatusLabel(Account(id = "a", name = "A", status = "ready")))
         assertEquals(
             "Reprise dans 48 min",
             accountStatusLabel(
-                Account("a", name = "A", status = "waiting", resetsAt = now / 1000 + 48 * 60),
+                Account(id = "a", name = "A", status = "waiting", resetsAt = now / 1000 + 48 * 60),
                 now,
             ),
         )
@@ -914,23 +911,23 @@ class SignalPresentationTest {
         assertEquals("maintenant", resetsIn(now / 1000 - 5, now))
         assertEquals(
             "5 heures",
-            windowLabel(AccountWindow("w", "5-hour window", durationMins = 300)),
+            windowLabel(AccountWindow(id = "w", label = "5-hour window", durationMins = 300)),
         )
-        assertEquals("Semaine", windowLabel(AccountWindow("w", "Weekly", durationMins = 10080)))
+        assertEquals("Semaine", windowLabel(AccountWindow(id = "w", label = "Weekly", durationMins = 10080)))
         assertEquals(
             "Semaine · Opus",
             windowLabel(
-                AccountWindow("w", "Weekly · Opus", durationMins = 10080, models = listOf("opus"))
+                AccountWindow(id = "w", label = "Weekly · Opus", durationMins = 10080, models = listOf("opus"))
             ),
         )
-        assertEquals(40.0, AccountWindow("w", usedPercent = 60.0).remaining, 0.0)
-        assertEquals(0.0, AccountWindow("w", usedPercent = 105.0).remaining, 0.0)
+        assertEquals(40.0, AccountWindow(id = "w", usedPercent = 60.0).remaining, 0.0)
+        assertEquals(0.0, AccountWindow(id = "w", usedPercent = 105.0).remaining, 0.0)
         val usage =
             AccountUsage(
-                listOf(
-                    AccountWindow("week", durationMins = 10080),
-                    AccountWindow("opus", models = listOf("opus")),
-                    AccountWindow("five", durationMins = 300),
+                windows = listOf(
+                    AccountWindow(id = "week", durationMins = 10080),
+                    AccountWindow(id = "opus", models = listOf("opus")),
+                    AccountWindow(id = "five", durationMins = 300),
                 )
             )
         assertEquals(listOf("five", "week"), usage.general.map { it.id })

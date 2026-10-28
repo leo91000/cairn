@@ -625,3 +625,42 @@ complete deterministic node values, warmups, alternating repetitions, audit,
 transactional writes/deletes, process CPU and DB/WAL/page reporting. Results belong
 in the PR description, never in Git. Cold connections retain the OS page cache;
 these local timings are separate from production network latency.
+
+
+## Coding-agent accounts and usage (A15)
+
+Fresh SQLite v13 replaces `agentAccounts` with `coding_agent_accounts`,
+`account_usage`, ordered `account_usage_windows`, `account_exhaustion` and
+`account_leases`. Named columns own selection state, parallel limits, priority,
+model-provider binding and both current/exhausted usage. Relations reference their
+account; lease deletion is restricted while a slot is held. The lease run key also
+supports background title/avatar work without fabricating a retained run. Startup
+invalidates runtime leases before new admission, keeping the existing credential
+recovery and recovering-run exclusion. No historical reader, migration or records
+mirror exists. The existing Driver and worker still own connection, refresh/reset,
+remaining-capacity selection, exhaustion switching and run-scoped credential isolation.
+
+Rust owns public account/usage/sign-in views and closed commands. Both apps remove
+their handwritten models and use the existing generated clients. Settings replace
+name, enabled and parallel limit together, with an expected revision; usage refresh
+does not change that revision. The shared corpus includes decimal usage, absent/
+unknown readings, ordered OpenCode providers, Codex credit metadata and wire integer
+bounds. The Kotlin template now maps the generator's decimal type to Double.
+Codex credit objects remain opaque provider data; all scheduling fields are named.
+
+HTTP, public MCP and cairn_installation share the account registry. Owner UI policy
+remains in force. Delegated tools can inspect secret-free metadata and manage
+settings/order with read/manage scopes and transactional installation-grant rechecks.
+They do not receive sign-in challenges. Connecting/reconnecting and key replacement
+return a human-required management path to agents; submitting codes, cancelling a
+human sign-in and deleting credentials require the authenticated human owner.
+Installation access and public manage scopes never fabricate this proof.
+
+The existing A1/A2 `project_measurement::account_measurement::account_storage_layouts`
+compares the frozen records mapping at `663259d9` with typed SQL. Three, fifteen and
+thirty deterministic mixed-provider accounts cover the actual ten-per-provider cap,
+current/exhausted model windows, Codex credits and OpenCode order. The same clocks,
+connections, alternating repetitions, warmups, read/list/ranking/save/delete phases,
+audit, CPU and DB/WAL/page reporting are reused. Results belong in the PR description;
+no raw measurement artifact is committed. Cold connections retain the OS cache and
+these local timings do not measure production network latency.

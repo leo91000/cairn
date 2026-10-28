@@ -464,10 +464,7 @@ impl Catalog {
             .collect::<Vec<_>>();
         accounts.sort_by(|a, b| a.priority().cmp(&b.priority()).then(a.id.cmp(&b.id)));
         let mut connected = Vec::<String>::new();
-        for provider in accounts
-            .iter()
-            .filter_map(|a| a.model_provider.as_deref())
-        {
+        for provider in accounts.iter().filter_map(|a| a.model_provider.as_deref()) {
             if !connected.iter().any(|p| p == provider) {
                 connected.push(provider.to_owned());
             }

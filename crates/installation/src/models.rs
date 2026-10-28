@@ -359,10 +359,8 @@ impl Models {
                 }
             }
             // Only accounts a run can land on decide whether a speed is confirmed.
-            let signed_in = source.is_empty()
-                || accounts
-                    .iter()
-                    .any(|a| a.id == *source && a.is_ready());
+            let signed_in =
+                source.is_empty() || accounts.iter().any(|a| a.id == *source && a.is_ready());
             if signed_in {
                 catalogs.push(cached);
             }

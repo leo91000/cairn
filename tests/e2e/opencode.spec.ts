@@ -146,7 +146,7 @@ test('OpenCode answers common questionnaires, steers a busy session and replaces
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'Finish with the compact status panel', mode: 'steer' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
   const replaced = await workspace.api(`/api/accounts/${account.id}/api-key`, 'POST', { modelProvider: 'opencode', apiKey: 'synthetic-browser-replacement-key' })
-  expect(replaced.id).toBe(account.id)
+  expect(replaced.account.id).toBe(account.id)
   expect(JSON.stringify(replaced)).not.toContain('synthetic-browser-replacement-key')
 })
 

@@ -160,14 +160,14 @@ class AccountsJourneyTest {
                             """{"accountId":"studio","provider":"claude","state":"pending","phase":"authorizing","url":"https://claude.com/oauth/authorize?fixture=1","acceptsCode":true}"""
                         server.accounts +=
                             """{"id":"studio","provider":"claude","name":"Studio","state":"pending","status":"signIn"}"""
-                        server.signIn
+                        """{"kind":"signIn","signIn":${server.signIn}}"""
                     }
                     "POST /api/installations/fixture/api/accounts/sign-in/code" -> {
                         server.signIn =
                             """{"accountId":"studio","provider":"claude","state":"complete","phase":"verifying"}"""
                         server.accounts[1] =
                             """{"id":"studio","provider":"claude","name":"Studio","email":"studio@example.test","plan":"max","state":"ready","status":"next","stale":false,"remainingPercent":40.0,"usage":{"checkedAt":1,"windows":[{"id":"five_hour","label":"5-hour window","usedPercent":25,"durationMins":300},{"id":"seven_day","label":"Weekly","usedPercent":60,"durationMins":10080}]}}"""
-                        """{"submitted":true}"""
+                        """{"done":true}"""
                     }
                     else -> null
                 }
@@ -228,9 +228,11 @@ class AccountsJourneyTest {
         journey(
             server,
             { request, payload ->
-                if (request.method == "PATCH") {
+                if (request.method == "PUT") {
                     assertEquals("/api/installations/fixture/api/accounts/work", request.path)
-                    val update = wireJson.parseToJsonElement(payload).jsonObject
+                    val command = wireJson.parseToJsonElement(payload).jsonObject
+                    assertEquals("", command["revision"]?.jsonPrimitive?.content)
+                    val update = command.getValue("settings").jsonObject
                     update["maxConcurrentRuns"]?.let {
                         server.accounts[0] =
                             server.accounts[0].replace(
@@ -238,14 +240,14 @@ class AccountsJourneyTest {
                                 "\"maxConcurrentRuns\":${it.jsonPrimitive.int}",
                             )
                     }
-                    update["enabled"]?.let {
+                    update["enabled"]?.takeIf { !it.jsonPrimitive.boolean }?.let {
                         server.accounts[0] =
                             server.accounts[0].replace(
                                 "\"status\":\"next\"",
                                 "\"status\":\"paused\",\"enabled\":false",
                             )
                     }
-                    "{}"
+                    server.accounts[0]
                 } else null
             },
         ) {
@@ -264,14 +266,12 @@ class AccountsJourneyTest {
                 .performClick()
             compose.waitUntil(10000) {
                 server.requests.any {
-                    it.first == "PATCH /api/installations/fixture/api/accounts/work"
+                    it.first == "PUT /api/installations/fixture/api/accounts/work"
                 }
             }
             assertEquals(
-                """{"maxConcurrentRuns":5}""",
-                server.requests
-                    .first { it.first == "PATCH /api/installations/fixture/api/accounts/work" }
-                    .second,
+                5,
+                wireJson.parseToJsonElement(server.requests.first { it.first == "PUT /api/installations/fixture/api/accounts/work" }.second).jsonObject.getValue("settings").jsonObject.getValue("maxConcurrentRuns").jsonPrimitive.int,
             )
             waitText("EN COURS · 1 SUR 5")
             compose
@@ -280,14 +280,12 @@ class AccountsJourneyTest {
                 .performClick()
             compose.waitUntil(10000) {
                 server.requests.count {
-                    it.first == "PATCH /api/installations/fixture/api/accounts/work"
+                    it.first == "PUT /api/installations/fixture/api/accounts/work"
                 } == 2
             }
             assertEquals(
-                """{"enabled":false}""",
-                server.requests
-                    .last { it.first == "PATCH /api/installations/fixture/api/accounts/work" }
-                    .second,
+                false,
+                wireJson.parseToJsonElement(server.requests.last { it.first == "PUT /api/installations/fixture/api/accounts/work" }.second).jsonObject.getValue("settings").jsonObject.getValue("enabled").jsonPrimitive.boolean,
             )
             waitText("En pause")
         }
@@ -315,7 +313,7 @@ class AccountsJourneyTest {
                         request.path == "/api/installations/fixture/api/accounts/sign-in"
                 ) {
                     server.signIn = "null"
-                    """{"cancelled":true}"""
+                    """{"done":true}"""
                 } else null
             },
         ) {
@@ -352,7 +350,7 @@ class AccountsJourneyTest {
                         val account =
                             """{"id":"zen","provider":"opencode","name":"Zen","modelProvider":"opencode","modelProviderName":"OpenCode Zen","state":"ready","status":"next"}"""
                         server.accounts += account
-                        account
+                        """{"kind":"connected","account":$account}"""
                     }
                     else -> null
                 }

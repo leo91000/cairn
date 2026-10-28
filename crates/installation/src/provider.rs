@@ -107,6 +107,7 @@ impl From<Provider> for cairn_contracts::AgentProvider {
         }
     }
 }
+
 impl From<cairn_contracts::AgentProvider> for Provider {
     fn from(value: cairn_contracts::AgentProvider) -> Self {
         match value {

@@ -26,8 +26,8 @@ use crate::{
     store::Db,
     validation::text,
 };
-use serde_json::{Value, json};
 use serde::Deserialize;
+use serde_json::{Value, json};
 use sign_in::SignIn;
 use std::{
     borrow::Cow,
@@ -988,7 +988,7 @@ impl Accounts {
         input: &AccountSettings,
     ) -> Result<CodingAgentAccount> {
         let account = self.account(s, id).await?;
-        self.update_authorized(s, id, &account.revision, input, |_| Ok(()))
+        self.update_authorized(s, id, &account.revision, input, None, |_| Ok(()))
             .await
     }
 
@@ -998,6 +998,7 @@ impl Accounts {
         id: &str,
         revision: &str,
         input: &AccountSettings,
+        public_credential: Option<&str>,
         authorize: impl Fn(&Db<'_>) -> Result<()> + Send + 'static,
     ) -> Result<CodingAgentAccount> {
         let _guard = self.lock(id).await;
@@ -1005,6 +1006,9 @@ impl Accounts {
             return Err(Error::conflict(
                 "Finish or cancel sign-in before editing this account.",
             ));
+        }
+        if let Some(credential) = public_credential {
+            crate::relay::authorize_plugin_mcp(s, credential).await?;
         }
         let mut account = self.account(s, id).await?;
         if account.revision != revision {
@@ -1040,7 +1044,8 @@ impl Accounts {
         provider: Provider,
         ids: &[String],
     ) -> Result<CodingAgentAccounts> {
-        self.reorder_authorized(s, provider, ids, |_| Ok(())).await
+        self.reorder_authorized(s, provider, ids, None, |_| Ok(()))
+            .await
     }
 
     pub(crate) async fn reorder_authorized(
@@ -1048,6 +1053,7 @@ impl Accounts {
         s: &Service,
         provider: Provider,
         ids: &[String],
+        public_credential: Option<&str>,
         authorize: impl Fn(&Db<'_>) -> Result<()> + Send + 'static,
     ) -> Result<CodingAgentAccounts> {
         if !provider.driver().ordered() {
@@ -1069,6 +1075,9 @@ impl Accounts {
             account_guards.push(self.lock(&id).await);
         }
 
+        if let Some(credential) = public_credential {
+            crate::relay::authorize_plugin_mcp(s, credential).await?;
+        }
         let ids = ids.to_vec();
         s.store
             .transaction(move |db| {

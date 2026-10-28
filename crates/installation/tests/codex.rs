@@ -1,4 +1,5 @@
 use common::account_fixture::AccountFixtures;
+
 mod common;
 
 use cairn_installation::{
@@ -702,7 +703,8 @@ async fn completed_sign_in_is_already_cleaned_up_and_available() {
     );
     assert!(!service.accounts.busy(&service, id).await.unwrap());
     assert_eq!(
-        common::account_fixture::account_values(service.accounts.list(&service).await.unwrap())[0]["status"],
+        common::account_fixture::account_values(service.accounts.list(&service).await.unwrap())[0]
+            ["status"],
         "next"
     );
 
@@ -1380,7 +1382,8 @@ async fn device_login_verifies_identity_then_leases_private_credentials() {
     let id = flow["accountId"].as_str().unwrap();
     let view = sign_in_until(&service, is_settled).await;
     assert_eq!(view["state"], "complete", "{view}");
-    let accounts = common::account_fixture::account_values(service.accounts.list(&service).await.unwrap());
+    let accounts =
+        common::account_fixture::account_values(service.accounts.list(&service).await.unwrap());
     assert_eq!(accounts.len(), 1);
     assert_eq!(accounts[0]["remainingPercent"], 60.0);
     assert_eq!(accounts[0]["provider"], "codex");

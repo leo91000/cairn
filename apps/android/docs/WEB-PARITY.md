@@ -298,3 +298,13 @@ human management URL for agents; status never consumes another session's callbac
 PKCE, refresh and private-network/metadata protection remain in the existing
 protocol implementations. The shared corpus qualifies Rust/TS/Kotlin; browser MCP
 journeys and `McpJourneyCases` (JVM/device) cover the clients.
+
+
+A15 account contracts: Connections on web and Android use generated Rust account,
+usage, sign-in and command models. Renaming, pause and parallel limits send complete
+settings with the current revision, and a stale save reports its conflict before
+reload. Native sheets, usage windows, device-code/browser steps and OpenCode order
+are preserved. Both tools expose the same registry with account policies; agents
+never obtain human sign-in challenges or credential-management authority from an
+installation grant. Existing AccountsJourneyTest / AccountsDeviceTest and browser
+accounts/OpenCode/Claude journeys qualify the corresponding native presentations.

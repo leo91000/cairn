@@ -125,20 +125,29 @@ impl AccountOperation {
         input: Value,
         context: ResumeContext,
     ) -> Result<Value> {
-        let (human, bearer) = match context {
-            ResumeContext::Human(_) => (true, None),
-            ResumeContext::Public(scopes, _) => {
+        let (human, bearer, public_credential) = match context {
+            ResumeContext::Human(_) => (true, None, None),
+            ResumeContext::Public(scopes, credential) => {
                 if !scopes.iter().any(|scope| scope == self.scope) {
                     return Err(Error::forbidden(format!(
                         "The {} scope is required.",
                         self.scope
                     )));
                 }
-                (false, None)
+                if matches!(
+                    self.name,
+                    "replace_coding_agent_account" | "order_coding_agent_accounts"
+                ) && credential.is_none()
+                {
+                    return Err(Error::unauthorized(
+                        "A current public MCP authorization is required.",
+                    ));
+                }
+                (false, None, credential)
             }
             ResumeContext::Installation(bearer) => {
                 crate::installation_mcp::authorize(s, &bearer).await?;
-                (false, Some(bearer))
+                (false, Some(bearer), None)
             }
         };
         let authorize = crate::installation_mcp::management_authorization(bearer.as_deref());
@@ -174,6 +183,7 @@ impl AccountOperation {
                             &input.account_id,
                             &input.revision,
                             &input.settings,
+                            public_credential.as_deref(),
                             authorize.clone(),
                         )
                         .await?,
@@ -186,7 +196,13 @@ impl AccountOperation {
                 }
                 let mut result = s
                     .accounts
-                    .reorder_authorized(s, input.provider.into(), &input.ids, authorize.clone())
+                    .reorder_authorized(
+                        s,
+                        input.provider.into(),
+                        &input.ids,
+                        public_credential.as_deref(),
+                        authorize.clone(),
+                    )
                     .await?;
                 if !human {
                     result.sign_in = None;
@@ -320,7 +336,7 @@ pub(crate) async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         let provider = crate::provider::Provider::parse(provider)?;
         return account_operation("list_coding_agent_account_providers")
             .unwrap()
-            .invoke(s, json!({"provider":provider}), ResumeContext::http(input)?)
+            .invoke(s, json!({ "provider": provider }), ResumeContext::http(input)?)
             .await;
     }
     let mut body = input.body.clone();
@@ -357,4 +373,66 @@ pub(crate) async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         .expect("known account operation")
         .invoke(s, body, ResumeContext::http(input)?)
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        accounts::{Account, AccountState},
+        provider::Provider,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn revoked_authorization_after_account_lock_wait_cannot_publish_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let s = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().to_owned()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "/nonexistent-codex".into(),
+            claude_bin: "/nonexistent-claude".into(),
+            opencode_bin: "/nonexistent-opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        let account = Account::new(Provider::Claude, "Unchanged", AccountState::Pending);
+        s.store.save_coding_account(&account).await.unwrap();
+        let guard = s.accounts.lock(&account.id).await;
+        let revoked = Arc::new(AtomicBool::new(false));
+        let denied = revoked.clone();
+        let settings = AccountSettings {
+            name: "Revoked edit".into(),
+            enabled: false,
+            max_concurrent_runs: 1,
+        };
+        let mut waiting = Box::pin(s.accounts.update_authorized(
+            &s,
+            &account.id,
+            &account.revision,
+            &settings,
+            None,
+            move |_| {
+                if denied.load(Ordering::SeqCst) {
+                    Err(Error::forbidden("Revoked"))
+                } else {
+                    Ok(())
+                }
+            },
+        ));
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        revoked.store(true, Ordering::SeqCst);
+        drop(guard);
+        assert_eq!(waiting.await.unwrap_err().status, 403);
+        assert_eq!(s.accounts.account(&s, &account.id).await.unwrap(), account);
+    }
 }

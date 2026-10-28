@@ -96,17 +96,19 @@ Screenshots use synthetic accounts: [desktop](screenshots/agent-accounts/desktop
 | Route | Purpose |
 | --- | --- |
 | `GET /api/accounts` | `{accounts, signIn, required}`: every account, the sign-in in progress, and the coding agents whose runs wait for you |
-| `POST /api/accounts` | `{provider, name}` starts sign-in; OpenCode additionally requires `{modelProvider, apiKey}` |
+| `POST /api/accounts` | `{provider, name}` starts sign-in; OpenCode additionally requires `{modelProvider, apiKey}`. Returns `kind: signIn` with `signIn`, or `kind: connected` with `account` |
 | `GET /api/accounts/providers/opencode` | Supported API-key model providers from the installed native catalog |
 | `POST /api/accounts/order` | `{provider, ids}` saves the order Auto tries OpenCode connections in; `ids` lists every account once |
 | `POST /api/accounts/{id}/api-key` | `{modelProvider, apiKey}` replaces an OpenCode key when the account is idle |
 | `POST /api/accounts/{id}/sign-in` | Signs an existing account in again |
 | `POST /api/accounts/sign-in/code` | `{code}` for coding agents whose page shows a code to paste back (Claude Code) |
 | `DELETE /api/accounts/sign-in` | Cancels the sign-in; an account that never connected is removed |
-| `PATCH /api/accounts/{id}` | Any of `{name, enabled, maxConcurrentRuns}` |
+| `PUT /api/accounts/{id}` | `{revision, settings: {name, enabled, maxConcurrentRuns}}`; stale revisions conflict |
 | `DELETE /api/accounts/{id}` | Removes the account and its credentials |
 | `POST /api/accounts/refresh` | Reads every account's usage now |
 
 ## Validation
 
 `crates/installation/tests/accounts.rs` covers per-agent selection, `crates/installation/tests/codex.rs` and `crates/installation/tests/claude.rs` each driver's sign-in, usage, rotation and parallel limits against synthetic CLIs, and `crates/installation/tests/worker.rs` real runs, exhaustion failover and simultaneous Claude conversations. `tests/e2e/accounts.spec.ts` drives the web page in Chromium and WebKit, and `AccountsJourneyTest` and `AccountsDeviceTest` the Android screen. These fixtures never contact OpenAI or Anthropic and never spend subscription allowance or banked resets.
+
+Account views and commands are generated from Rust. Public MCP and the installation tool share the registry and account policies. Connecting/reconnecting or replacing a key needs an authenticated human owner; agents receive a human-required path and never a challenge. Code submission, cancellation of human sign-in and credential deletion also require that owner session. Names, pause/parallel settings and ordering use scoped management with grant checks at publication.

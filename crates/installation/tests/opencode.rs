@@ -1,4 +1,5 @@
 use common::account_fixture::AccountFixtures;
+
 mod common;
 
 use cairn_installation::{

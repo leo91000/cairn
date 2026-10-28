@@ -116,7 +116,13 @@ struct Choice {
 }
 
 fn available(account: &cairn_contracts::CodingAgentAccount) -> bool {
-    matches!(account.status, cairn_contracts::AccountStatus::Next | cairn_contracts::AccountStatus::Ready | cairn_contracts::AccountStatus::Low | cairn_contracts::AccountStatus::Full)
+    matches!(
+        account.status,
+        cairn_contracts::AccountStatus::Next
+            | cairn_contracts::AccountStatus::Ready
+            | cairn_contracts::AccountStatus::Low
+            | cairn_contracts::AccountStatus::Full
+    )
 }
 
 fn selection(agent: &Value, provider: Provider, model: &str) -> Value {
@@ -163,7 +169,8 @@ async fn choices(s: &Service, agent: &Value) -> Result<Vec<Choice>> {
                                 && accounts.iter().any(|account| {
                                     account.provider == cairn_contracts::AgentProvider::Opencode
                                         && available(account)
-                                        && account.model_provider.as_deref() == route["provider"].as_str()
+                                        && account.model_provider.as_deref()
+                                            == route["provider"].as_str()
                                 })
                         })
                 })

@@ -225,5 +225,40 @@ pub struct AccountProviderInput {
     pub provider: AgentProvider,
 }
 
-fn account_enabled() -> bool {true}
-fn account_parallel_runs() -> u64 {4}
+fn account_enabled() -> bool {
+    true
+}
+
+fn account_parallel_runs() -> u64 {
+    4
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_account_corpus_qualifies_usage_and_bounded_parallelism() {
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/coding-agent-account-contracts.json"
+        ))
+        .unwrap();
+        for value in corpus["accounts"].as_array().unwrap() {
+            let account: CodingAgentAccount = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(
+                serde_json::from_value::<CodingAgentAccount>(
+                    serde_json::to_value(&account).unwrap()
+                )
+                .unwrap(),
+                account
+            );
+        }
+        for value in corpus["settings"].as_array().unwrap() {
+            assert!(serde_json::from_value::<AccountSettings>(value.clone()).is_ok());
+        }
+        for value in corpus["invalidSettings"].as_array().unwrap() {
+            assert!(serde_json::from_value::<AccountSettings>(value.clone()).is_err());
+        }
+        let _: AccountSignIn = serde_json::from_value(corpus["signIn"].clone()).unwrap();
+    }
+}
