@@ -105,7 +105,8 @@ def stop_daemon(env):
 
 def wait_ready(env, directory, repo):
     started = time.monotonic()
-    deadline = started + 180
+    deadline = started + 900
+    next_sample = 0
     while time.monotonic() < deadline:
         status = command_output(["cargo", "ra-jit", "status"], env)
         (directory / "status-ready.log").write_text(status)
@@ -113,8 +114,22 @@ def wait_ready(env, directory, repo):
             return time.monotonic() - started
         if "failed" in status.lower():
             raise RuntimeError(f"Blaze failed to load the workspace: {status}")
+        elapsed = time.monotonic() - started
+        if elapsed >= next_sample:
+            print(f"blaze: workspace still loading after {elapsed:.0f} s", flush=True)
+            pids = sorted(set(re.findall(r"\bpid (\d+)", status)))
+            if pids:
+                processes = subprocess.run(
+                    ["ps", "-p", ",".join(pids), "-o", "pid,etimes,time,rss,stat,comm"],
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+                with (directory / "loading-processes.log").open("a") as log:
+                    log.write(f"\nAfter {elapsed:.1f} s (CPU/RSS of daemon and worker only):\n")
+                    log.write(processes.stdout)
+                    log.write(processes.stderr)
+            next_sample = elapsed + 30
         time.sleep(1)
-    raise TimeoutError("Blaze did not become ready in 180 seconds; see status-ready.log")
+    raise TimeoutError("Blaze did not become ready in 900 seconds; see status-ready.log and loading-processes.log")
 
 
 def run_engine(repo, output, name, toolchain, blaze):

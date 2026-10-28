@@ -28,6 +28,15 @@ class BlazeBenchmarkTests(unittest.TestCase):
         self.assertTrue(benchmark.served_by_blaze("Finished `dev` profile [ra-jit] in 0.1s"))
         self.assertFalse(benchmark.served_by_blaze("[ra-jit] failed; building with cargo\nFinished `dev` profile in 1s"))
 
+    def test_workspace_can_become_ready_after_three_minutes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            status = f"daemon: running\n    {directory}: ready"
+            with patch.object(benchmark.time, "monotonic", side_effect=[0, 181, 182]):
+                with patch.object(benchmark, "command_output", return_value=status):
+                    elapsed = benchmark.wait_ready({}, directory, directory)
+            self.assertEqual(elapsed, 182)
+
     def test_oracle_rejects_a_successful_build_with_stale_output(self):
         with tempfile.TemporaryDirectory() as temporary:
             binary = Path(temporary) / "binary"

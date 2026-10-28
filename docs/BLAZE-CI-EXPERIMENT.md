@@ -73,6 +73,13 @@ a fresh process with already available build files. It excludes cache transfer,
 checkout and runner startup costs, so it is an optimistic reference for an
 otherwise fresh CI runner.
 
+The first hosted run was still loading after three minutes, so the loading budget
+is fifteen minutes. During loading, the experiment records the daemon and worker's
+process state, cumulative CPU time and RSS every thirty seconds to distinguish
+ongoing computation from a stopped or stuck worker. These samples are diagnostics,
+not total-engine resource measurements. A timeout is inconclusive for warm-build
+speed; it is not reported as an engine speedup.
+
 The workflow retains machine-readable measurements, command logs, daemon status
 and a readable comparison in its Actions artifacts and job summary. Wall time is
 measured per build. GNU time CPU and peak RSS describe the foreground command and
