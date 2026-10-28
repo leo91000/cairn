@@ -138,10 +138,10 @@ ainsi, pour chaque hook, qui peut déclencher quoi : un bot ouvert à tous est 
 qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l’arbre.
 
 - **Agent d’exécution** : la règle désigne l’agent dont les droits encadrent le hook
-  qu’elle écoute et les outils qu’elle appelle elle-même ; son créateur doit y avoir
-  accès. Un membre ne peut donc pas écouter une instance que ses agents n’ont pas le
-  droit d’écouter. Les droits sur les hooks et les outils n’existent que sur les
-  agents.
+  de plugin qu’elle écoute et les outils qu’elle appelle elle-même ; son créateur doit
+  y avoir accès. Un membre ne peut donc pas écouter une instance que ses agents n’ont
+  pas le droit d’écouter. Les droits sur les hooks de plugin et les outils n’existent
+  que sur les agents.
 - **Blocs** : si / sinon imbriqués et boucles.
 - **Conditions** : un éditeur structuré de groupes ET / OU imbriqués, d’opérateurs sur
   tout champ de la payload (égal, contient, expression régulière, dans une liste,
@@ -215,11 +215,11 @@ indépendamment des autres :
 
 | Empêchement | Cause | Levé par |
 | --- | --- | --- |
-| Désactivée | son créateur, ou une duplication (le duplicata démarre ainsi) ; arrête les déclenchements en cours | son créateur |
-| Pause d’urgence | le propriétaire ; arrête aussi les déclenchements en cours | le propriétaire |
-| Budget épuisé | un plafond horaire dépassé ; le créateur est prévenu | son créateur ou le propriétaire |
+| Désactivée | son créateur, ou une duplication (le duplicata démarre ainsi) ; arrête les déclenchements en cours | son créateur |
+| Pause d’urgence | le propriétaire ; arrête aussi les déclenchements en cours | le propriétaire |
+| Budget épuisé | un plafond horaire dépassé ; le créateur est prévenu | son créateur ou le propriétaire |
 | Droits perdus | le créateur perd l’accès à l’agent d’exécution, ou cet agent le hook de plugin écouté | le retour du droit, de lui-même |
-| Adhésion terminée | le créateur est retiré, part ou est supprimé ; le réinviter n’y change rien | jamais : il reste à dupliquer |
+| Adhésion terminée | le créateur est retiré, part ou est supprimé ; le réinviter n’y change rien | jamais : il reste à dupliquer |
 
 Un agent qui a l’accès à l’installation n’écrit des règles que dans une conversation
 dont toutes les entrées, depuis sa création, ont été écrites par une même personne sur
@@ -229,16 +229,20 @@ modifie. Une conversation qu’une règle, un agent, `cairn_installation` ou une
 personne a atteinte, une tâche (planifiée, lancée à la main ou déléguée) et une
 mission ne le permettent jamais, même plus tard ; pas plus qu’une conversation dont
 l’agent a vu ses instructions ou ses skills modifiées, depuis sa création, par un
-autre que cette personne, ou dont l’agent suit des instructions ou des skills qu’un
-agent a écrites, à quelque moment que ce soit (les instructions d’un plugin comptent
-comme écrites par le propriétaire qui l’a accordé). Il écrit au nom de cette
-personne : il crée des règles à son nom, et ne modifie, désactive, réactive ou
-supprime que les règles de ce compte. Il ne peut accorder de droits à aucun agent ni à
-aucun compte, ni toucher à la règle d’un autre compte, ni lever une pause d’urgence,
-ni réduire, sur l’agent d’exécution d’une règle d’un autre compte (le propriétaire, ou
-un membre dont l’adhésion dure), un droit sur un hook ou un outil que cette règle
-utilise, ressources comprises, quel que soit l’état de la règle. Une règle créée par
-le MCP public a pour créateur le propriétaire qui a autorisé ce client.
+autre que cette personne (une skill importée d’une source compte comme écrite par
+celui qui l’importe, risque résiduel accepté comme ci-dessous), ou dont l’agent suit
+des instructions ou des skills qu’un agent a écrites, à quelque moment que ce soit
+(les instructions d’un plugin comptent comme écrites par le propriétaire qui l’a
+accordé). Il écrit au nom de cette personne : il crée des règles à son nom, et ne
+modifie, désactive, réactive ou supprime que les règles de ce compte. Il ne peut
+accorder de droits à aucun agent ni à aucun compte, ni toucher à la règle d’un autre
+compte, ni lever une pause d’urgence ou contourner celle-ci en supprimant ou en
+dupliquant la règle en pause, ni réduire, sur l’agent d’exécution d’une règle d’un
+autre compte que cette personne (de n’importe quel compte, hors d’une telle
+conversation ; le propriétaire, ou un membre dont l’adhésion dure), un droit sur un
+hook ou un outil que cette règle utilise, ressources comprises, quel que soit l’état
+de la règle. Une règle créée par le MCP public a pour créateur le propriétaire qui a
+autorisé ce client.
 
 Une règle n’atteint un agent dont la politique autorise l’exécution native, ou une
 conversation qui s’exécute en natif, que si son créateur détenait l’autorité native
@@ -250,6 +254,11 @@ chaque action qui résout, au moment du déclenchement, un agent ou une conversa
 natifs, Cairn vérifie à la fois cette autorité conservée et l’autorité native actuelle
 du créateur ; sans elles, l’action échoue. Le travail natif qu’une règle démarre garde
 les limites de node et le renouvellement de bail de tout travail natif.
+
+Fusionner des agents ([guide](../AGENT-MERGE.md)) met les règles dont l’agent
+d’exécution disparaît en « Droits perdus » jusqu’à ce que leur créateur en choisisse
+un autre ; une conversation déplacée vers un autre agent ne permet plus d’écrire de
+règles.
 
 ### Budget du moteur
 

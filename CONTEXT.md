@@ -261,8 +261,8 @@ dernière action, avec la version de la règle en vigueur à son début.
 _Avoid_ : exécution, run (réservés au travail d’un agent)
 
 **Agent d’exécution d’une règle** :
-L’agent dont les droits encadrent le hook de plugin qu’une règle écoute et les outils qu’elle
-appelle elle-même. Le créateur de la règle doit y avoir accès.
+L’agent dont les droits encadrent le hook de plugin qu’une règle écoute et les outils
+qu’elle appelle elle-même. Le créateur de la règle doit y avoir accès.
 
 **Ressource d’un plugin** :
 Ce sur quoi portent les hooks et les outils d’un plugin, et que le plugin sait lister :
