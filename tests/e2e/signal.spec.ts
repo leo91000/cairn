@@ -434,6 +434,11 @@ test('blocked missions ask only when they wait on the user, and can be set aside
   await expect(card(proof.task)).toBeVisible()
   await page.goto(workspacePath('/'))
   await expect(card(proof.task)).toBeVisible()
+  // Mission activity can arrive before the requester conversation list after a reload.
+  // Wait for its placement too, so J/K navigate the complete attention order.
+  await expect(recent.locator(`[data-fil-key="task:${handedBack.task.id}"]`)).toContainText('Waiting on Orchestrate the F8 architecture work')
+  await expect(recent.locator(`[data-fil-key="task:${external.task.id}"]`)).toContainText('Waiting on an outside check')
+  await expect(forYou.locator(`[data-fil-key="task:${handedBack.task.id}"], [data-fil-key="task:${external.task.id}"]`)).toHaveCount(0)
   // K climbs to the top of the Fil; what needs an answer comes newest first, then the device proof.
   for (let step = 0; step < 6; step++)
     await page.keyboard.press('k')
