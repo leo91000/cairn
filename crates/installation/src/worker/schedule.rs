@@ -14,6 +14,7 @@ use crate::{
     store::{Db, Store},
     validation::text,
 };
+use cairn_contracts::EventKind;
 use cairn_contracts::RunState;
 use serde_json::{Value, json};
 use std::{
@@ -46,6 +47,7 @@ impl Worker {
             .keys()
             .cloned()
             .collect::<HashSet<_>>();
+        crate::chats::coding_agent::tick(s, &active).await?;
         // Parked missions must release any pre-crash execution independently
         // of their wakeup and of admission capacity for new processes.
         for state in s.store.read(|db| db.active_run_states()).await? {
@@ -128,6 +130,15 @@ impl Worker {
             return Ok(());
         }
 
+        if state.cancel_requested_at.is_some() {
+            let pending_id = run_id.clone();
+            if s.store
+                .read(move |db| crate::chats::coding_agent::pending_for_run(db, &pending_id))
+                .await?
+            {
+                return Ok(());
+            }
+        }
         let run_preparation = self.run_preparation_lock(&run_id).await;
         let _run_preparation = run_preparation.lock_owned().await;
         let current_id = run_id.clone();
@@ -369,8 +380,13 @@ async fn report_account_wait(
         account_required: Some(serde_json::from_value(serde_json::json!(required))?),
         ..Default::default()
     };
-    s.store.change_run(run_id, patch).await?;
-    s.store.event(run_id, "status", &error.message, None).await
+    let (run_id, message) = (run_id.to_owned(), error.message.clone());
+    s.store
+        .transaction(move |db| {
+            db.change_run(&run_id, patch)?;
+            db.event(&run_id, &EventKind::Status, &message, None)
+        })
+        .await
 }
 
 /// Shows why `run` waits for a node. Updated figures replace the reason
@@ -387,11 +403,17 @@ pub(super) async fn report_capacity_wait(s: &Service, run: &RunState, detail: &s
         account_required: Some(None),
         ..Default::default()
     };
-    s.store.change_run(run_id, patch).await?;
-    if previous.starts_with(CAPACITY_WAIT_REASON) {
-        return Ok(());
-    }
-    s.store.event(run_id, "status", &reason, None).await
+    let changed_figures = previous.starts_with(CAPACITY_WAIT_REASON);
+    let run_id = run_id.to_owned();
+    s.store
+        .transaction(move |db| {
+            db.change_run(&run_id, patch)?;
+            if !changed_figures {
+                db.event(&run_id, &EventKind::Status, &reason, None)?;
+            }
+            Ok(())
+        })
+        .await
 }
 
 /// Returns whether a recovering run may launch again now.
@@ -533,7 +555,7 @@ fn cancel_recovery(db: &Db<'_>, id: &str, run: &RunState) -> Result<()> {
         .and_then(|retry| retry.next_attempt_at)
         .is_some()
     {
-        db.event(id, "status", RunStatus::Cancelled.as_str(), None)?;
+        db.event(id, &EventKind::Status, RunStatus::Cancelled.as_str(), None)?;
     }
     Ok(())
 }
@@ -982,7 +1004,7 @@ mod tests {
         assert!(
             service
                 .store
-                .kv(&format!("run-checkpoint:{run_id}"))
+                .checkpoint_boundary(&run_id)
                 .await
                 .unwrap()
                 .is_none()
@@ -1125,7 +1147,7 @@ mod tests {
         assert!(
             service
                 .store
-                .kv(&format!("run-checkpoint:{run_id}"))
+                .checkpoint_boundary(&run_id)
                 .await
                 .unwrap()
                 .is_none()

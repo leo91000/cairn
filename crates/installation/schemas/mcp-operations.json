@@ -24,7 +24,7 @@
   },
   {
     "name": "list_skills",
-    "description": "List global .agents skills or the skills for one registered project.",
+    "description": "List global .agents skills or the skills for one registered project. Each item includes usageCount: the number of delivered messages invoking its $name among the installation's last 1000 chat messages (once per message, excluding code). Sort descending by usageCount to prefer frequently used skills; counts are shared across scopes with the same name.",
     "scope": "read",
     "destructive": false,
     "inputSchema": {
@@ -179,7 +179,7 @@
   },
   {
     "name": "list_chats",
-    "description": "List conversations with pagination, optional agent/project filters and active/trash view. Returns metadata, without messages or marking chats read.",
+    "description": "List conversations with pagination, optional agent/project filters and active/trash view. Returns metadata including accountWaitReason and accountRequired for quota waits, without messages or marking chats read.",
     "scope": "read",
     "destructive": false,
     "inputSchema": {
@@ -674,7 +674,7 @@
   },
   {
     "name": "answer_chat_question",
-    "description": "Answer a pending question. Supply a fresh UUID answer.id and one answer per field; identical retries are safe. May steer or start agent work.",
+    "description": "Answer a pending questionnaire with separate selected option IDs and comment for every field. Text alone is allowed. Supply a fresh UUID answer.id; identical retries are safe. May steer or start agent work.",
     "scope": "run",
     "destructive": true,
     "inputSchema": {
@@ -705,14 +705,29 @@
                 "type": "string"
               },
               "additionalProperties": {
-                "minItems": 1,
-                "maxItems": 1,
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 10000
-                }
+                "type": "object",
+                "properties": {
+                  "selected": {
+                    "default": [],
+                    "maxItems": 30,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  },
+                  "comment": {
+                    "default": "",
+                    "type": "string",
+                    "maxLength": 10000
+                  }
+                },
+                "required": [
+                  "selected",
+                  "comment"
+                ],
+                "additionalProperties": false
               }
             }
           },
@@ -729,6 +744,31 @@
         "questionId",
         "answer"
       ]
+    }
+  },
+  {
+    "name": "withdraw_chat_question",
+    "description": "Withdraw a pending questionnaire without supplying any answer or authorization. Identical retries are safe; answers being delivered cannot be withdrawn.",
+    "scope": "run",
+    "destructive": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "questionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "chatId",
+        "questionId"
+      ],
+      "additionalProperties": false
     }
   },
   {
@@ -1021,292 +1061,6 @@
     }
   },
   {
-    "name": "list_nodes",
-    "description": "List execution nodes, their immutable backends, budgets, trusted people, agent grants and storage status. Read this before configuring or replacing a node.",
-    "scope": "read",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {},
-      "required": [],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "list_native_callers",
-    "description": "List current installation owner/member identities eligible for native trust. Membership alone never grants native execution.",
-    "scope": "read",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {},
-      "required": [],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "create_node_enrollment",
-    "description": "Create a single-use enrollment for a separate node. Without managerUrl, the returned installCommand lets Beacon introduce the machine to the manager (route beacon): no address, certificate or open port. They connect directly when the networks allow it; otherwise node traffic, including conversation disks, transits Beacon encrypted end to end to the manager certificate pinned in the command. Pass a direct HTTPS managerUrl reachable from the machine (LAN or VPN) to keep that traffic off Beacon entirely. To switch an existing machine, choose the other backend, install its runtime on that machine, then wait for this exact nodeId in list_nodes. Configure it and agent grants before offering to retire the previous node. Does not convert existing conversations or install anything.",
-    "scope": "manage",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 100
-        },
-        "backend": {
-          "type": "string",
-          "enum": [
-            "firecracker",
-            "native"
-          ],
-          "default": "firecracker"
-        },
-        "managerUrl": {
-          "type": "string",
-          "maxLength": 2000,
-          "description": "Optional direct HTTPS manager origin. Omit it to let Beacon introduce the machine to the manager."
-        }
-      },
-      "required": [
-        "name"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "update_node",
-    "description": "Configure an enrolled node using its current name, tags, limits and admission setting from list_nodes. Native execution requires explicit nativeEnabled and nativeAccounts from list_native_callers, and trusted originating callers. Slots share the configured CPU/RAM/disk budgets. Backend is immutable; enroll another node to change it. Agent access is managed through update_agent.",
-    "scope": "manage",
-    "destructive": true,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "nodeId": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "node": {
-          "type": "object",
-          "properties": {
-            "name": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 100
-            },
-            "tags": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "maxLength": 40
-              },
-              "maxItems": 32
-            },
-            "limits": {
-              "type": "object",
-              "properties": {
-                "cpu": {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                "memoryMiB": {
-                  "type": "integer",
-                  "minimum": 129
-                },
-                "diskMiB": {
-                  "type": "integer",
-                  "minimum": 1
-                }
-              },
-              "required": [
-                "cpu",
-                "memoryMiB",
-                "diskMiB"
-              ],
-              "additionalProperties": false
-            },
-            "slots": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 4096
-            },
-            "accepting": {
-              "type": "boolean"
-            },
-            "nativeEnabled": {
-              "type": "boolean"
-            },
-            "nativeAccounts": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "format": "uuid"
-              },
-              "maxItems": 100
-            },
-            "confirmNativeAdministration": {
-              "type": "boolean",
-              "default": false,
-              "description": "Informed owner confirmation that newly trusted people may administer this host when its native mode is administrator."
-            }
-          },
-          "required": [
-            "name",
-            "tags",
-            "limits",
-            "accepting"
-          ],
-          "additionalProperties": false
-        }
-      },
-      "required": [
-        "nodeId",
-        "node"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "change_native_node_mode",
-    "description": "Preview or confirm a native node privilege change. Call with change.mode first; inspect all affected agents, trusted people, conversations, tasks and root limitations, then confirm with the returned previewId. Stops managed workloads before applying and restarting; inspect list_nodes nativeModeRequest/nativeModeObserved/nativeModeStatus. Native administrator gives real unrestricted passwordless host sudo. Existing remote Cairn permissions do not expand; returning to protected does not clean or restore the host. A built-in agent can request elevation but the owner must confirm it in node details; its result is awaiting-owner. Requires installation management. No unknown or older supervisor can accept administrator work.",
-    "scope": "manage",
-    "destructive": true,
-    "inputSchema": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "nodeId",
-        "change"
-      ],
-      "properties": {
-        "nodeId": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "change": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "mode"
-          ],
-          "properties": {
-            "mode": {
-              "type": "string",
-              "enum": [
-                "protected",
-                "administrator"
-              ]
-            },
-            "previewId": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "confirm": {
-              "type": "boolean",
-              "default": false
-            }
-          }
-        }
-      }
-    }
-  },
-  {
-    "name": "update_node_storage",
-    "description": "Configure a VM or native node's disk cache, shared memory cache, free-space reserve and synchronization limits. Read its current storage policy from list_nodes and send all six values to preserve unchanged settings. Requires configured private S3 storage and a successful node storage probe, like the owner's Storage dialog.",
-    "scope": "manage",
-    "destructive": true,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "nodeId": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "storage": {
-          "type": "object",
-          "properties": {
-            "cacheMiB": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 16777216
-            },
-            "memoryCacheMiB": {
-              "type": "integer",
-              "minimum": 4,
-              "maximum": 4096
-            },
-            "reserveMiB": {
-              "type": "integer",
-              "minimum": 64,
-              "maximum": 16777216
-            },
-            "reservePercent": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 50
-            },
-            "backupSeconds": {
-              "type": "integer",
-              "minimum": 5,
-              "maximum": 3600
-            },
-            "maxDirtySeconds": {
-              "type": "integer",
-              "minimum": 5,
-              "maximum": 86400
-            }
-          },
-          "required": [
-            "cacheMiB",
-            "memoryCacheMiB",
-            "reserveMiB",
-            "reservePercent",
-            "backupSeconds",
-            "maxDirtySeconds"
-          ],
-          "additionalProperties": false
-        }
-      },
-      "required": [
-        "nodeId",
-        "storage"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "revoke_node",
-    "description": "Permanently revoke a node identity and its execution grants, preserving files on the machine. After a replacement is configured, releasePlacements returns conversations pinned to or preferring the old node to automatic placement. Ordinary revocation keeps those choices. Conversations retain their execution backend. Does not uninstall the runtime or delete its files.",
-    "scope": "manage",
-    "destructive": true,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "nodeId": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "releasePlacements": {
-          "type": "boolean",
-          "default": false
-        }
-      },
-      "required": [
-        "nodeId"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
     "name": "get_chat_backend_migration",
     "description": "Inspect a conversation whose agent execution backend changed. Returns its current and configured backend, authorized destination nodes, pending migration and errors. Migration preserves the same chat and files and starts a fresh engine session.",
     "scope": "read",
@@ -1359,6 +1113,69 @@
         "nodeId",
         "backend",
         "confirm"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_chat_coding_agent_options",
+    "description": "List connected coding agents with available usage for a quota-blocked conversation. Returns the runId and turnId required to switch, and any pending switch. Account credentials and details are never returned.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "chatId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "switch_chat_coding_agent",
+    "description": "Continue the quota-blocked turn with another connected coding agent, preserving the chat, pending request and files. Read get_chat_coding_agent_options first. Supply a fresh requestId UUID, runId, turnId and provider. Retrying the same requestId within seven days is idempotent. The old execution is stopped before a fresh engine session receives the visible transcript. Never grants access or changes the agent profile; stop_chat cancels a pending switch.",
+    "scope": "run",
+    "destructive": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "runId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "requestId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "codex",
+            "claude",
+            "opencode"
+          ]
+        }
+      },
+      "required": [
+        "chatId",
+        "runId",
+        "requestId",
+        "turnId",
+        "provider"
       ],
       "additionalProperties": false
     }

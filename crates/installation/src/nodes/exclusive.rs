@@ -8,6 +8,7 @@ use crate::{
     store::Db,
     validation::{text, uuid},
 };
+use cairn_contracts::EventKind;
 use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc, time::Duration};
@@ -26,7 +27,7 @@ fn pending_requests(db: &Db<'_>) -> Result<Vec<Value>> {
 pub fn acquire_tool() -> Value {
     json!({
         "name": "acquire_exclusive",
-        "description": "Reserve this execution node exclusively for this run and explicitly included active dependencies. Cairn suspends other VMs without restarting their commands, blocks new work and confirms acquisition only after the controller acknowledges suspension and the requested RAM headroom. Requires the installation owner's explicit node permission. Use for CPU-intensive local work; release before remote waiting. Requests queue fairly and expire automatically; existing commands, security leases and external services retain their own semantics. Repeating the same request does not extend its duration. Memory reclamation is capability-qualified and fails explicitly when unavailable.",
+        "description": "Reserve this execution node exclusively for this run and explicitly included active dependencies. Cairn suspends other Cairn workloads without restarting their commands, blocks new work and confirms acquisition only after the controller acknowledges suspension and the requested RAM headroom. Requires the installation owner's explicit node permission. Native reservations leave external host applications and GPU allocations unchanged; administrator enforcement is cooperative. Use for CPU-intensive local work; release before remote waiting. Requests queue fairly and expire automatically; existing commands, security leases and external services retain their own semantics. Repeating the same request does not extend its duration. Memory reclamation is capability-qualified and fails explicitly when unavailable.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -126,7 +127,7 @@ fn terminal(record: &Value) -> bool {
 
 fn authorize_run(db: &Db<'_>, run: &Value, node_id: &str) -> Result<String> {
     let denied = || Error::forbidden("Exclusive node access is unavailable or was revoked.");
-    let node = db.get("nodes", node_id)?.ok_or_else(denied)?;
+    let node = db.node_boundary(node_id)?.ok_or_else(denied)?;
     let agent_id = super::run_agent(run);
     let profile = db.agent(agent_id)?.ok_or_else(denied)?;
     let agent = serde_json::to_value(&profile)?;
@@ -149,10 +150,15 @@ fn authorize_run(db: &Db<'_>, run: &Value, node_id: &str) -> Result<String> {
         .as_str()
         .unwrap_or(super::LOCAL_NODE_ID)
         != node_id
-        || checkpoint["prepared"]["backend"] != "firecracker"
+        || checkpoint["prepared"]["backend"]
+            != if crate::native::policy::node_native(&node) {
+                "native"
+            } else {
+                "firecracker"
+            }
     {
         return Err(Error::conflict(
-            "Exclusivity requires an active VM on this node.",
+            "Exclusivity requires an active execution of this node's backend.",
         ));
     }
     let attempt = text(&checkpoint, "runnerId");
@@ -234,7 +240,7 @@ pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
                 .unwrap_or(super::LOCAL_NODE_ID);
             let owner_attempt = authorize_run(db, &run, node_id)?;
             let node = db
-                .get("nodes", node_id)?
+                .node_boundary(node_id)?
                 .ok_or_else(|| Error::not_found("Node missing."))?;
             if node["exclusiveReservations"] != true {
                 return Err(Error::conflict(
@@ -307,8 +313,7 @@ pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
             });
             db.put(KIND, &request)?;
             db.event(
-                text(&run, "id"),
-                "node.exclusive",
+                text(&run, "id"), &EventKind::from_adapter("node.exclusive"),
                 "Exclusive reservation queued.",
                 Some(&public(&request)),
             )?;
@@ -382,11 +387,11 @@ pub async fn release_owned(s: &Service, request_id: &str, owner: Option<&str>) -
                 .into();
                 record["releaseRequestedAt"] = now().into();
                 db.put(KIND, &record)?;
-                if let Some(mut node) = db.get("nodes", text(&record, "nodeId"))?
+                if let Some(mut node) = db.node_boundary(text(&record, "nodeId"))?
                     && node["exclusiveReservation"]["id"] == record["id"]
                 {
                     node["exclusiveReservation"] = public(&record);
-                    db.put("nodes", &node)?;
+                    db.save_node_boundary(&node)?;
                 }
             }
             Ok(public(&record))
@@ -526,12 +531,12 @@ async fn reconcile_node(s: &Service, node_id: &str) -> Result<()> {
                 db.put(KIND, &record)?;
             }
             let mut node_record = db
-                .get("nodes", &node)?
+                .node_boundary(&node)?
                 .ok_or_else(|| Error::not_found("Node missing."))?;
             let summary = public(&record);
             if node_record["exclusiveReservation"] != summary {
                 node_record["exclusiveReservation"] = summary;
-                db.put("nodes", &node_record)?;
+                db.save_node_boundary(&node_record)?;
             }
             Ok(Some(record))
         })
@@ -589,9 +594,9 @@ async fn reconcile_node(s: &Service, node_id: &str) -> Result<()> {
                         current["error"] = error.message.into();
                         db.put(KIND, &current)?;
                         clear_suspensions(db, &current)?;
-                        if let Some(mut node) = db.get("nodes", &node_id)? {
+                        if let Some(mut node) = db.node_boundary(&node_id)? {
                             node["exclusiveReservation"] = Value::Null;
-                            db.put("nodes", &node)?;
+                            db.save_node_boundary(&node)?;
                         }
                         Ok(())
                     })
@@ -660,7 +665,7 @@ async fn reconcile_node(s: &Service, node_id: &str) -> Result<()> {
             if current != previous {
                 db.put(KIND, &current)?;
             }
-            if let Some(mut node) = db.get("nodes", &node_id)? {
+            if let Some(mut node) = db.node_boundary(&node_id)? {
                 let summary = if terminal(&current) {
                     Value::Null
                 } else {
@@ -668,7 +673,7 @@ async fn reconcile_node(s: &Service, node_id: &str) -> Result<()> {
                 };
                 if node["exclusiveReservation"] != summary {
                     node["exclusiveReservation"] = summary;
-                    db.put("nodes", &node)?;
+                    db.save_node_boundary(&node)?;
                 }
             }
             Ok(())
@@ -697,7 +702,7 @@ pub async fn maintain(s: Arc<Service>) {
                 // controller still holds a reservation. Inspect reachable controllers
                 // even when the restored request queue is completely empty.
                 nodes.extend(
-                    db.list("nodes")?
+                    db.nodes_boundary()?
                         .iter()
                         .filter(|node| {
                             node["exclusiveReservations"] == true

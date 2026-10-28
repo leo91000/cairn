@@ -1,4 +1,5 @@
 use common::AgentFixture;
+use common::node_fixture::*;
 
 mod common;
 
@@ -12,6 +13,8 @@ use cairn_installation::{
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
+
+const NATIVE_NODE_ID: &str = "e160ec69-e129-464c-846c-42b99ec69484";
 
 struct Fixture {
     root: tempfile::TempDir,
@@ -43,9 +46,14 @@ impl Fixture {
                 state["highestEpoch"] = body["epoch"].clone();
                 Json(state.clone())
             })).with_state(remote.clone());
+        // Model the manager's controller URL for an enrolled remote identity.
+        let app = app
+            .clone()
+            .nest(&format!("/internal/execution/{NATIVE_NODE_ID}"), app);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let runner_url = format!("http://{}", listener.local_addr().unwrap());
         let s = Service::new(cairn_installation::config::Config {
+            public_url: runner_url.clone(),
             runner_url,
             ..common::config(root.path())
         })
@@ -59,14 +67,11 @@ impl Fixture {
                 .unwrap();
         });
         s.store
-            .put(
-                "nodes",
-                json!({
-                    "id": LOCAL_NODE_ID,
-                    "exclusiveReservations": true,
-                    "limits": { "memoryMiB": 4096 },
-                }),
-            )
+            .put_node_fixture(json!({
+                "id": LOCAL_NODE_ID,
+                "exclusiveReservations": true,
+                "limits": { "memoryMiB": 4096 },
+            }))
             .await
             .unwrap();
         s.agent_fixture(
@@ -119,9 +124,9 @@ impl Fixture {
             .unwrap();
         self.s.chat_acknowledge(&run_id, &message).await.unwrap();
         let config = self.s.mcps.run_configuration(&self.s, &run).await.unwrap();
-        self.s.store.set(&format!("run-checkpoint:{run_id}"), json!({
+        self.s.store.save_checkpoint_boundary(&run_id, json!({
             "runnerId": id(), "nodeId": LOCAL_NODE_ID, "prepared": { "backend": "firecracker" },
-        }), None).await.unwrap();
+        })).await.unwrap();
         (run_id, text(&config["env"], "CAIRN_MCP_RUN_TOKEN").into())
     }
 
@@ -219,7 +224,7 @@ async fn manager_acquisition_is_idempotent_fenced_and_released_before_waiting() 
     assert!(f.remote.lock().await["reservation"].is_null());
     assert!(
         f.s.store
-            .get("nodes", LOCAL_NODE_ID)
+            .node_boundary(LOCAL_NODE_ID)
             .await
             .unwrap()
             .unwrap()["exclusiveReservation"]
@@ -315,7 +320,7 @@ async fn replaced_attempt_and_invalid_input_cannot_reuse_a_reservation() {
     let acquired = exclusive::acquire(&f.s, &f.token, &request())
         .await
         .unwrap();
-    f.s.store.set(&format!("run-checkpoint:{}", f.run), json!({ "runnerId": id(), "nodeId": LOCAL_NODE_ID, "prepared": { "backend": "firecracker" } }), None).await.unwrap();
+    f.s.store.save_checkpoint_boundary(&f.run, json!({ "runnerId": id(), "nodeId": LOCAL_NODE_ID, "prepared": { "backend": "firecracker" } })).await.unwrap();
     f.until(|record| record["state"] == "released").await;
     assert!(acquired["expiresAt"].as_i64().unwrap() > now());
 }
@@ -352,4 +357,72 @@ async fn nonblocking_requests_remain_queued_until_their_independent_acquisition_
     f.until(|record| record["id"] == queued["id"] && record["state"] == "acquired")
         .await;
     assert_eq!(f.remote.lock().await["reservation"]["id"], queued["id"]);
+}
+
+#[tokio::test]
+async fn native_reservations_use_the_same_authorization_queue_and_revocation() {
+    let f = Fixture::new().await;
+    let mut node =
+        f.s.store
+            .node_boundary(LOCAL_NODE_ID)
+            .await
+            .unwrap()
+            .unwrap();
+    let mut local = node.clone();
+    local["exclusiveReservations"] = false.into();
+    f.s.store.put_node_fixture(local).await.unwrap();
+    node["id"] = NATIVE_NODE_ID.into();
+    node["local"] = false.into();
+    node["capabilities"] = json!({ "backend": "native" });
+    f.s.store.put_node_fixture(node).await.unwrap();
+    let agent =
+        f.s.agent_fixture(
+            json!({
+                "access": { "backend": "native", "nodes": [NATIVE_NODE_ID] },
+                "exclusiveNodes": [NATIVE_NODE_ID],
+            }),
+            Some(MAIN_AGENT_ID),
+        )
+        .await
+        .unwrap();
+    f.s.store
+        .transaction({
+            let run = f.run.clone();
+            move |db| {
+                common::run_fixture::change_run_fixture(
+                    db,
+                    &run,
+                    &json!({
+                        "executionBackend": "native", "nodeId": NATIVE_NODE_ID, "snapshot": { "agent": agent },
+                    }),
+                )
+            }
+        })
+        .await
+        .unwrap();
+    let mut checkpoint =
+        f.s.store
+            .checkpoint_boundary(&f.run)
+            .await
+            .unwrap()
+            .unwrap();
+    checkpoint["nodeId"] = NATIVE_NODE_ID.into();
+    checkpoint["prepared"]["backend"] = "native".into();
+    f.s.store
+        .save_checkpoint_boundary(&f.run, checkpoint)
+        .await
+        .unwrap();
+    let acquired = exclusive::acquire(&f.s, &f.token, &request())
+        .await
+        .unwrap();
+    assert_eq!(acquired["state"], "acquired");
+    f.s.agent_fixture(json!({ "exclusiveNodes": [] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
+    f.until(|record| record["state"] == "released").await;
+    assert!(
+        exclusive::acquire(&f.s, &f.token, &request())
+            .await
+            .is_err()
+    );
 }

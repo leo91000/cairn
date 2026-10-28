@@ -28,6 +28,100 @@ abstract class BackgroundWaitCases {
     protected open fun capture(name: String) {}
 
     @Test
+    fun rejectedQuotaSwitchRemainsVisibleAfterOptionsRefresh() =
+        conversation("running", quota = true, codingAgentChoices = true, rejectSwitch = true) {
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Continuer avec Codex").performScrollTo().performClick()
+            // The changed label proves the options response after the POST was rendered.
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex disponible")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Switch refused. Review the accounts.").assertExists()
+        }
+
+    @Test
+    fun quotaAlternativesRefreshWhenCodexBecomesAvailable() =
+        conversation(
+            "running",
+            quota = true,
+            codingAgentChoices = true,
+            initialAlternatives = "unavailable",
+        ) {
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Continuer avec Codex").performScrollTo().assertIsDisplayed()
+        }
+
+    @Test
+    fun quotaAlternativesRetryAfterAReadFailure() =
+        conversation(
+            "running",
+            quota = true,
+            codingAgentChoices = true,
+            initialAlternatives = "error",
+        ) {
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Continuer avec Codex").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Alternatives temporarily unavailable.").assertDoesNotExist()
+        }
+
+    @Test
+    fun quotaOffersOneClickCodingAgentSwitchForTheCurrentTurn() =
+        conversation("running", quota = true, codingAgentChoices = true) { server ->
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Continuer avec Codex").performScrollTo().assertIsDisplayed()
+            capture("quota-switch-android")
+            compose.onNodeWithText("Continuer avec Codex").performClick()
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first { it.method == "POST" && it.path?.endsWith("/coding-agent") == true }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            assertTrue(body["provider"] == JsonPrimitive("codex"))
+            assertTrue(body["runId"] == JsonPrimitive(SAVED_RUN_ID))
+            assertTrue(body["turnId"] == JsonPrimitive("quota-turn"))
+            assertTrue(body["requestId"]!!.jsonPrimitive.content.isNotBlank())
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodes(hasText("Annuler le changement") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Annuler le changement").performScrollTo().performClick()
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodes(hasText("Continuer avec Codex") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose.onNodeWithText("Claude Code").assertIsSelected()
+            compose.onNodeWithText("Codex").assertIsNotSelected()
+        }
+
+    @Test
     fun recoveredQuotaDoesNotRestoreDuplicateErrors() =
         conversation("succeeded", quota = true) {
             compose.onNodeWithTag("chat-quota").assertDoesNotExist()
@@ -40,7 +134,9 @@ abstract class BackgroundWaitCases {
     fun quotaWaitFoldsDuplicateErrorsAndExpandsOneTechnicalMessage() =
         conversation("running", quota = true) {
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
-            compose.onAllNodesWithText("Quota Claude Code atteint").assertCountEquals(1)
+            compose
+                .onAllNodesWithText("Limite de dépense Claude Code atteinte")
+                .assertCountEquals(1)
             compose
                 .onNodeWithText("Reprise automatique dès qu’un compte est disponible.")
                 .assertIsDisplayed()
@@ -64,14 +160,32 @@ abstract class BackgroundWaitCases {
             history = { _, now ->
                 quotaEvents(now) +
                     listOf(
-                        RunEvent(7, now, "turn.started", "", runId = SAVED_RUN_ID),
-                        RunEvent(8, now, "turn.completed", "", runId = SAVED_RUN_ID),
-                        RunEvent(9, now, "status", "succeeded", runId = SAVED_RUN_ID),
+                        RunEvent(
+                            id = 7,
+                            createdAt = now,
+                            type = "turn.started",
+                            text = "",
+                            runId = SAVED_RUN_ID,
+                        ),
+                        RunEvent(
+                            id = 8,
+                            createdAt = now,
+                            type = "turn.completed",
+                            text = "",
+                            runId = SAVED_RUN_ID,
+                        ),
+                        RunEvent(
+                            id = 9,
+                            createdAt = now,
+                            type = "status",
+                            text = "succeeded",
+                            runId = SAVED_RUN_ID,
+                        ),
                     )
             },
         ) {
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
-            compose.onNodeWithText("La limite d’usage du compte est atteinte.").assertIsDisplayed()
+            compose.onNodeWithText("Quota Claude Code atteint").assertIsDisplayed()
             compose
                 .onNodeWithText("La limite de dépense du compte est atteinte.")
                 .assertDoesNotExist()
@@ -250,31 +364,49 @@ abstract class BackgroundWaitCases {
             history = { wakeup, now ->
                 fun message(id: Long, text: String) =
                     RunEvent(
-                        id,
-                        now - 20_000 + id,
-                        "item.completed",
-                        "",
-                        mapOf(
-                            "item" to
-                                buildJsonObject {
-                                    put("id", "message-$id")
-                                    put("type", "agent_message")
-                                    put("text", text)
-                                }
-                        ),
+                        id = id,
+                        createdAt = now - 20_000 + id,
+                        type = "item.completed",
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "item" to
+                                        buildJsonObject {
+                                            put("id", "message-$id")
+                                            put("type", "agent_message")
+                                            put("text", text)
+                                        }
+                                )
+                            ),
                     )
                 listOf(
-                    RunEvent(1, now - 30_000, "turn.started", "", emptyMap()),
+                    RunEvent(
+                        id = 1,
+                        createdAt = now - 30_000,
+                        type = "turn.started",
+                        text = "",
+                        payload = kotlinx.serialization.json.JsonObject(emptyMap()),
+                    ),
                     message(2, "Lot poussé dans la PR."),
                     RunEvent(
-                        3,
-                        now - 15_000,
-                        "chat.wait",
-                        reason,
-                        wireJson.encodeToJsonElement(wakeup!!).jsonObject,
+                        id = 3,
+                        createdAt = now - 15_000,
+                        type = "chat.wait",
+                        text = reason,
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                wireJson.encodeToJsonElement(wakeup!!).jsonObject
+                            ),
                     ),
                     message(4, "CI en cours, reprise programmée pour la vérifier."),
-                    RunEvent(5, now - 5_000, "turn.completed", "", emptyMap()),
+                    RunEvent(
+                        id = 5,
+                        createdAt = now - 5_000,
+                        type = "turn.completed",
+                        text = "",
+                        payload = kotlinx.serialization.json.JsonObject(emptyMap()),
+                    ),
                 )
             },
         ) {
@@ -423,13 +555,22 @@ abstract class BackgroundWaitCases {
             timelineEntries(
                     listOf(
                         RunEvent(
-                            1,
-                            1,
-                            "chat.wait",
-                            "",
-                            wireJson.encodeToJsonElement(wakeup).jsonObject,
+                            id = 1,
+                            createdAt = 1,
+                            type = "chat.wait",
+                            text = "",
+                            payload =
+                                kotlinx.serialization.json.JsonObject(
+                                    wireJson.encodeToJsonElement(wakeup).jsonObject
+                                ),
                         ),
-                        RunEvent(2, 2, "chat.wait_ready", "Result available", observation),
+                        RunEvent(
+                            id = 2,
+                            createdAt = 2,
+                            type = "chat.wait_ready",
+                            text = "Result available",
+                            payload = kotlinx.serialization.json.JsonObject(observation),
+                        ),
                     ),
                     chat = true,
                 )
@@ -453,6 +594,9 @@ abstract class BackgroundWaitCases {
         sleeping: Boolean = false,
         conditional: Boolean = false,
         quota: Boolean = false,
+        codingAgentChoices: Boolean = false,
+        initialAlternatives: String? = null,
+        rejectSwitch: Boolean = false,
         paused: Boolean = false,
         reason: String = "Attendre la CI",
         history: ((ChatWakeup?, Long) -> List<RunEvent>)? = null,
@@ -533,16 +677,19 @@ abstract class BackgroundWaitCases {
                 )
             val waiting =
                 RunEvent(
-                    1,
-                    now - 30_000,
-                    "turn.waiting",
-                    "",
-                    mapOf(
-                        "tasks" to
-                            buildJsonArray {
-                                addJsonObject { put("description", "Vérifier la CI") }
-                            }
-                    ),
+                    id = 1,
+                    createdAt = now - 30_000,
+                    type = "turn.waiting",
+                    text = "",
+                    payload =
+                        kotlinx.serialization.json.JsonObject(
+                            mapOf(
+                                "tasks" to
+                                    buildJsonArray {
+                                        addJsonObject { put("description", "Vérifier la CI") }
+                                    }
+                            )
+                        ),
                 )
             val batch =
                 wireJson.encodeToString(
@@ -556,8 +703,55 @@ abstract class BackgroundWaitCases {
                 )
             server.dispatcher =
                 object : Dispatcher() {
+                    @Volatile var switching = false
+                    @Volatile var switchRejected = false
+                    var alternativesReads = 0
+
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
+                        if (codingAgentChoices && path.endsWith("/stop")) {
+                            switching = false
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody("{}")
+                        }
+                        if (codingAgentChoices && path.endsWith("/coding-agent")) {
+                            if (request.method == "POST" && rejectSwitch) {
+                                switchRejected = true
+                                return MockResponse()
+                                    .setResponseCode(409)
+                                    .setHeader("Content-Type", "application/json")
+                                    .setBody("""{"error":"Switch refused. Review the accounts."}""")
+                            }
+                            if (request.method == "GET" && alternativesReads++ == 0) {
+                                if (initialAlternatives == "error")
+                                    return MockResponse()
+                                        .setResponseCode(500)
+                                        .setHeader("Content-Type", "application/json")
+                                        .setBody(
+                                            """{"error":"Alternatives temporarily unavailable."}"""
+                                        )
+                                if (initialAlternatives == "unavailable")
+                                    return MockResponse()
+                                        .setHeader("Content-Type", "application/json")
+                                        .setBody(
+                                            """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"claude","choices":[]}"""
+                                        )
+                            }
+                            if (request.method == "POST") switching = true
+                            val progress =
+                                if (switching) ""","switching":{"provider":"codex","error":null}"""
+                                else ""
+                            val label = if (switchRejected) "Codex disponible" else "Codex"
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody(
+                                    if (request.method == "POST") "{}"
+                                    else
+                                        """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"claude","choices":[{"provider":"codex","label":"$label"}]$progress}"""
+                                )
+                        }
+
                         if (path == "/api/installations/fixture/api/chats/chat/stream")
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
@@ -702,7 +896,15 @@ private fun quotaEvents(now: Long): List<RunEvent> {
         type: String,
         text: String = "",
         payload: Map<String, JsonElement>? = null,
-    ) = RunEvent(id, now - 30_000 + id * 1000, type, text, payload, runId = SAVED_RUN_ID)
+    ) =
+        RunEvent(
+            id = id,
+            createdAt = now - 30_000 + id * 1000,
+            type = type,
+            text = text,
+            payload = (payload)?.let { kotlinx.serialization.json.JsonObject(it) },
+            runId = SAVED_RUN_ID,
+        )
     fun message(id: Long, text: String) =
         event(
             id,

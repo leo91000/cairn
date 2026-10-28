@@ -33,7 +33,7 @@ const SHARED_V1: &str = "shared-v1";
 
 /// Running executions and stopped on-demand disks with unpublished writes or an
 /// unfinished publication, including a mission parked before demand was saved.
-const SYNC_CANDIDATES: &str =
+pub(super) const SYNC_CANDIDATES: &str =
     "SELECT data FROM runs WHERE status='running'
         OR json_extract(data,'$.backup.requestedRevision') > COALESCE(json_extract(data,'$.backup.acknowledgedRevision'),0)
         OR (status IN ('succeeded','failed','cancelled','interrupted','queued','waiting')
@@ -948,10 +948,10 @@ async fn make_room(s: &Service, mut occupied: u64, incoming: u64, budget: u64) -
     // use the emergency reserve so a dirty journal can still make progress.
     let node = s
         .store
-        .get("nodes", super::LOCAL_NODE_ID)
+        .node_boundary(super::LOCAL_NODE_ID)
         .await?
         .unwrap_or_default();
-    let policy = crate::storage::policy::Policy::for_node(&node["storage"])?;
+    let policy = crate::storage::policy::for_node(&node["storage"])?;
     let (total, _) = crate::storage::policy::space(&s.config.data_dir)?;
     let reserve = policy.reserve(total);
     let required = occupied

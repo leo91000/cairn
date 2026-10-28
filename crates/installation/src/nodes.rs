@@ -9,6 +9,7 @@ pub(crate) mod eviction;
 pub mod exclusive;
 pub mod executor;
 pub mod files;
+pub mod inventory;
 pub mod maintenance;
 pub mod moves;
 pub mod native_mode;
@@ -38,6 +39,11 @@ use axum::{
     extract::{Request, State},
     http::HeaderMap,
 };
+use cairn_contracts::{
+    CreateNodeEnrollmentInput, ExecutionNode, NodeAgent, NodeBackend, NodeConfiguration,
+    NodeEnrollment, NodeId, NodeStatus, StaleDisks,
+};
+pub use cairn_contracts::{NodeCapabilities as Capabilities, NodeResources as Resources};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -61,35 +67,18 @@ pub(crate) enum NodeState {
     WaitingForNode,
 }
 
-/// Connection state reported to owners; derived, never persisted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NodeStatus {
-    Revoked,
-    Local,
-    Online,
-    Offline,
-}
-
-impl NodeStatus {
-    fn of(node: &Value) -> Self {
-        if node["revoked"] == true {
-            Self::Revoked
-        } else if node["local"] == true {
-            Self::Local
-        } else if seen_within(node, HEARTBEAT_TIMEOUT_MS) {
-            Self::Online
-        } else {
-            Self::Offline
-        }
-    }
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Revoked => "revoked",
-            Self::Local => "local",
-            Self::Online => "online",
-            Self::Offline => "offline",
-        }
+fn status(node: &ExecutionNode) -> NodeStatus {
+    if node.revoked {
+        NodeStatus::Revoked
+    } else if node.local {
+        NodeStatus::Local
+    } else if node
+        .last_seen
+        .is_some_and(|seen| now() - seen < HEARTBEAT_TIMEOUT_MS)
+    {
+        NodeStatus::Online
+    } else {
+        NodeStatus::Offline
     }
 }
 
@@ -128,17 +117,13 @@ pub(crate) fn run_agent(run: &Value) -> &str {
     text(&run["snapshot"]["agent"], "id")
 }
 
-pub(crate) fn checkpoint_key(run: &str) -> String {
-    format!("run-checkpoint:{run}")
-}
-
 /// The run's resume checkpoint, or `null` when none was recorded.
 pub(crate) async fn checkpoint(s: &Service, run: &str) -> Result<Value> {
-    Ok(s.store.kv(&checkpoint_key(run)).await?.unwrap_or_default())
+    Ok(s.store.checkpoint_boundary(run).await?.unwrap_or_default())
 }
 
 pub(crate) fn db_checkpoint(db: &Db<'_>, run: &str) -> Result<Value> {
-    Ok(db.kv(&checkpoint_key(run))?.unwrap_or_default())
+    Ok(db.checkpoint_boundary(run)?.unwrap_or_default())
 }
 
 pub(crate) async fn runner_secret(s: &Service) -> Result<String> {
@@ -198,119 +183,6 @@ pub(crate) fn node_tags(node: &Value) -> impl Iterator<Item = &Value> {
         .chain(node["systemTags"].as_array().into_iter().flatten())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ResourceKind {
-    Cpu,
-    Memory,
-    Disk,
-}
-
-impl ResourceKind {
-    pub(crate) const ALL: [Self; 3] = [Self::Cpu, Self::Memory, Self::Disk];
-
-    pub(crate) const fn key(self) -> &'static str {
-        match self {
-            Self::Cpu => "cpu",
-            Self::Memory => "memoryMiB",
-            Self::Disk => "diskMiB",
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Resources {
-    pub cpu: u32,
-    pub memory_mi_b: u64,
-    pub disk_mi_b: u64,
-}
-
-impl Resources {
-    pub(crate) fn validate(&self) -> Result<()> {
-        if !(1..=4096).contains(&self.cpu)
-            || !(128..=1_073_741_824).contains(&self.memory_mi_b)
-            || !(128..=1_099_511_627_776).contains(&self.disk_mi_b)
-        {
-            return Err(Error::bad("Invalid node resource limits."));
-        }
-        Ok(())
-    }
-
-    pub(crate) fn amount(&self, kind: ResourceKind) -> u64 {
-        match kind {
-            ResourceKind::Cpu => u64::from(self.cpu),
-            ResourceKind::Memory => self.memory_mi_b,
-            ResourceKind::Disk => self.disk_mi_b,
-        }
-    }
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Capabilities {
-    os: String,
-    arch: String,
-    #[serde(default = "firecracker_backend")]
-    backend: String,
-    kvm: bool,
-    #[serde(default)]
-    ublk: bool,
-    #[serde(default)]
-    native_mode_protocol: u32,
-    cpu: u32,
-    memory_mi_b: u64,
-    disk_mi_b: u64,
-    #[serde(default)]
-    disk_total_mi_b: u64,
-}
-
-fn firecracker_backend() -> String {
-    "firecracker".into()
-}
-
-impl Capabilities {
-    fn validate(&self) -> Result<()> {
-        if self.os != "linux" || self.arch != "x86_64" {
-            return Err(Error::bad("Nodes require Linux x86-64."));
-        }
-        if !matches!(self.backend.as_str(), "firecracker" | "native") {
-            return Err(Error::bad("Unknown node backend."));
-        }
-        self.resources().validate()
-    }
-
-    const fn resources(&self) -> Resources {
-        Resources {
-            cpu: self.cpu,
-            memory_mi_b: self.memory_mi_b,
-            disk_mi_b: self.disk_mi_b,
-        }
-    }
-
-    pub(crate) fn limits(&self) -> Resources {
-        if self.backend == "native" {
-            return Resources {
-                cpu: (self.cpu / 2).clamp(1, 8),
-                memory_mi_b: (self.memory_mi_b / 4).clamp(128, 8192),
-                disk_mi_b: (self.disk_mi_b / 5).clamp(128, 32768),
-            };
-        }
-        Resources {
-            cpu: self.cpu.saturating_sub(1).max(1),
-            memory_mi_b: self.memory_mi_b.saturating_sub(512).max(128),
-            disk_mi_b: (self.disk_mi_b * 4 / 5).max(128),
-        }
-    }
-
-    fn tags(&self) -> Vec<&'static str> {
-        if self.kvm {
-            vec!["linux", "x86_64", "kvm"]
-        } else {
-            vec!["linux", "x86_64"]
-        }
-    }
-}
-
 pub(crate) fn valid_runtime(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 100
@@ -333,9 +205,9 @@ fn name(value: &str) -> Result<String> {
     Ok(value.into())
 }
 
-fn public(mut node: Value) -> Value {
-    node["status"] = NodeStatus::of(&node).as_str().into();
-    node
+fn public(mut node: ExecutionNode) -> Result<Value> {
+    node.status = status(&node);
+    Ok(serde_json::to_value(node)?)
 }
 
 pub(crate) fn is_active_attempt(attempt: &Value) -> bool {
@@ -392,21 +264,6 @@ async fn stale_disks(s: &Service, volumes: &[Value], attempts: &[Value]) -> Resu
     Ok(stale)
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct StaleSummary {
-    count: usize,
-    disk_mi_b: u64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentGrant<'a> {
-    id: &'a Value,
-    name: &'a Value,
-    all_nodes: bool,
-}
-
 struct Usage<'a> {
     attempts: &'a [Value],
     agents: &'a [Value],
@@ -414,55 +271,67 @@ struct Usage<'a> {
 }
 
 impl Usage<'_> {
-    fn stale_summary(&self, node: &Value) -> StaleSummary {
+    fn stale_summary(&self, node: &ExecutionNode) -> StaleDisks {
         let stale = self
             .stale
             .iter()
-            .filter(|disk| disk.volume["nodeId"] == node["id"]);
-        StaleSummary {
-            count: stale.clone().count(),
+            .filter(|disk| disk.volume["nodeId"] == node.id.to_string());
+        StaleDisks {
+            count: stale.clone().count() as u32,
             disk_mi_b: stale.map(|disk| disk.mi_b).sum(),
         }
     }
 
-    fn granted_agents(&self, node: &Value) -> Vec<AgentGrant<'_>> {
-        if node["revoked"] == true {
-            return Vec::new();
+    fn granted_agents(&self, node: &ExecutionNode) -> Result<Vec<NodeAgent>> {
+        if node.revoked {
+            return Ok(Vec::new());
         }
-        let id = text(node, "id");
-        self.agents
+        // Agent policy remains a named boundary until A18; no node field is read dynamically.
+        let id = node.id.to_string();
+        Ok(self
+            .agents
             .iter()
             .filter(|agent| {
-                agent_allows(agent, id)
-                    && native_mode::reviewed(node, agent)
-                    && crate::native::policy::native(agent)
-                        == crate::native::policy::node_native(node)
+                agent_allows(agent, &id)
+                    && (!node
+                        .native_mode_request
+                        .as_ref()
+                        .is_some_and(|r| r.mode == cairn_contracts::NativeMode::Administrator)
+                        || node
+                            .native_reviewed_agents
+                            .iter()
+                            .any(|id| id == text(agent, "id")))
+                    && crate::native::policy::supports(
+                        agent,
+                        if node.capabilities.backend == NodeBackend::Native {
+                            "native"
+                        } else {
+                            "firecracker"
+                        },
+                    )
             })
-            .map(|agent| AgentGrant {
-                id: &agent["id"],
-                name: &agent["name"],
+            .map(|agent| NodeAgent {
+                id: text(agent, "id").into(),
+                name: text(agent, "name").into(),
                 all_nodes: crate::service::policy(agent)["nodes"].is_null(),
             })
-            .collect()
+            .collect())
     }
 
-    fn describe(&self, mut node: Value) -> Result<Value> {
+    fn describe(&self, mut node: ExecutionNode) -> Result<ExecutionNode> {
         let used = self
             .attempts
             .iter()
-            .filter(|attempt| attempt["nodeId"] == node["id"] && is_active_attempt(attempt))
-            .count() as u64;
-        let capacity = slots(&node);
-        node["slots"] = capacity.into();
-        node["occupiedSlots"] = used.into();
-        node["availableSlots"] = capacity.saturating_sub(used).into();
-        if let Some(object) = node.as_object_mut() {
-            object.remove("reserved");
-            object.remove("available");
-        }
-        node["staleDisks"] = serde_json::to_value(self.stale_summary(&node))?;
-        node["agents"] = serde_json::to_value(self.granted_agents(&node))?;
-        Ok(public(node))
+            .filter(|a| a["nodeId"] == node.id.to_string() && is_active_attempt(a))
+            .count() as u32;
+        let capacity = node.slots();
+        node.slots = Some(capacity);
+        node.occupied_slots = used;
+        node.available_slots = capacity.saturating_sub(used);
+        node.stale_disks = self.stale_summary(&node);
+        node.agents = self.granted_agents(&node)?;
+        node.status = status(&node);
+        Ok(node)
     }
 }
 
@@ -476,7 +345,7 @@ pub(crate) fn slots(node: &Value) -> u64 {
 }
 
 /// Nodes with their shared budgets, free slots and authorized agents.
-pub async fn inventory(s: &Service) -> Result<Vec<Value>> {
+pub async fn typed_inventory(s: &Service) -> Result<Vec<ExecutionNode>> {
     let attempts = s.store.list("node-attempts").await?;
     let volumes = s.store.list("node-volumes").await?;
     let agents = s.store.agent_snapshots().await?;
@@ -488,7 +357,7 @@ pub async fn inventory(s: &Service) -> Result<Vec<Value>> {
     };
     let mut nodes = s
         .store
-        .list("nodes")
+        .nodes()
         .await?
         .into_iter()
         .map(|node| usage.describe(node))
@@ -496,13 +365,32 @@ pub async fn inventory(s: &Service) -> Result<Vec<Value>> {
     s.store
         .read(move |db| {
             for node in &mut nodes {
-                if crate::native::policy::node_native(node) && node["diskGrowthProtocol"] == 1 {
-                    node["diskAccounting"] = disk_capacity::accounting(db, node, &attempts)?;
+                if node.capabilities.backend == NodeBackend::Native
+                    && node.disk_growth_protocol == Some(1)
+                {
+                    node.disk_accounting = serde_json::from_value(disk_capacity::accounting(
+                        db,
+                        &serde_json::to_value(&*node)?,
+                        &attempts,
+                    )?)?;
                 }
             }
             Ok(nodes)
         })
         .await
+}
+
+/// A10/A11 view adapter; inventory/configuration themselves use the typed reader.
+pub async fn inventory(s: &Service) -> Result<Vec<Value>> {
+    typed_inventory(s)
+        .await?
+        .into_iter()
+        .map(|node| Ok(serde_json::to_value(node)?))
+        .collect()
+}
+
+fn public_boundary(node: Value) -> Result<Value> {
+    public(serde_json::from_value(node)?)
 }
 
 pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
@@ -511,6 +399,46 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
         .trim_start_matches("/api/")
         .split('/')
         .collect::<Vec<_>>();
+    let command = match (input.method.as_str(), segments.as_slice()) {
+        ("GET", ["nodes"]) => Some(("list_nodes", json!({}))),
+        ("GET", ["nodes", "native-callers"]) => Some(("list_native_callers", json!({}))),
+        ("POST", ["nodes", "enrollments"]) => Some(("create_node_enrollment", input.body.clone())),
+        ("PUT", ["nodes", node]) if *node != "settings" => {
+            Some(("update_node", json!({"nodeId": node, "node": input.body})))
+        }
+        ("PUT", ["nodes", node, "storage"]) => {
+            if input.body["nodeId"] != *node {
+                return Err(Error::bad("Node identity differs from path."));
+            }
+            Some(("update_node_storage", input.body.clone()))
+        }
+        ("POST", ["nodes", node, "native-mode"]) => Some((
+            "change_native_node_mode",
+            json!({"nodeId": node, "change": input.body}),
+        )),
+        ("POST", ["nodes", node, "revoke"]) => {
+            let mut body = if input.body.is_null() {
+                json!({})
+            } else {
+                input.body.clone()
+            };
+            if !body.is_object() {
+                return Err(Error::bad("Invalid node revocation."));
+            }
+            if body.get("nodeId").is_some_and(|id| id != *node) {
+                return Err(Error::bad("Node identity differs from path."));
+            }
+            body["nodeId"] = (*node).into();
+            Some(("revoke_node", body))
+        }
+        _ => None,
+    };
+    if let Some((name, body)) = command {
+        return crate::capabilities::node_operation(name)
+            .expect("node command")
+            .invoke(s, body, crate::capabilities::ResumeContext::http(input)?)
+            .await;
+    }
     if input.method == "GET" {
         // Nodes stay listed from their last record while the local runner is unreachable.
         let _ = refresh_local(s).await;
@@ -546,10 +474,6 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
             args["chatId"] = chat.into();
             s.migrate_chat_backend(args, |_| Ok(())).await
         }
-        ("POST", ["nodes", node, "native-mode"]) => {
-            native_mode::change(s, node, input.body.clone(), |_| Ok(())).await
-        }
-        ("GET", ["nodes", "native-callers"]) => native_callers(s, |_| Ok(())).await,
         ("GET", ["nodes", "alerts"]) => alerts::recent(s).await,
         ("GET", ["nodes", "settings"]) => {
             let mut value = publication::settings(s).await?;
@@ -558,20 +482,11 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
         }
         ("PUT", ["nodes", "settings"]) => publication::configure(s, input.body.clone()).await,
         ("GET", ["nodes", "backups", run]) => backups(s, run).await,
-        ("PUT", ["nodes", node, "storage"]) => {
-            configure_storage(s, node, &input.body, |_| Ok(())).await
-        }
-        ("GET", ["nodes"]) => Ok(inventory(s).await?.into()),
         ("POST", ["nodes", _, "exclusive", reservation, "release"]) => {
             exclusive::release_owned(s, reservation, None).await
         }
-        ("PUT", ["nodes", node]) => configure_node(s, node, input.body.clone(), |_| Ok(())).await,
-        ("POST", ["nodes", "enrollments"]) => invite(s, input.body.clone(), |_| Ok(())).await,
         ("POST", ["nodes", node, "stale-disks", "delete"]) => delete_stale_disks(s, node).await,
         ("PUT", ["nodes", node, "agents"]) => grant_agents(s, node, input.body.clone()).await,
-        ("POST", ["nodes", node, "revoke"]) => {
-            revoke(s, node, input.body.clone(), |_| Ok(())).await
-        }
         _ => Err(Error::not_found("Not found")),
     }
 }
@@ -615,22 +530,27 @@ pub(crate) async fn configure_storage(
     authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
 ) -> Result<Value> {
     crate::validation::uuid(node)?;
-    if body["enabled"] == false {
-        return Err(Error::bad(
-            "S3-backed disk storage is required on every node.",
-        ));
+    let request: cairn_contracts::UpdateNodeStorageInput = decode(body.clone())?;
+    if request.node_id.to_string() != node {
+        return Err(Error::bad("Node identity differs from request."));
     }
-    let policy: Policy = decode(body.clone())?;
-    policy.validate()?;
-    if s.get("nodes", node).await?["revoked"] == true {
+    let policy = request.storage;
+    policy.validate().map_err(Error::bad)?;
+    let current = s.get_node(node).await?;
+    if current.revoked {
         return Err(Error::conflict("Node revoked."));
+    }
+    if current.revision != request.revision {
+        return Err(Error::conflict(
+            "This node was changed elsewhere. Reload it before saving.",
+        ));
     }
     crate::object_storage::Storage::configured(s)?
         .validate()
         .await?;
     let response = s
         .http
-        .post(format!("{}/storage-policy", controller_url(s, node)))
+        .post(format!("{}/storage-policy/probe", controller_url(s, node)))
         .bearer_auth(runner_secret(s).await?)
         .json(&policy)
         .timeout(std::time::Duration::from_secs(30))
@@ -641,38 +561,79 @@ pub(crate) async fn configure_storage(
         return Err(Error::conflict("Node did not pass its storage probe."));
     }
     let node = node.to_owned();
-    let value = s
+    let (value, configuration) = s
         .store
         .transaction(move |db| {
             authorize(db)?;
             let mut record = db
-                .get("nodes", &node)?
+                .node(&node)?
                 .ok_or_else(|| Error::not_found("Node missing."))?;
-            if record["revoked"] == true {
+            if record.revoked {
                 return Err(Error::conflict("Node revoked."));
             }
-            record["storage"] = serde_json::to_value(&policy)?;
-            db.put("nodes", &record)
+            if record.revision != request.revision {
+                return Err(Error::conflict(
+                    "This node was changed elsewhere. Reload it before saving.",
+                ));
+            }
+            record.storage = policy;
+            record.revision = id();
+            let record = db.save_node(&record)?;
+            let configuration = db
+                .node_storage_configuration(&node)?
+                .ok_or_else(|| Error::not_found("Node missing."))?;
+            Ok((record, configuration))
         })
         .await?;
-    Ok(public(value))
+    if apply_storage_configuration(s, &request.node_id.to_string(), &configuration)
+        .await
+        .is_err()
+    {
+        return Err(Error::unavailable(
+            "Storage settings were saved, but the node has not confirmed them. It will retry automatically.",
+        ));
+    }
+    public(value)
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Configuration {
-    name: String,
-    tags: Vec<String>,
-    limits: Resources,
-    #[serde(default)]
-    slots: Option<u64>,
-    accepting: bool,
-    #[serde(default, rename = "nativeEnabled")]
-    native_enabled: Option<bool>,
-    #[serde(default, rename = "nativeAccounts")]
-    native_accounts: Option<Vec<String>>,
-    #[serde(default, rename = "confirmNativeAdministration")]
-    confirm_native_administration: bool,
+async fn apply_storage_configuration(
+    s: &Service,
+    node: &str,
+    configuration: &crate::storage::policy::Configuration,
+) -> Result<()> {
+    let response = s
+        .http
+        .post(format!("{}/storage-policy", controller_url(s, node)))
+        .bearer_auth(runner_secret(s).await?)
+        .json(configuration)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|_| Error::unavailable("Node storage configuration unavailable."))?;
+    if !response.status().is_success() {
+        return Err(Error::unavailable(
+            "Node storage configuration was not confirmed.",
+        ));
+    }
+    Ok(())
+}
+
+async fn reconcile_local_storage(s: &Service, observed: &Value) -> Result<()> {
+    let configuration = s
+        .store
+        .read(|db| db.node_storage_configuration(LOCAL_NODE_ID))
+        .await?;
+    if let Some(configuration) = configuration
+        && serde_json::to_value(&configuration)? != *observed
+    {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            apply_storage_configuration(s, LOCAL_NODE_ID, &configuration),
+        )
+        .await
+        .map_err(|_| Error::unavailable("Local storage reconciliation pending."))??;
+    }
+    Ok(())
 }
 
 pub(crate) async fn configure_node(
@@ -681,20 +642,19 @@ pub(crate) async fn configure_node(
     body: Value,
     authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
 ) -> Result<Value> {
-    let request: Configuration = decode(body)?;
+    let request: NodeConfiguration = decode(body)?;
     let owner_review = native_mode::owner().is_some();
     if let Some(accounts) = &request.native_accounts {
-        let existing = s.get("nodes", node).await?;
-        if accounts.iter().any(|account| {
-            !existing["nativeAccounts"]
-                .as_array()
-                .is_some_and(|values| values.iter().any(|value| value == account))
-        }) {
+        let existing = s.get_node(node).await?;
+        if accounts
+            .iter()
+            .any(|account| !existing.native_accounts.contains(account))
+        {
             crate::native::policy::refresh(s).await?;
         }
     }
     let label = name(&request.name)?;
-    request.limits.validate()?;
+    request.limits.validate().map_err(Error::bad)?;
     if request.limits.memory_mi_b <= 128 {
         return Err(Error::bad(
             "Shared RAM must exceed the 128 MiB controller reserve.",
@@ -715,80 +675,53 @@ pub(crate) async fn configure_node(
     s.store
         .transaction(move |db| {
             authorize(db)?;
-            let mut record = db
-                .get("nodes", &node)?
-                .ok_or_else(|| Error::not_found("Node not found."))?;
-            if record["revoked"] == true {
-                return Err(Error::conflict("This node is revoked."));
-            }
-            // A capacity the node never reported counts as exceeded.
-            let exceeds_capacity = ResourceKind::ALL.iter().any(|kind| {
-                let capabilities = &record["capabilities"];
-                let capacity = match kind {
-                    ResourceKind::Disk => capabilities["diskTotalMiB"]
-                        .as_u64()
-                        .filter(|total| *total > 0)
-                        .or_else(|| capabilities["diskMiB"].as_u64()),
-                    _ => capabilities[kind.key()].as_u64(),
-                };
-                Some(request.limits.amount(*kind)) > capacity
-            });
-            if exceeds_capacity {
+            let mut record = db.node(&node)?.ok_or_else(|| Error::not_found("Node not found."))?;
+            if record.revoked { return Err(Error::conflict("This node is revoked.")); }
+            if record.revision != request.revision { return Err(Error::conflict("This node was changed elsewhere. Reload it before saving.")); }
+            let capacity = record.capabilities.resources();
+            let detected_total = record.capabilities.disk_total_mi_b;
+            let disk_capacity = if detected_total > 0 { detected_total } else { capacity.disk_mi_b };
+            if request.limits.cpu > capacity.cpu || request.limits.memory_mi_b > capacity.memory_mi_b || request.limits.disk_mi_b > disk_capacity {
                 return Err(Error::bad("Limits exceed the node's detected capacity."));
             }
-            let changed_budget = record["limits"] != serde_json::to_value(&request.limits)?
-                || request.slots.is_some_and(|count| count != slots(&record));
-            if changed_budget {
-                record["executionReady"] = false.into();
-            }
-            record["name"] = label.into();
-            record["tags"] = request.tags.into();
-            record["limits"] = serde_json::to_value(&request.limits)?;
-            if let Some(slots) = request.slots {
-                record["slots"] = slots.into();
-            }
-            if let Some(enabled) = request.native_enabled {
-                record["nativeEnabled"] = enabled.into();
-            }
+            let changed_budget = record.limits != request.limits || request.slots.is_some_and(|count| count != record.slots());
+            if changed_budget { record.execution_ready = false; }
+            record.name = label;
+            record.tags = request.tags;
+            record.limits = request.limits;
+            if let Some(slots) = request.slots { record.slots = Some(slots); }
+            if let Some(enabled) = request.native_enabled { record.native_enabled = enabled; }
             if let Some(accounts) = request.native_accounts {
-                if accounts.len() > 100 {
-                    return Err(Error::bad("Use at most 100 trusted native accounts."));
-                }
+                if accounts.len() > 100 { return Err(Error::bad("Use at most 100 trusted native accounts.")); }
                 let authority = db.kv("native-authority")?.unwrap_or_default();
                 for account in &accounts {
                     crate::validation::uuid(account)?;
-                    let retained = record["nativeAccounts"]
-                        .as_array()
-                        .is_some_and(|values| values.iter().any(|value| value == account));
-                    if !retained && native_mode::administrator(&record)
-                        && (!owner_review || !request.confirm_native_administration)
-                    {
+                    let retained = record.native_accounts.contains(account);
+                    let administrator = record.native_mode_request.as_ref().is_some_and(|r| r.mode == cairn_contracts::NativeMode::Administrator);
+                    if !retained && administrator && (!owner_review || !request.confirm_native_administration) {
                         return Err(Error::forbidden("The owner must confirm that new trusted people may administer this host."));
                     }
                     if !retained && authority["accounts"].get(account).is_none() {
-                        return Err(Error::bad(
-                            "Select a current installation owner or member for native access.",
-                        ));
+                        return Err(Error::bad("Select a current installation owner or member for native access."));
                     }
                 }
-                record["nativeAccounts"] = accounts.into();
+                record.native_accounts = accounts;
             }
-            record["accepting"] = request.accepting.into();
-            db.put("nodes", &record)?;
+            record.accepting = request.accepting;
+            record.revision = id();
+            db.save_node(&record)?;
             db.audit("node.configured", &json!({ "nodeId": node }))?;
-            Ok(public(record))
+            public(record)
         })
         .await
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Invitation {
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EnrollmentChallenge {
     name: String,
-    #[serde(default = "firecracker_backend")]
-    backend: String,
-    #[serde(rename = "managerUrl")]
-    manager_url: Option<String>,
+    backend: NodeBackend,
+    node_id: NodeId,
 }
 
 pub(crate) async fn invite(
@@ -796,12 +729,13 @@ pub(crate) async fn invite(
     body: Value,
     authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
 ) -> Result<Value> {
-    let request: Invitation = decode(body)?;
+    let request: CreateNodeEnrollmentInput = decode(body)?;
     let name = name(&request.name)?;
-    if !matches!(request.backend.as_str(), "firecracker" | "native") {
-        return Err(Error::bad("Unknown execution backend."));
-    }
-    let backend = request.backend;
+    let backend = if request.backend == NodeBackend::Native {
+        "native"
+    } else {
+        "firecracker"
+    };
     let direct = match request.manager_url {
         Some(value) => Some(connector::master(value.trim())?),
         None => None,
@@ -833,12 +767,16 @@ pub(crate) async fn invite(
     let code = token();
     let node_id = id();
     let expires = now() + ENROLLMENT_TTL_MS;
-    let invitation = json!({ "name": name, "backend": backend, "nodeId": node_id });
+    let invitation = EnrollmentChallenge {
+        name,
+        backend: request.backend,
+        node_id: NodeId(uuid::Uuid::parse_str(&node_id).map_err(Error::internal)?),
+    };
     let key = format!("node-enrollment:{}", digest(&code));
     s.store
         .transaction(move |db| {
             authorize(db)?;
-            db.set(&key, &invitation, Some(expires))
+            db.set(&key, &serde_json::to_value(&invitation)?, Some(expires))
         })
         .await?;
     let installable = backend == "native" || maintenance::release().is_ok();
@@ -866,15 +804,15 @@ pub(crate) async fn invite(
         }
         (true, None, None) => None,
     };
-    Ok(json!({
-        "code": code,
-        "expiresAt": expires,
-        "route": route,
-        "managerUrl": manager_url,
-        "installCommand": install,
-        "backend": backend,
-        "nodeId": node_id,
-    }))
+    Ok(serde_json::to_value(NodeEnrollment {
+        code,
+        expires_at: expires,
+        route: route.into(),
+        manager_url,
+        install_command: install,
+        backend: request.backend,
+        node_id: NodeId(uuid::Uuid::parse_str(&node_id).map_err(Error::internal)?),
+    })?)
 }
 
 async fn delete_stale_disks(s: &Service, node: &str) -> Result<Value> {
@@ -926,9 +864,9 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
     s.store
         .transaction(move |db| {
             let mut record = db
-                .get("nodes", &node)?
+                .node(&node)?
                 .ok_or_else(|| Error::not_found("Node not found."))?;
-            if record["revoked"] == true {
+            if record.revoked {
                 return Err(Error::conflict("This node is revoked."));
             }
             for profile in db.agents()? {
@@ -941,40 +879,52 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
                     continue;
                 }
                 if granted
-                    && crate::native::policy::native(&agent)
-                        != crate::native::policy::node_native(&record)
+                    && !crate::native::policy::supports(
+                        &agent,
+                        if record.capabilities.backend == NodeBackend::Native {
+                            "native"
+                        } else {
+                            "firecracker"
+                        },
+                    )
                 {
                     return Err(Error::bad(
                         "Choose agents configured for this node's execution backend.",
                     ));
                 }
-                if native_mode::administrator(&record) {
-                    let mut reviewed = record["nativeReviewedAgents"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default();
+                if record
+                    .native_mode_request
+                    .as_ref()
+                    .is_some_and(|r| r.mode == cairn_contracts::NativeMode::Administrator)
+                {
+                    let mut reviewed = record.native_reviewed_agents.clone();
                     if !granted {
-                        reviewed.retain(|id| id != &agent["id"]);
+                        reviewed.retain(|id| id != text(&agent, "id"));
                     } else if owner_review
                         && request.confirm_native_administration
-                        && !reviewed.contains(&agent["id"])
+                        && !reviewed.iter().any(|id| id == text(&agent, "id"))
                     {
-                        reviewed.push(agent["id"].clone());
-                    } else if !native_mode::reviewed(&record, &agent) {
+                        reviewed.push(text(&agent, "id").into());
+                    } else if !record
+                        .native_reviewed_agents
+                        .iter()
+                        .any(|id| id == text(&agent, "id"))
+                    {
                         return Err(Error::forbidden(
                             "The owner must explicitly review access to this administrative node.",
                         ));
                     }
-                    record["nativeReviewedAgents"] = reviewed.into();
+                    record.native_reviewed_agents = reviewed;
                 }
                 set_node_grant(db, profile, &node, granted)?;
             }
             // Revoking placement can also release exclusive reservations on
             // this record. Persist only our admission field onto that new copy.
-            let mut current = db.get("nodes", &node)?.unwrap();
-            if current["nativeReviewedAgents"] != record["nativeReviewedAgents"] {
-                current["nativeReviewedAgents"] = record["nativeReviewedAgents"].clone();
-                db.put("nodes", &current)?;
+            let mut current = db.node(&node)?.unwrap();
+            if current.native_reviewed_agents != record.native_reviewed_agents {
+                current.native_reviewed_agents = record.native_reviewed_agents;
+                current.revision = id();
+                db.save_node(&current)?;
             }
             db.audit(
                 "node.agents.configured",
@@ -1002,6 +952,7 @@ fn set_node_grant(
     } else {
         nodes.retain(|id| id != node);
         agent.settings.exclusive_nodes.retain(|id| id != node);
+        agent.settings.node_priorities.retain(|id| id != node);
     }
     agent.revision = crate::config::id();
     db.save_agent(&agent)?;
@@ -1032,13 +983,14 @@ pub(crate) async fn revoke(
         .transaction(move |db| {
             authorize(db)?;
             let mut record = db
-                .get("nodes", &node)?
+                .node(&node)?
                 .ok_or_else(|| Error::not_found("Node not found."))?;
-            if record["local"] == true {
+            if record.local {
                 return Err(Error::bad("The local runner cannot be revoked."));
             }
-            record["revoked"] = true.into();
-            record["accepting"] = false.into();
+            record.revoked = true;
+            record.accepting = false;
+            record.revision = id();
             for (key, value) in db.keys("node-token:")? {
                 if value == node {
                     db.delete(&key)?;
@@ -1054,12 +1006,19 @@ pub(crate) async fn revoke(
                 let before = agent.settings.exclusive_nodes.len();
                 agent.settings.exclusive_nodes.retain(|id| id != &node);
                 changed |= before != agent.settings.exclusive_nodes.len();
+                let before = agent.settings.node_priorities.len();
+                agent.settings.node_priorities.retain(|id| id != &node);
+                changed |= before != agent.settings.node_priorities.len();
                 if changed {
                     agent.revision = crate::config::id();
                     db.save_agent(&agent)?;
                 }
             }
-            record = db.put("nodes", &record)?;
+            db.save_node(&record)?;
+            // Agent revocation updates the authoritative grant relations in this transaction.
+            record = db
+                .node(&node)?
+                .ok_or_else(|| Error::not_found("Node not found."))?;
 
             let mut released = 0_u64;
             if request.release_placements {
@@ -1070,9 +1029,10 @@ pub(crate) async fn revoke(
                 "node.revoked",
                 &json!({ "nodeId": node, "releasedPlacements": released }),
             )?;
-            let mut value = public(record);
-            value["releasedPlacements"] = released.into();
-            Ok(value)
+            Ok(serde_json::to_value(cairn_contracts::NodeRevocation {
+                node: serde_json::from_value(public(record)?)?,
+                released_placements: released as u32,
+            })?)
         })
         .await
 }
@@ -1135,24 +1095,6 @@ struct Enrollment {
     runtime_id: String,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EnrolledNode {
-    id: String,
-    name: Value,
-    local: bool,
-    accepting: bool,
-    revoked: bool,
-    tags: Vec<String>,
-    system_tags: Vec<&'static str>,
-    capabilities: Capabilities,
-    limits: Resources,
-    storage: Policy,
-    runtime_id: String,
-    last_seen: i64,
-    created_at: i64,
-}
-
 async fn enroll(s: &Service, body: Value) -> Result<Value> {
     let request: Enrollment = decode(body)?;
     if request.protocol != 1 {
@@ -1163,7 +1105,7 @@ async fn enroll(s: &Service, body: Value) -> Result<Value> {
             "Node version mismatch; deploy manager and nodes at the same version.",
         ));
     }
-    request.capabilities.validate()?;
+    request.capabilities.validate().map_err(Error::bad)?;
     name(&request.name)?;
     let runtime = name(&request.runtime_id)?;
     if request.code.len() != 43 {
@@ -1174,45 +1116,35 @@ async fn enroll(s: &Service, body: Value) -> Result<Value> {
     let token_key = format!("node-token:{}", digest(&credential));
     s.store
         .transaction(move |db| {
-            let invitation = db
+            let proof = db
                 .kv(&key)?
                 .ok_or_else(|| Error::unauthorized("Invalid or expired enrollment code."))?;
-            let expected = invitation["backend"]
-                .as_str()
-                .ok_or_else(|| Error::bad("Missing enrollment backend."))?;
-            if request.capabilities.backend != expected {
+            let invitation: EnrollmentChallenge = decode(proof)?;
+            if request.capabilities.backend != invitation.backend {
                 return Err(Error::forbidden(
                     "Enrollment backend differs from the owner's invitation.",
                 ));
             }
-            let node_id = invitation["nodeId"]
-                .as_str()
-                .ok_or_else(|| Error::bad("Missing enrollment node identity."))?
-                .to_owned();
+            let node_id = invitation.node_id.to_string();
             db.delete(&key)?;
             let capabilities = request.capabilities;
-            let node = EnrolledNode {
-                id: node_id.clone(),
-                name: invitation["name"].clone(),
-                local: false,
+            let native = capabilities.backend == NodeBackend::Native;
+            let node = ExecutionNode {
+                id: NodeId(uuid::Uuid::parse_str(&node_id).map_err(Error::internal)?),
+                name: invitation.name,
+                revision: id(),
                 accepting: false,
-                revoked: false,
-                tags: Vec::new(),
                 system_tags: capabilities.tags(),
                 limits: capabilities.limits(),
                 capabilities,
                 storage: Policy::default(),
                 runtime_id: runtime,
-                last_seen: now(),
+                last_seen: Some(now()),
                 created_at: now(),
+                slots: native.then_some(1),
+                ..ExecutionNode::default()
             };
-            let mut node = serde_json::to_value(node)?;
-            if crate::native::policy::node_native(&node) {
-                node["slots"] = 1.into();
-                node["nativeEnabled"] = false.into();
-                node["nativeAccounts"] = json!([]);
-            }
-            db.put("nodes", &node)?;
+            db.save_node(&node)?;
             db.set(&token_key, &Value::from(node_id.clone()), None)?;
             db.audit("node.enrolled", &json!({ "nodeId": node_id }))?;
             Ok(json!({
@@ -1251,11 +1183,12 @@ struct Lease {
 #[serde(rename_all = "camelCase")]
 struct HeartbeatReply {
     node_id: String,
-    accepting: Value,
+    accepting: bool,
     slots: u64,
-    limits: Value,
+    limits: Resources,
     leases: Vec<Lease>,
-    native_mode: Value,
+    native_mode: cairn_contracts::NativeModeRequest,
+    storage_policy: crate::storage::policy::Configuration,
     #[serde(skip_serializing_if = "Value::is_null")]
     disk_growth: Value,
     heartbeat_interval_ms: i64,
@@ -1272,7 +1205,7 @@ async fn heartbeat(s: &Service, input: &Input) -> Result<Value> {
     let matching_version = matches_component_version(&input.body);
     let capabilities = if matching_version && input.body["capabilities"].is_object() {
         let value: Capabilities = decode(input.body["capabilities"].clone())?;
-        value.validate()?;
+        value.validate().map_err(Error::bad)?;
         Some(serde_json::to_value(value)?)
     } else {
         None
@@ -1317,69 +1250,69 @@ fn record_heartbeat(
         .and_then(|v| v.as_str().map(str::to_owned))
         .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
     let mut node = db
-        .get("nodes", &node_id)?
-        .filter(|v| v["revoked"] != true)
+        .node(&node_id)?
+        .filter(|n| !n.revoked)
         .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
     if !matches_component_version(body) {
-        node["executionReady"] = false.into();
-        db.put("nodes", &node)?;
-        // Commit the readiness fence before reporting the rejected observation.
+        node.execution_ready = false;
+        db.save_node(&node)?;
         return Ok(Err(Error::conflict(
             "Node/controller version mismatch; deploy all components at the same version.",
         )));
     }
-    node["runtimeId"] = name(text(body, "runtimeId"))?.into();
-    node["lastSeen"] = now().into();
-    node["runtimeSlots"] = body["pool"]["capacity"].clone();
-    node["retainedRuns"] = body["pool"]["retained_runs"].clone();
-    node["usage"] = body["usage"].clone();
-    node["pressure"] = body["pressure"].clone();
-    node["budgetError"] = body["budgetError"].clone();
-    node["exclusiveReservations"] = body["exclusiveReservations"].clone();
+    node.runtime_id = name(text(body, "runtimeId"))?;
+    node.last_seen = Some(now());
+    node.runtime_slots = decode(body["pool"]["capacity"].clone())?;
+    node.retained_runs = decode(body["pool"]["retained_runs"].clone())?;
+    node.usage = decode(body["usage"].clone())?;
+    node.pressure = decode(body["pressure"].clone())?;
+    node.budget_error = decode(body["budgetError"].clone())?;
+    node.exclusive_reservations = body["exclusiveReservations"] == true;
     if let Some(capabilities) = capabilities {
-        // The installer fixes the execution backend at enrollment. Another runtime on the
-        // same machine enrolls as a new node, so its grants and checkpoints never mix.
-        let backend = |value: &Value| {
-            value["backend"]
-                .as_str()
-                .unwrap_or("firecracker")
-                .to_owned()
-        };
-        if backend(&capabilities) != backend(&node["capabilities"]) {
+        let capabilities: Capabilities = decode(capabilities)?;
+        if capabilities.backend != node.capabilities.backend {
             return Err(Error::conflict(
                 "A node cannot change its execution backend. Enroll the machine again as a new node.",
             ));
         }
-        node["capabilities"] = capabilities;
+        node.capabilities = capabilities;
     }
-    node["storage"] = serde_json::to_value(Policy::for_node(&node["storage"])?)?;
-    node["imageDigest"] = body["imageDigest"].clone();
-    node["nativeModeObserved"] = body["nativeMode"].clone();
-    if node["capabilities"]["backend"] == "native" {
-        node["nativeModeStatus"] = if native_mode::applied(&node) {
-            "applied"
-        } else if body["nativeMode"]["status"] == "failed"
-            && (body["nativeMode"]["generation"] == node["nativeModeRequest"]["generation"]
-                || body["nativeMode"]["target"]["generation"]
-                    == node["nativeModeRequest"]["generation"])
-        {
-            "failed"
-        } else {
-            "pending"
-        }
-        .into();
+    node.image_digest = decode(body["imageDigest"].clone())?;
+    node.native_mode_observed = decode(body["nativeMode"].clone())?;
+    if node.capabilities.backend == NodeBackend::Native {
+        let boundary = serde_json::to_value(&node)?;
+        node.native_mode_status = Some(
+            if native_mode::applied(&boundary) {
+                "applied"
+            } else if body["nativeMode"]["status"] == "failed"
+                && (body["nativeMode"]["generation"] == boundary["nativeModeRequest"]["generation"]
+                    || body["nativeMode"]["target"]["generation"]
+                        == boundary["nativeModeRequest"]["generation"])
+            {
+                "failed"
+            } else {
+                "pending"
+            }
+            .into(),
+        );
     }
-    node["executionReady"] = execution_ready(&node, body, expected).into();
-    let disk_growth = disk_capacity::report(db, &mut node, &body["diskGrowth"])?;
-    db.put("nodes", &node)?;
+    node.execution_ready = execution_ready(&serde_json::to_value(&node)?, body, expected);
+    let mut disk_boundary = serde_json::to_value(&node)?;
+    let disk_growth = disk_capacity::report(db, &mut disk_boundary, &body["diskGrowth"])?;
+    node.disk_growth_protocol = decode(disk_boundary["diskGrowthProtocol"].clone())?;
+    node.disk_capacity = decode(disk_boundary["diskCapacity"].clone())?;
+    db.save_node(&node)?;
     let leases = renew_leases(db, &node_id, expected.lease_ms)?;
     Ok(Ok(HeartbeatReply {
-        native_mode: native_mode::requested(&node),
+        storage_policy: db
+            .node_storage_configuration(&node_id)?
+            .ok_or_else(|| Error::not_found("Node missing."))?,
+        native_mode: node.native_mode_request.clone().unwrap_or_default(),
         disk_growth,
         node_id,
-        accepting: node["accepting"].clone(),
-        slots: slots(&node),
-        limits: node["limits"].clone(),
+        accepting: node.accepting,
+        slots: u64::from(node.slots()),
+        limits: node.limits,
         leases,
         heartbeat_interval_ms: HEARTBEAT_INTERVAL_MS,
         disconnect_timeout_ms: HEARTBEAT_TIMEOUT_MS,
@@ -1426,11 +1359,11 @@ fn renew_leases(db: &Db<'_>, node_id: &str, lease_ms: u64) -> Result<Vec<Lease>>
             && checkpoint["runnerId"] == attempt["id"]
             && agent_allows(&agent, node_id);
         let native_allowed =
-            !crate::native::policy::node_native(&db.get("nodes", node_id)?.unwrap_or_default())
+            !crate::native::policy::node_native(&db.node_boundary(node_id)?.unwrap_or_default())
                 || crate::native::policy::allows(
                     db,
                     &run,
-                    &db.get("nodes", node_id)?.unwrap_or_default(),
+                    &db.node_boundary(node_id)?.unwrap_or_default(),
                 )?;
         if !owns_execution || !native_allowed {
             continue;
@@ -1465,22 +1398,28 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
         .await
         .map_err(Error::internal)?;
     if health["runtimeId"] != component_runtime() || health["nodeProtocol"] != 2 {
-        if let Some(mut node) = s.store.get("nodes", LOCAL_NODE_ID).await? {
-            node["executionReady"] = false.into();
-            s.store.put("nodes", node).await?;
-        }
+        s.store
+            .transaction(|db| {
+                if let Some(mut node) = db.node(LOCAL_NODE_ID)? {
+                    node.execution_ready = false;
+                    db.save_node(&node)?;
+                }
+                Ok(())
+            })
+            .await?;
         return Err(Error::conflict(
             "Local controller version mismatch; deploy all components at the same version.",
         ));
     }
+    let observed_storage = health["storagePolicy"].clone();
     let capabilities = health["capabilities"].clone();
     if !capabilities.is_object() {
         return Ok(());
     }
     let detected: Capabilities = decode(capabilities.clone())?;
     let mut budget_error = Value::Null;
-    if let Some(record) = s.store.get("nodes", LOCAL_NODE_ID).await? {
-        let budget = json!({ "slots": slots(&record), "limits": record["limits"] });
+    if let Some(record) = s.store.node(LOCAL_NODE_ID).await? {
+        let budget = json!({ "slots": record.slots(), "limits": record.limits });
         if health["budget"].is_object() && health["budget"] != budget {
             let started = std::time::Instant::now();
             let result = s
@@ -1509,39 +1448,43 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
     }
     s.store
         .transaction(move |db| {
-            let mut record = match db.get("nodes", LOCAL_NODE_ID)? {
+            let mut record = match db.node(LOCAL_NODE_ID)? {
                 Some(record) => record,
-                None => json!({
-                    "id": LOCAL_NODE_ID,
-                    "name": "Current runner",
-                    "local": true,
-                    "revoked": false,
-                    "accepting": true,
-                    "tags": [],
-                    "createdAt": now(),
-                    "limits": detected.limits(),
-                }),
+                None => ExecutionNode {
+                    id: NodeId(uuid::Uuid::parse_str(LOCAL_NODE_ID).map_err(Error::internal)?),
+                    name: "Current runner".into(),
+                    local: true,
+                    accepting: true,
+                    created_at: now(),
+                    limits: detected.limits(),
+                    revision: id(),
+                    ..ExecutionNode::default()
+                },
             };
-            record["systemTags"] = detected.tags().into();
-            record["capabilities"] = capabilities;
-            record["runtimeId"] = health["runtimeId"].clone();
-            record["storage"] = serde_json::to_value(Policy::for_node(&record["storage"])?)?;
-            record["executionReady"] = (health["status"] == "ok"
+            record.system_tags = detected.tags();
+            record.capabilities = detected;
+            record.runtime_id = decode(health["runtimeId"].clone())?;
+            record.execution_ready = health["status"] == "ok"
                 && health["sharedResources"] == true
-                && health["budget"]
-                    == json!({ "slots": slots(&record), "limits": record["limits"] }))
-            .into();
-            record["budgetError"] = budget_error;
-            record["exclusiveReservations"] = health["exclusiveReservations"].clone();
-            record["lastSeen"] = now().into();
-            record["runtimeSlots"] = health["pool"]["capacity"].clone();
-            record["retainedRuns"] = health["pool"]["retained_runs"].clone();
-            record["usage"] = health["usage"].clone();
-            record["pressure"] = health["pressure"].clone();
-            db.put("nodes", &record)?;
+                && health["budget"] == json!({ "slots": record.slots(), "limits": record.limits });
+            record.budget_error = decode(budget_error)?;
+            record.exclusive_reservations = health["exclusiveReservations"] == true;
+            record.last_seen = Some(now());
+            record.runtime_slots = decode(health["pool"]["capacity"].clone())?;
+            record.retained_runs = decode(health["pool"]["retained_runs"].clone())?;
+            record.usage = decode(health["usage"].clone())?;
+            record.pressure = decode(health["pressure"].clone())?;
+            db.save_node(&record)?;
             Ok(())
         })
-        .await
+        .await?;
+    if let Err(error) = reconcile_local_storage(s, &observed_storage).await {
+        tracing::warn!(
+            status = error.status,
+            "Local storage policy reconciliation pending"
+        );
+    }
+    Ok(())
 }
 
 /// Linux suspend time counts toward a remote execution lease.

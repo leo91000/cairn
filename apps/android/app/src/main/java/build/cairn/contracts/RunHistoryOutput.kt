@@ -6,8 +6,9 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class RunHistoryOutput(
-    val events: List<kotlinx.serialization.json.JsonElement?>,
+    val events: List<RunEventPage>,
     val hasMore: Boolean,
+    val history: String,
     val nextAfter: Long,
     val run: kotlinx.serialization.json.JsonElement?,
 ) {

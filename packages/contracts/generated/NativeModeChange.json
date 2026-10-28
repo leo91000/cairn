@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "confirm": {
+      "default": false,
+      "type": "boolean"
+    },
+    "mode": {
+      "pattern": "^(protected|administrator)$",
+      "type": "string"
+    },
+    "previewId": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "mode"
+  ],
+  "title": "NativeModeChange",
+  "type": "object"
+}

@@ -12,6 +12,7 @@ import {
 import path from 'node:path'
 import process from 'node:process'
 import { createInterface } from 'node:readline'
+import { askCairn } from './cairn-questions.mjs'
 
 const home = process.env.CLAUDE_CONFIG_DIR
 if (!home)
@@ -1353,6 +1354,17 @@ else {
         is_error: true,
         result: 'Fixture usage limit reached',
       })
+      return
+    }
+
+    if (prompt.includes('fixture:cairn-question')) {
+      const config = JSON.parse(args[args.indexOf('--mcp-config') + 1])
+      askCairn(config.mcpServers.cairn_workspace, [{ id: 'approach', title: 'Which approach?', options: [{ id: 'small', label: 'Small change' }] }])
+        .then(() => complete('Awaiting input'))
+        .catch((error) => {
+          process.stderr.write(`${error.message}\n`)
+          process.exit(1)
+        })
       return
     }
 

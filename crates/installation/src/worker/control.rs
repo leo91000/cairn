@@ -8,6 +8,7 @@ use crate::{
     store::Db,
     validation::text,
 };
+use cairn_contracts::EventKind;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -62,6 +63,7 @@ impl Worker {
                 authorize(db)?;
                 let chat = crate::chats::pause_in(db, &id, true)?;
                 if let Some(run_id) = chat["runId"].as_str() {
+                    crate::chats::coding_agent::cancel_in(db, run_id)?;
                     crate::chats::continuation::cancel_for_run(db, run_id)?;
                     let run = required(db.run_state(run_id)?, "Run not found")?;
                     if run.status.is_active() {
@@ -190,6 +192,7 @@ impl Worker {
 }
 
 fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
+    crate::chats::coding_agent::cancel_in(db, id)?;
     let run = required(db.run_state(id)?, "Run not found")?;
     let waiting = crate::chats::continuation::cancel_for_run(db, id)?;
     if !run.status.is_active() {
@@ -224,7 +227,7 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
             .as_ref()
             .is_some_and(|r| r.next_attempt_at.is_some())
         {
-            db.event(id, "status", RunStatus::Cancelled.as_str(), None)?;
+            db.event(id, &EventKind::Status, RunStatus::Cancelled.as_str(), None)?;
         }
     }
     db.audit("run.cancelled", &json!({ "id": id }))
@@ -316,7 +319,7 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
     }
     db.change_run(id, patch)?;
     let result = required(db.run(id)?, "Run not found")?;
-    db.event(id, "status", "Resume requested", None)?;
+    db.event(id, &EventKind::Status, "Resume requested", None)?;
     Ok(result)
 }
 
@@ -467,14 +470,7 @@ async fn pause_chat(s: &Service, input: &crate::http::Input, id: &str) -> Result
 }
 
 async fn stop_chat(s: &Service, id: &str) -> Result<Value> {
-    let chat = s.get("chats", id).await?;
-    s.chat_pause(id, true).await?;
-    s.chat_cancel_wait(id).await?;
-    if let Some(run_id) = chat["runId"].as_str()
-        && s.store.run_state(run_id).await?.status.is_active()
-    {
-        s.worker.cancel(s, run_id).await?;
-    }
+    s.worker.stop_chat_authorized(s, id, |_| Ok(())).await?;
     Ok(json!({ "stopped": true }))
 }
 
@@ -497,9 +493,9 @@ mod tests {
                     "resumeAvailable": true, "missionTurnId": "previous-turn",
                     "waitContinuation": { "observation": { "state": "completed" } },
                 }), None)?;
-                    db.set("run-checkpoint:mission", &json!({
+                    db.save_checkpoint_boundary("mission", &json!({
                     "completed": completed, "launched": true, "prepared": { "cwd": "/workspace" },
-                }), None)?;
+                }))?;
                     let resumed = requeue(db, "mission")?;
                     assert_eq!(resumed["status"], "queued");
                     if completed {

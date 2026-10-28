@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { ExecutionNode, NodeStoragePolicy } from '../../../../packages/contracts/nodes'
 import { ref } from 'vue'
+import { updateNodeStorage } from '../../../../packages/contracts/generated/updateNodeStorage'
 import { api } from '../api'
 import { HardDrive } from '../icons'
 import Icon from './Icon.vue'
@@ -10,11 +11,13 @@ import UiButton from './UiButton.vue'
 const props = defineProps<{ node: ExecutionNode }>()
 const emit = defineEmits<{ saved: [] }>()
 const policy = ref<NodeStoragePolicy | null>(null)
+const revision = ref('')
 const error = ref('')
 const busy = ref(false)
 
 function open() {
   error.value = ''
+  revision.value = props.node.revision
   const saved = props.node.storage
   policy.value = {
     cacheMiB: saved?.cacheMiB ?? 102400,
@@ -27,10 +30,12 @@ function open() {
 }
 
 async function save() {
+  if (!policy.value)
+    return
   busy.value = true
   error.value = ''
   try {
-    await api(`/nodes/${props.node.id}/storage`, { method: 'PUT', body: JSON.stringify(policy.value) })
+    await updateNodeStorage(api, { nodeId: props.node.id, revision: revision.value, storage: policy.value })
     policy.value = null
     emit('saved')
   }

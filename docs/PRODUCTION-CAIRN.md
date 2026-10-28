@@ -21,11 +21,11 @@ Infrastructure changes have their own scope and are not part of a routine releas
    immutable image digests, the tested commit, run ID, CLI versions and the served
    engine releases its rollback checks used
    ([tool versions](CLI-UPDATES.md)). Take the
-   Beacon and installation images from that same evidence. A reused PR image
-   can report its tested merge commit while matching the tag's tree.
+   Beacon and installation images from that same evidence. Nightly qualification produces reusable evidence; historical complete main/PR
+   evidence remains compatible. Short PR checks provide no image provenance.
 2. **Create the tag and release notes.** A pushed version tag starts the container
    and Android workflows. They reuse compatible validation evidence or run fresh
-   checks; a tag can wait for validation already running on main. For Android,
+   checks; a tag can wait for nightly qualification already running on main. For Android,
    compatibility includes the version and build configuration. Prepare notes in
    a draft release if needed. The Android workflow signs the validated APK,
    attaches it and its update manifest, then publishes the release atomically.

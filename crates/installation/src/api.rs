@@ -249,7 +249,7 @@ async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result
             let limit = input.number("limit", 100, 1, 500)?;
             let id = (*id).to_owned();
             s.store
-                .read(move |db| Ok(db.events(&id, after, limit)?.into()))
+                .read(move |db| Ok(serde_json::to_value(db.event_page(&id, after, limit)?)?))
                 .await?
         }
         ("GET", [provider, "models"]) => {
@@ -327,6 +327,15 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
         }
         ("POST", ["chats"]) => s.chat_create(input.body.clone()).await?,
         ("GET", ["chats", id]) => chat_detail(s, id).await?,
+        ("GET", ["chats", id, "coding-agent"]) => {
+            crate::chats::coding_agent::options(s, id, |_| Ok(())).await?
+        }
+        ("POST", ["chats", id, "coding-agent"]) => {
+            let mut args = input.body.clone();
+            args["chatId"] = (*id).into();
+            s.switch_chat_coding_agent(args, crate::native::policy::chat_proof(id))
+                .await?
+        }
         ("POST", ["chats", id, "messages"]) => s.chat_send(id, input.body.clone()).await?,
         ("PUT", ["chats", id, "messages", message]) => {
             s.chat_edit(id, message, Some(input.body.clone())).await?
@@ -358,6 +367,7 @@ async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resu
                 items.extend(s.skills.list(&project.id.to_string(), Some(path)).await?);
             }
             sources::attach(s, &mut items).await?;
+            s.attach_skill_usage(&mut items).await?;
             items.into()
         }
         ("POST", ["skills", scope, "import"]) => {

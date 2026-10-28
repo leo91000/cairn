@@ -1,7 +1,6 @@
 mod chat_files;
 mod chat_tools;
 pub mod code_mode;
-mod node_tools;
 
 use crate::{
     error::{Error, Result, required},
@@ -449,7 +448,17 @@ async fn management(
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            call(s, identity, text(params, "name"), args).await
+            let owner = identity
+                .filter(|identity| identity.role == crate::auth::InstallationRole::Owner)
+                .map(|identity| identity.account_id.clone());
+            // Keep verified public callers separate from run-scoped delegation.
+            // Box the dispatcher so nested task-local scopes keep a bounded stack.
+            crate::native::policy::CALLER
+                .scope(
+                    owner,
+                    Box::pin(call(s, identity, text(params, "name"), args)),
+                )
+                .await
         }
         _ => Err(Error::not_found("Method not found")),
     }
@@ -521,6 +530,11 @@ pub(crate) fn operations() -> Vec<Value> {
         crate::capabilities::PLUGIN_PACKAGE_OPERATIONS
             .iter()
             .map(crate::capabilities::plugin_packages::PluginPackageOperation::descriptor),
+    );
+    operations.extend(
+        crate::capabilities::NODE_OPERATIONS
+            .iter()
+            .map(crate::capabilities::NodeOperation::descriptor),
     );
     operations.extend(
         crate::capabilities::PROJECT_OPERATIONS
@@ -628,6 +642,18 @@ pub(crate) async fn operation(
             )
             .await;
     }
+    if let Some(op) = crate::capabilities::node_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
     if let Some(op) = crate::capabilities::project_operation(name) {
         return op
             .invoke(
@@ -675,99 +701,148 @@ pub(crate) async fn operation(
     invoke(s, name, args, None).await
 }
 
-fn run_record_preview(record: Value, fields: &[&str]) -> Result<(Value, usize)> {
-    let bytes = serde_json::to_vec(&record)?.len();
-    if bytes <= RUN_PAGE_BYTES {
-        return Ok((record, bytes));
-    }
-    let mut preview = json!({
-        "truncated": true,
-        "totalBytes": bytes
-    });
-    let mut bytes = serde_json::to_vec(&preview)?.len();
-    for field in fields {
-        if let Some(value) = record.get(*field) {
-            let size = serde_json::to_vec(value)?.len() + field.len() + 4;
-            if bytes + size <= RUN_PAGE_BYTES {
-                preview[*field] = value.clone();
-                bytes += size;
-            }
+/// Count wire bytes without allocating a second buffer for large raw engine
+/// payloads. Sizing a page must not decode or copy those payloads again.
+fn encoded_size(value: &impl Serialize) -> Result<usize> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
-    Ok((preview, bytes))
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}
+
+fn event_preview(event: cairn_contracts::RunEvent) -> Result<cairn_contracts::RunEventPage> {
+    use cairn_contracts::{EventPreview, RunEventPage};
+    let total_bytes = encoded_size(&event)? as u64;
+    let complete = RunEventPage::Complete { event };
+    if encoded_size(&complete)? <= RUN_PAGE_BYTES - 2 {
+        return Ok(complete);
+    }
+    let RunEventPage::Complete { event } = complete else {
+        unreachable!()
+    };
+    let mut preview = RunEventPage::Truncated {
+        total_bytes,
+        preview: EventPreview {
+            id: event.id,
+            run_id: event.run_id,
+            created_at: event.created_at,
+            kind: None,
+            text: None,
+        },
+    };
+    if let RunEventPage::Truncated {
+        preview: fields, ..
+    } = &mut preview
+    {
+        // Unknown adapter markers can themselves be oversized. The full event
+        // remains addressable by ID; omit fields that do not fit the preview.
+        let marker = event.kind.as_str().to_owned();
+        let remaining = RUN_PAGE_BYTES - 1024;
+        let marker_bytes = encoded_size(&marker)?;
+        let text_bytes = encoded_size(&event.text)?;
+        if marker_bytes <= remaining {
+            fields.kind = Some(marker);
+        }
+        if marker_bytes.saturating_add(text_bytes) <= remaining {
+            fields.text = Some(event.text);
+        }
+    }
+    Ok(preview)
+}
+
+/// Keep the newest contiguous suffix of the UI window. A preview retains its
+/// event ID for read_run_content; trimming sets hasOlder and never skips a cursor.
+pub(crate) fn bounded_history_window(
+    page: cairn_contracts::HistoryPage,
+) -> Result<cairn_contracts::RunHistoryWindowOutput> {
+    let mut events = Vec::new();
+    let mut bytes = 2;
+    let mut has_older = page.has_older;
+    let mut oldest = page.oldest;
+    for event in page.events.into_iter().rev() {
+        let id = event.id;
+        let preview = event_preview(event)?;
+        let size = encoded_size(&preview)? + usize::from(!events.is_empty());
+        if !events.is_empty() && bytes + size > RUN_PAGE_BYTES {
+            has_older = true;
+            break;
+        }
+        bytes += size;
+        oldest = id;
+        events.push(preview);
+    }
+    events.reverse();
+    Ok(cairn_contracts::RunHistoryWindowOutput {
+        events,
+        history: page.history,
+        oldest,
+        has_older,
+    })
 }
 
 pub(crate) fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
-    let run = required(db.run(id)?, "Run not found")?;
-    let (run, _) = run_record_preview(
-        run,
-        &[
-            "id",
-            "taskId",
-            "projectId",
-            "status",
-            "trigger",
-            "createdAt",
-            "startedAt",
-            "finishedAt",
-        ],
-    )?;
+    let run = required(db.run_view(id)?, "Run not found")?;
+    let total_bytes = encoded_size(&run)? as u64;
+    let run = if total_bytes <= RUN_PAGE_BYTES as u64 {
+        cairn_contracts::RunMetadataPage::Complete { run: Box::new(run) }
+    } else {
+        let state = run.state;
+        cairn_contracts::RunMetadataPage::Truncated {
+            total_bytes,
+            preview: cairn_contracts::RunPreview {
+                id: state.id,
+                task_id: state.task_id,
+                project_id: state.project_id,
+                status: state.status,
+                trigger: state.trigger,
+                created_at: state.created_at,
+                started_at: state.started_at,
+                finished_at: state.finished_at,
+            },
+        }
+    };
     let mut events = Vec::new();
-    let mut bytes = 0;
+    let mut bytes = 2;
     let mut next = after;
     for event in db.event_batch(id, after, 100, RUN_PAGE_BYTES)? {
         let event_id = event.id;
-        let (event, size) = run_record_preview(
-            serde_json::to_value(event)?,
-            &["id", "runId", "createdAt", "type", "text"],
-        )?;
+        let page = event_preview(event)?;
+        let size = encoded_size(&page)? + usize::from(!events.is_empty());
         if !events.is_empty() && bytes + size > RUN_PAGE_BYTES {
             break;
         }
         bytes += size;
-        events.push(event);
+        events.push(page);
         next = event_id;
     }
-    let more: bool = db.0.query_row(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE run_id=? AND id>?)",
-        rusqlite::params![id, next],
-        |row| row.get(0),
-    )?;
+    let (first, newest) = crate::live::event_bounds(db, id)?;
     let history = cairn_contracts::RunHistoryOutput {
-        run: if run["truncated"] == true {
-            cairn_contracts::RunMetadataPage::Truncated {
-                total_bytes: run["totalBytes"].as_u64().unwrap(),
-                preview: serde_json::from_value(run)?,
-            }
-        } else {
-            cairn_contracts::RunMetadataPage::Complete {
-                run: Box::new(serde_json::from_value(run)?),
-            }
-        },
+        run,
         events,
+        history: format!("v1:{id}:{first}"),
         next_after: next,
-        has_more: more,
+        has_more: newest > next,
     };
     Ok(serde_json::to_value(history)?)
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunContentChunk<'a> {
-    run_id: &'a str,
-    event_id: &'a Value,
-    encoding: &'static str,
-    format: &'static str,
-    offset: usize,
-    total_bytes: usize,
-    sha256: String,
-    data: &'a str,
-    next_offset: Option<usize>,
-}
-
-pub(crate) fn read_run_content(db: &Db<'_>, args: &Value) -> Result<Value> {
-    let id = text(args, "runId");
-    let data = if let Some(event_id) = args["eventId"].as_i64() {
+pub(crate) fn read_run_content(
+    db: &Db<'_>,
+    args: &cairn_contracts::ReadRunContentInput,
+) -> Result<Value> {
+    let run_id = args.run_id.to_string();
+    let id = run_id.as_str();
+    let data = if let Some(event_id) = args.event_id {
         db.require_run(id)?;
         let event = db
             .event_batch(id, event_id - 1, 1, RUN_PAGE_BYTES)?
@@ -777,11 +852,11 @@ pub(crate) fn read_run_content(db: &Db<'_>, args: &Value) -> Result<Value> {
         // a potentially huge nested JSON object just to serialize it again.
         serde_json::to_string(&required(event, "Event not found in this run")?)?
     } else {
-        required(db.run(id)?, "Run not found")?.to_string()
+        serde_json::to_string(&required(db.run_view(id)?, "Run not found")?)?
     };
     let digest = crate::auth::hex_digest(&data);
-    let offset = args["offset"].as_u64().unwrap() as usize;
-    if (offset > 0 || args["sha256"].is_string()) && text(args, "sha256") != digest {
+    let offset = usize::try_from(args.offset).map_err(|_| Error::bad("Invalid content offset."))?;
+    if (offset > 0 || args.sha256.is_some()) && args.sha256.as_deref() != Some(&digest) {
         return Err(Error::conflict(
             "Content changed or checksum missing. Restart at offset 0 and pass the returned sha256 with each subsequent chunk.",
         ));
@@ -792,16 +867,16 @@ pub(crate) fn read_run_content(db: &Db<'_>, args: &Value) -> Result<Value> {
         ));
     }
     let end = data.floor_char_boundary((offset + RUN_PAGE_BYTES).min(data.len()));
-    let chunk = RunContentChunk {
-        run_id: id,
-        event_id: &args["eventId"],
-        encoding: "utf-8",
-        format: "json",
-        offset,
-        total_bytes: data.len(),
+    let chunk = cairn_contracts::RunContentOutput {
+        run_id,
+        event_id: args.event_id,
+        encoding: "utf-8".into(),
+        format: "json".into(),
+        offset: offset as u64,
+        total_bytes: data.len() as u64,
         sha256: digest,
-        data: &data[offset..end],
-        next_offset: (end < data.len()).then_some(end),
+        data: data[offset..end].to_owned(),
+        next_offset: (end < data.len()).then_some(end as u64),
     };
     Ok(serde_json::to_value(chunk)?)
 }
@@ -818,13 +893,7 @@ pub(crate) async fn invoke(
             crate::backend_migration::preview(s, text(&args, "chatId"), authorize).await
         }
         "migrate_chat_backend" => s.migrate_chat_backend(args, authorize).await,
-        "list_nodes"
-        | "list_native_callers"
-        | "create_node_enrollment"
-        | "update_node"
-        | "change_native_node_mode"
-        | "update_node_storage"
-        | "revoke_node" => node_tools::invoke(s, name, args, bearer).await,
+
         "list_chat_artifacts"
         | "read_chat_artifact"
         | "set_chat_artifact_visibility"
@@ -832,8 +901,11 @@ pub(crate) async fn invoke(
         | "read_chat_attachment"
         | "upload_chat_attachment" => chat_files::invoke(s, name, args, bearer).await,
         "read_chat_content"
+        | "get_chat_coding_agent_options"
+        | "switch_chat_coding_agent"
         | "list_chat_questions"
         | "answer_chat_question"
+        | "withdraw_chat_question"
         | "restore_chat"
         | "restart_chat_session"
         | "resume_chat"
@@ -878,7 +950,11 @@ async fn skills_tool(s: &Service, name: &str, args: &Value, bearer: Option<&str>
     let scope = project_id.unwrap_or("global");
     let skill = text(args, "name");
     match name {
-        "list_skills" => Ok(s.skills.list(scope, project).await?.into()),
+        "list_skills" => {
+            let mut skills = s.skills.list(scope, project).await?;
+            s.attach_skill_usage(&mut skills).await?;
+            Ok(skills.into())
+        }
         "read_skill" => {
             if let Some(path) = args["path"].as_str() {
                 return s.skills.read(skill, path, project).await;

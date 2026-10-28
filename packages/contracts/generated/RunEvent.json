@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "The event's ordering identity is distinct from a client's presentation identity.",
+  "properties": {
+    "createdAt": {
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": -9007199254740991,
+      "type": "integer"
+    },
+    "displayId": {
+      "description": "Client cache identity; never supplied by the event writer.",
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "id": {
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": -9007199254740991,
+      "type": "integer"
+    },
+    "payload": {
+      "additionalProperties": true,
+      "description": "Redacted adapter JSON, retained without constructing a second object tree.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "x-cairn-json-object": true
+    },
+    "runId": {
+      "default": "",
+      "type": "string"
+    },
+    "text": {
+      "type": "string"
+    },
+    "type": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "createdAt",
+    "type",
+    "text"
+  ],
+  "title": "RunEvent",
+  "type": "object"
+}

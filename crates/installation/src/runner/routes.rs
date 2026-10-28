@@ -1,5 +1,6 @@
 //! HTTP interface of the VM controller.
 use super::broker::{Broker, ProjectImport, erase_attempt_content};
+use crate::runner::exclusive::Reservations;
 use crate::{
     auth::safe_equal,
     error::{Error, Result},
@@ -76,6 +77,7 @@ pub(super) async fn handler(State(broker): State<Broker>, request: Request) -> R
         ["exclusive", "release"] => exclusive_release(&broker, request).await,
         ["node-budget"] => node_budget(&broker, request).await,
         ["storage-policy"] => storage_policy(&broker, request).await,
+        ["storage-policy", "probe"] => storage_policy_probe(request).await,
         ["snapshots", snapshot, hash] => snapshot_file(&broker, request, snapshot, hash).await,
         ["disks", run, "snapshot"] => disk_snapshot(&broker, request, run).await,
         ["disks", run, "snapshot-completed"] => completed_snapshot(&broker, request, run).await,
@@ -112,6 +114,7 @@ async fn health(broker: &Broker) -> Result<Response> {
         "budget": broker.pool.budget().await,
         "usage": usage,
         "pressure": pressure,
+        "storagePolicy": broker.storage_policy.current().await,
     }))
 }
 
@@ -154,17 +157,22 @@ async fn node_budget(broker: &Broker, request: Request) -> Result<Response> {
     json_response(json!({ "ready": true }))
 }
 
-async fn storage_policy(broker: &Broker, request: Request) -> Result<Response> {
+async fn storage_policy_probe(request: Request) -> Result<Response> {
     require_post(&request)?;
     let bytes = body(request, 16384, "Invalid storage policy.").await?;
     let policy: crate::storage::policy::Policy = serde_json::from_slice(&bytes)?;
-    policy.validate()?;
-    crate::skills::atomic_write(
-        &broker.state.join("storage-policy.json"),
-        &serde_json::to_vec(&policy)?,
-    )
-    .await?;
-    crate::storage::runtime::configure(&broker.state, &policy)?;
+    policy.validate().map_err(Error::bad)?;
+    json_response(json!({ "ready": true }))
+}
+
+async fn storage_policy(broker: &Broker, request: Request) -> Result<Response> {
+    require_post(&request)?;
+    let bytes = body(request, 16384, "Invalid storage policy.").await?;
+    let configuration: crate::storage::policy::Configuration = serde_json::from_slice(&bytes)?;
+    let control = broker.storage_policy.clone();
+    let state = broker.state.clone();
+    let operation = tokio::spawn(async move { control.apply(&state, configuration).await });
+    operation.await.map_err(Error::internal)??;
     json_response(json!({ "ready": true }))
 }
 

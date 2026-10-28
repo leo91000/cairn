@@ -39,6 +39,7 @@ tasks.test {
     inputs.file(rootProject.file("../../packages/contracts/generated/mission-wire.json"))
     inputs.file(rootProject.file("../../tests/fixtures/mission-contracts.json"))
     inputs.file(rootProject.file("../../tests/fixtures/run-contracts.json"))
+    inputs.file(rootProject.file("../../tests/fixtures/node-contracts.json"))
     inputs.file(rootProject.file("../../packages/contracts/generated/run-wire.json"))
     inputs.file(wire)
     systemProperty("cairn.contractWire", wire.absolutePath)

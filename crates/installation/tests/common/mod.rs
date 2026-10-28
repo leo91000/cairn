@@ -153,7 +153,7 @@ pub async fn add_run(store: &Store, record: &Value) {
 /// Saves the worker checkpoint of `run`.
 pub async fn set_checkpoint(store: &Store, run: &str, checkpoint: Value) {
     store
-        .set(&format!("run-checkpoint:{run}"), checkpoint, None)
+        .save_checkpoint_boundary(run, checkpoint)
         .await
         .unwrap();
 }
@@ -719,3 +719,5 @@ pub async fn owner_plugin_route(
     };
     cairn_installation::plugins::routes(s, &input).await
 }
+
+pub mod node_fixture;

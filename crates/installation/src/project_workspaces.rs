@@ -7,6 +7,7 @@ use crate::{
     service::{Service, covers, run_projects},
     validation::{text, uuid},
 };
+use cairn_contracts::EventKind;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -94,7 +95,7 @@ impl Projects {
         }
         let checkpoint = s
             .store
-            .kv(&format!("run-checkpoint:{run_id}"))
+            .checkpoint_boundary(run_id)
             .await?
             .unwrap_or_default();
         let prepared = &checkpoint["prepared"];
@@ -109,7 +110,9 @@ impl Projects {
         let attempt = text(&checkpoint, "runnerId");
         uuid(attempt)?;
         let status = format!("Opening {}", text(&project, "name"));
-        s.store.event(run_id, "status", &status, None).await?;
+        s.store
+            .event(run_id, &EventKind::Status, &status, None)
+            .await?;
         let agent_id = text(&run["snapshot"]["agent"], "id");
         let access = crate::plugins::run_credentials::fetch(
             s,
@@ -211,10 +214,11 @@ fn open_project_tool() -> Value {
 /// Workspace tools of a plan turn: reading Cairn's state, including delegated task
 /// reports, and opening authorized projects in the private workspace. Every other tool,
 /// including delegation and plugin tools, has effects beyond the turn.
-const PLAN_TOOLS: [&str; 5] = [
+const PLAN_TOOLS: [&str; 6] = [
     "open_project",
     "list_nodes",
     "exclusive_status",
+    "ask_questions",
     "pending_questions",
     "task_status",
 ];
@@ -264,6 +268,10 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
             let result = crate::nodes::moves::request_by_agent(s, &run, args).await;
             ToolResult::from_result(result, summary)
         }
+        "ask_questions" => ToolResult::from_result(
+            crate::chats::questions::ask(s, bearer, args.clone()).await,
+            summary,
+        ),
         "pending_questions" | "withdraw_question" => ToolResult::from_result(
             crate::chats::questions::for_agent(
                 s,
@@ -307,6 +315,9 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
                 )
             },
         ),
+        "task_models" => {
+            ToolResult::from_result(crate::delegation::models(s, bearer, args).await, summary)
+        }
         "task_status" => {
             ToolResult::from_result(crate::delegation::status(s, bearer, args).await, summary)
         }
@@ -366,6 +377,7 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         crate::nodes::moves::tool(),
         crate::artifacts::sharing::tool(),
         crate::outcome::tool(),
+        crate::chats::questions::ask_tool(),
         crate::chats::questions::list_tool(),
         crate::chats::questions::cancel_tool(),
         crate::waits::tool(&conditions, delegates),

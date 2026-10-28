@@ -59,6 +59,15 @@ pub fn native(agent: &Value) -> bool {
     policy(agent)["backend"] == "native"
 }
 
+/// A profile or an unplaced snapshot may authorize either execution kind.
+/// Once placed, the run snapshot always records its concrete backend.
+pub fn supports(agent: &Value, backend: &str) -> bool {
+    let access = policy(agent);
+    access["backend"] == "auto"
+        || access["backend"] == backend
+        || backend == "firecracker" && access["backend"].is_null()
+}
+
 pub fn node_native(node: &Value) -> bool {
     node["capabilities"]["backend"] == "native"
 }
@@ -94,7 +103,7 @@ pub(crate) fn provenance(db: &Db<'_>, source: &Origin) -> Result<Value> {
         Origin::Unknown => Ok(unknown()),
         Origin::Human(account) => {
             let nodes = db
-                .list("nodes")?
+                .nodes_boundary()?
                 .into_iter()
                 .filter(|node| {
                     node_native(node)
@@ -361,8 +370,8 @@ fn allows_agent(
     agent: &Value,
     admission: Admission,
 ) -> Result<bool> {
-    if !native(agent)
-        || !native(&run["snapshot"]["agent"])
+    if !supports(agent, "native")
+        || !supports(&run["snapshot"]["agent"], "native")
         || !node_native(node)
         || node["nativeEnabled"] != true
         || node["revoked"] == true
@@ -449,7 +458,7 @@ pub(crate) fn authorize_origin(db: &Db<'_>, agent: &Value, source: &Origin) -> R
 
     let mut run = json!({ "snapshot": { "agent": agent } });
     apply(&mut run, &grant);
-    for node in db.list("nodes")? {
+    for node in db.nodes_boundary()? {
         if authority_allows(db, &run, &node)? {
             return Ok(grant);
         }
@@ -469,12 +478,21 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
             "Wait for the backend migration to finish before directing this conversation.",
         ));
     }
-    if native(&run["snapshot"]["agent"]) != native(&agent) && run["id"].is_string() {
+    if !supports(&agent, text(&policy(&run["snapshot"]["agent"]), "backend"))
+        && policy(&agent)["backend"] != "auto"
+        && run["id"].is_string()
+    {
         return Err(Error::conflict(
             "Execution backend changed. Migrate this conversation from its execution-node details before continuing.",
         ));
     }
-    let incoming = authorize_origin(db, &agent, source)?;
+    // An automatic profile follows the concrete environment of this conversation.
+    // New conversations retain provenance even when only a VM can admit it.
+    let mut effective = agent.clone();
+    if policy(&agent)["backend"] == "auto" && run["id"].is_string() {
+        effective["access"]["backend"] = policy(&run["snapshot"]["agent"])["backend"].clone();
+    }
+    let incoming = authorize_origin(db, &effective, source)?;
     if chat["id"].is_string()
         && run["id"].is_string()
         && !chat["nativeProvenanceUnknown"].is_boolean()
@@ -506,7 +524,7 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
         && incoming["nativeParentRunId"].is_string()
         && chat["nativeParentRunId"] != incoming["nativeParentRunId"]
     {
-        if native(&agent) {
+        if native(&effective) {
             return Err(Error::forbidden(
                 "A native conversation cannot combine unrelated delegation grants.",
             ));
@@ -517,7 +535,7 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
         unknown = true;
     }
     let mut nodes = Vec::new();
-    for node in db.list("nodes")? {
+    for node in db.nodes_boundary()? {
         if !node_native(&node) || node["nativeEnabled"] != true || node["revoked"] == true {
             continue;
         }
@@ -551,10 +569,10 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
     });
     grant["nativePluginGrants"] = incoming["nativePluginGrants"].clone();
     merge_plugin_grants(&mut grant, chat);
-    if native(&agent) {
-        let mut combined = json!({ "snapshot": { "agent": agent } });
+    if native(&effective) {
+        let mut combined = json!({ "snapshot": { "agent": effective } });
         apply(&mut combined, &grant);
-        if !db.list("nodes")?.iter().any(|node| {
+        if !db.nodes_boundary()?.iter().any(|node| {
             run["nodeId"]
                 .as_str()
                 .is_none_or(|current| node["id"] == current)
@@ -583,6 +601,15 @@ pub(crate) fn authorize_chat_in(db: &Db<'_>, id: &str, source: &Origin) -> Resul
     authorize_chat(db, &mut chat, source)?;
     db.put("chats", &chat)?;
     Ok(())
+}
+
+/// Prove directing authority without recording a historical director.
+pub(crate) fn chat_proof(id: &str) -> impl Fn(&Db<'_>) -> Result<()> + Clone + Send + 'static {
+    let (id, source) = (id.to_owned(), origin());
+    move |db| {
+        let chat = crate::error::required(db.get("chats", &id)?, "Chat not found")?;
+        chat_grant(db, &chat, &source).map(|_| ())
+    }
 }
 
 pub(crate) fn chat_authorization(
@@ -649,15 +676,71 @@ pub async fn refresh(s: &Service) -> Result<()> {
 }
 
 pub async fn refresh_agent(s: &Service, agent: &str) -> Result<()> {
-    if native(&s.agent_snapshot(agent).await?) {
-        refresh(s).await?;
+    refresh_for(s, &s.agent_snapshot(agent).await?).await
+}
+
+/// Native authority must never become a dependency of VM admission. An automatic
+/// profile may fall back to a VM when fresh host authority cannot be obtained.
+/// Invalidate stale evidence so that fallback cannot accidentally admit native work.
+pub(crate) async fn refresh_for(s: &Service, agent: &Value) -> Result<()> {
+    if native(agent) {
+        return refresh(s).await;
+    }
+    if policy(agent)["backend"] != "auto" {
+        return Ok(());
+    }
+    let has_native = s.store.nodes_boundary().await?.iter().any(|node| {
+        node_native(node)
+            && node["revoked"] != true
+            && node["nativeEnabled"] == true
+            && crate::nodes::agent_allows(agent, text(node, "id"))
+    });
+    if !has_native {
+        return Ok(());
+    }
+    if let Err(error) = refresh(s).await {
+        s.store
+            .set(
+                "native-authority",
+                json!({ "observedAt": 0, "accounts": {} }),
+                None,
+            )
+            .await?;
+        tracing::warn!(
+            status = error.status,
+            "Native authority unavailable; automatic placement is limited to VM nodes"
+        );
     }
     Ok(())
 }
 
+fn for_environment(mut agent: Value, run: &Value) -> Value {
+    if policy(&agent)["backend"] == "auto"
+        && let Some(backend @ ("native" | "firecracker")) =
+            run["snapshot"]["agent"]["access"]["backend"].as_str()
+    {
+        agent["access"]["backend"] = backend.into();
+    }
+    agent
+}
+
+async fn chat_agent(s: &Service, chat: &str) -> Result<Value> {
+    let chat = chat.to_owned();
+    s.store
+        .read(move |db| {
+            let chat = crate::error::required(db.get("chats", &chat)?, "Chat not found")?;
+            let agent = crate::error::required(
+                db.agent_snapshot(text(&chat, "agentId"))?,
+                "Agent not found",
+            )?;
+            let run = db.run(text(&chat, "runId"))?.unwrap_or_default();
+            Ok(for_environment(agent, &run))
+        })
+        .await
+}
+
 pub async fn refresh_chat(s: &Service, chat: &str) -> Result<()> {
-    let record = s.get("chats", chat).await?;
-    refresh_agent(s, text(&record, "agentId")).await
+    refresh_for(s, &chat_agent(s, chat).await?).await
 }
 
 /// Cover resume, retries, question responses and other mutation routes, including
@@ -683,23 +766,20 @@ pub async fn authorize_request(s: &Service, input: &crate::http::Input) -> Resul
         return Ok(());
     }
     let agent = match parts.as_slice() {
-        ["chats", id, ..] => {
-            let chat = s.get("chats", id).await?;
-            s.agent_snapshot(text(&chat, "agentId")).await?
-        }
+        ["chats", id, ..] => chat_agent(s, id).await?,
         ["runs", id, ..] | ["nodes", "placement", id, ..] => {
             let run = s.store.run(id).await?;
             if !native(&run["snapshot"]["agent"]) {
                 return Ok(());
             }
-            s.agent_snapshot(crate::nodes::run_agent(&run)).await?
+            for_environment(s.agent_snapshot(crate::nodes::run_agent(&run)).await?, &run)
         }
         _ => return Ok(()),
     };
-    if !native(&agent) {
+    if !supports(&agent, "native") {
         return Ok(());
     }
-    refresh(s).await?;
+    refresh_for(s, &agent).await?;
     let caller = input
         .identity
         .as_ref()

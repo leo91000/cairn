@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "backend": {
+      "pattern": "^(firecracker|native)$",
+      "type": "string"
+    },
+    "code": {
+      "type": "string"
+    },
+    "expiresAt": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "installCommand": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "managerUrl": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "nodeId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "route": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "nodeId",
+    "backend",
+    "route",
+    "code",
+    "expiresAt"
+  ],
+  "title": "NodeEnrollment",
+  "type": "object"
+}

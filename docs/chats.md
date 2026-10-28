@@ -77,7 +77,7 @@ process is replaced for a plan turn and the turn after it. Claude Code's auto-mo
 classifier never decides in place of Cairn. OpenCode cannot run plan turns. A plan request cannot steer a running turn
 that may change files: queue it. One sent to steer while no turn runs waits for its
 own plan turn rather than joining a later turn. See
-[the plan-turn decision](adr/0072-plan-turns.md), which also records the native
+[the plan-turn decision](adr/0075-plan-turns.md), which also records the native
 qualification of each engine release.
 
 ## Invoking skills with `$`
@@ -100,9 +100,30 @@ Validation includes authenticated API boundaries, restricted project access, liv
 
 ## Questions during a reply
 
-Codex can ask for input while continuing its work, or wait when an answer is required. A **Your input** card appears above the composer, and the chat history shows how many questions need an answer. Open **Answer** to choose an option or write your own response. Suggested choices are never submitted automatically. You can close the panel and answer later; questions survive navigation and server restarts. Answering a live question works even when the follow-up queue is paused.
+Codex, Claude Code and OpenCode use the same `cairn_workspace.ask_questions`
+interface. It creates a questionnaire and immediately returns its ID. The agent
+can continue independent work, or report `needs_input` and end its turn while it
+waits. A **Your input** card opens the questionnaire on web; Android presents the
+same choices in its native dialog.
 
-The adapter enables Codex's `default_mode_request_user_input` feature for chats. It supports `item/tool/requestUserInput` server requests and questions attached to assistant messages. Live request answers use the native response protocol; if the request expired or the process restarted, an answer can instead steer or start the next turn in the same conversation. Other interactive RPC requests, including approvals, remain unavailable. Answer submissions are idempotent and retained until delivery. Questions and the notification outbox are committed together in SQLite.
+Each question defaults to single choice, or can allow multiple choices with
+optional `minChoices` and `maxChoices`. A comment accompanies selected options;
+text alone is also accepted. Bounds apply to checked options: a comment cannot
+replace a missing choice. Recommendations are visible and never preselected.
+Every question needs a response before the group is submitted in one operation.
+
+Questionnaires survive navigation, restarts, turn completion and coding-agent
+changes. A `completed` outcome retires unanswered questionnaires; `needs_input`
+keeps them. Manual withdrawal supplies neither an answer nor approval. Answers
+steer an active turn or start a continuation, including when the ordinary queue
+is paused. Selected option IDs and labels remain separate from the comment in
+the message the agent receives. Submitted answers are immutable; corrections use
+a new chat message. Repeated creation and submission requests are idempotent.
+
+Native question tools are disabled or rejected. Pre-change pending questionnaires
+are retired at startup without rewriting historical messages. Questions and their
+notification outbox entries are committed together. See the [questionnaire
+contract and examples](USER-QUESTIONS.md) and [ADR-0074](adr/0074-common-agent-question-tool.md).
 
 ## Notifications
 
@@ -112,7 +133,7 @@ On iPhone and iPad, install Cairn using Safari's **Share → Add to Home Screen*
 
 The public app must use HTTPS. No notification SaaS account is required: VAPID keys are generated automatically and encrypted with the existing persistent application key, along with browser subscription credentials. Keep the data volume and its encryption key when moving the deployment. Supported push providers are Chrome/Chromium (FCM), Firefox, Safari, and Edge's Windows notification service. The server validates provider endpoints, removes expired subscriptions, and retries temporary failures for up to an hour. It skips notifications for questions already answered. The service worker does not cache pages or authenticated API responses.
 
-Tests cover the native Codex request/response shape, blocking and nonblocking questions, late answers, replay, restart, API authorization, notification retry and expiry, private push content, device enrollment/revocation, notification routing, and desktop/mobile question screens in Chromium and WebKit. Browser automation replaces the OS permission prompt and push provider; actual delivery to a phone requires opting in on that phone.
+Tests cover common questionnaire creation, native-tool rejection, choices with comments, late answers, replay, restart, API authorization, notification retry and expiry, private push content, device enrollment/revocation, notification routing, and desktop/mobile question screens in Chromium and WebKit. Browser automation replaces the OS permission prompt and push provider; actual delivery to a phone requires opting in on that phone.
 
 ## Missions
 

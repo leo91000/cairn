@@ -1,5 +1,6 @@
-use super::checkpoint::{Checkpoint, RunCheckpoint};
+use super::checkpoint::{Checkpoint, EventChanges, RunCheckpoint};
 use crate::{config::now, error::Result, run_output, service::Service, validation::text};
+use cairn_contracts::EventKind;
 use serde_json::{Value, json};
 use std::sync::LazyLock;
 use tokio::{
@@ -257,25 +258,30 @@ pub(super) async fn record(
         let message = text(&event, "text").to_owned();
         // Capacity is runtime diagnostic state, separate from the controller's
         // authoritative storage document refreshed by the publication monitor.
+        let id = id.to_owned();
         s.store
-            .update_run_boundary(id, serde_json::json!({ "diskCapacity": event["capacity"] }))
+            .transaction(move |db| {
+                db.update_run_boundary(&id, &json!({ "diskCapacity": event["capacity"] }))?;
+                db.event(&id, &EventKind::Status, &message, Some(&event))
+            })
             .await?;
-        s.store.event(id, "status", &message, Some(event)).await?;
         return Ok(false);
     }
     if event["type"] == "turn.speed" {
         let event = run_output::payload(&event, secrets);
         let (message, outcome) = speed_notice(s, id, &event).await?;
-        if let Some(message) = message {
-            s.store.event(id, "status", message, Some(event)).await?;
-        }
-        // Recorded once its notice is stored, so a retry after a failure still shows it.
+        let id = id.to_owned();
         s.store
-            .set(
-                &format!("turn-speed:{id}"),
-                outcome,
-                Some(now() + 30 * 86_400_000),
-            )
+            .transaction(move |db| {
+                if let Some(message) = message {
+                    db.event(&id, &EventKind::Status, message, Some(&event))?;
+                }
+                db.set(
+                    &format!("turn-speed:{id}"),
+                    &outcome,
+                    Some(now() + 30 * 86_400_000),
+                )
+            })
             .await?;
         return Ok(false);
     }
@@ -315,7 +321,6 @@ pub(super) async fn record(
         return Ok(false);
     }
     let exhausted = run_output::exhausted(&event);
-    apply_event(s, id, &event, checkpoint, secrets).await?;
     // Every activity item has its own detail limit, regardless of earlier output.
     let conversation = event["item"]["type"] == "agent_message"
         || CONVERSATION_EVENTS.contains(&text(&event, "type"))
@@ -339,7 +344,7 @@ pub(super) async fn record(
         if !conversation && !activity_item {
             *log_total = log_total.saturating_add(serialized.len());
         }
-        store_event(s, id, &serialized, &stored).await?;
+        store_event(s, id, &serialized, &event, &stored, checkpoint, secrets).await?;
     }
     if event["type"] == "turn.completed" {
         // Title failures cannot change the outcome of the user's turn.
@@ -369,13 +374,16 @@ async fn record_raw(
     if recorded.is_empty() {
         return Ok(());
     }
-    s.store.event(id, kind, recorded, None).await
+    s.store
+        .event(id, &EventKind::from_adapter(kind), recorded, None)
+        .await
 }
 
 /// Handles chat protocol messages, which are not run output.
 async fn handle_chat_control(s: &Service, id: &str, event: &Value) -> Result<bool> {
     match text(event, "type") {
-        "chat.question" => s.question_receive(id, event["question"].clone()).await?,
+        // Only the authenticated workspace tool can create a questionnaire.
+        "chat.question" => {}
         "chat.question.closed" => {
             s.question_release(id, event["questionId"].as_str()).await?;
         }
@@ -389,74 +397,73 @@ async fn handle_chat_control(s: &Service, id: &str, event: &Value) -> Result<boo
     Ok(true)
 }
 
-/// Updates the checkpoint and run from an agent event.
+/// Derives checkpoint and run changes from the redacted adapter frame. The
+/// transaction that publishes the event also owns all of these durable changes.
 async fn apply_event(
     s: &Service,
-    id: &str,
     event: &Value,
+    stored: &Value,
     checkpoint: &Checkpoint,
+    kind: EventKind,
+    text_value: String,
     secrets: &[String],
 ) -> Result<()> {
     let failure = text(&event["error"], "message");
     let provider_failure = event["type"] == "turn.failed";
     let controller_failure = event["type"] == "runner.failed";
-    if (provider_failure || controller_failure)
-        && !failure.is_empty()
-        && checkpoint.read(|c| c.last_error().is_empty()).await
-    {
-        let failure = truncate(&run_output::redact(failure, secrets), ERROR_LIMIT);
+    let failure = ((provider_failure || controller_failure) && !failure.is_empty()).then(|| {
+        let message = truncate(&run_output::redact(failure, secrets), ERROR_LIMIT);
         let mut error = run_output::payload(&event["error"], secrets);
-        error["message"] = failure.clone().into();
-        let cause = if provider_failure {
-            crate::run_retry::Cause::classify(&error)
-        } else {
-            None
-        };
-        checkpoint
-            .update(|c| {
-                c.last_error = Some(Some(failure));
-                c.retry_cause = Some(cause);
-                if provider_failure {
-                    c.completed = Some(false);
-                }
-            })
-            .await?;
-    }
+        error["message"] = message.clone().into();
+        let cause = provider_failure
+            .then(|| crate::run_retry::Cause::classify(&error))
+            .flatten();
+        (message, cause)
+    });
+    let mut changes = crate::runs::RunChanges::default();
+    let mut changed = false;
     if event["type"] == "thread.started" && event["thread_id"].is_string() {
-        let patch = crate::runs::RunChanges {
-            session_id: Some(serde_json::from_value(event["thread_id"].clone())?),
-            resume_available: Some(true),
-            ..Default::default()
-        };
-        s.store.change_run(id, patch).await?;
+        changes.session_id = Some(serde_json::from_value(event["thread_id"].clone())?);
+        changes.resume_available = Some(true);
+        changed = true;
     }
-    // The latest occupancy of the native session, shown before its history loads.
     if event["type"] == "context.usage" && event["usage"]["contextTokens"].is_u64() {
-        let patch = serde_json::json!({ "contextUsage": event["usage"] });
-        s.store.update_run_boundary(id, patch).await?;
+        changes.boundary = Some(json!({ "contextUsage": event["usage"] }));
+        changed = true;
     }
-    if event["item"]["type"] == "agent_message" && event["item"]["text"].is_string() {
-        let message = truncate(
-            &run_output::redact(text(&event["item"], "text"), secrets),
-            MESSAGE_LIMIT,
-        );
-        checkpoint
-            .remember(|c| c.last_message = Some(message))
-            .await;
+    let message = (event["item"]["type"] == "agent_message" && event["item"]["text"].is_string())
+        .then(|| {
+            truncate(
+                &run_output::redact(text(&event["item"], "text"), secrets),
+                MESSAGE_LIMIT,
+            )
+        });
+    let completed = event["type"] == "turn.completed";
+    if completed && !event["usage"].is_null() {
+        changes.boundary = Some(json!({ "usage": event["usage"] }));
+        changed = true;
     }
-    if event["type"] == "turn.completed" {
-        checkpoint.update(|c| c.completed = Some(true)).await?;
-        let run = s.store.run(id).await?;
+    checkpoint
+        .record_event(
+            kind,
+            text_value,
+            stored.clone(),
+            EventChanges {
+                run: changed.then_some(changes),
+                failure: failure.map(|(message, cause)| (message, cause, provider_failure)),
+                completed,
+                last_message: message,
+            },
+        )
+        .await?;
+    if completed {
+        let run = s.store.run(&checkpoint.id).await?;
         let outcome = &run["outcome"];
         if outcome["status"] == "completed"
             && outcome["messageId"].is_string()
             && outcome["messageId"] == *crate::waits::execution_id(&run)
         {
-            s.question_release(id, None).await?;
-        }
-        if !event["usage"].is_null() {
-            let patch = serde_json::json!({ "usage": event["usage"] });
-            s.store.update_run_boundary(id, patch).await?;
+            s.question_complete(&checkpoint.id).await?;
         }
     }
     Ok(())
@@ -506,7 +513,15 @@ async fn speed_notice(
     Ok((message, record))
 }
 
-async fn store_event(s: &Service, id: &str, raw: &str, event: &Value) -> Result<()> {
+async fn store_event(
+    s: &Service,
+    id: &str,
+    raw: &str,
+    source: &Value,
+    event: &Value,
+    checkpoint: &Checkpoint,
+    secrets: &[String],
+) -> Result<()> {
     let value = event["item"]
         .get("text")
         .or_else(|| event["item"].get("aggregated_output"))
@@ -519,7 +534,14 @@ async fn store_event(s: &Service, id: &str, raw: &str, event: &Value) -> Result<
         "" => "output",
         kind => kind,
     };
-    s.store.event(id, kind, &value, Some(event.clone())).await
+    let kind = EventKind::from_adapter(kind);
+    if matches!(kind, EventKind::External(_)) {
+        tracing::warn!(
+            run_id = id,
+            "Unknown coding-agent event retained as redacted adapter data"
+        );
+    }
+    apply_event(s, source, event, checkpoint, kind, value, secrets).await
 }
 
 fn truncate(value: &str, limit: usize) -> String {

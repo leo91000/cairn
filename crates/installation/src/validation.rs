@@ -65,11 +65,27 @@ fn defaults(value: &mut Value, schema: &Value) {
             }
         }
     }
+    if let Some(additional) = schema
+        .get("additionalProperties")
+        .filter(|schema| schema.is_object())
+        && let Some(values) = value.as_object_mut()
+    {
+        let properties = schema["properties"].as_object();
+        for (key, item) in values {
+            if !properties.is_some_and(|properties| properties.contains_key(key)) {
+                defaults(item, additional);
+            }
+        }
+    }
     if let Some(items) = value.as_array_mut() {
         for item in items {
             defaults(item, &schema["items"]);
         }
     }
+}
+
+pub fn input_schema(kind: &str) -> Value {
+    SCHEMAS[kind].clone()
 }
 
 pub fn parse(kind: &str, mut value: Value) -> Result<Value> {
@@ -104,11 +120,9 @@ fn trim_text(kind: &str, value: &mut Value) {
     let Some(answers) = value["answers"].as_object_mut() else {
         return;
     };
-    for items in answers.values_mut().filter_map(Value::as_array_mut) {
-        for item in items {
-            if let Some(text) = item.as_str() {
-                *item = text.trim().into();
-            }
+    for answer in answers.values_mut() {
+        if let Some(comment) = answer["comment"].as_str() {
+            answer["comment"] = comment.trim().into();
         }
     }
 }

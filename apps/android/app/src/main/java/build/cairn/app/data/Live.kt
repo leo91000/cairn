@@ -83,7 +83,7 @@ class LiveAccumulator {
                     event =
                         original.copy(
                             text = text,
-                            payload = original.payload.orEmpty() + ("item" to expanded),
+                            payload = JsonObject(original.payload.orEmpty() + ("item" to expanded)),
                         )
                 }
                 if (index == null) {

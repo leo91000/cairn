@@ -581,6 +581,16 @@ internal fun ChatPage(
             mention.start != dismissedMention &&
             (suggestions.isNotEmpty() || mention.query.firstOrNull()?.isDigit() != true)
     BackHandler(selected && showSkills) { dismissedMention = mention?.start }
+    LaunchedEffect(selected && showSkills) {
+        if (selected && showSkills) {
+            try {
+                vm.refreshSkills()
+            } catch (error: Exception) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                // Keep the loaded catalog usable when the connection is unavailable.
+            }
+        }
+    }
     val projects =
         state.projects.filter {
             selectedAgent?.access?.projects == null ||
@@ -1360,33 +1370,40 @@ internal fun ChatPage(
                                             )
                                         }
                                     }
-                                    quota?.let { notice ->
-                                        item(key = "quota:${chat?.run?.id}") {
-                                            ChatQuotaCard(
-                                                notice,
-                                                canManage = state.isOwner,
-                                                busy = state.busy,
-                                                openConnections = openConnections,
-                                                resume = {
-                                                    chat?.let { current ->
-                                                        vm.perform {
-                                                            if (current.run?.status == "failed")
-                                                                api.resumeRun(
-                                                                    ResumeRunInput(current.run.id)
+                                    chat
+                                        ?.takeIf { quota != null || it.codingAgentSwitch != null }
+                                        ?.let { currentChat ->
+                                            item(key = "quota:${chat?.run?.id}") {
+                                                ChatQuotaRecovery(
+                                                    vm,
+                                                    currentChat,
+                                                    quota,
+                                                    followConversation = { chooseProvider("") },
+                                                    canManage = state.isOwner,
+                                                    busy = state.busy,
+                                                    openConnections = openConnections,
+                                                    resume = {
+                                                        chat?.let { current ->
+                                                            vm.perform {
+                                                                if (current.run?.status == "failed")
+                                                                    api.resumeRun(
+                                                                        ResumeRunInput(
+                                                                            current.run.id
+                                                                        )
+                                                                    )
+                                                                api.request(
+                                                                    "POST",
+                                                                    "/chats/${segment(current.id)}/pause",
+                                                                    buildJsonObject {
+                                                                        put("paused", false)
+                                                                    },
                                                                 )
-                                                            api.request(
-                                                                "POST",
-                                                                "/chats/${segment(current.id)}/pause",
-                                                                buildJsonObject {
-                                                                    put("paused", false)
-                                                                },
-                                                            )
+                                                            }
                                                         }
-                                                    }
-                                                },
-                                            )
+                                                    },
+                                                )
+                                            }
                                         }
-                                    }
                                     if (!active && delivery.sending.isEmpty() && !live.catchingUp)
                                         chat?.run?.outcome?.let { outcome ->
                                             item(
@@ -1402,20 +1419,31 @@ internal fun ChatPage(
                                             EventRow(
                                                 vm,
                                                 RunEvent(
-                                                    -1,
-                                                    sending.message.createdAt,
-                                                    "chat.user",
-                                                    sending.message.text,
-                                                    mapOf(
-                                                        "text" to
-                                                            JsonPrimitive(sending.message.text),
-                                                        "attachments" to
-                                                            wireJson.encodeToJsonElement(
-                                                                sending.message.attachments
-                                                            ),
-                                                        "plan" to
-                                                            JsonPrimitive(sending.message.plan),
-                                                    ),
+                                                    id = -1,
+                                                    createdAt = sending.message.createdAt,
+                                                    type = "chat.user",
+                                                    text = sending.message.text,
+                                                    payload =
+                                                        kotlinx.serialization.json.JsonObject(
+                                                            mapOf(
+                                                                "text" to
+                                                                    JsonPrimitive(
+                                                                        questionAnswerText(
+                                                                            sending.message.text,
+                                                                            sending.message
+                                                                                .questionId,
+                                                                        )
+                                                                    ),
+                                                                "attachments" to
+                                                                    wireJson.encodeToJsonElement(
+                                                                        sending.message.attachments
+                                                                    ),
+                                                                "plan" to
+                                                                    JsonPrimitive(
+                                                                        sending.message.plan
+                                                                    ),
+                                                            )
+                                                        ),
                                                 ),
                                                 chat?.agentName ?: "Cairn",
                                             )
@@ -1881,6 +1909,7 @@ internal fun QuestionDialog(
 ) {
     // Private answers never enter SavedState or on-disk drafts.
     var answers by remember(question.id) { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var selected by remember(question.id) { mutableStateOf<Map<String, List<String>>>(emptyMap()) }
     var submission by remember(question.id) { mutableStateOf("") }
     var submissionKey by remember(question.id) { mutableStateOf("") }
     Dialog(
@@ -1918,17 +1947,40 @@ internal fun QuestionDialog(
                         question.fields.forEach { field ->
                             Text(field.title, style = MaterialTheme.typography.titleMedium)
                             field.options.forEach { option ->
+                                val checked = selected[field.id].orEmpty().contains(option.id)
+                                val toggle = {
+                                    val current = selected[field.id].orEmpty()
+                                    val next =
+                                        if (field.mode == "single") listOf(option.id)
+                                        else if (checked) current - option.id
+                                        else current + option.id
+                                    selected = selected + (field.id to next)
+                                }
                                 OutlinedCard(
-                                    onClick = { answers = answers + (field.id to option.label) },
+                                    onClick = toggle,
                                     modifier = Modifier.fillMaxWidth(),
+                                    colors =
+                                        CardDefaults.outlinedCardColors(
+                                            containerColor =
+                                                if (checked)
+                                                    MaterialTheme.colorScheme.secondaryContainer
+                                                else MaterialTheme.colorScheme.surface
+                                        ),
                                 ) {
-                                    Row(Modifier.padding(12.dp)) {
-                                        RadioButton(
-                                            answers[field.id] == option.label,
-                                            { answers = answers + (field.id to option.label) },
-                                        )
+                                    Row(
+                                        Modifier.padding(12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        if (field.mode == "multiple")
+                                            Checkbox(checked, { toggle() })
+                                        else RadioButton(checked, toggle)
                                         Column {
                                             Text(option.label)
+                                            if (option.recommended)
+                                                Text(
+                                                    "Recommandé",
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                )
                                             if (option.description.isNotBlank())
                                                 Text(
                                                     option.description,
@@ -1937,6 +1989,45 @@ internal fun QuestionDialog(
                                         }
                                     }
                                 }
+                            }
+                            if (field.options.isNotEmpty()) {
+                                val minimum = field.minChoices ?: 1
+                                val maximum =
+                                    if (field.mode == "single") 1
+                                    else field.maxChoices ?: field.options.size
+                                val range =
+                                    if (minimum == maximum) "$minimum" else "$minimum à $maximum"
+                                Text(
+                                    if (field.mode == "multiple")
+                                        "Choisissez $range options, ou répondez en texte libre."
+                                    else "Choisissez une option, ou répondez en texte libre.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                if (field.mode == "multiple") {
+                                    val count = selected[field.id].orEmpty().size
+                                    val detail =
+                                        when {
+                                            count > maximum -> " · Retirez ${count - maximum} choix"
+                                            count in 1 until minimum ->
+                                                " · Encore ${minimum - count} choix"
+                                            else -> ""
+                                        }
+                                    Text(
+                                        "Choix sélectionnés : $count$detail",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color =
+                                            if (detail.isNotEmpty()) MaterialTheme.colorScheme.error
+                                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                if (selected[field.id].orEmpty().isNotEmpty())
+                                    TextButton(
+                                        onClick = {
+                                            selected = selected + (field.id to emptyList())
+                                        }
+                                    ) {
+                                        Text("Effacer les choix")
+                                    }
                             }
                             if (field.secret)
                                 OutlinedTextField(
@@ -1950,7 +2041,7 @@ internal fun QuestionDialog(
                             else
                                 Field(
                                     if (field.options.isEmpty()) "Réponse"
-                                    else "Ou votre propre réponse",
+                                    else "Commentaire ou réponse libre",
                                     answers[field.id].orEmpty(),
                                     { answers = answers + (field.id to it.take(10000)) },
                                     2,
@@ -1965,6 +2056,7 @@ internal fun QuestionDialog(
                                         "/chats/${segment(question.chatId)}/questions/${segment(question.id)}/cancel",
                                     )
                                     answers = emptyMap()
+                                    selected = emptyMap()
                                     close()
                                 }
                             },
@@ -1984,7 +2076,20 @@ internal fun QuestionDialog(
                             vm.perform {
                                 val values =
                                     wireJson.encodeToJsonElement(
-                                        answers.mapValues { listOf(it.value.trim()) }
+                                        question.fields.associate { field ->
+                                            field.id to
+                                                QuestionAnswer(
+                                                    selected =
+                                                        field.options
+                                                            .filter {
+                                                                selected[field.id]
+                                                                    .orEmpty()
+                                                                    .contains(it.id)
+                                                            }
+                                                            .map { it.id },
+                                                    comment = answers[field.id].orEmpty().trim(),
+                                                )
+                                        }
                                     )
                                 if (submissionKey != values.toString()) {
                                     submissionKey = values.toString()
@@ -1999,11 +2104,15 @@ internal fun QuestionDialog(
                                     },
                                 )
                                 answers = emptyMap()
+                                selected = emptyMap()
                                 close()
                             }
                         },
                         enabled =
-                            !state.busy && question.fields.all { !answers[it.id].isNullOrBlank() },
+                            !state.busy &&
+                                question.fields.all {
+                                    it.accepts(selected[it.id].orEmpty(), answers[it.id].orEmpty())
+                                },
                     ) {
                         Text("Envoyer la réponse")
                     }

@@ -175,7 +175,7 @@ impl LazyDisk {
         let timing = crate::performance::Operation::new(
             "journal_open",
             Self::identity(directory),
-            "integrity_scan",
+            "header_recovery",
         );
         if !directory.exists() {
             std::fs::DirBuilder::new()

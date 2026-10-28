@@ -98,7 +98,7 @@ impl LazyDisk {
     pub(crate) fn verify_sealed(source: &Path) -> io::Result<()> {
         let (_lock, db) = offline(source)?;
         let (size, _) = base_metadata(source, &db)?;
-        let _journal = journal::Journal::open(source, &db, size)?;
+        let _journal = journal::Journal::open_verified(source, &db, size)?;
         Ok(())
     }
 
@@ -148,7 +148,7 @@ impl LazyDisk {
         let (_lock, db) = offline(target)?;
         base_metadata(target, &db)?;
         drop(db);
-        super::super::policy::Policy::for_node(&context["policy"]).map_err(failure)?;
+        crate::storage::policy::for_node(&context["policy"]).map_err(failure)?;
         let encoded = super::state::encode_context(context)?;
         let db = journal::metadata(target, None)?;
         db.execute(

@@ -1,4 +1,7 @@
 pub(crate) mod checkpoint;
+
+use cairn_contracts::EventKind;
+
 mod control;
 mod execution;
 mod launch;
@@ -44,6 +47,14 @@ struct Admission {
 }
 
 impl Worker {
+    /// Keep durable conversation recovery alive until graceful shutdown completes.
+    pub(crate) fn spawn_recovery(
+        &self,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        self.tasks.spawn(task);
+    }
+
     /// Coordinates admission/recovery filesystem writes with permanent run cleanup.
     pub(crate) async fn run_preparation_lock(&self, run_id: &str) -> Arc<Mutex<()>> {
         let mut locks = self.run_preparation_locks.lock().await;
@@ -197,7 +208,7 @@ fn restore_after_restart(db: &mut Db<'_>) -> Result<()> {
             }
             continue;
         }
-        if db.kv(&checkpoint::key(id))?.is_none() && run.started_at.is_some() {
+        if checkpoint::RunCheckpoint::load_in(db, id)?.is_none() && run.started_at.is_some() {
             let patch = crate::runs::RunChanges {
                 status : Some(RunStatus::Interrupted),
                 finished_at : Some(Some(now())),
@@ -216,7 +227,12 @@ fn restore_after_restart(db: &mut Db<'_>) -> Result<()> {
             ..Default::default()
         };
         db.change_run(id, patch)?;
-        db.event(id, "status", "Recovering after worker restart", None)?;
+        db.event(
+            id,
+            &EventKind::Status,
+            "Recovering after worker restart",
+            None,
+        )?;
     }
     Ok(())
 }

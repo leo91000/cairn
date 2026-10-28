@@ -5,7 +5,7 @@
  * empty selection. These generated wire models confer no actor authority.
  */
 export interface AccessPolicy {
-  backend: 'firecracker' | 'native'
+  backend: 'auto' | 'firecracker' | 'native'
   nodes: Array<string> | null
   projects: Array<string> | null
   skills: Array<string> | null

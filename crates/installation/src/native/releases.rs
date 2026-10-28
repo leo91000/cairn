@@ -71,7 +71,7 @@ pub async fn download(State(app): State<App>, request: Request) -> Result<Respon
         }
     } else {
         let node = crate::nodes::transport::authenticate(s, &input.headers).await?;
-        if !super::policy::node_native(&s.get("nodes", &node).await?) {
+        if !super::policy::node_native(&s.node_boundary(&node).await?) {
             return Err(Error::forbidden(
                 "This node is not enrolled for native execution.",
             ));

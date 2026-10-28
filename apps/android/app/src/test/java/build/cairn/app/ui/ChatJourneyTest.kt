@@ -129,21 +129,24 @@ class ChatJourneyTest {
                     .toByteArray()
             val event =
                 RunEvent(
-                    1,
-                    1789315200000,
-                    "item.completed",
-                    "",
-                    mapOf(
-                        "item" to
-                            buildJsonObject {
-                                put("id", "answer")
-                                put("type", "agent_message")
-                                put(
-                                    "text",
-                                    "J’ai terminé la **revue du projet**. Les changements sont cohérents et les vérifications passent.\n\nLes points essentiels :\n- Une conversation plus lisible\n- Les fichiers regroupés au même endroit\n\n[Ouvrir le compte rendu](/api/installations/fixture/api/runs/run/artifacts/report-v2).",
-                                )
-                            }
-                    ),
+                    id = 1,
+                    createdAt = 1789315200000,
+                    type = "item.completed",
+                    text = "",
+                    payload =
+                        kotlinx.serialization.json.JsonObject(
+                            mapOf(
+                                "item" to
+                                    buildJsonObject {
+                                        put("id", "answer")
+                                        put("type", "agent_message")
+                                        put(
+                                            "text",
+                                            "J’ai terminé la **revue du projet**. Les changements sont cohérents et les vérifications passent.\n\nLes points essentiels :\n- Une conversation plus lisible\n- Les fichiers regroupés au même endroit\n\n[Ouvrir le compte rendu](/api/installations/fixture/api/runs/run/artifacts/report-v2).",
+                                        )
+                                    }
+                            )
+                        ),
                 )
             fun stream(state: LiveState, events: List<RunEvent> = emptyList()): MockResponse {
                 val body =
@@ -270,45 +273,63 @@ class ChatJourneyTest {
                                         ),
                                         listOf(
                                             RunEvent(
-                                                9,
-                                                1789315189000,
-                                                "chat.user",
-                                                "Peux-tu examiner le projet et préparer un compte rendu ?",
-                                            ),
-                                            RunEvent(10, 1789315190000, "turn.started", ""),
-                                            RunEvent(
-                                                11,
-                                                1789315190100,
-                                                "item.started",
-                                                "",
-                                                mapOf(
-                                                    "item" to
-                                                        buildJsonObject {
-                                                            put("id", "command-1")
-                                                            put("type", "command_execution")
-                                                            put("command", "git status --short")
-                                                            put("status", "in_progress")
-                                                        }
-                                                ),
+                                                id = 9,
+                                                createdAt = 1789315189000,
+                                                type = "chat.user",
+                                                text =
+                                                    "Peux-tu examiner le projet et préparer un compte rendu ?",
                                             ),
                                             RunEvent(
-                                                12,
-                                                1789315190200,
-                                                "item.completed",
-                                                "",
-                                                mapOf(
-                                                    "item" to
-                                                        buildJsonObject {
-                                                            put("id", "command-1")
-                                                            put("type", "command_execution")
-                                                            put("command", "git status --short")
-                                                            put("status", "completed")
-                                                            put(
-                                                                "aggregated_output",
-                                                                "Workspace clean",
-                                                            )
-                                                        }
-                                                ),
+                                                id = 10,
+                                                createdAt = 1789315190000,
+                                                type = "turn.started",
+                                                text = "",
+                                            ),
+                                            RunEvent(
+                                                id = 11,
+                                                createdAt = 1789315190100,
+                                                type = "item.started",
+                                                text = "",
+                                                payload =
+                                                    kotlinx.serialization.json.JsonObject(
+                                                        mapOf(
+                                                            "item" to
+                                                                buildJsonObject {
+                                                                    put("id", "command-1")
+                                                                    put("type", "command_execution")
+                                                                    put(
+                                                                        "command",
+                                                                        "git status --short",
+                                                                    )
+                                                                    put("status", "in_progress")
+                                                                }
+                                                        )
+                                                    ),
+                                            ),
+                                            RunEvent(
+                                                id = 12,
+                                                createdAt = 1789315190200,
+                                                type = "item.completed",
+                                                text = "",
+                                                payload =
+                                                    kotlinx.serialization.json.JsonObject(
+                                                        mapOf(
+                                                            "item" to
+                                                                buildJsonObject {
+                                                                    put("id", "command-1")
+                                                                    put("type", "command_execution")
+                                                                    put(
+                                                                        "command",
+                                                                        "git status --short",
+                                                                    )
+                                                                    put("status", "completed")
+                                                                    put(
+                                                                        "aggregated_output",
+                                                                        "Workspace clean",
+                                                                    )
+                                                                }
+                                                        )
+                                                    ),
                                             ),
                                             event.copy(id = 13),
                                         ),
@@ -450,7 +471,13 @@ class ChatJourneyTest {
                     .jsonObject
             assertEquals(
                 "Application entière",
-                answer["answers"]!!.jsonObject["scope"]!!.jsonArray.single().jsonPrimitive.content,
+                answer["answers"]!!
+                    .jsonObject["scope"]!!
+                    .jsonObject["selected"]!!
+                    .jsonArray
+                    .single()
+                    .jsonPrimitive
+                    .content,
             )
             // Queued follow-ups stay next to the composer, outside the scrolling history.
             compose.onNodeWithTag("conversation-queue").assertIsDisplayed()

@@ -51,10 +51,20 @@ fn fill_snapshot(target: &mut Value, input: &Value) {
 }
 
 pub trait DbRunFixture {
+    /// JSON assertions in other-domain tests adapt the typed current event page.
+    fn events_fixture(&self, run: &str, after: i64, limit: i64) -> Result<Vec<Value>>;
+
     fn add_run_fixture(&self, input: &Value, dedupe: Option<&str>) -> Result<Value>;
 }
 
 impl DbRunFixture for Db<'_> {
+    fn events_fixture(&self, run: &str, after: i64, limit: i64) -> Result<Vec<Value>> {
+        self.event_page(run, after, limit)?
+            .into_iter()
+            .map(|event| serde_json::to_value(event).map_err(Into::into))
+            .collect()
+    }
+
     fn add_run_fixture(&self, input: &Value, dedupe: Option<&str>) -> Result<Value> {
         let state: RunState = serde_json::from_value(input.clone())?;
         let mut payload = input.clone();

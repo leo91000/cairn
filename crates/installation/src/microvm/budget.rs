@@ -34,7 +34,7 @@ impl Budget {
     }
 
     pub fn validate(&self) -> Result<()> {
-        self.limits.validate()?;
+        self.limits.validate().map_err(Error::bad)?;
         if self.vm_memory_mib() < MIN_GUEST_MEMORY_MIB {
             return Err(Error::bad(
                 "Shared RAM must allow 512 MiB for the controller and at least 128 MiB for a guest.",

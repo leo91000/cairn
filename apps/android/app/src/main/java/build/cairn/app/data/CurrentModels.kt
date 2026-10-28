@@ -31,7 +31,13 @@ data class ChatMessage(
     val speed: String = "",
 )
 
-@Serializable data class QuestionOption(val label: String, val description: String = "")
+@Serializable
+data class QuestionOption(
+    val label: String,
+    val description: String = "",
+    val id: String = label,
+    val recommended: Boolean = false,
+)
 
 @Serializable
 data class QuestionField(
@@ -39,7 +45,22 @@ data class QuestionField(
     val title: String,
     val secret: Boolean = false,
     val options: List<QuestionOption> = emptyList(),
-)
+    val mode: String = "single",
+    val minChoices: Int? = null,
+    val maxChoices: Int? = null,
+) {
+    fun accepts(selected: List<String>, comment: String): Boolean {
+        if (selected.isEmpty()) return comment.isNotBlank()
+        val maximum = if (mode == "single") 1 else maxChoices ?: options.size
+        return selected.size >= (minChoices ?: 1) &&
+            selected.size <= maximum &&
+            selected.distinct().size == selected.size &&
+            selected.all { id -> options.any { it.id == id } }
+    }
+}
+
+@Serializable
+data class QuestionAnswer(val selected: List<String> = emptyList(), val comment: String = "")
 
 @Serializable
 data class ChatQuestion(
@@ -68,6 +89,19 @@ data class ChatCompaction(
 
 /** The conversation whose agent delegated a conversation. */
 @Serializable data class ChatRequester(val chatId: String, val title: String = "")
+
+@Serializable data class CodingAgentSwitch(val provider: String, val error: String? = null)
+
+@Serializable data class CodingAgentChoice(val provider: String, val label: String)
+
+@Serializable
+data class CodingAgentOptions(
+    val runId: String? = null,
+    val turnId: String? = null,
+    val provider: String = "codex",
+    val choices: List<CodingAgentChoice> = emptyList(),
+    val switching: CodingAgentSwitch? = null,
+)
 
 @Serializable
 data class Chat(
@@ -108,6 +142,10 @@ data class Chat(
     val suspendedByExclusive: ExclusiveReservation? = null,
     /** The conversation that delegated this one, while it still exists. */
     val requester: ChatRequester? = null,
+    val codingAgentSwitch: CodingAgentSwitch? = null,
+    /** The current run's account wait, also available in conversation lists. */
+    val accountWaitReason: String? = null,
+    val accountRequired: String? = null,
 ) {
     val exclusiveSuspended
         get() =
@@ -166,13 +204,7 @@ data class LiveBatch(
     val hasOlder: Boolean = false,
 )
 
-@Serializable
-data class HistoryPage(
-    val events: List<RunEvent>,
-    val history: String,
-    val oldest: Long,
-    val hasOlder: Boolean,
-)
+typealias HistoryPage = build.cairn.contracts.HistoryPage
 
 @Serializable data class ReasoningOption(val reasoningEffort: String, val description: String = "")
 

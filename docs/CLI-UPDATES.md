@@ -79,7 +79,8 @@ production, the CLIs may still contact their vendors' public endpoints:
   must reach the conversation, and the turn after a plan must write again. The job
   installs bubblewrap and socat, and lifts Ubuntu's restriction on unprivileged user
   namespaces, which both sandboxes need. `publish` depends on this job, so a release
-  whose plan-turn boundary does not hold is not served.
+  whose plan-turn boundary does not hold is not served. The short PR validation does
+  not run it.
 
 The `resolve` job reads the served versions from the configuration of the
 installation image production reports at `CAIRN_BEACON_ORIGIN/install/release`
@@ -156,5 +157,5 @@ following checks before merge:
   `NATIVE_PROBE_PATH` adds a directory to the engine's `PATH`,
   `NATIVE_PROBE_DROP_CAPS` drops inherited capabilities, and
   `NATIVE_PROBE_PRIVATE_TMP` gives Codex its own `/tmp` (with `TMPDIR` outside
-  `/tmp`); see [the plan-turn decision](adr/0072-plan-turns.md#qualification).
+  `/tmp`); see [the plan-turn decision](adr/0075-plan-turns.md#qualification).
 - All engines: keep their autoupdaters disabled at runtime.

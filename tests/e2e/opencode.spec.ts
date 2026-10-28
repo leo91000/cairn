@@ -93,7 +93,7 @@ test('OpenCode connects a Zen key, selects native models and runs a conversation
   expect(errors).toEqual([])
 })
 
-test('OpenCode answers native questions, steers a busy session and replaces an idle key', async ({ workspace }) => {
+test('OpenCode answers common questionnaires, steers a busy session and replaces an idle key', async ({ workspace }) => {
   test.setTimeout(90000)
   initializeRepository(workspace.projectPath)
   let account = (await workspace.api('/api/accounts')).accounts.find((a: { modelProvider?: string }) => a.modelProvider === 'opencode')
@@ -112,7 +112,7 @@ test('OpenCode answers native questions, steers a busy session and replaces an i
     id: crypto.randomUUID(),
     provider: 'opencode',
     model,
-    text: 'fixture:opencode-question',
+    text: 'fixture:cairn-question',
   })
   try {
     await expect.poll(async () => {
@@ -132,9 +132,10 @@ test('OpenCode answers native questions, steers a busy session and replaces an i
   }
 
   const question = (await workspace.api(`/api/chats/${chat.id}`)).questions.find((q: { status: string }) => q.status === 'pending')
-  await workspace.api(`/api/chats/${chat.id}/questions/${question.id}/answer`, 'POST', { id: crypto.randomUUID(), answers: { 0: ['Compact'] } })
+  await workspace.api(`/api/chats/${chat.id}/questions/${question.id}/answer`, 'POST', { id: crypto.randomUUID(), answers: { layout: { selected: ['compact'], comment: 'Compact layout' } } })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).questions.find((q: { id: string }) => q.id === question.id)?.status).toBe('answered')
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
-  expect((await workspace.api(`/api/chats/${chat.id}`)).run.summary).toContain('Compact layout')
+  expect((await workspace.api(`/api/chats/${chat.id}`)).run.summary).toContain('compact status panel')
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'fixture:opencode-hang' })
   await expect.poll(async () => {
     const detail = await workspace.api(`/api/chats/${chat.id}`)
@@ -365,4 +366,39 @@ test('OpenCode Go displays three quotas, reset times and the provider balance se
   expect(refreshed.status).not.toBe('waiting')
   expect(refreshed.remainingPercent).toBe(0)
   expect(JSON.stringify(refreshed)).not.toContain(apiKey)
+})
+
+test('OpenCode explains an unavailable connection without claiming its quota is exhausted', async ({ page, workspace }) => {
+  initializeRepository(workspace.projectPath)
+  const accounts = (await workspace.api('/api/accounts')).accounts
+  if (!accounts.some((account: { provider: string, enabled: boolean, state: string }) => account.provider === 'opencode' && account.enabled && account.state === 'ready')) {
+    await workspace.api('/api/accounts', 'POST', {
+      provider: 'opencode',
+      name: 'Route diagnostic',
+      modelProvider: 'opencode',
+      apiKey: 'synthetic-browser-route-key',
+    })
+  }
+
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const model = 'openrouter/anthropic/claude-sonnet-4.6'
+  try {
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+      id: crypto.randomUUID(),
+      provider: 'opencode',
+      model,
+      text: 'Check the connection before starting.',
+    })
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.accountWaitReason).toContain(`No enabled OpenCode account supports model ${model}`)
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await signIn(page)
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 900 })
+      await expect(page.getByText(`No enabled OpenCode account supports model ${model}. Choose a model available through your connections or connect its model provider.`, { exact: true }).first()).toBeVisible()
+      await expect(page.getByRole('status', { name: 'Coding agent quota reached' })).toHaveCount(0)
+    }
+  }
+  finally {
+    await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
+  }
 })

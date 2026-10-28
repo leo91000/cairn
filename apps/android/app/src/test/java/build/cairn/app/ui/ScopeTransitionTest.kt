@@ -170,7 +170,14 @@ class ScopeTransitionTest {
                     1,
                     "v1:r:1",
                     LiveState(),
-                    listOf(RunEvent(1, 1, "chat.user", "fixture")),
+                    listOf(
+                        RunEvent(
+                            id = 1,
+                            createdAt = 1,
+                            type = "chat.user",
+                            text = "fixture",
+                        )
+                    ),
                 ),
                 true,
             )

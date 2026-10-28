@@ -12,7 +12,7 @@ export type { Agent } from './generated/typescript/Agent'
 export type { AgentAvatar } from './generated/typescript/AgentAvatar'
 export type { Mission as Task } from './generated/typescript/Mission'
 export type { Project } from './generated/typescript/Project'
-export type { RunStatus } from './generated/typescript/RunStatus'
+export type { RunEvent } from './generated/typescript/RunEvent'
 /** Who must act next on work that is blocked or needs input; the user when absent. */
 export type OutcomeWaitingOn = 'user' | 'requester' | 'external'
 export interface TaskOutcome {
@@ -32,6 +32,8 @@ export interface Skill {
   content: string
   path: string
   valid: boolean
+  /** Messages invoking this name among the installation's last 1000 chat messages. */
+  usageCount?: number
   error?: string
   files?: number
   bytes?: number
@@ -122,14 +124,7 @@ export interface SkillSourceStatus {
   current: boolean
   changes: SkillSourceChange[]
 }
-export interface RunEvent {
-  id: number
-  runId: string
-  createdAt: number
-  type: string
-  text: string
-  payload?: Record<string, unknown>
-}
+export type { RunStatus } from './generated/typescript/RunStatus'
 
 export type RunListItem = Omit<import('./generated/typescript/Run').Run, 'snapshot' | 'summary'>
 

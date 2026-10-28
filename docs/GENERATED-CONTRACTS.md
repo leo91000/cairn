@@ -136,7 +136,7 @@ JSON Schema's UUID format; clients never grant authority through validation.
 
 ### Development reset
 
-The fresh installation schema is now version 8. Earlier development databases
+The fresh installation schema is now version 10. Earlier development databases
 are rejected, without being rewritten. Stop the development processes, remove the
 **disposable development data directory** (SQLite, vault and related local state)
 and start with a newly empty data directory. Recreate projects/agents and rerun
@@ -525,3 +525,103 @@ The A1/A2 `project_measurement` harness compares the frozen A12 records layout a
 repetitions. Measurements include encoded bytes, physical DB/WAL/pages, CPU and
 cold-connection/warm latency. Raw artifacts stay outside Git; local SQLite timings
 are not production network latency.
+
+
+## Events, checkpoints and history (A6)
+
+Fresh SQLite v10 retains the append-only `events` table, its ordering/turn/message
+indexes and pruning rules, with checked timestamps and valid JSON payloads.
+`run_checkpoints(run_id PK/FK -> runs ON DELETE CASCADE, state)` stores the current
+checkpoint serialized from `RunCheckpoint`; generic KV rejects checkpoint keys.
+The worker, chat continuation and mission wakeup use named checkpoint fields.
+Node preparation/publication/movement retain explicit validating adapters until
+their owning A9–A11/A18 conversions; they share the same writer, with no mirror or
+historical reader. SQL snapshot JSON is business state serialized from its type,
+not an open document accepting new decision fields.
+
+Rust owns `RunEvent`, `EventKind`, `HistoryPage`, complete/truncated event pages
+and the digest-pinned content DTO. Both apps delete their manual event/history
+models. The presentation identity stored only by client caches is optional; the
+server writer never supplies it. Engine payloads remain redacted raw JSON, so
+storage/chunk reads avoid adding an intermediate engine object tree. Unknown engine
+markers remain data, are diagnosed, and cannot select a lifecycle transition.
+Chat, wait and artifact payloads are explicit boundaries of A7/A8/A16 and C1–C4;
+this ticket does not change timeline interpretation or presentation.
+
+The existing registry adds `read_run_history` with the same `read` scope and
+transactional installation-grant checks. HTTP GET history and its generated query client retain full UI frames. Agent
+windows share the same snapshot/page reader, then apply the explicit
+complete/truncated event projection before crossing the 1 MiB tool-result limit.
+`get_run.history` supplies the revision for these windows. Their oldest cursor covers the newest contiguous suffix and never skips rows;
+full event content remains readable in digest-pinned chunks. `get_run.events` is now an explicit
+`kind: complete` (`event`) or `kind: truncated` (`preview`, `totalBytes`) union.
+Event identity and forward cursors survive previews; full redacted JSON remains
+available through `read_run_content`, pinned by digest and UTF-8 byte offsets.
+
+Engine transitions publish their state/checkpoint and event in one transaction;
+text snapshots do not rewrite a checkpoint per token. Store transactions notify
+after successful commit even if their caller was cancelled; failed and empty
+transactions do not publish a revision. Existing live cursor, reconnect reset,
+recent-window, superseded-text and byte-budget behavior remains covered.
+
+`project_measurement::event_measurement::event_storage_layouts` reuses the A1/A2
+clocks, SQLite connections and distributions against the frozen `f5aebef5` event
+mapping. It qualifies 100/10k/100k events, cursor reads, long-conversation opening,
+cold connections and transactional streaming writes/checkpoints, in five
+alternating repetitions. PR descriptions own the results and host conditions;
+raw measurement artifacts are never committed.
+
+
+## Node inventory and enrollment (A9)
+
+Fresh SQLite v12 replaces node records with `nodes`, `node_tags`,
+`node_trusted_accounts` and `node_reviewed_agents`. Identity, backend, detected
+capabilities, configured shared budgets, readiness, runtime and configuration
+revision have named columns and constraints. Ordered relations retain operator and
+system tags separately, trusted Beacon account IDs and current reviewed agents.
+The relations reference nodes; reviewed agents also reference typed agents.
+Beacon accounts remain external identities. Agent access/exclusivity stays in
+A3's authoritative relations and is only projected into inventory. The virtual
+local runner remains usable before its first health observation, so its existing
+agent selections retain their live validators rather than requiring a fabricated
+inventory row. No historical reader, migration or records mirror is added.
+
+Both apps delete their handwritten domain models and use the existing Rust/TS/
+Kotlin generator. Scalar backend/mode/status enums use the generator's existing
+constrained-string representation in Kotlin, and tagged native-mode results remain
+a sealed interface. Inventory decoding follows Rust defaults using the same
+supported schema-contract override as runs. Required object fields avoid object
+defaults unsupported by the pinned generator. The shared node corpus covers UUID,
+null/absent observations, native state, resource bounds and complete revisions.
+
+The common registry owns inventory, eligible native callers, enrollment,
+configuration, native-mode review, storage configuration and revocation. Config
+replacements check and rotate their revision in the writer transaction; heartbeats
+retain it. Storage validation does not mutate the controller; the writer rechecks
+both revision and authorization before publishing a policy. The SQL writer advances
+an internal storage generation only when the six policy fields change. Controllers
+apply committed generation-tagged packets in order, ignore older packets, and
+reject a different policy at the same generation. A disconnected apply retains its
+controller task; a controller restart reports its acknowledgement as unknown.
+Heartbeats reconcile the latest committed packet, including after a lost or failed
+confirmation. A command that saved settings without receiving confirmation says so
+explicitly; both apps retain that error and can reload the saved desired policy.
+The controller policy file keeps its current flat typed policy format.
+Native privilege confirmation still compares the exact owner preview and current
+access, with an explicit configuration revision, and waits for the current
+supervisor generation. No scope or installation grant provides a human owner
+proof. Certificate enrollment, machine bearer revocation, TLS/DTLS channels and
+current component-version fences are unchanged.
+
+A10/A11 still own attempts, placements, exclusive reservations, maintenance and
+disk publication/growth. Their named `node_boundary` / `nodes_boundary` /
+`save_node_boundary` adapters serialize through the one typed SQL writer, with no
+fallback to records or historical documents; A18 removes those callers. Node
+checkpoint and native-run provenance continue at their current fenced boundary.
+
+The A1/A2 `project_measurement::node_storage_layouts` harness compares the frozen
+records mapping at `6b214471` with current inventory/config SQL, with identical
+complete deterministic node values, warmups, alternating repetitions, audit,
+transactional writes/deletes, process CPU and DB/WAL/page reporting. Results belong
+in the PR description, never in Git. Cold connections retain the OS page cache;
+these local timings are separate from production network latency.

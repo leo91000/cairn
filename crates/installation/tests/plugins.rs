@@ -1,3 +1,4 @@
+use cairn_contracts::EventKind;
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
@@ -713,14 +714,14 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
     s.store
         .event(
             &run_id,
-            "chat.user",
+            &EventKind::ChatUser,
             "",
             Some(json!({ "messageId": delivery["id"] })),
         )
         .await
         .unwrap();
     s.store
-        .event(&run_id, "item.started", "", Some(json!({ "item": { "type": "command_execution", "command": "pnpm   test --filter deploy" } })))
+        .event(&run_id, &EventKind::ItemStarted, "", Some(json!({ "item": { "type": "command_execution", "command": "pnpm   test --filter deploy" } })))
         .await
         .unwrap();
     let question = "a".repeat(64);
@@ -730,7 +731,7 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
             "id": question,
             "blocking": true,
             "fields": [{ "id": "0", "title": "Retry the deploy?", "secret": false, "options": [
-                { "label": "Yes", "description": "" }, { "label": "No", "description": "Leave it" }
+                { "id": "Yes", "label": "Yes", "description": "" }, { "id": "No", "label": "No", "description": "Leave it" }
             ] }],
         }),
     )
@@ -799,21 +800,21 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
     )
     .unwrap();
     s.store
-        .event(&run_id, "artifact", "Report", Some(json!({ "id": artifact, "name": "report.md", "mediaType": "text/markdown", "size": 11 })))
+        .event(&run_id, &EventKind::Artifact, "Report", Some(json!({ "id": artifact, "name": "report.md", "mediaType": "text/markdown", "size": 11 })))
         .await
         .unwrap();
     let answer = format!("{}{}", "é".repeat(1900), "done");
     s.store
         .event(
             &run_id,
-            "item.completed",
+            &EventKind::ItemCompleted,
             &answer,
             Some(json!({ "item": { "type": "agent_message", "text": answer } })),
         )
         .await
         .unwrap();
     s.store
-        .event(&run_id, "turn.completed", "", None)
+        .event(&run_id, &EventKind::TurnCompleted, "", None)
         .await
         .unwrap();
     mock.statuses.lock().await.push(429);
@@ -936,7 +937,7 @@ async fn finish_turn(s: &Service, delivery: &Value, answer: &str) {
     s.store
         .event(
             &run_id,
-            "chat.user",
+            &EventKind::ChatUser,
             "",
             Some(json!({ "messageId": delivery["id"] })),
         )
@@ -945,14 +946,14 @@ async fn finish_turn(s: &Service, delivery: &Value, answer: &str) {
     s.store
         .event(
             &run_id,
-            "item.completed",
+            &EventKind::ItemCompleted,
             answer,
             Some(json!({ "item": { "type": "agent_message", "text": answer } })),
         )
         .await
         .unwrap();
     s.store
-        .event(&run_id, "turn.completed", "", None)
+        .event(&run_id, &EventKind::TurnCompleted, "", None)
         .await
         .unwrap();
 }
@@ -1466,14 +1467,14 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
     s.store
         .event(
             run_id,
-            "item.completed",
+            &EventKind::ItemCompleted,
             "unrelated answer",
             agent("unrelated answer"),
         )
         .await
         .unwrap();
     s.store
-        .event(run_id, "turn.completed", "", None)
+        .event(run_id, &EventKind::TurnCompleted, "", None)
         .await
         .unwrap();
     let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
@@ -1486,7 +1487,7 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
     s.store
         .event(
             run_id,
-            "chat.user",
+            &EventKind::ChatUser,
             "hello",
             Some(json!({ "messageId": receipt["messageId"] })),
         )
@@ -1494,15 +1495,19 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
         .unwrap();
     s.store
         .event(
-            run_id,
-            "item.completed",
+            run_id, &EventKind::ItemCompleted,
             "synthetic_secret",
             Some(json!({ "item": { "type": "command_execution", "aggregated_output": "synthetic_secret" } })),
         )
         .await
         .unwrap();
     s.store
-        .event(run_id, "item.completed", "hello back", agent("hello back"))
+        .event(
+            run_id,
+            &EventKind::ItemCompleted,
+            "hello back",
+            agent("hello back"),
+        )
         .await
         .unwrap();
     assert!(
@@ -1512,7 +1517,7 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
             .is_none()
     );
     s.store
-        .event(run_id, "turn.completed", "", None)
+        .event(run_id, &EventKind::TurnCompleted, "", None)
         .await
         .unwrap();
     let reply = common::plugin_reply(&s, &connection, &delivery)
@@ -1578,7 +1583,12 @@ async fn replies_answer_a_retried_turn_with_its_last_attempt() {
     let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
         let store = s.store.clone();
         let run_id = run_id.to_owned();
-        async move { store.event(&run_id, kind, text, payload).await.unwrap() }
+        async move {
+            store
+                .event(&run_id, &EventKind::from_adapter(kind), text, payload)
+                .await
+                .unwrap();
+        }
     };
 
     event(
@@ -1635,7 +1645,12 @@ async fn replies_answer_a_retried_turn_stopped_by_cairn_with_its_last_attempt() 
     let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
         let store = s.store.clone();
         let run_id = run_id.to_owned();
-        async move { store.event(&run_id, kind, text, payload).await.unwrap() }
+        async move {
+            store
+                .event(&run_id, &EventKind::from_adapter(kind), text, payload)
+                .await
+                .unwrap();
+        }
     };
 
     event(
@@ -1715,7 +1730,7 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     s.store
         .event(
             run_id,
-            "chat.user",
+            &EventKind::ChatUser,
             "hello",
             Some(json!({ "messageId": receipt["messageId"] })),
         )
@@ -1724,7 +1739,7 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     let capacity = "Selected model is at capacity. Please try a different model.";
     let failure = json!({ "error": { "message": capacity, "codexErrorInfo": "serverOverloaded" } });
     s.store
-        .event(run_id, "turn.failed", capacity, Some(failure))
+        .event(run_id, &EventKind::TurnFailed, capacity, Some(failure))
         .await
         .unwrap();
     assert!(reply().await.is_none(), "The attempt has not settled yet");
@@ -1746,7 +1761,7 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     s.store
         .event(
             run_id,
-            "status",
+            &EventKind::Status,
             "Usage exhausted. Saving this session and restoring capacity or switching accounts.",
             None,
         )
@@ -1758,7 +1773,7 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     s.store
         .event(
             run_id,
-            "status",
+            &EventKind::Status,
             "Usage exhausted. Saving this session and restoring capacity or switching accounts.",
             None,
         )
@@ -1817,7 +1832,7 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     s.store
         .event(
             run_id,
-            "retry.scheduled",
+            &EventKind::RetryScheduled,
             "Temporary agent error.",
             Some(retry),
         )
@@ -1836,7 +1851,10 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
         )
         .await
         .unwrap();
-    s.store.event(run_id, "status", wait, None).await.unwrap();
+    s.store
+        .event(run_id, &EventKind::Status, wait, None)
+        .await
+        .unwrap();
     assert!(reply().await.is_none());
     age_last_event(&s, run_id, 3 * 60_000).await;
     assert_eq!(reply().await.unwrap().status, "failed");
@@ -1852,16 +1870,21 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
         .unwrap();
     assert!(reply().await.is_none());
     s.store
-        .event(run_id, "turn.started", "", None)
+        .event(run_id, &EventKind::TurnStarted, "", None)
         .await
         .unwrap();
     let answer = json!({ "item": { "type": "agent_message", "text": "hello back" } });
     s.store
-        .event(run_id, "item.completed", "hello back", Some(answer))
+        .event(
+            run_id,
+            &EventKind::ItemCompleted,
+            "hello back",
+            Some(answer),
+        )
         .await
         .unwrap();
     s.store
-        .event(run_id, "turn.completed", "", None)
+        .event(run_id, &EventKind::TurnCompleted, "", None)
         .await
         .unwrap();
     let completed = reply().await.unwrap();
@@ -1914,7 +1937,12 @@ async fn replies_do_not_follow_a_retry_stopped_before_it_ran() {
     let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
         let store = s.store.clone();
         let run_id = run_id.to_owned();
-        async move { store.event(&run_id, kind, text, payload).await.unwrap() }
+        async move {
+            store
+                .event(&run_id, &EventKind::from_adapter(kind), text, payload)
+                .await
+                .unwrap();
+        }
     };
 
     event(
@@ -1986,7 +2014,12 @@ async fn replies_to_a_stopped_turn_do_not_carry_the_next_answer() {
         let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
             let store = s.store.clone();
             let run_id = run_id.to_owned();
-            async move { store.event(&run_id, kind, text, payload).await.unwrap() }
+            async move {
+                store
+                    .event(&run_id, &EventKind::from_adapter(kind), text, payload)
+                    .await
+                    .unwrap();
+            }
         };
 
         event(
@@ -2125,7 +2158,7 @@ async fn public_question_partial_answers_require_the_starters_authority() {
     s.store
         .event(
             run,
-            "chat.user",
+            &EventKind::ChatUser,
             "",
             Some(json!({ "messageId": delivery["id"] })),
         )
@@ -2136,7 +2169,7 @@ async fn public_question_partial_answers_require_the_starters_authority() {
         "id": question,
         "blocking": true,
         "fields": [
-            { "id": "first", "title": "First?", "secret": false, "options": [{ "label": "Safe", "description": "" }, { "label": "Attacker", "description": "" }] },
+            { "id": "first", "title": "First?", "secret": false, "options": [{ "id": "Safe", "label": "Safe", "description": "" }, { "id": "Attacker", "label": "Attacker", "description": "" }] },
             { "id": "second", "title": "Second?", "secret": false, "options": [] },
         ],
     })).await.unwrap();
@@ -2190,7 +2223,7 @@ async fn public_question_partial_answers_require_the_starters_authority() {
         queued
             .iter()
             .any(|message| message["answers"]
-                == json!({ "first": ["Safe"], "second": ["Continue"] }))
+                == json!({ "first": { "selected": [], "comment": "Safe" }, "second": { "selected": [], "comment": "Continue" } }))
     );
     session.stop().await;
     server.abort();
@@ -2279,7 +2312,7 @@ async fn channel_fallback_questions_retry_and_controls_route_to_the_right_conver
     s.store
         .event(
             run,
-            "chat.user",
+            &EventKind::ChatUser,
             "",
             Some(json!({ "messageId": delivery["id"] })),
         )
@@ -2288,7 +2321,7 @@ async fn channel_fallback_questions_retry_and_controls_route_to_the_right_conver
     let question = "c".repeat(64);
     s.question_receive(run, json!({
         "id": question, "blocking": true,
-        "fields": [{ "id": "x".repeat(101), "title": "Choose?", "secret": false, "options": [{ "label": format!("a{}", "é".repeat(40)), "description": "" }] }],
+        "fields": [{ "id": "x".repeat(101), "title": "Choose?", "secret": false, "options": [{ "id": "choice", "label": format!("a{}", "é".repeat(40)), "description": "" }] }],
     })).await.unwrap();
     // Another queued message in this conversation must not republish its question.
     let mut second = message("541", "300", "<@400> also this");
@@ -2416,7 +2449,7 @@ async fn optional_questions_are_not_republished_on_later_turns() {
     s.store
         .event(
             run,
-            "chat.user",
+            &EventKind::ChatUser,
             "",
             Some(json!({ "messageId": first["id"] })),
         )
@@ -2434,18 +2467,20 @@ async fn optional_questions_are_not_republished_on_later_turns() {
     .await
     .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    s.question_release(run, Some(&question)).await.unwrap();
+    s.question_cancel(text(&chat, "id"), &question)
+        .await
+        .unwrap();
     s.store
         .event(
             run,
-            "item.completed",
+            &EventKind::ItemCompleted,
             "Done",
             Some(json!({ "item": { "type": "agent_message", "text": "Done" } })),
         )
         .await
         .unwrap();
     s.store
-        .event(run, "turn.completed", "", None)
+        .event(run, &EventKind::TurnCompleted, "", None)
         .await
         .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
@@ -2461,7 +2496,7 @@ async fn optional_questions_are_not_republished_on_later_turns() {
     s.store
         .event(
             run,
-            "chat.user",
+            &EventKind::ChatUser,
             "",
             Some(json!({ "messageId": receipt["messageId"] })),
         )

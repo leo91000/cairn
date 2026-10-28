@@ -192,7 +192,7 @@ fn resources(resources: Option<&Value>) -> Result<Resources> {
         }
         None => crate::nodes::placement::defaults(),
     };
-    resources.validate()?;
+    resources.validate().map_err(Error::bad)?;
     Ok(resources)
 }
 

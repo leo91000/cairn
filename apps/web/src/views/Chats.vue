@@ -24,7 +24,12 @@ import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { resumeRun } from '../../../../packages/contracts/generated/resume-run'
 import { failureReason, sameReason, stopEcho } from '../activity'
-import { api, apiUpload, state } from '../api'
+import {
+  api,
+  apiUpload,
+  refreshSkills,
+  state,
+} from '../api'
 import { reuseAttachmentKey } from '../attachment-media'
 import {
   isImage,
@@ -1120,6 +1125,8 @@ function key(event: KeyboardEvent) {
             :sending="delivery.sending"
             :events="events"
             :quota="quota"
+            :chat-id="detail?.id"
+            :coding-agent-switch="detail?.codingAgentSwitch"
             :can-manage-accounts="state.installationRole === 'owner'"
             :busy="busy"
             :wakeup="liveWait"
@@ -1139,6 +1146,7 @@ function key(event: KeyboardEvent) {
             chat
             :can-implement="!hasDraft && !editing && !busy && !inactive"
             @resume-quota="resumeQuota"
+            @coding-agent-switched="chosenProvider = $event"
             @load="live.loadOlder"
             @position="live.savePosition"
             @implement="implementPlan"
@@ -1340,6 +1348,7 @@ function key(event: KeyboardEvent) {
                   rows="2"
                   maxlength="50000"
                   @keydown="key"
+                  @skills-open="refreshSkills().catch(() => {})"
                 />
                 <div class="flex items-center justify-between gap-2 pt-2">
                   <div class="flex min-w-0 flex-1 items-center gap-1">

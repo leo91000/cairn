@@ -16,6 +16,96 @@ import {
 
 const MAIN_AGENT_ID = '00000000-0000-4000-8000-000000000001'
 
+test('automatic placement saves ordered node priorities on the agent', async ({ page, workspace, browserName }) => {
+  test.setTimeout(60000)
+  await signIn(page)
+  const first = await enroll(page, workspace, 'Priority machine one', false)
+  const second = await enroll(page, workspace, 'Priority machine two', false)
+  const third = await enroll(page, workspace, 'Priority machine three', false)
+  await page.goto(workspacePath('/agents/new'))
+  await page.getByLabel('Name', { exact: true }).fill('Automatic placement')
+  const id = await createAgent(page)
+  await openAgentSection(page, 'Nodes')
+  await expect(page.getByRole('button', { name: 'Prioritize Priority machine one', exact: true })).toBeDisabled()
+  await page.getByRole('switch', { name: 'Can run its conversations on Priority machine one', exact: true }).check()
+  await page.getByRole('switch', { name: 'Can run its conversations on Priority machine two', exact: true }).check()
+  await page.getByRole('switch', { name: 'Can run its conversations on Priority machine three', exact: true }).check()
+  await page.getByRole('button', { name: 'Prioritize Priority machine one', exact: true }).click()
+  await page.getByRole('button', { name: 'Prioritize Priority machine two', exact: true }).click()
+  await page.getByRole('button', { name: 'Prioritize Priority machine three', exact: true }).click()
+  const priorities = page.getByRole('list', { name: 'Node priorities', exact: true })
+  const handle = (name: string) => priorities.getByRole('button', { name: `Drag Priority machine ${name} to reorder`, exact: true })
+  const drag = async (from: string, to: string, cancel = false) => {
+    await handle(from).scrollIntoViewIfNeeded()
+    const start = (await handle(from).boundingBox())!
+    const end = (await handle(to).boundingBox())!
+    await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2, { steps: 12 })
+    if (cancel)
+      await page.keyboard.press('Escape')
+    await page.mouse.up()
+  }
+
+  // Move across several rows in either direction. Dropping and cancelling preserve grants.
+  await drag('three', 'one')
+  await expect(priorities.getByRole('listitem').first()).toContainText('1. Priority machine three')
+  await drag('three', 'two')
+  await expect(priorities.getByRole('listitem').last()).toContainText('3. Priority machine three')
+  await drag('three', 'one', true)
+  await expect(priorities.getByRole('listitem').last()).toContainText('3. Priority machine three')
+  await page.getByRole('button', { name: 'Move Priority machine two up', exact: true }).focus()
+  await page.keyboard.press('Enter')
+  await page.screenshot({ path: 'test-results/node-priorities-desktop.png', fullPage: true })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.emulateMedia({ colorScheme: 'dark' })
+  await drag('three', 'one')
+  await expect(priorities.getByRole('listitem').nth(1)).toContainText('2. Priority machine three')
+  await expect(priorities).toBeInViewport()
+  await page.screenshot({ path: 'test-results/node-priorities-phone-dark.png', fullPage: true })
+  if (browserName === 'chromium') {
+    // Browser touch input exercises pointer capture and touch-action, rather than synthetic DOM events.
+    const session = await page.context().newCDPSession(page)
+    await session.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 })
+    const touchDrag = async (from: string, to: string, cancel = false) => {
+      const start = (await handle(from).boundingBox())!
+      const end = (await handle(to).boundingBox())!
+      const x = start.x + start.width / 2
+      const y = start.y + start.height / 2
+      await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] })
+      for (let step = 1; step <= 10; step++) {
+        await session.send('Input.dispatchTouchEvent', {
+          type: 'touchMove',
+          touchPoints: [{ x, y: y + (end.y + end.height / 2 - y) * step / 10 }],
+        })
+      }
+
+      await session.send('Input.dispatchTouchEvent', { type: cancel ? 'touchCancel' : 'touchEnd', touchPoints: [] })
+    }
+
+    await touchDrag('one', 'three')
+    await expect(priorities.getByRole('listitem').nth(1)).toContainText('2. Priority machine one')
+    await touchDrag('one', 'three')
+    await expect(priorities.getByRole('listitem').nth(1)).toContainText('2. Priority machine three')
+    await touchDrag('one', 'two', true)
+    await expect(priorities.getByRole('listitem').last()).toContainText('3. Priority machine one')
+    await session.send('Emulation.setTouchEmulationEnabled', { enabled: false })
+    await session.detach()
+  }
+
+  await saveAgent(page)
+  const saved = await workspace.api(`/api/agents/${id}`)
+  expect(saved.access.backend).toBe('auto')
+  expect(saved.nodePriorities).toEqual([second, third, first])
+  expect(saved.access.nodes).toEqual(expect.arrayContaining([first, second, third]))
+  await page.reload()
+  await openAgentSection(page, 'Nodes')
+  await expect(page.getByText('1. Priority machine two', { exact: true })).toBeVisible()
+  await expect(page.getByText('2. Priority machine three', { exact: true })).toBeVisible()
+  // This longer gesture journey must not spend the following tests' shared request budget.
+  await workspace.restart()
+})
+
 async function signIn(page: Page) {
   await page.goto(workspacePath('/'))
   await authenticateWorkspace(page)
@@ -798,7 +888,13 @@ test('the execution backend chooses which nodes an agent can be granted', async 
     },
   })
   expect(enrolled.ok()).toBe(true)
-  const native = (await enrolled.json()).nodeId as string
+  const nativeRegistration = await enrolled.json()
+  const native = nativeRegistration.nodeId as string
+  const heartbeat = await page.request.post(`${workspace.installationUrl}/internal/nodes/heartbeat`, {
+    headers: { authorization: `Bearer ${nativeRegistration.token}` },
+    data: { exclusiveReservations: true, runtimeId: 'development', nodeProtocol: 2 },
+  })
+  expect(heartbeat.ok()).toBe(true)
   const agent = await workspace.api('/api/agents', 'POST', { name: 'GPU renderer', access: { nodes: [vm] } })
   await page.goto(workspacePath(`/agents/${agent.id}?section=nodes`))
   await authenticateWorkspace(page)
@@ -823,7 +919,11 @@ test('the execution backend chooses which nodes an agent can be granted', async 
   await expect(nodes.getByRole('listitem', { name: 'Current runner' })).toHaveCount(0)
   const run = page.getByRole('switch', { name: 'Can run its conversations on native-box' })
   await expect(run).not.toBeChecked()
+  const exclusive = page.getByRole('switch', { name: 'Can reserve native-box exclusively' })
+  await expect(exclusive).toBeDisabled()
   await run.check()
+  await expect(exclusive).toBeEnabled()
+  await exclusive.check()
 
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
   const review = page.getByRole('dialog', { name: 'Review before saving' })
@@ -832,6 +932,7 @@ test('the execution backend chooses which nodes an agent can be granted', async 
   await expect(review).toHaveCount(0)
   const saved = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
   expect(saved.access).toMatchObject({ backend: 'native', nodes: [native] })
+  expect(saved.exclusiveNodes).toEqual([native])
   await page.getByRole('switch', { name: 'All nodes, including future' }).check()
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
   await expect(review).toHaveCount(0)

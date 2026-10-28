@@ -11,6 +11,7 @@ use crate::{
     skills::private_dir,
     validation::text,
 };
+use cairn_contracts::EventKind;
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
@@ -62,6 +63,7 @@ impl ExecutionAdapter for Opencode {
         let mut native_names = std::collections::HashSet::new();
         let mut permissions = Map::new();
         permissions.insert("*".into(), "allow".into());
+        permissions.insert("question".into(), "deny".into());
         for (name, server) in &configuration.servers {
             if !native_names.insert(native_tool_name(name)) {
                 return Err(Error::bad(
@@ -219,7 +221,7 @@ impl ExecutionAdapter for Opencode {
         s.store
             .event(
                 text(plan, "runId"),
-                "status",
+                &EventKind::Status,
                 &format!("{name} via {via}"),
                 Some(payload),
             )

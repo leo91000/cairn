@@ -28,6 +28,8 @@ fn summary(chat: &Value) -> Value {
         "runId",
         "paused",
         "status",
+        "accountWaitReason",
+        "accountRequired",
         "lifecycle",
         "createdAt",
         "updatedAt",
@@ -100,13 +102,35 @@ fn detail(db: &Db<'_>, args: &Value) -> Result<Value> {
     Ok(result)
 }
 
+fn record_preview(record: Value, fields: &[&str]) -> Result<(Value, usize)> {
+    let bytes = serde_json::to_vec(&record)?.len();
+    if bytes <= PAGE_BYTES {
+        return Ok((record, bytes));
+    }
+    let mut preview = json!({
+        "truncated": true,
+        "totalBytes": bytes
+    });
+    let mut bytes = serde_json::to_vec(&preview)?.len();
+    for field in fields {
+        if let Some(value) = record.get(*field) {
+            let size = serde_json::to_vec(value)?.len() + field.len() + 4;
+            if bytes + size <= PAGE_BYTES {
+                preview[*field] = value.clone();
+                bytes += size;
+            }
+        }
+    }
+    Ok((preview, bytes))
+}
+
 pub(super) fn page(values: &[Value], args: &Value, key: &str) -> Result<Value> {
     let offset = args["offset"].as_u64().unwrap() as usize;
     let limit = args["limit"].as_u64().unwrap() as usize;
     let mut items = Vec::new();
     let mut bytes = 0;
     for value in values.iter().skip(offset).take(limit) {
-        let (value, size) = super::run_record_preview(
+        let (value, size) = record_preview(
             value.clone(),
             &["id", "chatId", "runId", "status", "createdAt", "blocking"],
         )?;
@@ -161,7 +185,7 @@ pub(super) async fn invoke(
     let origin = crate::native::policy::origin();
     let control = matches!(
         name,
-        "restore_chat" | "resume_chat" | "restart_chat_session"
+        "restore_chat" | "resume_chat" | "restart_chat_session" | "switch_chat_coding_agent"
     ) || (name == "set_chat_paused" && args["paused"] != true);
     if control && origin.known() {
         crate::native::policy::refresh_chat(s, text(&args, "chatId")).await?;
@@ -189,6 +213,12 @@ pub(super) async fn invoke(
             Ok(())
         }
     };
+    if name == "get_chat_coding_agent_options" {
+        return chats::coding_agent::options(s, text(&args, "chatId"), authorize).await;
+    }
+    if name == "switch_chat_coding_agent" {
+        return s.switch_chat_coding_agent(args, authorize).await;
+    }
     if matches!(
         name,
         "list_chats" | "get_chat" | "list_chat_questions" | "read_chat_content"
@@ -237,6 +267,15 @@ pub(super) async fn invoke(
         return s
             .worker
             .resume_authorized(s, &run_id, commit_authority)
+            .await;
+    }
+    if name == "withdraw_chat_question" {
+        return s
+            .question_cancel_authorized(
+                text(&args, "chatId"),
+                text(&args, "questionId"),
+                commit_authority,
+            )
             .await;
     }
     if name == "answer_chat_question" {

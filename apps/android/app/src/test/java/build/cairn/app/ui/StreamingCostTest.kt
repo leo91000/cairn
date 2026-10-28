@@ -59,22 +59,30 @@ class StreamingCostTest {
                 var cursor = count.toLong() + 1
                 fun message(id: Long, field: String, value: String) =
                     RunEvent(
-                        id,
-                        id,
-                        "item.updated",
-                        if (field == "text") value else "",
-                        mapOf(
-                            "item" to
-                                buildJsonObject {
-                                    put("id", "stream-message")
-                                    put("type", "agent_message")
-                                    put(field, value)
-                                }
-                        ),
+                        id = id,
+                        createdAt = id,
+                        type = "item.updated",
+                        text = if (field == "text") value else "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "item" to
+                                        buildJsonObject {
+                                            put("id", "stream-message")
+                                            put("type", "agent_message")
+                                            put(field, value)
+                                        }
+                                )
+                            ),
                     )
                 accumulator.append(
                     (1..count).map {
-                        RunEvent(it.toLong(), it.toLong(), "output", "Prior output $it")
+                        RunEvent(
+                            id = it.toLong(),
+                            createdAt = it.toLong(),
+                            type = "output",
+                            text = "Prior output $it",
+                        )
                     } + message(cursor, "text", text)
                 )
                 val reduce = mutableListOf<Double>()

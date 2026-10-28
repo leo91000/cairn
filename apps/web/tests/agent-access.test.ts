@@ -26,11 +26,52 @@ import {
   selectionSummary,
   skillLabel,
   unknownNode,
+  withAllNodes,
   withBackend,
   withRun,
 } from '../src/agent-access'
 
 const gpu = {
+  revision: 'fixture',
+  createdAt: 0,
+  systemTags: [],
+  runtimeSlots: null,
+  nativeEnabled: false,
+  nativeAccounts: [],
+  nativeReviewedAgents: [],
+  nativeModeRequest: null,
+  nativeModeObserved: null,
+  nativeModeProposal: null,
+  nativeModeStatus: null,
+  exclusiveReservation: null,
+  exclusiveAgents: [],
+  usage: null,
+  budgetError: null,
+  pressure: null,
+  executionReady: false,
+  maintenance: null,
+  maintenanceError: null,
+  maintenanceGeneration: null,
+  maintenanceStartedAt: null,
+  imageDigest: null,
+  updateError: null,
+  retainedRuns: null,
+  diskGrowthProtocol: null,
+  diskCapacity: null,
+  occupiedSlots: 0,
+  availableSlots: 4,
+  agents: [],
+  staleDisks: { count: 0, diskMiB: 0 },
+  diskAccounting: null,
+  storage: {
+    cacheMiB: 102400,
+    memoryCacheMiB: 256,
+    reserveMiB: 10240,
+    reservePercent: 5,
+    backupSeconds: 60,
+    maxDirtySeconds: 300,
+  },
+
   id: 'gpu',
   name: 'gpu-box',
   local: false,
@@ -40,12 +81,17 @@ const gpu = {
   exclusiveReservations: true,
   tags: [],
   capabilities: {
+    backend: 'firecracker',
+    ublk: false,
+    nativeModeProtocol: 0,
+    diskTotalMiB: 0,
     cpu: 8,
     memoryMiB: 1024,
     diskMiB: 1024,
     os: 'linux',
     arch: 'x86_64',
     kvm: true,
+
   },
   limits: { cpu: 8, memoryMiB: 1024, diskMiB: 1024 },
   slots: 2,
@@ -137,7 +183,7 @@ it('summarizes an agent for the list and places server errors in their section',
 
 it('starts new agents restricted until the owner widens their access', () => {
   expect(newAgentDraft().access).toEqual({
-    backend: 'firecracker',
+    backend: 'auto',
     nodes: [LOCAL_NODE_ID],
     projects: [],
     skills: [],
@@ -150,6 +196,84 @@ it('starts new agents restricted until the owner widens their access', () => {
   expect(newAgentDraft()).toMatchObject({ exclusiveNodes: [], plugins: [] })
   expect(issues(newAgentDraft(), context, false)).toEqual([])
   expect(reviewLines(newAgentDraft(), newAgentDraft(), context)).toEqual([])
+})
+
+it('offers both node kinds automatically and retains the owner’s ordered preferences when rebasing', () => {
+  const desktop = { ...gpu, id: 'desktop', capabilities: { ...gpu.capabilities, backend: 'native' } } as ExecutionNode
+  expect(nodesFor([gpu, desktop], 'auto').map(node => node.id)).toEqual([LOCAL_NODE_ID, 'gpu', 'desktop'])
+  const base = newAgentDraft()
+  base.access.nodes = ['gpu', 'desktop']
+  base.nodePriorities = ['gpu', 'desktop']
+  const mine = structuredClone(base)
+  mine.nodePriorities.reverse()
+  const theirs = structuredClone(base)
+  theirs.description = 'Changed elsewhere'
+  expect(changes(base, mine)).toEqual(['nodes'])
+  expect(rebaseDraft(base, mine, theirs)).toMatchObject({ nodePriorities: ['desktop', 'gpu'], description: 'Changed elsewhere' })
+  expect(nativeReviewNodes(mine, { ...context, nodes: [{ ...desktop, nativeModeRequest: { mode: 'administrator', generation: 'g' }, nativeReviewedAgents: [] }] })).toEqual(['desktop'])
+})
+
+it('removes revoked priorities when rebasing a local reorder, including wildcard grants', () => {
+  for (const wildcard of [false, true]) {
+    const base = newAgentDraft()
+    base.access.nodes = wildcard ? null : ['gpu', 'desktop']
+    base.nodePriorities = ['gpu', 'desktop']
+    const mine = structuredClone(base)
+    mine.nodePriorities.reverse()
+    const theirs = structuredClone(base)
+    theirs.access.nodes = wildcard ? null : ['desktop']
+    theirs.nodePriorities = ['desktop']
+    expect(rebaseDraft(base, mine, theirs).nodePriorities).toEqual(['desktop'])
+    theirs.access.backend = 'native'
+    expect(rebaseDraft(base, mine, theirs).nodePriorities).toEqual(['desktop'])
+  }
+})
+
+it('drops priorities excluded when wildcard grants become explicit', () => {
+  const administrator = {
+    ...gpu,
+    id: 'desk',
+    capabilities: { ...gpu.capabilities, backend: 'native' },
+    nativeModeRequest: { mode: 'administrator', generation: 'g' },
+    nativeReviewedAgents: [],
+  } as ExecutionNode
+  const access = { ...newAgentDraft().access, nodes: null }
+  const next = withAllNodes(access, ['desk', 'gpu'], [gpu, administrator], false, 'agent')
+  expect(next.nodes).toEqual([LOCAL_NODE_ID, 'gpu'])
+  expect(next.nodePriorities).toEqual(['gpu'])
+})
+
+it('retains concurrent priority removals when switching a fixed profile to automatic', () => {
+  for (const backend of ['firecracker', 'native'] as const) {
+    const base = newAgentDraft()
+    base.access.backend = backend
+    base.access.nodes = null
+    base.nodePriorities = ['gpu']
+    const mine = structuredClone(base)
+    mine.access.backend = 'auto'
+    const theirs = structuredClone(base)
+    theirs.nodePriorities = []
+    expect(rebaseDraft(base, mine, theirs)).toMatchObject({ access: { backend: 'auto', nodes: null }, nodePriorities: [] })
+  }
+})
+
+it('merges compatible execution and exclusive grants when either editor switches to automatic', () => {
+  for (const ownSwitch of [false, true]) {
+    const base = newAgentDraft()
+    base.access.backend = 'firecracker'
+    base.access.nodes = ['gpu', 'removed']
+    base.exclusiveNodes = ['removed']
+    base.nodePriorities = ['removed']
+    const mine = structuredClone(base)
+    mine.access.backend = ownSwitch ? 'auto' : 'firecracker'
+    mine.access.nodes = ['gpu', 'removed', 'added']
+    const theirs = structuredClone(base)
+    theirs.access.backend = ownSwitch ? 'firecracker' : 'auto'
+    theirs.access.nodes = ['gpu']
+    theirs.exclusiveNodes = []
+    theirs.nodePriorities = []
+    expect(rebaseDraft(base, mine, theirs)).toMatchObject({ access: { backend: 'auto', nodes: ['gpu', 'added'] }, exclusiveNodes: [], nodePriorities: [] })
+  }
 })
 
 it('treats live grants the server omits as none, so a loaded agent is not changed', () => {
@@ -468,6 +592,7 @@ it('runs agents in Firecracker VMs unless native execution is chosen, and only o
   expect(nodesFor(nodes, 'native').map(node => node.id)).toEqual(['desktop'])
 
   const saved = newAgentDraft()
+  saved.access.backend = 'firecracker'
   const native = structuredClone(saved)
   native.access.backend = 'native'
   native.access.nodes = ['desktop']
@@ -556,6 +681,7 @@ it('flags run permissions on removed nodes or nodes of the other backend', () =>
   } as ExecutionNode
   const draft = newAgentDraft()
   draft.access.nodes = [LOCAL_NODE_ID, 'gpu', 'gone', 'desktop']
+  draft.access.backend = 'firecracker'
   expect(issues(draft, { ...context, nodes: [gpu, desktop] }, false).map(issue => issue.text)).toEqual([
     'A node this agent can run on no longer exists.',
     'Native desktop uses another execution backend: this agent cannot run there.',

@@ -1,5 +1,6 @@
 package build.cairn.app.data
 
+import build.cairn.contracts.NativeModeRequest
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -16,14 +17,47 @@ import org.junit.Test
 class AgentEditingTest {
     private val gpu =
         ExecutionNode(
-            "gpu",
-            "gpu-box",
+            id = "475328ca-1491-5a74-abfb-fb52c2e04160",
+            name = "gpu-box",
             accepting = true,
             status = "online",
             exclusiveReservations = true,
             executionReady = true,
+            createdAt = 0,
+            revision = "fixture",
+            capabilities =
+                NodeCapabilities(
+                    os = "",
+                    arch = "",
+                    cpu = 1,
+                    memoryMiB = 128,
+                    diskMiB = 128,
+                    kvm = false,
+                ),
+            limits = NodeResources(cpu = 1, memoryMiB = 256, diskMiB = 128),
+            storage = NodeStoragePolicy(),
+            staleDisks = StaleDisks(count = 0, diskMiB = 0),
         )
-    private val mac = ExecutionNode("mac", "mac-mini", status = "offline")
+    private val mac =
+        ExecutionNode(
+            id = "17ce976c-733b-5e32-9840-7888af8907c0",
+            name = "mac-mini",
+            status = "offline",
+            createdAt = 0,
+            revision = "fixture",
+            capabilities =
+                NodeCapabilities(
+                    os = "",
+                    arch = "",
+                    cpu = 1,
+                    memoryMiB = 128,
+                    diskMiB = 128,
+                    kvm = false,
+                ),
+            limits = NodeResources(cpu = 1, memoryMiB = 256, diskMiB = 128),
+            storage = NodeStoragePolicy(),
+            staleDisks = StaleDisks(count = 0, diskMiB = 0),
+        )
     private val nodes = listOf(gpu, mac)
     private val projects =
         listOf(
@@ -114,7 +148,7 @@ class AgentEditingTest {
                     mcpTools = build.cairn.contracts.McpTools(emptyMap()),
                     skills = null,
                     mcps = null,
-                    nodes = listOf(LOCAL_NODE_ID, "gpu"),
+                    nodes = listOf(LOCAL_NODE_ID, "475328ca-1491-5a74-abfb-fb52c2e04160"),
                     projects =
                         listOf(
                             "2450c72e-6174-56da-b0fc-b06868e8e8e5",
@@ -182,17 +216,17 @@ class AgentEditingTest {
 
     @Test
     fun exclusiveNeedsExecutionAndStoppingExecutionDropsIt() {
-        val granted = agent.withExclusive("gpu", true)
+        val granted = agent.withExclusive("475328ca-1491-5a74-abfb-fb52c2e04160", true)
         assertEquals(listOf(gpu), granted.effectiveExclusive(nodes))
         assertEquals("2 sur 3 · exclusivité sur 1", nodesSummary(granted, nodes))
 
-        val stopped = granted.withNodeRun("gpu", false)
+        val stopped = granted.withNodeRun("475328ca-1491-5a74-abfb-fb52c2e04160", false)
         assertEquals(listOf(LOCAL_NODE_ID), stopped.access.nodes)
         assertTrue(stopped.exclusiveNodes.isEmpty())
         assertEquals("Runner actuel seulement", nodesSummary(stopped, nodes))
 
         // Legacy data: an exclusive grant where the agent cannot run is inactive and reported.
-        val legacy = stopped.copy(exclusiveNodes = listOf("gpu"))
+        val legacy = stopped.copy(exclusiveNodes = listOf("475328ca-1491-5a74-abfb-fb52c2e04160"))
         assertTrue(legacy.effectiveExclusive(nodes).isEmpty())
         assertEquals(AgentSection.Nodes, agentIssues(legacy, resources).single().section)
 
@@ -200,7 +234,11 @@ class AgentEditingTest {
         val all = legacy.copy(access = legacy.access.withAllNodes(true, nodes))
         assertEquals(listOf(gpu), all.effectiveExclusive(nodes))
         assertEquals(
-            listOf(LOCAL_NODE_ID, "gpu", "mac"),
+            listOf(
+                LOCAL_NODE_ID,
+                "475328ca-1491-5a74-abfb-fb52c2e04160",
+                "17ce976c-733b-5e32-9840-7888af8907c0",
+            ),
             all.access.withAllNodes(false, nodes).nodes,
         )
     }
@@ -236,7 +274,7 @@ class AgentEditingTest {
                     agent.copy(
                         name = "Releases",
                         plugins = listOf("prod"),
-                        exclusiveNodes = listOf("gpu"),
+                        exclusiveNodes = listOf("475328ca-1491-5a74-abfb-fb52c2e04160"),
                     )
             )
         val changes = agentChanges(agent, edited)
@@ -282,7 +320,7 @@ class AgentEditingTest {
                         projects = listOf("2450c72e-6174-56da-b0fc-b06868e8e8e5"),
                         installation = true,
                     ),
-                exclusiveNodes = listOf("gpu"),
+                exclusiveNodes = listOf("475328ca-1491-5a74-abfb-fb52c2e04160"),
                 plugins = listOf("prod"),
             )
         val preview =
@@ -403,7 +441,7 @@ class AgentEditingTest {
         val granted =
             agent.copy(
                 access = agent.access.copy(installation = true),
-                exclusiveNodes = listOf("gpu"),
+                exclusiveNodes = listOf("475328ca-1491-5a74-abfb-fb52c2e04160"),
                 plugins = listOf("prod"),
             )
         assertEquals(
@@ -565,7 +603,7 @@ class AgentEditingTest {
                         mcpTools = build.cairn.contracts.McpTools(mapOf("m" to listOf("t1"))),
                     ),
                 plugins = listOf("prod"),
-                exclusiveNodes = listOf("gpu"),
+                exclusiveNodes = listOf("475328ca-1491-5a74-abfb-fb52c2e04160"),
             )
         val mine =
             base.copy(
@@ -603,30 +641,42 @@ class AgentEditingTest {
 
     @Test
     fun aBackendSwitchOnEitherSideKeepsThatSidesNodesWhole() {
-        val base = agent.withExclusive("gpu", true)
+        val base = agent.withExclusive("475328ca-1491-5a74-abfb-fb52c2e04160", true)
         // I switched to native and chose desk; they added mac meanwhile.
-        val mine = base.withBackend(native = true).withNodeRun("desk", true)
+        val mine =
+            base
+                .withBackend(native = true)
+                .withNodeRun("aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503", true)
         val theirs =
             base.copy(
                 revision = "r2",
-                access = base.access.copy(nodes = base.access.nodes!! + "mac"),
+                access =
+                    base.access.copy(
+                        nodes = base.access.nodes!! + "17ce976c-733b-5e32-9840-7888af8907c0"
+                    ),
             )
         val rebased = rebaseAgent(base, mine, theirs)
         assertEquals(NATIVE_BACKEND, rebased.access.backend)
-        assertEquals(listOf("desk"), rebased.access.nodes)
+        assertEquals(listOf("aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503"), rebased.access.nodes)
         assertEquals(emptyList<String>(), rebased.exclusiveNodes)
 
         // They switched; I only added a VM node: their native nodes win, mine is not merged in.
-        val theirsNative = base.withBackend(native = true).withNodeRun("desk", true)
-        val mineVm = base.withNodeRun("mac", true)
+        val theirsNative =
+            base
+                .withBackend(native = true)
+                .withNodeRun("aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503", true)
+        val mineVm = base.withNodeRun("17ce976c-733b-5e32-9840-7888af8907c0", true)
         val kept = rebaseAgent(base, mineVm, theirsNative.copy(revision = "r2"))
         assertEquals(NATIVE_BACKEND, kept.access.backend)
-        assertEquals(listOf("desk"), kept.access.nodes)
+        assertEquals(listOf("aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503"), kept.access.nodes)
     }
 
     @Test
     fun cardsAndReviewsNameTheBackendAndOnlyEffectiveExclusivity() {
-        val native = agent.withBackend(native = true).withNodeRun("desk", true)
+        val native =
+            agent
+                .withBackend(native = true)
+                .withNodeRun("aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503", true)
         assertEquals(
             listOf("exécution native"),
             agentReductions(native, native.withBackend(native = false), resources).filter {
@@ -635,12 +685,18 @@ class AgentEditingTest {
         )
         assertEquals("2 projets · 1 node · Exécution native", agentAccessSummary(native))
 
-        val granted = agent.copy(plugins = listOf("prod", "staging")).withExclusive("mac", true)
+        val granted =
+            agent
+                .copy(plugins = listOf("prod", "staging"))
+                .withExclusive("17ce976c-733b-5e32-9840-7888af8907c0", true)
         // Without the catalog or machines: counts, and no exclusivity that may not apply.
         assertEquals("2 projets · 2 nodes · 2 plugins", agentAccessSummary(granted))
         assertEquals(
             "2 projets · 2 nodes · Exclusivité",
-            agentAccessSummary(agent.withExclusive("gpu", true), nodes = nodes),
+            agentAccessSummary(
+                agent.withExclusive("475328ca-1491-5a74-abfb-fb52c2e04160", true),
+                nodes = nodes,
+            ),
         )
         // With them: package names, and exclusivity only where it applies (mac cannot run it).
         assertEquals("2 projets · 2 nodes · 1Password", agentAccessSummary(granted, catalog, nodes))
@@ -648,7 +704,8 @@ class AgentEditingTest {
 
     @Test
     fun toolChoicesOfDeletedConnectionsAreNeverSent() {
-        val tools = mapOf("kept" to listOf("a"), "gone" to listOf("b"))
+        val tools =
+            mapOf("kept" to listOf("a"), "6d71f5d3-a5b5-5940-ae43-02937d4d6b40" to listOf("b"))
         val all =
             agent.copy(
                 access =
@@ -660,7 +717,7 @@ class AgentEditingTest {
                 .jsonObject["mcpTools"]!!
         assertEquals(setOf("kept"), sent.jsonObject.keys)
         assertEquals(
-            setOf("kept", "gone"),
+            setOf("kept", "6d71f5d3-a5b5-5940-ae43-02937d4d6b40"),
             agentSaveBody(all)["settings"]!!
                 .jsonObject["access"]!!
                 .jsonObject["mcpTools"]!!
@@ -673,14 +730,42 @@ class AgentEditingTest {
     fun runPermissionsOnUnusableNodesAreReportedAndNativeSupportsAllNodes() {
         val desk =
             ExecutionNode(
-                "desk",
-                "desk-native",
+                id = "aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503",
+                name = "desk-native",
                 status = "online",
-                capabilities = NodeCapabilities(backend = NATIVE_BACKEND),
+                capabilities =
+                    NodeCapabilities(
+                        backend = NATIVE_BACKEND,
+                        os = "",
+                        arch = "",
+                        cpu = 1,
+                        memoryMiB = 128,
+                        diskMiB = 128,
+                        kvm = false,
+                    ),
+                createdAt = 0,
+                revision = "fixture",
+                limits = NodeResources(cpu = 1, memoryMiB = 256, diskMiB = 128),
+                storage = NodeStoragePolicy(),
+                staleDisks = StaleDisks(count = 0, diskMiB = 0),
             )
-        val holder = agent.copy(access = agent.access.copy(nodes = listOf("gpu", "desk", "gone")))
+        val holder =
+            agent.copy(
+                access =
+                    agent.access.copy(
+                        nodes =
+                            listOf(
+                                "475328ca-1491-5a74-abfb-fb52c2e04160",
+                                "aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503",
+                                "6d71f5d3-a5b5-5940-ae43-02937d4d6b40",
+                            )
+                    )
+            )
         val unusable = holder.unusableNodes(nodes + desk)
-        assertEquals(listOf("desk", "gone"), unusable.map { it.id })
+        assertEquals(
+            listOf("aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503", "6d71f5d3-a5b5-5940-ae43-02937d4d6b40"),
+            unusable.map { it.id },
+        )
         assertEquals(listOf(true, false), unusable.map { it.otherBackend })
         val issues = agentIssues(holder, resources.copy(nodes = nodes + desk))
         assertTrue(issues.any { "« desk-native » utilise un autre mode d’exécution" in it.text })
@@ -691,7 +776,12 @@ class AgentEditingTest {
         val allNative = native.copy(access = native.access.withAllNodes(true, nodes + desk))
         assertNull(allNative.access.nodes)
         assertFalse(AgentSection.Nodes in agentErrors(AgentDraft(allNative)))
-        assertFalse(AgentSection.Nodes in agentErrors(AgentDraft(native.withNodeRun("desk", true))))
+        assertFalse(
+            AgentSection.Nodes in
+                agentErrors(
+                    AgentDraft(native.withNodeRun("aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503", true))
+                )
+        )
     }
 
     @Test
@@ -730,32 +820,106 @@ class AgentEditingTest {
     }
 
     @Test
+    fun automaticPlacementKeepsBothKindsAndOrderedAgentPriorities() {
+        val desk =
+            ExecutionNode(
+                id = "aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503",
+                name = "desk-native",
+                status = "online",
+                capabilities =
+                    NodeCapabilities(
+                        backend = NATIVE_BACKEND,
+                        os = "",
+                        arch = "",
+                        cpu = 1,
+                        memoryMiB = 128,
+                        diskMiB = 128,
+                        kvm = false,
+                    ),
+                createdAt = 0,
+                revision = "fixture",
+                limits = NodeResources(cpu = 1, memoryMiB = 256, diskMiB = 128),
+                storage = NodeStoragePolicy(),
+                staleDisks = StaleDisks(count = 0, diskMiB = 0),
+            )
+        val auto =
+            agent
+                .withBackend("auto")
+                .copy(
+                    nodePriorities = listOf("475328ca-1491-5a74-abfb-fb52c2e04160", LOCAL_NODE_ID)
+                )
+        assertEquals(
+            listOf(
+                LOCAL_NODE_ID,
+                "475328ca-1491-5a74-abfb-fb52c2e04160",
+                "17ce976c-733b-5e32-9840-7888af8907c0",
+                "aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503",
+            ),
+            auto.nodeChoices(nodes + desk).map { it.id },
+        )
+        val mine = auto.copy(nodePriorities = auto.nodePriorities.reversed())
+        assertTrue(AgentSection.Nodes in agentChanges(auto, AgentDraft(mine)))
+        assertEquals(
+            mine.nodePriorities,
+            rebaseAgent(auto, mine, auto.copy(description = "new")).nodePriorities,
+        )
+        assertEquals(mine.nodePriorities, agentSettings(mine).nodePriorities)
+    }
+
+    @Test
     fun nativeExecutionUsesOnlyNativeNodesAndIsReviewed() {
         val desk =
             ExecutionNode(
-                "desk",
-                "desk-native",
+                id = "aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503",
+                name = "desk-native",
                 status = "online",
-                capabilities = NodeCapabilities(backend = NATIVE_BACKEND),
+                capabilities =
+                    NodeCapabilities(
+                        backend = NATIVE_BACKEND,
+                        os = "",
+                        arch = "",
+                        cpu = 1,
+                        memoryMiB = 128,
+                        diskMiB = 128,
+                        kvm = false,
+                    ),
+                createdAt = 0,
+                revision = "fixture",
+                limits = NodeResources(cpu = 1, memoryMiB = 256, diskMiB = 128),
+                storage = NodeStoragePolicy(),
+                staleDisks = StaleDisks(count = 0, diskMiB = 0),
             )
         val all = nodes + desk
-        val reserved = agent.withExclusive("gpu", true)
+        val reserved = agent.withExclusive("475328ca-1491-5a74-abfb-fb52c2e04160", true)
 
-        // New agents and existing ones default to a VM.
-        assertEquals(VM_BACKEND, newAgent().access.backend)
-        assertEquals(listOf(LOCAL_NODE_ID, "gpu", "mac"), reserved.nodeChoices(all).map { it.id })
+        // New agents choose automatically; saved fixed-backend profiles stay fixed.
+        assertEquals("auto", newAgent().access.backend)
+        assertEquals(
+            listOf(
+                LOCAL_NODE_ID,
+                "475328ca-1491-5a74-abfb-fb52c2e04160",
+                "17ce976c-733b-5e32-9840-7888af8907c0",
+            ),
+            reserved.nodeChoices(all).map { it.id },
+        )
 
         // Switching starts again from no node and no exclusive reservation.
         val native = reserved.withBackend(native = true)
         assertEquals(NATIVE_BACKEND, native.access.backend)
         assertEquals(emptyList<String>(), native.access.nodes)
         assertEquals(emptyList<String>(), native.exclusiveNodes)
-        assertEquals(listOf("desk"), native.nodeChoices(all).map { it.id })
+        assertEquals(
+            listOf("aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503"),
+            native.nodeChoices(all).map { it.id },
+        )
         assertEquals(native, native.withBackend(native = true))
         // An older installation keeps reservations on its nodes: they stay as shown.
-        assertEquals(emptyList<String>(), reserved.withNodeRun("gpu", false).exclusiveNodes)
+        assertEquals(
+            emptyList<String>(),
+            reserved.withNodeRun("475328ca-1491-5a74-abfb-fb52c2e04160", false).exclusiveNodes,
+        )
 
-        val running = native.withNodeRun("desk", true)
+        val running = native.withNodeRun("aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503", true)
         assertEquals("Exécution native · 1 sur 1", nodesSummary(running, all))
         assertEquals(
             listOf(AgentSection.Nodes),
@@ -777,6 +941,161 @@ class AgentEditingTest {
             NATIVE_BACKEND,
             rebaseAgent(agent, running, agent.copy(revision = "r2")).access.backend,
         )
+    }
+
+    @Test
+    fun rebasingPriorityOrderNeverRestoresRevokedPreferences() {
+        for (wildcard in listOf(false, true)) {
+            val base =
+                agent.copy(
+                    access =
+                        agent.access.copy(
+                            nodes =
+                                if (wildcard) null
+                                else
+                                    listOf(
+                                        "475328ca-1491-5a74-abfb-fb52c2e04160",
+                                        "17ce976c-733b-5e32-9840-7888af8907c0",
+                                    )
+                        ),
+                    nodePriorities =
+                        listOf(
+                            "475328ca-1491-5a74-abfb-fb52c2e04160",
+                            "17ce976c-733b-5e32-9840-7888af8907c0",
+                        ),
+                )
+            val mine =
+                base.copy(
+                    nodePriorities =
+                        listOf(
+                            "17ce976c-733b-5e32-9840-7888af8907c0",
+                            "475328ca-1491-5a74-abfb-fb52c2e04160",
+                        )
+                )
+            val theirs =
+                base.copy(
+                    access =
+                        base.access.copy(
+                            nodes =
+                                if (wildcard) null
+                                else listOf("17ce976c-733b-5e32-9840-7888af8907c0")
+                        ),
+                    nodePriorities = listOf("17ce976c-733b-5e32-9840-7888af8907c0"),
+                )
+            assertEquals(
+                listOf("17ce976c-733b-5e32-9840-7888af8907c0"),
+                rebaseAgent(base, mine, theirs).nodePriorities,
+            )
+            val switched = theirs.copy(access = theirs.access.copy(backend = NATIVE_BACKEND))
+            assertEquals(
+                listOf("17ce976c-733b-5e32-9840-7888af8907c0"),
+                rebaseAgent(base, mine, switched).nodePriorities,
+            )
+        }
+    }
+
+    @Test
+    fun explicitNodeSelectionsDropExcludedAdministratorPriorities() {
+        val administrator =
+            ExecutionNode(
+                id = "aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503",
+                name = "aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503",
+                status = "online",
+                capabilities =
+                    NodeCapabilities(
+                        backend = NATIVE_BACKEND,
+                        os = "",
+                        arch = "",
+                        cpu = 1,
+                        memoryMiB = 128,
+                        diskMiB = 128,
+                        kvm = false,
+                    ),
+                nativeModeRequest =
+                    NativeModeRequest(
+                        mode = "administrator",
+                        generation = "g",
+                    ),
+                createdAt = 0,
+                revision = "fixture",
+                limits = NodeResources(cpu = 1, memoryMiB = 256, diskMiB = 128),
+                storage = NodeStoragePolicy(),
+                staleDisks = StaleDisks(count = 0, diskMiB = 0),
+            )
+        val auto =
+            agent
+                .withBackend("auto")
+                .copy(
+                    access = agent.access.copy(backend = "auto", nodes = null),
+                    nodePriorities =
+                        listOf(
+                            "aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503",
+                            "475328ca-1491-5a74-abfb-fb52c2e04160",
+                        ),
+                )
+        val next = auto.withAllNodes(false, nodes + administrator)
+        assertFalse("aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503" in next.access.nodes.orEmpty())
+        assertEquals(listOf("475328ca-1491-5a74-abfb-fb52c2e04160"), next.nodePriorities)
+    }
+
+    @Test
+    fun switchingToAutomaticRetainsConcurrentPriorityRemovals() {
+        for (backend in listOf(VM_BACKEND, NATIVE_BACKEND)) {
+            val base =
+                agent.copy(
+                    access = agent.access.copy(backend = backend, nodes = null),
+                    nodePriorities = listOf("475328ca-1491-5a74-abfb-fb52c2e04160"),
+                )
+            val mine = base.withBackend("auto")
+            val theirs = base.copy(nodePriorities = emptyList())
+            val rebased = rebaseAgent(base, mine, theirs)
+            assertEquals("auto", rebased.access.backend)
+            assertNull(rebased.access.nodes)
+            assertTrue(rebased.nodePriorities.isEmpty())
+        }
+    }
+
+    @Test
+    fun automaticBackendMergesCompatibleExecutionAndExclusiveGrants() {
+        for (ownSwitch in listOf(false, true)) {
+            val base =
+                agent.copy(
+                    access =
+                        agent.access.copy(
+                            backend = VM_BACKEND,
+                            nodes = listOf("475328ca-1491-5a74-abfb-fb52c2e04160", "removed"),
+                        ),
+                    exclusiveNodes = listOf("removed"),
+                    nodePriorities = listOf("removed"),
+                )
+            val mine =
+                base.copy(
+                    access =
+                        base.access.copy(
+                            backend = if (ownSwitch) "auto" else VM_BACKEND,
+                            nodes =
+                                listOf("475328ca-1491-5a74-abfb-fb52c2e04160", "removed", "added"),
+                        )
+                )
+            val theirs =
+                base.copy(
+                    access =
+                        base.access.copy(
+                            backend = if (ownSwitch) VM_BACKEND else "auto",
+                            nodes = listOf("475328ca-1491-5a74-abfb-fb52c2e04160"),
+                        ),
+                    exclusiveNodes = emptyList(),
+                    nodePriorities = emptyList(),
+                )
+            val rebased = rebaseAgent(base, mine, theirs)
+            assertEquals("auto", rebased.access.backend)
+            assertEquals(
+                listOf("475328ca-1491-5a74-abfb-fb52c2e04160", "added"),
+                rebased.access.nodes,
+            )
+            assertTrue(rebased.exclusiveNodes.isEmpty())
+            assertTrue(rebased.nodePriorities.isEmpty())
+        }
     }
 
     @Test
@@ -848,7 +1167,11 @@ class AgentEditingTest {
         val everywhere = agent.access.copy(nodes = null)
         assertEquals(everywhere, everywhere.withAllNodes(false, emptyList()))
         assertEquals(
-            listOf(LOCAL_NODE_ID, "gpu", "mac"),
+            listOf(
+                LOCAL_NODE_ID,
+                "475328ca-1491-5a74-abfb-fb52c2e04160",
+                "17ce976c-733b-5e32-9840-7888af8907c0",
+            ),
             everywhere.withAllNodes(false, nodes).nodes,
         )
     }
@@ -858,7 +1181,7 @@ class AgentEditingTest {
         val sent = mutableListOf<JsonObject>()
         grantNodeAgents(
             listOf("d3153f9f-724b-59c3-9614-ab78f231c4d3", "d3153f9f-724b-59c3-9614-ab78f231c4d3"),
-            setOf("other"),
+            setOf("824f3da3-b37b-5713-9c61-06e3f54a7ff8"),
         ) {
             sent += it
         }
@@ -878,8 +1201,10 @@ class AgentEditingTest {
             )) {
             sent.clear()
             val failed = runCatching {
-                grantNodeAgents(listOf("d3153f9f-724b-59c3-9614-ab78f231c4d3"), setOf("other")) {
-                    body ->
+                grantNodeAgents(
+                    listOf("d3153f9f-724b-59c3-9614-ab78f231c4d3"),
+                    setOf("824f3da3-b37b-5713-9c61-06e3f54a7ff8"),
+                ) { body ->
                     sent += body
                     throw error
                 }
@@ -890,8 +1215,13 @@ class AgentEditingTest {
 
         // Nothing new chosen: no request at all.
         sent.clear()
-        grantNodeAgents(listOf("other"), setOf("other")) { sent += it }
-        grantNodeAgents(emptyList(), setOf("other")) { sent += it }
+        grantNodeAgents(
+            listOf("824f3da3-b37b-5713-9c61-06e3f54a7ff8"),
+            setOf("824f3da3-b37b-5713-9c61-06e3f54a7ff8"),
+        ) {
+            sent += it
+        }
+        grantNodeAgents(emptyList(), setOf("824f3da3-b37b-5713-9c61-06e3f54a7ff8")) { sent += it }
         assertTrue(sent.isEmpty())
     }
 
@@ -991,7 +1321,11 @@ class AgentEditingTest {
             agent.copy(
                 access =
                     agent.access.copy(
-                        projects = listOf("2450c72e-6174-56da-b0fc-b06868e8e8e5", "gone"),
+                        projects =
+                            listOf(
+                                "2450c72e-6174-56da-b0fc-b06868e8e8e5",
+                                "6d71f5d3-a5b5-5940-ae43-02937d4d6b40",
+                            ),
                         mcps = null,
                     )
             )
@@ -1033,14 +1367,14 @@ class AgentEditingTest {
                 description = "Theirs",
                 revision = "r2",
                 access = agent.access.copy(sandbox = "read-only"),
-                exclusiveNodes = listOf("gpu"),
+                exclusiveNodes = listOf("475328ca-1491-5a74-abfb-fb52c2e04160"),
             )
         val rebased = rebaseAgent(agent, mine, theirs)
         assertEquals("Mine", rebased.name)
         assertEquals("Theirs", rebased.description)
         assertEquals("read-only", rebased.access.sandbox)
         assertEquals(listOf("prod"), rebased.plugins)
-        assertEquals(listOf("gpu"), rebased.exclusiveNodes)
+        assertEquals(listOf("475328ca-1491-5a74-abfb-fb52c2e04160"), rebased.exclusiveNodes)
         assertEquals("r2", rebased.revision)
     }
 
@@ -1188,7 +1522,11 @@ class AgentEditingTest {
         val administrator =
             gpu.copy(
                 capabilities = gpu.capabilities.copy(backend = NATIVE_BACKEND),
-                nativeModeRequest = NativeModeState("administrator", "generation"),
+                nativeModeRequest =
+                    NativeModeRequest(
+                        mode = "administrator",
+                        generation = "generation",
+                    ),
             )
         val native = agent.copy(access = agent.access.copy(backend = NATIVE_BACKEND, nodes = null))
         assertEquals(

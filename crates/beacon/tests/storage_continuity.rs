@@ -93,10 +93,9 @@ async fn existing_disks_keep_publishing_reading_and_purging_on_their_original_st
         .unwrap();
     service
         .store
-        .set(
-            &format!("run-checkpoint:{run_id}"),
+        .save_checkpoint_boundary(
+            &run_id,
             json!({ "nodeId": LOCAL_NODE_ID, "runnerId": id() }),
-            None,
         )
         .await
         .unwrap();

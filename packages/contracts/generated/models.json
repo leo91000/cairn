@@ -7,7 +7,7 @@
       "properties": {
         "backend": {
           "default": "firecracker",
-          "pattern": "^(firecracker|native)$",
+          "pattern": "^(auto|firecracker|native)$",
           "type": "string"
         },
         "delegation": {
@@ -192,6 +192,16 @@
           "minLength": 1,
           "type": "string"
         },
+        "nodePriorities": {
+          "default": [],
+          "description": "Preferred placement order. This does not grant access to any node.",
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
         "plugins": {
           "items": {
             "format": "uuid",
@@ -240,6 +250,7 @@
         "timeoutMinutes",
         "access",
         "exclusiveNodes",
+        "nodePriorities",
         "plugins",
         "revision",
         "createdAt"
@@ -429,6 +440,16 @@
           "minLength": 1,
           "type": "string"
         },
+        "nodePriorities": {
+          "default": [],
+          "description": "Preferred placement order. This does not grant access to any node.",
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
         "plugins": {
           "items": {
             "format": "uuid",
@@ -473,6 +494,7 @@
         "timeoutMinutes",
         "access",
         "exclusiveNodes",
+        "nodePriorities",
         "plugins"
       ],
       "type": "object"
@@ -597,6 +619,23 @@
       ],
       "type": "object"
     },
+    "ChangeNativeNodeModeInput": {
+      "additionalProperties": false,
+      "properties": {
+        "change": {
+          "$ref": "#/definitions/NativeModeChange"
+        },
+        "nodeId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "nodeId",
+        "change"
+      ],
+      "type": "object"
+    },
     "CleanupRunOutput": {
       "additionalProperties": false,
       "properties": {
@@ -642,6 +681,34 @@
       },
       "required": [
         "settings"
+      ],
+      "type": "object"
+    },
+    "CreateNodeEnrollmentInput": {
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "default": "firecracker",
+          "pattern": "^(firecracker|native)$",
+          "type": "string"
+        },
+        "managerUrl": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "backend",
+        "managerUrl"
       ],
       "type": "object"
     },
@@ -709,6 +776,356 @@
       ],
       "type": "object"
     },
+    "EventPreview": {
+      "properties": {
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
+          "type": "integer"
+        },
+        "id": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "runId",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "ExecutionNode": {
+      "additionalProperties": false,
+      "properties": {
+        "accepting": {
+          "default": false,
+          "type": "boolean"
+        },
+        "agents": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/NodeAgent"
+          },
+          "type": "array"
+        },
+        "availableSlots": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "budgetError": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "capabilities": {
+          "$ref": "#/definitions/NodeCapabilities"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "diskAccounting": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NodeDiskAccounting"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "diskCapacity": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NodeDiskObservation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "diskGrowthProtocol": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "exclusiveAgents": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "exclusiveReservation": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "ExclusiveReservation"
+        },
+        "exclusiveReservations": {
+          "default": false,
+          "type": "boolean"
+        },
+        "executionReady": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "imageDigest": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastSeen": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limits": {
+          "$ref": "#/definitions/NodeResources"
+        },
+        "local": {
+          "default": false,
+          "type": "boolean"
+        },
+        "maintenance": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maintenanceError": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maintenanceGeneration": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maintenanceStartedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "nativeAccounts": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "nativeEnabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "nativeModeObserved": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NativeModeObserved"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "nativeModeProposal": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NativeModeProposal"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "nativeModeRequest": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NativeModeRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "nativeModeStatus": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeReviewedAgents": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "occupiedSlots": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pressure": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retainedRuns": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": "string"
+        },
+        "revoked": {
+          "default": false,
+          "type": "boolean"
+        },
+        "runtimeId": {
+          "default": "",
+          "type": "string"
+        },
+        "runtimeSlots": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "slots": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "staleDisks": {
+          "$ref": "#/definitions/StaleDisks"
+        },
+        "status": {
+          "default": "offline",
+          "pattern": "^(online|offline|local|revoked)$",
+          "type": "string"
+        },
+        "storage": {
+          "$ref": "#/definitions/NodeStoragePolicy"
+        },
+        "systemTags": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "updateError": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NodeUsage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "revision",
+        "capabilities",
+        "limits",
+        "createdAt",
+        "storage",
+        "staleDisks"
+      ],
+      "type": "object"
+    },
     "GetRunInput": {
       "additionalProperties": false,
       "properties": {
@@ -728,6 +1145,33 @@
       "required": [
         "runId",
         "after"
+      ],
+      "type": "object"
+    },
+    "HistoryPage": {
+      "properties": {
+        "events": {
+          "items": {
+            "$ref": "#/definitions/RunEvent"
+          },
+          "type": "array"
+        },
+        "hasOlder": {
+          "type": "boolean"
+        },
+        "history": {
+          "type": "string"
+        },
+        "oldest": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "events",
+        "history",
+        "oldest",
+        "hasOlder"
       ],
       "type": "object"
     },
@@ -847,6 +1291,10 @@
       "required": [
         "tasks"
       ],
+      "type": "object"
+    },
+    "ListNodesInput": {
+      "additionalProperties": false,
       "type": "object"
     },
     "ListPluginInstancesOutput": {
@@ -2352,6 +2800,771 @@
         "enabled",
         "archived"
       ],
+      "type": "object"
+    },
+    "NativeAffectedAgent": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "NativeAffectedConversation": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "status"
+      ],
+      "type": "object"
+    },
+    "NativeCaller": {
+      "additionalProperties": false,
+      "properties": {
+        "email": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "email"
+      ],
+      "type": "object"
+    },
+    "NativeModeChange": {
+      "additionalProperties": false,
+      "properties": {
+        "confirm": {
+          "default": false,
+          "type": "boolean"
+        },
+        "mode": {
+          "pattern": "^(protected|administrator)$",
+          "type": "string"
+        },
+        "previewId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mode",
+        "previewId",
+        "confirm"
+      ],
+      "type": "object"
+    },
+    "NativeModeChangeOutput": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "preview",
+              "type": "string"
+            },
+            "preview": {
+              "$ref": "#/definitions/NativeModeImpact"
+            },
+            "previewId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "previewId",
+            "preview"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "awaitingOwner",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "node": {
+              "$ref": "#/definitions/ExecutionNode"
+            }
+          },
+          "required": [
+            "kind",
+            "node",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "requested",
+              "type": "string"
+            },
+            "node": {
+              "$ref": "#/definitions/ExecutionNode"
+            }
+          },
+          "required": [
+            "kind",
+            "node"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "NativeModeImpact": {
+      "properties": {
+        "agents": {
+          "items": {
+            "$ref": "#/definitions/NativeAffectedAgent"
+          },
+          "type": "array"
+        },
+        "conversations": {
+          "items": {
+            "$ref": "#/definitions/NativeAffectedConversation"
+          },
+          "type": "array"
+        },
+        "interruptions": {
+          "type": "string"
+        },
+        "mode": {
+          "pattern": "^(protected|administrator)$",
+          "type": "string"
+        },
+        "tasks": {
+          "items": {
+            "$ref": "#/definitions/NativeAffectedAgent"
+          },
+          "type": "array"
+        },
+        "trustedAccounts": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "trustedPeople": {
+          "items": {
+            "$ref": "#/definitions/NativeTrustedPerson"
+          },
+          "type": "array"
+        },
+        "warning": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "warning",
+        "interruptions",
+        "trustedAccounts",
+        "trustedPeople",
+        "agents",
+        "conversations",
+        "tasks"
+      ],
+      "type": "object"
+    },
+    "NativeModeObserved": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "pattern": "^(protected|administrator)$",
+          "type": "string"
+        },
+        "status": {
+          "pattern": "^(pending|applied|failed)$",
+          "type": "string"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NativeModeRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "mode",
+        "status"
+      ],
+      "type": "object"
+    },
+    "NativeModePreview": {
+      "additionalProperties": false,
+      "properties": {
+        "preview": {
+          "$ref": "#/definitions/NativeModeImpact"
+        },
+        "previewId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "previewId",
+        "preview"
+      ],
+      "type": "object"
+    },
+    "NativeModeProposal": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "pattern": "^(protected|administrator)$",
+          "type": "string"
+        },
+        "previewId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "previewId",
+        "mode",
+        "status"
+      ],
+      "type": "object"
+    },
+    "NativeModeRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "pattern": "^(protected|administrator)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    },
+    "NativeTrustedPerson": {
+      "properties": {
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "email"
+      ],
+      "type": "object"
+    },
+    "NodeAgent": {
+      "additionalProperties": false,
+      "properties": {
+        "allNodes": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "NodeCapabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "arch": {
+          "type": "string"
+        },
+        "backend": {
+          "default": "firecracker",
+          "pattern": "^(firecracker|native)$",
+          "type": "string"
+        },
+        "cpu": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "diskMiB": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "diskTotalMiB": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kvm": {
+          "type": "boolean"
+        },
+        "memoryMiB": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nativeModeProtocol": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "os": {
+          "type": "string"
+        },
+        "ublk": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "os",
+        "arch",
+        "kvm",
+        "cpu",
+        "memoryMiB",
+        "diskMiB"
+      ],
+      "type": "object"
+    },
+    "NodeConfiguration": {
+      "additionalProperties": false,
+      "properties": {
+        "accepting": {
+          "type": "boolean"
+        },
+        "confirmNativeAdministration": {
+          "default": false,
+          "type": "boolean"
+        },
+        "limits": {
+          "$ref": "#/definitions/NodeResources"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "nativeAccounts": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "nativeEnabled": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": "string"
+        },
+        "slots": {
+          "default": null,
+          "format": "uint32",
+          "maximum": 4096,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "type": "array"
+        }
+      },
+      "required": [
+        "revision",
+        "name",
+        "tags",
+        "limits",
+        "slots",
+        "accepting",
+        "nativeEnabled",
+        "nativeAccounts",
+        "confirmNativeAdministration"
+      ],
+      "type": "object"
+    },
+    "NodeDiskAccounting": {
+      "additionalProperties": false,
+      "properties": {
+        "capturedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "hostFreeBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hostReserveBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "localBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "poolReserveBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reclaimableBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unsynchronizedBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unusedGrantedBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "capturedAt",
+        "localBytes",
+        "unusedGrantedBytes",
+        "hostFreeBytes",
+        "hostReserveBytes",
+        "poolReserveBytes",
+        "reclaimableBytes",
+        "unsynchronizedBytes"
+      ],
+      "type": "object"
+    },
+    "NodeDiskObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "capturedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "freeBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ownedBytes": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "protocol": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requests": {
+          "items": {
+            "$ref": "#/definitions/NodeGrowthRequest"
+          },
+          "type": "array"
+        },
+        "retainedBytes": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "usedBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "protocol",
+        "capturedAt",
+        "usedBytes",
+        "freeBytes",
+        "ownedBytes",
+        "retainedBytes",
+        "requests"
+      ],
+      "type": "object"
+    },
+    "NodeEnrollment": {
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "pattern": "^(firecracker|native)$",
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "expiresAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "installCommand": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "managerUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nodeId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "route": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "nodeId",
+        "backend",
+        "route",
+        "managerUrl",
+        "installCommand",
+        "code",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
+    "NodeGrowthRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "attemptId": {
+          "type": "string"
+        },
+        "currentMiB": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "attemptId",
+        "currentMiB"
+      ],
+      "type": "object"
+    },
+    "NodeInput": {
+      "additionalProperties": false,
+      "properties": {
+        "nodeId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "nodeId"
+      ],
+      "type": "object"
+    },
+    "NodeResources": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "format": "uint32",
+          "maximum": 4096,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "diskMiB": {
+          "format": "uint64",
+          "maximum": 1099511627776,
+          "minimum": 128,
+          "type": "integer"
+        },
+        "memoryMiB": {
+          "format": "uint64",
+          "maximum": 1073741824,
+          "minimum": 128,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpu",
+        "memoryMiB",
+        "diskMiB"
+      ],
+      "type": "object"
+    },
+    "NodeRevocation": {
+      "additionalProperties": false,
+      "properties": {
+        "node": {
+          "$ref": "#/definitions/ExecutionNode"
+        },
+        "releasedPlacements": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "node",
+        "releasedPlacements"
+      ],
+      "type": "object"
+    },
+    "NodeStoragePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "backupSeconds": {
+          "default": 60,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cacheMiB": {
+          "default": 102400,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxDirtySeconds": {
+          "default": 300,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "memoryCacheMiB": {
+          "default": 256,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reserveMiB": {
+          "default": 10240,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reservePercent": {
+          "default": 5,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "NodeUsage": {
+      "additionalProperties": false,
+      "properties": {
+        "diskBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "diskMiB": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "memoryMiB": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
       "type": "object"
     },
     "PackageVersion": {
@@ -4466,6 +5679,34 @@
       ],
       "type": "object"
     },
+    "ReadRunHistoryInput": {
+      "additionalProperties": false,
+      "properties": {
+        "before": {
+          "default": 9007199254740991,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "history": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "before",
+        "history"
+      ],
+      "type": "object"
+    },
     "ReplaceAgentInput": {
       "additionalProperties": false,
       "properties": {
@@ -4621,6 +5862,24 @@
       ],
       "type": "object"
     },
+    "RevokeNodeInput": {
+      "additionalProperties": false,
+      "properties": {
+        "nodeId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "releasePlacements": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "nodeId",
+        "releasePlacements"
+      ],
+      "type": "object"
+    },
     "Run": {
       "description": "The full wire view shares its lifecycle fields with SQL. Payloads owned by\nunconverted domains use explicit client type references at this boundary;\nthey do not define or decide run admission/transitions (A6-A13/A18).",
       "properties": {
@@ -4751,13 +6010,15 @@
           ]
         },
         "nativeMode": {
-          "additionalProperties": true,
-          "default": null,
-          "type": [
-            "object",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NativeModeRequest"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "x-kotlin-type": "NativeModeState"
+          "default": null
         },
         "nodeId": {
           "default": null,
@@ -4834,13 +6095,15 @@
           "default": null
         },
         "resources": {
-          "additionalProperties": true,
-          "default": null,
-          "type": [
-            "object",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NodeResources"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "x-kotlin-type": "NodeResources"
+          "default": null
         },
         "restoredAt": {
           "default": null,
@@ -5049,15 +6312,115 @@
       ],
       "type": "object"
     },
+    "RunEvent": {
+      "description": "The event's ordering identity is distinct from a client's presentation identity.",
+      "properties": {
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
+          "type": "integer"
+        },
+        "displayId": {
+          "description": "Client cache identity; never supplied by the event writer.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
+          "type": "integer"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "description": "Redacted adapter JSON, retained without constructing a second object tree.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-cairn-json-object": true
+        },
+        "runId": {
+          "default": "",
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "createdAt",
+        "type",
+        "text",
+        "runId"
+      ],
+      "type": "object"
+    },
+    "RunEventPage": {
+      "description": "An oversized event retains its cursor, while its exact JSON remains available\nthrough read_run_content. No success-shaped partial event is returned.",
+      "oneOf": [
+        {
+          "properties": {
+            "event": {
+              "$ref": "#/definitions/RunEvent"
+            },
+            "kind": {
+              "const": "complete",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "event"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "truncated",
+              "type": "string"
+            },
+            "preview": {
+              "$ref": "#/definitions/EventPreview"
+            },
+            "totalBytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "preview",
+            "totalBytes"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "RunHistoryOutput": {
       "properties": {
         "events": {
-          "description": "Engine/event payloads are owned by A7, not the run-transition conversion.",
-          "items": true,
+          "items": {
+            "$ref": "#/definitions/RunEventPage"
+          },
           "type": "array"
         },
         "hasMore": {
           "type": "boolean"
+        },
+        "history": {
+          "description": "Retained-history revision for read_run_history windows.",
+          "type": "string"
         },
         "nextAfter": {
           "format": "int64",
@@ -5075,8 +6438,37 @@
       "required": [
         "run",
         "events",
+        "history",
         "nextAfter",
         "hasMore"
+      ],
+      "type": "object"
+    },
+    "RunHistoryWindowOutput": {
+      "description": "Agent windows use bounded previews; UI history retains its full event frames.",
+      "properties": {
+        "events": {
+          "items": {
+            "$ref": "#/definitions/RunEventPage"
+          },
+          "type": "array"
+        },
+        "hasOlder": {
+          "type": "boolean"
+        },
+        "history": {
+          "type": "string"
+        },
+        "oldest": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "events",
+        "history",
+        "oldest",
+        "hasOlder"
       ],
       "type": "object"
     },
@@ -5923,6 +7315,26 @@
       ],
       "type": "object"
     },
+    "StaleDisks": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "diskMiB": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "count",
+        "diskMiB"
+      ],
+      "type": "object"
+    },
     "UpdateMcpInput": {
       "additionalProperties": false,
       "properties": {
@@ -5944,6 +7356,44 @@
         "id",
         "revision",
         "connection"
+      ],
+      "type": "object"
+    },
+    "UpdateNodeInput": {
+      "additionalProperties": false,
+      "properties": {
+        "node": {
+          "$ref": "#/definitions/NodeConfiguration"
+        },
+        "nodeId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "nodeId",
+        "node"
+      ],
+      "type": "object"
+    },
+    "UpdateNodeStorageInput": {
+      "additionalProperties": false,
+      "properties": {
+        "nodeId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "storage": {
+          "$ref": "#/definitions/NodeStoragePolicy"
+        }
+      },
+      "required": [
+        "nodeId",
+        "revision",
+        "storage"
       ],
       "type": "object"
     }

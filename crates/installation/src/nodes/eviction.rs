@@ -6,7 +6,6 @@ use crate::{
     service::Service,
     store::Db,
     validation::text,
-    worker::checkpoint,
 };
 use serde_json::{Value, json};
 use std::{
@@ -124,7 +123,7 @@ async fn pressure(s: &Service) -> Result<()> {
         .store
         .transaction(|db| {
             let mut nodes = Vec::new();
-            for node in db.list("nodes")? {
+            for node in db.nodes_boundary()? {
                 let id = text(&node, "id");
                 let key = format!("native-capacity-pressure:{id}");
                 if db.kv(&key)? == Some(json!(true)) {
@@ -197,12 +196,12 @@ fn candidate(
     {
         return Ok(None);
     }
-    let checkpoint = db.kv(&checkpoint::key(run))?.unwrap_or_default();
+    let checkpoint = db.checkpoint_boundary(run)?.unwrap_or_default();
     let node_id = text(&checkpoint, "nodeId");
     if expected_node.is_some_and(|expected| expected != node_id) {
         return Ok(None);
     }
-    let Some(node) = db.get("nodes", node_id)? else {
+    let Some(node) = db.node_boundary(node_id)? else {
         return Ok(None);
     };
     if !crate::native::policy::node_native(&node)
@@ -360,7 +359,7 @@ async fn evict_clean(
             let Some(current) = db.run(&run)? else {
                 return Ok(());
             };
-            let checkpoint = db.kv(&checkpoint::key(&run))?.unwrap_or_default();
+            let checkpoint = db.checkpoint_boundary(&run)?.unwrap_or_default();
             if checkpoint["nodeId"] != node_id
                 || checkpoint["runnerId"] != expected["attempt"]
                 || current["backup"]["id"] != point["id"]
@@ -394,6 +393,9 @@ async fn evict_clean(
 }
 
 #[cfg(test)]
+use crate::node_fixture::*;
+
+#[cfg(test)]
 use crate::run_fixture::DbRunFixture;
 
 #[cfg(test)]
@@ -408,7 +410,7 @@ mod tests {
             "id": id(), "runId": run, "nodeId": node, "snapshotId": id(),
             "diskGeneration": 7, "destination": "s3", "bucket": "synthetic-bucket",
         });
-        db.put("nodes", &json!({
+        db.put_node_fixture(&json!({
             "id": node, "lastSeen": now(), "capabilities": { "backend": "native", "ublk": true },
         }))?;
         db.add_run_fixture(&json!({
@@ -419,11 +421,7 @@ mod tests {
             "backup": { "id": point["id"], "snapshotId": point["snapshotId"], "status": "ready",
                 "requestedRevision": 2, "acknowledgedRevision": 2 },
         }), None)?;
-        db.set(
-            &checkpoint::key(run),
-            &json!({ "nodeId": node, "runnerId": attempt }),
-            None,
-        )?;
+        db.save_checkpoint_boundary(run, &json!({ "nodeId": node, "runnerId": attempt }))?;
         db.put(
             "node-volumes",
             &json!({
@@ -561,7 +559,7 @@ mod tests {
                 assert_eq!(page.len(), 1);
                 assert_eq!(page[0]["id"], final_run);
                 assert!(candidate(db, &final_run, time, None)?.is_some());
-                let mut node = db.get("nodes", node_id)?.unwrap();
+                let mut node = db.node_boundary(node_id)?.unwrap();
                 node["diskCapacity"] = json!({ "capturedAt": time - 2_000 });
                 db.set(
                     &format!("native-capacity-reclaimed:{node_id}"),
@@ -593,7 +591,7 @@ mod tests {
                 let mut storage = db.run(&run)?.unwrap()["storage"].clone();
                 storage["dirtyBytes"] = 0.into();
                 db.update_run_boundary(&run, &json!({ "nodeId": node_id, "storage": storage }))?;
-                let mut node = db.get("nodes", node_id)?.unwrap();
+                let mut node = db.node_boundary(node_id)?.unwrap();
                 node["limits"] = json!({ "diskMiB": 102400 });
                 node["diskCapacity"] = json!({
                     "protocol": 1, "capturedAt": time, "usedBytes": 10000,
@@ -632,7 +630,7 @@ mod tests {
                         ..Default::default()
                     },
                 )?;
-                let saved = db.kv(&checkpoint::key(&run))?.unwrap();
+                let saved = db.checkpoint_boundary(&run)?.unwrap();
                 let mut attempt = db.get("node-attempts", text(&saved, "runnerId"))?.unwrap();
                 attempt["releasedAt"] = time.into();
                 db.put("node-attempts", &attempt)?;
@@ -704,7 +702,7 @@ mod tests {
                 })?;
                 db.update_run_boundary(&run, &json!({ "moveRequest": null, "nodeState": null, "backup": original["backup"] }))?;
             }
-            let saved = db.kv(&checkpoint::key(&run))?.unwrap();
+            let saved = db.checkpoint_boundary(&run)?.unwrap();
             let mut execution = db.get("node-attempts", text(&saved, "runnerId"))?.unwrap();
             execution["releasedAt"] = (time - IDLE_MS + 1).into();
             db.put("node-attempts", &execution)?;

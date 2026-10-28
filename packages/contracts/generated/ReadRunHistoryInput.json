@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "before": {
+      "default": 9007199254740991,
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "history": {
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    },
+    "runId": {
+      "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "runId",
+    "history"
+  ],
+  "title": "ReadRunHistoryInput",
+  "type": "object"
+}

@@ -1,5 +1,6 @@
 use crate::common::run_fixture::DbRunFixture;
 use crate::common::run_fixture::RunFixture;
+use cairn_contracts::EventKind;
 use common::MissionFixture;
 
 mod common;
@@ -39,14 +40,14 @@ async fn fixture() -> (tempfile::TempDir, std::sync::Arc<Service>, Value, Value)
     let saved = run.clone();
     service.store.transaction(move |db| {
         db.add_run_fixture(&saved, None)?;
-        db.event(text(&saved, "id"), "item.completed", "Deployment reviewed", Some(&json!({
+        db.event(text(&saved, "id"), &EventKind::ItemCompleted, "Deployment reviewed", Some(&json!({
             "item": { "id": "original-answer", "type": "agent_message", "text": "Deployment reviewed" },
         })))?;
-        db.set(&format!("run-checkpoint:{}", text(&saved, "id")), &json!({
+        db.save_checkpoint_boundary(text(&saved, "id"), &json!({
             "completed": true,
             "launched": true,
             "prepared": { "workspace": "/saved/workspace" },
-        }), None)
+        }))
     }).await.unwrap();
     (root, service, task, run)
 }
@@ -55,8 +56,7 @@ async fn fixture() -> (tempfile::TempDir, std::sync::Arc<Service>, Value, Value)
 async fn mission_conversion_preserves_history_session_workspace_and_schedule() {
     let (_root, service, task, original) = fixture().await;
     let run_id = text(&original, "id");
-    let checkpoint_key = format!("run-checkpoint:{run_id}");
-    let checkpoint = service.store.kv(&checkpoint_key).await.unwrap();
+    let checkpoint = service.store.checkpoint_boundary(run_id).await.unwrap();
     let (first, second) =
         tokio::join!(service.chat_from_run(run_id), service.chat_from_run(run_id));
     let chat = first.unwrap();
@@ -71,7 +71,10 @@ async fn mission_conversion_preserves_history_session_workspace_and_schedule() {
             .unwrap(),
         task
     );
-    assert_eq!(service.store.kv(&checkpoint_key).await.unwrap(), checkpoint);
+    assert_eq!(
+        service.store.checkpoint_boundary(run_id).await.unwrap(),
+        checkpoint
+    );
     let converted = service.store.run(run_id).await.unwrap();
     assert_eq!(converted["taskId"], chat["id"]);
     assert_eq!(converted["sourceTaskId"], task["id"]);
@@ -122,12 +125,17 @@ async fn mission_conversion_preserves_history_session_workspace_and_schedule() {
     assert_eq!(continued["workspace"], "/saved/workspace");
     assert_eq!(continued["snapshot"]["task"]["id"], chat["id"]);
     assert_eq!(continued["chatExecution"]["context"], Value::Null);
-    let checkpoint = service.store.kv(&checkpoint_key).await.unwrap().unwrap();
+    let checkpoint = service
+        .store
+        .checkpoint_boundary(run_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(checkpoint["completed"], false);
     assert_eq!(checkpoint["prepared"]["workspace"], "/saved/workspace");
     let events = service
         .store
-        .read(move |db| db.events(text(&original, "id"), 0, 100))
+        .read(move |db| db.events_fixture(text(&original, "id"), 0, 100))
         .await
         .unwrap();
     assert_eq!(events[0]["text"], "Deployment reviewed");
@@ -224,7 +232,7 @@ async fn mission_conversion_keeps_summary_only_results_in_the_chat_history() {
     assert_eq!(service.store.run(&run_id).await.unwrap()["summary"], "");
     let events = service
         .store
-        .read(move |db| db.events(&run_id, 0, 100))
+        .read(move |db| db.events_fixture(&run_id, 0, 100))
         .await
         .unwrap();
     assert_eq!(events.len(), 1);
@@ -255,11 +263,7 @@ async fn mission_conversion_rejects_unavailable_and_unfinished_conversations_ato
     }
     let (_root, service, _task, run) = fixture().await;
     let run_id = text(&run, "id");
-    service
-        .store
-        .delete(&format!("run-checkpoint:{run_id}"))
-        .await
-        .unwrap();
+    service.store.delete_checkpoint(run_id).await.unwrap();
     assert!(service.chat_from_run(run_id).await.is_err());
     assert!(service.chat_list().await.unwrap().is_empty());
 }

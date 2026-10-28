@@ -18,6 +18,12 @@ export interface ChatQuota {
   automatic: boolean
 }
 
+/** A live account wait that recovers automatically, without reconnecting an account. */
+export function isQuotaWait(run: { status: string, accountWaitReason?: string | null, accountRequired?: string | null }) {
+  return ['running', 'queued'].includes(run.status) && !run.accountRequired
+    && /^(?:Usage exhausted\.|Waiting for a .+ account with available usage\.)/i.test(run.accountWaitReason ?? '')
+}
+
 function quotaFailure(event: RunEvent) {
   if (!['turn.failed', 'error'].includes(event.type))
     return ''

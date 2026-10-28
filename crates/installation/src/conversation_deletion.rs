@@ -67,11 +67,7 @@ async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -
         return Ok(());
     }
     let credential = crate::execution::secret(&s.config.data_dir, "runner-secret").await?;
-    let checkpoint = s
-        .store
-        .kv(&format!("run-checkpoint:{run}"))
-        .await?
-        .unwrap_or_default();
+    let checkpoint = s.store.checkpoint_boundary(run).await?.unwrap_or_default();
     let node = destination
         .or(checkpoint["nodeId"].as_str())
         .unwrap_or(crate::nodes::LOCAL_NODE_ID);
@@ -137,7 +133,7 @@ async fn delete_disk_for_purge(s: &Service, run: &str, destination: Option<&str>
         .unwrap_or(crate::nodes::LOCAL_NODE_ID);
     let revoked = node != crate::nodes::LOCAL_NODE_ID
         && s.store
-            .get("nodes", node)
+            .node_boundary(node)
             .await?
             .is_some_and(|record| record["revoked"] == true);
     if revoked {
@@ -262,8 +258,8 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
             db.delete(&key)?;
         }
     }
+    db.delete_checkpoint(run)?;
     for key in [
-        format!("run-checkpoint:{run}"),
         format!("turn-speed:{run}"),
         format!("chat-error:{cid}"),
         format!("chat-title-pending:{cid}"),
@@ -312,11 +308,11 @@ mod tests {
         store
             .transaction(|db| {
                 db.put("chats", &json!({ "id": "chat", "runId": "run" }))?;
-                for key in ["run-checkpoint:run", "turn-speed:run", "chat-error:chat"] {
+                for key in ["turn-speed:run", "chat-error:chat"] {
                     db.set(key, &json!({ "messageId": "message" }), None)?;
                 }
                 forget(db, "chat", "run")?;
-                for key in ["run-checkpoint:run", "turn-speed:run", "chat-error:chat"] {
+                for key in ["turn-speed:run", "chat-error:chat"] {
                     assert!(db.kv(key)?.is_none(), "{key}");
                 }
                 Ok(())

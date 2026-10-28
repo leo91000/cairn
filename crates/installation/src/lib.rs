@@ -91,3 +91,7 @@ pub(crate) mod mission_fixture;
 #[cfg(test)]
 #[path = "../tests/common/run_fixture.rs"]
 pub(crate) mod run_fixture;
+
+#[cfg(test)]
+#[path = "../tests/common/node_fixture.rs"]
+pub(crate) mod node_fixture;

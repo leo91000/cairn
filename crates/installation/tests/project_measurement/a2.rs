@@ -61,6 +61,7 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
             timeout_minutes: row.get(8)?,
             access: decode(9, &row.get::<_, String>(9)?)?,
             exclusive_nodes: decode(10, &row.get::<_, String>(10)?)?,
+            node_priorities: Vec::new(),
             plugins: decode(11, &row.get::<_, String>(11)?)?,
         },
         revision: row.get(12)?,

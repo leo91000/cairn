@@ -20,6 +20,8 @@ import androidx.lifecycle.repeatOnLifecycle
 import build.cairn.app.data.*
 import build.cairn.app.diagnostics.PerfOperation
 import build.cairn.app.diagnostics.Performance
+import build.cairn.contracts.ReadRunHistoryInput
+import build.cairn.contracts.readRunHistory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -180,11 +182,22 @@ fun rememberLive(
                 scope.launch {
                     var pageApplied = false
                     try {
+                        val runId =
+                            Regex("^/runs/([^/]+)/stream$").matchEntire(path)?.groupValues?.get(1)
                         val page =
-                            api.get<HistoryPage>(
-                                path.removeSuffix("/stream") +
-                                    "/history?before=$before&history=${segment(history)}"
-                            )
+                            if (runId != null) {
+                                api.readRunHistory(
+                                    ReadRunHistoryInput(
+                                        runId = runId,
+                                        before = before,
+                                        history = history,
+                                    )
+                                )
+                            } else
+                                api.get<HistoryPage>(
+                                    path.removeSuffix("/stream") +
+                                        "/history?before=$before&history=${segment(history)}"
+                                )
 
                         val applied = pages.apply(page, value, requested)
                         if (applied != null) {
@@ -1159,9 +1172,11 @@ internal fun timelineEntries(
                     team = null
                     activity.add(
                         if (!chat && repeated && event.type == "status")
-                            event.copy(payload = event.payload?.minus("error"))
+                            event.copy(
+                                payload = event.payload?.let { JsonObject(it.minus("error")) }
+                            )
                         else if (event.id in recoveredRetries)
-                            event.copy(payload = event.payload.orEmpty() + RECOVERED)
+                            event.copy(payload = JsonObject(event.payload.orEmpty() + RECOVERED))
                         else event
                     )
                 }
@@ -1325,7 +1340,11 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
     val user = event.type == "chat.user"
     if (event.isMessage()) {
         val content =
-            if (user) (event.payload?.get("text") as? JsonPrimitive)?.contentOrNull ?: event.text
+            if (user)
+                questionAnswerText(
+                    (event.payload?.get("text") as? JsonPrimitive)?.contentOrNull ?: event.text,
+                    (event.payload?.get("questionId") as? JsonPrimitive)?.contentOrNull,
+                )
             else item.string("text").ifEmpty { event.text }
         // A plan turn explores and proposes without changing anything.
         val planRequest =

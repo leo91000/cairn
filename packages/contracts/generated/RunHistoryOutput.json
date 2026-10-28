@@ -7,7 +7,7 @@
       "properties": {
         "backend": {
           "default": "firecracker",
-          "pattern": "^(firecracker|native)$",
+          "pattern": "^(auto|firecracker|native)$",
           "type": "string"
         },
         "delegation": {
@@ -156,6 +156,16 @@
           "minLength": 1,
           "type": "string"
         },
+        "nodePriorities": {
+          "default": [],
+          "description": "Preferred placement order. This does not grant access to any node.",
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
         "plugins": {
           "items": {
             "format": "uuid",
@@ -204,6 +214,7 @@
         "timeoutMinutes",
         "access",
         "exclusiveNodes",
+        "nodePriorities",
         "plugins",
         "revision",
         "createdAt"
@@ -262,6 +273,43 @@
       ],
       "type": "object"
     },
+    "EventPreview": {
+      "properties": {
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
+          "type": "integer"
+        },
+        "id": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "runId",
+        "createdAt"
+      ],
+      "type": "object"
+    },
     "MissionPluginGrant": {
       "additionalProperties": false,
       "properties": {
@@ -279,6 +327,55 @@
         "connectionId",
         "revision",
         "authorId"
+      ],
+      "type": "object"
+    },
+    "NativeModeRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "pattern": "^(protected|administrator)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "generation"
+      ],
+      "type": "object"
+    },
+    "NodeResources": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "format": "uint32",
+          "maximum": 4096,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "diskMiB": {
+          "format": "uint64",
+          "maximum": 1099511627776,
+          "minimum": 128,
+          "type": "integer"
+        },
+        "memoryMiB": {
+          "format": "uint64",
+          "maximum": 1073741824,
+          "minimum": 128,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpu",
+        "memoryMiB",
+        "diskMiB"
       ],
       "type": "object"
     },
@@ -555,13 +652,15 @@
           ]
         },
         "nativeMode": {
-          "additionalProperties": true,
-          "default": null,
-          "type": [
-            "object",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NativeModeRequest"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "x-kotlin-type": "NativeModeState"
+          "default": null
         },
         "nodeId": {
           "default": null,
@@ -638,13 +737,15 @@
           "default": null
         },
         "resources": {
-          "additionalProperties": true,
-          "default": null,
-          "type": [
-            "object",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NodeResources"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "x-kotlin-type": "NodeResources"
+          "default": null
         },
         "restoredAt": {
           "default": null,
@@ -844,6 +945,101 @@
         "movementError"
       ],
       "type": "object"
+    },
+    "RunEvent": {
+      "description": "The event's ordering identity is distinct from a client's presentation identity.",
+      "properties": {
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
+          "type": "integer"
+        },
+        "displayId": {
+          "description": "Client cache identity; never supplied by the event writer.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
+          "type": "integer"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "description": "Redacted adapter JSON, retained without constructing a second object tree.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-cairn-json-object": true
+        },
+        "runId": {
+          "default": "",
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "createdAt",
+        "type",
+        "text",
+        "runId"
+      ],
+      "type": "object"
+    },
+    "RunEventPage": {
+      "description": "An oversized event retains its cursor, while its exact JSON remains available\nthrough read_run_content. No success-shaped partial event is returned.",
+      "oneOf": [
+        {
+          "properties": {
+            "event": {
+              "$ref": "#/definitions/RunEvent"
+            },
+            "kind": {
+              "const": "complete",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "event"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "truncated",
+              "type": "string"
+            },
+            "preview": {
+              "$ref": "#/definitions/EventPreview"
+            },
+            "totalBytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "preview",
+            "totalBytes"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "RunMetadataPage": {
       "description": "A byte-bounded metadata page is either complete or an explicit preview. The\nfull record remains available through read_run_content in either case.",
@@ -1318,12 +1514,17 @@
   },
   "properties": {
     "events": {
-      "description": "Engine/event payloads are owned by A7, not the run-transition conversion.",
-      "items": true,
+      "items": {
+        "$ref": "#/definitions/RunEventPage"
+      },
       "type": "array"
     },
     "hasMore": {
       "type": "boolean"
+    },
+    "history": {
+      "description": "Retained-history revision for read_run_history windows.",
+      "type": "string"
     },
     "nextAfter": {
       "format": "int64",
@@ -1341,6 +1542,7 @@
   "required": [
     "run",
     "events",
+    "history",
     "nextAfter",
     "hasMore"
   ],

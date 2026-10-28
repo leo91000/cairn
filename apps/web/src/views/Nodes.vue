@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { NodeConfiguration } from '../../../../packages/contracts/generated/typescript/NodeConfiguration'
 import type { ExecutionNode, NodeEnrollment, NodeSyncSettings } from '../../../../packages/contracts/nodes'
 import {
   computed,
@@ -6,6 +7,8 @@ import {
   onMounted,
   ref,
 } from 'vue'
+import { createNodeEnrollment } from '../../../../packages/contracts/generated/createNodeEnrollment'
+import { revokeNode } from '../../../../packages/contracts/generated/revokeNode'
 import {
   diskCapacity,
   formatBytes,
@@ -149,10 +152,10 @@ async function action(operation: () => Promise<void>) {
 
 function enroll() {
   return action(async () => {
-    enrollment.value = await api<NodeEnrollment>('/nodes/enrollments', {
-      method: 'POST',
-      // Without an address, Beacon introduces the machine to the manager.
-      body: JSON.stringify({ name: name.value, managerUrl: managerUrl.value.trim() || undefined, backend: enrollmentBackend.value }),
+    enrollment.value = await createNodeEnrollment(api, {
+      name: name.value,
+      managerUrl: managerUrl.value.trim() || null,
+      backend: enrollmentBackend.value,
     })
   })
 }
@@ -188,7 +191,7 @@ function retire() {
   if (!pair)
     return
   return action(async () => {
-    const result = await api<{ releasedPlacements?: number }>(`/nodes/${pair.previous.id}/revoke`, { method: 'POST', body: JSON.stringify({ releasePlacements: true }) })
+    const result = await revokeNode(api, { nodeId: pair.previous.id, releasePlacements: true })
     retiring.value = null
     const released = result.releasedPlacements ?? 0
     notify(released ? `${pair.previous.name} revoked; ${released} ${released === 1 ? 'conversation returns' : 'conversations return'} to automatic placement` : `${pair.previous.name} revoked`)
@@ -213,18 +216,18 @@ function save() {
     return
   const limits = { cpu: node.limits.cpu, memoryMiB: Math.round(memoryGiB.value * 1024), diskMiB: Math.round(diskGiB.value * 1024) }
   return action(async () => {
-    await api(`/nodes/${node.id}`, {
-      method: 'PUT',
-      body: JSON.stringify({
-        name: node.name,
-        tags: tags.value.split(',').map(tag => tag.trim()).filter(Boolean),
-        limits,
-        slots: node.slots,
-        // Exclusive reservations are granted on each agent's page; omitting them keeps them.
-        accepting: node.accepting,
-        ...(node.capabilities.backend === 'native' ? { nativeEnabled: node.nativeEnabled, nativeAccounts: node.nativeAccounts, confirmNativeAdministration: node.nativeModeRequest?.mode === 'administrator' } : {}),
-      }),
-    })
+    const configuration: NodeConfiguration = {
+      revision: node.revision,
+      name: node.name,
+      tags: tags.value.split(',').map(tag => tag.trim()).filter(Boolean),
+      limits,
+      slots: node.slots ?? null,
+      accepting: node.accepting,
+      nativeEnabled: node.capabilities.backend === 'native' ? node.nativeEnabled : null,
+      nativeAccounts: node.capabilities.backend === 'native' ? node.nativeAccounts : null,
+      confirmNativeAdministration: node.capabilities.backend === 'native' && node.nativeModeRequest?.mode === 'administrator',
+    }
+    await api(`/nodes/${node.id}`, { method: 'PUT', body: JSON.stringify(configuration) })
     editing.value = null
     notify('Node saved')
     if (grantAfterConfigure === node.id) {
@@ -299,7 +302,7 @@ function freeStaleDisks() {
 function mismatch(agentId: string) {
   const agent = state.agents.find(item => item.id === agentId)
   const native = granting.value?.capabilities.backend === 'native'
-  if (!agent || (agent.access?.backend === 'native') === native)
+  if (!agent || agent.access?.backend === 'auto' || (agent.access?.backend === 'native') === native)
     return ''
   return native ? 'Runs in a Firecracker VM: set it to native execution on its page first' : 'Uses native execution: only native nodes can run it'
 }
@@ -813,7 +816,7 @@ function statusLabel(node: ExecutionNode) {
           <p v-if="editing.exclusiveAgents?.length">
             {{ editing.exclusiveAgents.length }} can reserve it exclusively: {{ agentNames(editing.exclusiveAgents) }}
           </p>
-          <p v-if="!editing.exclusiveReservations && editing.capabilities.backend !== 'native'">
+          <p v-if="!editing.exclusiveReservations">
             This runtime needs an update before exclusive reservations can be acquired.
           </p>
           <p class="text-xs">
@@ -847,7 +850,7 @@ function statusLabel(node: ExecutionNode) {
           If a conversation disk is still mounted, the command lists it and stops before deleting anything: start cairn-native-node so its recovery releases owned disks, then run the command again.
         </p>
         <div>
-          <UiButton variant="danger" :disabled="busy" @click="action(async () => { await api(`/nodes/${revoking!.id}/revoke`, { method: 'POST', body: '{}' }); revoking = null })">
+          <UiButton variant="danger" :disabled="busy" @click="action(async () => { await revokeNode(api, { nodeId: revoking!.id, releasePlacements: false }); revoking = null })">
             Revoke node
           </UiButton>
         </div>

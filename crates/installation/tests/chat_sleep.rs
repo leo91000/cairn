@@ -1,3 +1,4 @@
+use crate::common::run_fixture::DbRunFixture;
 use common::MissionFixture;
 use common::StoreAgentFixture;
 
@@ -65,11 +66,7 @@ impl Fixture {
         let token = text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
         service
             .store
-            .set(
-                &format!("run-checkpoint:{run_id}"),
-                json!({ "completed": true, "launched": true }),
-                None,
-            )
+            .save_checkpoint_boundary(&run_id, json!({ "completed": true, "launched": true }))
             .await
             .unwrap();
         Self {
@@ -172,7 +169,7 @@ async fn delay_is_idempotent_durable_and_resumes_same_workspace_once_without_use
         .store
         .read(move |db| {
             Ok(db
-                .events(&run, 0, 100)?
+                .events_fixture(&run, 0, 100)?
                 .iter()
                 .filter(|event| event["type"] == "chat.wakeup")
                 .count())
@@ -381,14 +378,13 @@ async fn failed_paused_turn_cannot_replay_its_wakeup_after_manual_resume() {
             .unwrap();
         f.service
             .store
-            .set(
-                &format!("run-checkpoint:{}", f.run),
+            .save_checkpoint_boundary(
+                &f.run,
                 json!({
                     "completed": true,
                     "launched": true,
                     "prepared": { "backend": "fixture" },
                 }),
-                None,
             )
             .await
             .unwrap();
@@ -562,12 +558,12 @@ async fn delay_rejects_invalid_inputs_and_pending_steering_but_accepts_missions(
 }
 
 #[tokio::test]
-async fn replacing_a_native_session_retires_its_pending_questions_before_startup() {
+async fn common_questionnaires_survive_replacing_the_native_session() {
     for (provider, fresh_session, expected_pending) in [
         ("codex", false, 1),
-        ("opencode", false, 0),
-        ("claude", false, 0),
-        ("codex", true, 0),
+        ("opencode", false, 1),
+        ("claude", false, 1),
+        ("codex", true, 1),
     ] {
         let f = Fixture::new().await;
         let question = "a".repeat(64);
@@ -591,10 +587,9 @@ async fn replacing_a_native_session_retires_its_pending_questions_before_startup
         if fresh_session {
             f.service
                 .store
-                .set(
-                    &format!("run-checkpoint:{}", f.run),
+                .save_checkpoint_boundary(
+                    &f.run,
                     json!({ "completed": true, "launched": true, "freshSession": true }),
-                    None,
                 )
                 .await
                 .unwrap();
@@ -628,20 +623,17 @@ async fn replacing_a_native_session_retires_its_pending_questions_before_startup
             detail["pendingQuestions"], expected_pending,
             "provider={provider}, fresh_session={fresh_session}"
         );
-        if expected_pending == 0 {
-            assert_eq!(detail["questions"][0]["status"], "cancelled");
-            assert!(detail["run"]["sessionId"].is_null());
-            assert!(
-                f.service
-                    .question_answer(
-                        &f.chat,
-                        &question,
-                        json!({ "id": id(), "answers": { "scope": ["Obsolete answer"] } }),
-                    )
-                    .await
-                    .is_err()
-            );
-        }
+        assert_eq!(detail["questions"][0]["status"], "pending");
+        f.service
+            .question_answer(
+                &f.chat,
+                &question,
+                json!({
+                    "id": id(), "answers": { "scope": { "comment": "Continue after the switch" } },
+                }),
+            )
+            .await
+            .unwrap();
     }
 }
 
@@ -813,7 +805,7 @@ async fn timer_completion_is_a_result_and_existing_timer_records_still_resume() 
     let run = f.run.clone();
     let events = restarted
         .store
-        .read(move |db| db.events(&run, 0, 100))
+        .read(move |db| db.events_fixture(&run, 0, 100))
         .await
         .unwrap();
     let event = events
@@ -861,4 +853,67 @@ async fn switching_between_a_date_and_duration_replaces_the_request() {
         "conditions": [{ "type": "at", "date": same_instant.to_rfc3339() }], "reason": "Wait for CI",
     })).await.unwrap();
     assert_ne!(at["wakeup"]["id"], delay["id"]);
+}
+
+#[tokio::test]
+async fn idle_questionnaire_answers_continue_while_ordinary_followups_stay_paused() {
+    let f = Fixture::new().await;
+    let question = "a".repeat(64);
+    f.service
+        .question_receive(
+            &f.run,
+            json!({
+                "id": question,
+                "blocking": false,
+                "fields": [{ "id": "scope", "title": "Which scope?" }],
+            }),
+        )
+        .await
+        .unwrap();
+    f.finish().await;
+    f.service.chat_pause(&f.chat, true).await.unwrap();
+    let followup = id();
+    f.service
+        .chat_send(&f.chat, json!({ "id": followup, "text": "Later task" }))
+        .await
+        .unwrap();
+    let answer = id();
+    f.service
+        .question_answer(
+            &f.chat,
+            &question,
+            json!({
+                "id": answer,
+                "answers": { "scope": { "selected": [], "comment": "Everything" } },
+            }),
+        )
+        .await
+        .unwrap();
+    let detail = f.tick().await;
+    assert_eq!(detail["paused"], true);
+    assert_eq!(detail["run"]["status"], "queued");
+    assert_eq!(detail["run"]["chatExecution"]["messageId"], answer);
+    let messages = detail["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.iter().find(|m| m["id"] == followup).unwrap()["status"],
+        "queued"
+    );
+    f.service.chat_acknowledge(&f.run, &answer).await.unwrap();
+    f.finish().await;
+    let detail = f.tick().await;
+    assert_eq!(detail["run"]["status"], "succeeded");
+    assert_eq!(detail["paused"], true);
+    let events = f
+        .service
+        .store
+        .read({
+            let run = f.run.clone();
+            move |db| db.events_fixture(&run, 0, 100)
+        })
+        .await
+        .unwrap();
+    let answer_event = events
+        .iter()
+        .find(|event| event["type"] == "chat.user" && event["payload"]["questionId"] == question);
+    assert!(answer_event.is_some());
 }

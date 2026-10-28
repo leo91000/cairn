@@ -217,14 +217,14 @@ fn route(method: &str, path: &str) -> Result<()> {
             uuid(id)
                 && matches!(
                     (method, *operation),
-                    ("GET", "logs")
+                    ("GET", "logs" | "administrative-pause")
                         | ("POST", "wait")
                         | ("POST", "artifact")
                         | ("POST", "snapshot")
                 )
         }
         ["runs", id, "projects", project] => method == "POST" && uuid(id) && uuid(project),
-        ["storage-policy"] => method == "POST",
+        ["storage-policy"] | ["storage-policy", "probe"] => method == "POST",
         ["disks", id, operation] => {
             method == "POST"
                 && uuid(id)
@@ -552,27 +552,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_exclusive_inspection_reaches_the_authenticated_controller() {
+    async fn remote_exclusive_and_pause_inspection_reach_the_authenticated_controller() {
         use axum::{Router, http::StatusCode, routing::get};
-        let controller = Router::new().route(
-            "/exclusive",
-            get(|headers: axum::http::HeaderMap| async move {
-                if headers
-                    .get("authorization")
-                    .and_then(|value| value.to_str().ok())
-                    != Some("Bearer test-controller")
-                {
-                    return (
-                        StatusCode::UNAUTHORIZED,
-                        axum::Json(json!({"error": "denied"})),
-                    );
-                }
-                (
-                    StatusCode::OK,
-                    axum::Json(json!({"highestEpoch": 0, "reservation": null})),
-                )
-            }),
-        );
+        async fn inspect(
+            headers: axum::http::HeaderMap,
+            uri: axum::http::Uri,
+        ) -> (StatusCode, axum::Json<Value>) {
+            if headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                != Some("Bearer test-controller")
+            {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    axum::Json(json!({ "error": "denied" })),
+                );
+            }
+            let value = if uri.path().ends_with("/administrative-pause") {
+                json!({ "administrativePausedMs": 1234 })
+            } else {
+                json!({ "highestEpoch": 0, "reservation": null })
+            };
+            (StatusCode::OK, axum::Json(value))
+        }
+        let controller = Router::new()
+            .route("/exclusive", get(inspect))
+            .route("/runs/{id}/administrative-pause", get(inspect));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = url::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
         let stop = tokio_util::sync::CancellationToken::new();
@@ -590,20 +595,29 @@ mod tests {
             url: &url,
             token: "test-node",
         };
-        let command = json!({"method": "GET", "path": "/exclusive", "body": ""});
         let executor = Executor::default();
-        let response = call_controller(&master, &url, "test-controller", &command, &executor)
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.json::<Value>().await.unwrap(),
-            json!({"highestEpoch": 0, "reservation": null})
-        );
-        let denied = call_controller(&master, &url, "wrong-controller", &command, &executor)
-            .await
-            .unwrap();
-        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let pause = format!("/runs/{}/administrative-pause", crate::config::id());
+        for (path, expected) in [
+            (
+                "/exclusive",
+                json!({ "highestEpoch": 0, "reservation": null }),
+            ),
+            (pause.as_str(), json!({ "administrativePausedMs": 1234 })),
+        ] {
+            let command = json!({ "method": "GET", "path": path, "body": "" });
+            let response = call_controller(&master, &url, "test-controller", &command, &executor)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.json::<Value>().await.unwrap(), expected);
+            let denied = call_controller(&master, &url, "wrong-controller", &command, &executor)
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert!(route("POST", &pause).is_err());
+        assert!(route("GET", "/runs/invalid/administrative-pause").is_err());
+        assert!(route("GET", &format!("{pause}/extra")).is_err());
         stop.cancel();
         server.await.unwrap();
     }

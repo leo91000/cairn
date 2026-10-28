@@ -7,6 +7,7 @@ use crate::{
     validation::text,
     vault::Vault,
 };
+use cairn_contracts::EventKind;
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 use tokio_util::sync::CancellationToken;
@@ -101,6 +102,7 @@ impl Service {
             vault,
             shutdown: CancellationToken::new(),
         });
+        crate::chats::questions::retire_native(&service).await?;
         service.bootstrap_main_agent().await?;
         service.avatars.recover(&service).await?;
         tokio::spawn(crate::artifacts::preview::recover(service.clone()));
@@ -190,8 +192,8 @@ impl Service {
             editor == AgentEditor::Owner && crate::nodes::native_mode::owner().is_some();
         let reapproved = !review.reapprove_delegations.is_empty();
         let origin = crate::native::policy::origin();
-        if reapproved && crate::native::policy::native(&snapshot) {
-            crate::native::policy::refresh(self).await?;
+        if reapproved {
+            crate::native::policy::refresh_for(self, &snapshot).await?;
         }
         let (agent, created) = self.store.transaction(move |db| {
             authorize(db)?;
@@ -537,9 +539,7 @@ impl Service {
         } else {
             crate::native::policy::origin()
         };
-        if crate::native::policy::native(&run["snapshot"]["agent"]) {
-            crate::native::policy::refresh(self).await?;
-        }
+        crate::native::policy::refresh_for(self, &run["snapshot"]["agent"]).await?;
         let result = self
             .store
             .transaction(move |db| {
@@ -563,7 +563,7 @@ impl Service {
                     run["requestedBy"] = requester(&caller);
                 }
                 let run = crate::runs::admit_prepared(db, &run, dedupe.as_deref())?;
-                db.event(text(&run, "id"), "status", "Queued", None)?;
+                db.event(text(&run, "id"), &EventKind::Status, "Queued", None)?;
                 let detail = json!({
                     "id": run["id"],
                     "taskId": run["taskId"],

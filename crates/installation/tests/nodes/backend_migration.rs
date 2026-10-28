@@ -194,10 +194,10 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     native["capabilities"]["ublk"] = true.into();
     native["nativeEnabled"] = true.into();
     native["nativeAccounts"] = json!(["fixture-owner"]);
-    owner.put("nodes", native).await;
+    owner.put_node_fixture(native).await;
     let mut vm_record = owner.stored("nodes", &vm_node).await.unwrap();
     vm_record["capabilities"]["backend"] = "firecracker".into();
-    owner.put("nodes", vm_record).await;
+    owner.put_node_fixture(vm_record).await;
     seed_ext4(&owner, &record, &vm_node, &format!("http://{address}/")).await;
     tasks.push(owner.serve(listener));
     publication::capture(&owner.service, &owner.run(&run).await)
@@ -377,7 +377,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let checkpoint_before = owner
         .service
         .store
-        .kv(&format!("run-checkpoint:{run}"))
+        .checkpoint_boundary(&run)
         .await
         .unwrap()
         .unwrap();
@@ -447,8 +447,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     vm_profile["access"]["nodes"] = json!([vm_node]);
     owner.put("agents", vm_profile).await;
     owner
-        .put(
-            "nodes",
+        .put_node_fixture(
             json!({ "id": LOCAL_NODE_ID, "storage": { "reserveMiB": 16 * 1024 * 1024 } }),
         )
         .await;

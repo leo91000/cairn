@@ -9,6 +9,7 @@ import {
 import path from 'node:path'
 import process from 'node:process'
 import activityEvents from './activity-events.json' with { type: 'json' }
+import { askCairn, navigationQuestions } from './cairn-questions.mjs'
 
 export function chatFixture() {
   const file = path.join(process.env.CODEX_HOME, 'fixture-conversation.json')
@@ -103,7 +104,12 @@ export function chatFixture() {
     }
 
     if (!method && questionRequest && request.id === questionRequest) {
-      active.items.push({ id: 'answer', type: 'fixtureAnswer', answers: request.result.answers })
+      active.items.push({
+        id: 'answer',
+        type: 'fixtureAnswer',
+        answers: request.result?.answers,
+        error: request.error,
+      })
       save()
       notify('serverRequest/resolved', { threadId: thread.id, requestId: questionRequest })
       questionRequest = undefined
@@ -401,6 +407,18 @@ export function chatFixture() {
         const previous = JSON.parse(readFileSync(path.join(process.env.CODEX_HOME, 'fixture-exhausted.json'), 'utf8'))
         if (previous.account === globalThis.fixtureAccountId || previous.cwd !== process.cwd() || readFileSync(path.join(process.cwd(), 'preserved-work.txt'), 'utf8') !== 'work before exhaustion')
           throw new Error('Resume did not preserve context or switch accounts')
+      }
+
+      if (text.includes('fixture:cairn-question')) {
+        hold = true
+        askCairn(thread.fixtureConfig.mcp_servers.cairn_workspace, navigationQuestions).then(() => {
+          hold = false
+          finish()
+        }).catch((error) => {
+          process.stderr.write(`${error.message}\n`)
+          process.exit(1)
+        })
+        return true
       }
 
       if (!asked && text.includes('fixture:question')) {

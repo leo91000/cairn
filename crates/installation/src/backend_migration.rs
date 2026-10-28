@@ -11,6 +11,7 @@ use crate::{
     store::Db,
     validation::{parse, text},
 };
+use cairn_contracts::EventKind;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -82,15 +83,26 @@ pub(crate) fn candidate(run: &Value) -> Value {
     candidate
 }
 
-fn chat_run(db: &Db<'_>, chat_id: &str) -> Result<(Value, Value, Value)> {
+fn chat_run(db: &Db<'_>, chat_id: &str) -> Result<(Value, Value, Value, bool)> {
     let chat = required(db.get("chats", chat_id)?, "Chat not found")?;
     require_active(&chat)?;
     let run = required(db.run(text(&chat, "runId"))?, "Run not found")?;
-    let agent = required(
+    let mut agent = required(
         db.agent_snapshot(text(&chat, "agentId"))?,
         "Agent not found",
     )?;
-    Ok((chat, run, agent))
+    // Automatic profiles retain explicit conversion: the preview offers the
+    // other environment, never an implicit move of existing files.
+    let automatic = access(&agent)["backend"] == "auto";
+    if automatic {
+        agent["access"]["backend"] = if policy::native(&run["snapshot"]["agent"]) {
+            "firecracker"
+        } else {
+            "native"
+        }
+        .into();
+    }
+    Ok((chat, run, agent, automatic))
 }
 
 fn prospective(db: &Db<'_>, run: &Value, agent: &Value, origin: &Origin) -> Result<Value> {
@@ -146,7 +158,7 @@ pub(crate) fn source_read(db: &Db<'_>, run_id: &str, node: &Value) -> Result<boo
     let agent = required(db.agent_snapshot(nodes::run_agent(&run))?, "Agent removed")?;
     check_access(&run, &agent)?;
     let destination = required(
-        db.get("nodes", text(&run["backendMigration"], "nodeId"))?,
+        db.node_boundary(text(&run["backendMigration"], "nodeId"))?,
         "Destination removed",
     )?;
     if !allowed(db, &candidate(&run), &destination)? {
@@ -228,7 +240,7 @@ pub(crate) async fn chat_id(s: &Service, run: &str) -> Result<String> {
 async fn refresh_authority(s: &Service, chat: &Value) -> Result<()> {
     let run = s.store.run(text(chat, "runId")).await?;
     let agent = s.agent_snapshot(text(chat, "agentId")).await?;
-    if policy::native(&run["snapshot"]["agent"]) || policy::native(&agent) {
+    if policy::native(&run["snapshot"]["agent"]) || policy::supports(&agent, "native") {
         policy::refresh(s).await?;
     }
     Ok(())
@@ -247,14 +259,14 @@ pub(crate) async fn preview(
     let (chat_id, origin) = (chat_id.to_owned(), origin());
     s.store.read(move |db| {
         authorize(db)?;
-        let (chat, run, agent) = chat_run(db, &chat_id)?;
+        let (chat, run, agent, automatic) = chat_run(db, &chat_id)?;
         let from = backend(&run["snapshot"]["agent"]);
         let to = backend(&agent);
         let mut nodes = Vec::new();
         let mut reason = Value::Null;
         if from != to {
             match prospective(db, &run, &agent, &origin) {
-                Ok(proposed) => for node in db.list("nodes")? {
+                Ok(proposed) => for node in db.nodes_boundary()? {
                     if allowed(db, &proposed, &node)? {
                         nodes.push(json!({ "id": node["id"], "name": node["name"] }));
                     }
@@ -266,7 +278,8 @@ pub(crate) async fn preview(
             "chatId": chat["id"],
             "fromBackend": from,
             "toBackend": to,
-            "required": from != to,
+            "required": !automatic && from != to,
+            "optional": automatic && from != to,
             "nodes": nodes,
             "reason": reason,
             "pending": run["backendMigration"]["process"] == PROCESS.as_str(),
@@ -295,7 +308,7 @@ impl Service {
         let request_authorization = authorize.clone();
         self.store.transaction(move |db| {
             request_authorization(db)?;
-            let (mut chat, run, agent) = chat_run(db, text(&args, "chatId"))?;
+            let (mut chat, run, agent, _) = chat_run(db, text(&args, "chatId"))?;
             if backend(&agent) != text(&args, "backend") || backend(&agent) == backend(&run["snapshot"]["agent"]) {
                 return Err(Error::conflict("Choose the backend currently configured on this conversation's agent."));
             }
@@ -309,7 +322,7 @@ impl Service {
             if !checkpoint["prepared"]["projectRoot"].is_string() {
                 return Err(Error::conflict("This conversation has no saved isolated environment to migrate."));
             }
-            let node = required(db.get("nodes", text(&args, "nodeId"))?, "Destination node not found")?;
+            let node = required(db.node_boundary(text(&args, "nodeId"))?, "Destination node not found")?;
             let proposed = prospective(db, &run, &agent, &who)?;
             if !allowed(db, &proposed, &node)? || !nodes::valid_runtime(text(&node, "runtimeId")) {
                 return Err(Error::forbidden("Destination is not authorized for this backend."));
@@ -468,7 +481,7 @@ impl Service {
                 )
             })
             .await?;
-        let source_node = self.get("nodes", nodes::owner_node(&run)).await?;
+        let source_node = self.node_boundary(nodes::owner_node(&run)).await?;
         let (source_run_id, read_node) = (run_id.clone(), source_node.clone());
         let readable = self
             .store
@@ -484,7 +497,7 @@ impl Service {
         // migration; release an interrupted admission while retaining any
         // materialized disk allocation, then reserve again with live limits.
         nodes::placement::release(self, &reservation).await?;
-        let node = self.get("nodes", text(&args, "nodeId")).await?;
+        let node = self.node_boundary(text(&args, "nodeId")).await?;
         let point = if let Some(saved) = run["backendMigration"]["convertedBackup"].as_str() {
             // A controller may have installed this exact point before losing its
             // reply. Retrying it also completes the native restore transaction.
@@ -544,22 +557,21 @@ impl Service {
         let (chat_id, operation) = (chat_id.to_owned(), operation.to_owned());
         self.store.transaction(move |db| {
             authorize(db)?;
-            let (mut chat, current, agent) = chat_run(db, &chat_id)?;
+            let (mut chat, current, agent, _) = chat_run(db, &chat_id)?;
             let migration = &current["backendMigration"];
             if migration["id"] != operation || migration["agentRevision"] != agent["revision"]
                 || backend(&agent) != text(&args, "backend") {
                 return Err(Error::conflict("Conversation or agent changed during backend migration."));
             }
             let proposed = prospective(db, &current, &agent, &source)?;
-            let source_node = required(db.get("nodes", text(&source_node, "id"))?, "Source node removed")?;
+            let source_node = required(db.node_boundary(text(&source_node, "id"))?, "Source node removed")?;
             if !source_read(db, &run_id, &source_node)? {
                 return Err(Error::forbidden("Source read permission was revoked during migration."));
             }
-            let destination = required(db.get("nodes", text(&node, "id"))?, "Destination node removed")?;
+            let destination = required(db.node_boundary(text(&node, "id"))?, "Destination node removed")?;
             if !allowed(db, &proposed, &destination)? {
                 return Err(Error::forbidden("Destination permission was revoked during migration."));
             }
-            let key = nodes::checkpoint_key(&run_id);
             let mut checkpoint = nodes::db_checkpoint(db, &run_id)?;
             checkpoint["prepared"]["backend"] = args["backend"].clone();
             checkpoint["nodeId"] = node["id"].clone();
@@ -570,7 +582,7 @@ impl Service {
             checkpoint["freshSession"] = true.into();
             checkpoint["completed"] = true.into();
             for key in ["process", "settled", "controllerRecoveries"] { checkpoint[key] = Value::Null; }
-            db.set(&key, &checkpoint, None)?;
+            db.save_checkpoint_boundary(&run_id, &checkpoint)?;
             let mut patch = crate::runs::RunChanges {
                 snapshot: Some(serde_json::from_value(proposed["snapshot"].clone())?),
                 session_id : Some(None),
@@ -601,7 +613,7 @@ impl Service {
             chat["sessionRestartRequested"] = true.into();
             chat["wakeup"] = Value::Null;
             db.put("chats", &chat)?;
-            db.event(&run_id, "status", "Execution backend migrated. Conversation history and files preserved; the next message starts a fresh engine session.", None)?;
+            db.event(&run_id, &EventKind::Status, "Execution backend migrated. Conversation history and files preserved; the next message starts a fresh engine session.", None)?;
             db.audit("chat.backend-migration.completed", &json!({
                 "chatId": chat_id,
                 "backend": args["backend"],
@@ -639,10 +651,10 @@ async fn materialize(
     // lower the protection of the manager's database filesystem.
     let local = s
         .store
-        .get("nodes", nodes::LOCAL_NODE_ID)
+        .node_boundary(nodes::LOCAL_NODE_ID)
         .await?
         .unwrap_or_default();
-    let policy = crate::storage::policy::Policy::for_node(&local["storage"])?;
+    let policy = crate::storage::policy::for_node(&local["storage"])?;
     let (total, free) = crate::storage::policy::space(path.parent().unwrap())?;
     let payload: u64 = manifest["blocks"]
         .as_array()
@@ -680,6 +692,9 @@ async fn materialize(
     output.sync_all().await?;
     Ok(policy.reserve(total))
 }
+
+#[cfg(test)]
+use crate::node_fixture::*;
 
 #[cfg(test)]
 use crate::run_fixture::DbRunFixture;
@@ -759,7 +774,7 @@ mod tests {
             db.add_run_fixture(&parent_run, None)?;
             let agent = serde_json::to_value(crate::agent_fixture::profile(json!({ "id": target, "access": { "backend": "native", "nodes": [node] } }))?)?;
             db.save_agent(&serde_json::from_value(agent.clone())?)?;
-            db.put("nodes", &json!({
+            db.put_node_fixture(&json!({
                 "id": node,
                 "capabilities": { "backend": "native", "nativeModeProtocol": 1 },
                 "nativeModeObserved": { "mode": "protected", "generation": null, "status": "applied" },
@@ -789,20 +804,20 @@ mod tests {
             assert_eq!(prospective(db, &fast, &agent, &origin)?["snapshot"]["agent"]["speed"], "priority");
             assert_eq!(candidate["nativePrincipals"], json!(["editor", "owner"]));
             assert_eq!(candidate["nativeParentRunId"], parent);
-            assert!(allowed(db, &candidate, &db.get("nodes", &node)?.unwrap())?);
+            assert!(allowed(db, &candidate, &db.node_boundary(&node)?.unwrap())?);
             let mut plugin_bound = historical.clone();
             plugin_bound["nativeParentRunId"] = Value::Null;
             plugin_bound["nativePluginGrants"] = json!([{
                 "connectionId": id(), "revision": id(), "authorId": "external-person"
             }]);
             let delegated = prospective(db, &plugin_bound, &agent, &origin)?;
-            assert!(!allowed(db, &delegated, &db.get("nodes", &node)?.unwrap())?,
+            assert!(!allowed(db, &delegated, &db.node_boundary(&node)?.unwrap())?,
                 "An agent cannot erase a removed bot's revocation lineage by migrating its conversation");
             let adopted = prospective(db, &plugin_bound, &agent, &Origin::Human("owner".into()))?;
-            assert!(allowed(db, &adopted, &db.get("nodes", &node)?.unwrap())?,
+            assert!(allowed(db, &adopted, &db.node_boundary(&node)?.unwrap())?,
                 "The explicit owner can still adopt existing work");
-            let mut revoked = db.get("nodes", &node)?.unwrap();
-            revoked["nativeAccounts"] = json!(["owner"]); db.put("nodes", &revoked)?;
+            let mut revoked = db.node_boundary(&node)?.unwrap();
+            revoked["nativeAccounts"] = json!(["owner"]); db.put_node_fixture(&revoked)?;
             assert!(!allowed(db, &candidate, &revoked)?);
             let mut unknown = historical.clone(); unknown["nativeProvenanceUnknown"] = true.into();
             assert!(prospective(db, &unknown, &agent, &origin).is_err());

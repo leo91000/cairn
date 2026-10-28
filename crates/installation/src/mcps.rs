@@ -620,7 +620,7 @@ impl Mcps {
                 configuration.add_stdio(&server, tools, env);
             }
         }
-        let workspace = !s.config.runner_url.is_empty();
+        let workspace = !s.config.runner_url.is_empty() || run["trigger"] == "chat";
         if workspace {
             configuration.add_workspace(origin);
         }

@@ -1,3 +1,6 @@
+use crate::common::run_fixture::DbRunFixture;
+use cairn_contracts::EventKind;
+use common::node_fixture::*;
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
@@ -329,6 +332,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
             json!({
                 "nodeId": next,
                 "node": {
+                    "revision": s.get_node(next).await.unwrap().revision,
                     "name": "Trusted desktop", "tags": ["gpu"],
                     "limits": { "cpu": 2, "memoryMiB": 2048, "diskMiB": 8192 },
                     "slots": 6, "accepting": true,
@@ -339,9 +343,10 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
         .await;
         assert_eq!(result(&updated)["nativeEnabled"], true);
         assert_eq!(result(&updated)["capabilities"]["backend"], "native");
-        let mut capable = s.get("nodes", next).await.unwrap();
+        let mut capable = s.node_boundary(next).await.unwrap();
         capable["capabilities"]["nativeModeProtocol"] = 1.into();
-        s.store.put("nodes", capable).await.unwrap();
+        capable["exclusiveReservations"] = true.into();
+        s.store.put_node_fixture(capable).await.unwrap();
         let (_, preview) = node_management_call(
             &app,
             endpoint,
@@ -363,20 +368,16 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
             "nodeId": next, "change": { "mode": "administrator", "previewId": preview["previewId"], "confirm": true },
         })).await;
         if endpoint == "/mcp-installation" {
-            assert_eq!(
-                result(&requested)["status"],
-                "awaiting-owner",
-                "{requested}"
-            );
-            assert!(s.get("nodes", next).await.unwrap()["nativeModeRequest"].is_null());
+            assert_eq!(result(&requested)["kind"], "awaitingOwner", "{requested}");
+            assert!(s.node_boundary(next).await.unwrap()["nativeModeRequest"].is_null());
         } else {
             assert_eq!(
-                result(&requested)["nativeModeStatus"],
+                result(&requested)["node"]["nativeModeStatus"],
                 "pending",
                 "{requested}"
             );
             assert_eq!(
-                result(&requested)["nativeModeRequest"]["mode"],
+                result(&requested)["node"]["nativeModeRequest"]["mode"],
                 "administrator"
             );
         }
@@ -391,6 +392,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
             .unwrap();
         assert_eq!(node["nativeAccounts"], json!([trusted]));
         assert_eq!(node["slots"], 6);
+        assert_eq!(node["exclusiveReservations"], true);
         s.store
             .update_run_boundary(
                 run["id"].as_str().unwrap(),
@@ -408,7 +410,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
             }),
         )
         .await;
-        assert_eq!(result(&retired)["revoked"], true);
+        assert_eq!(result(&retired)["node"]["revoked"], true);
         assert_eq!(result(&retired)["releasedPlacements"], 1);
         assert!(s.store.run(run["id"].as_str().unwrap()).await.unwrap()["pinnedNodeId"].is_null());
         // Ordinary revocation preserves an explicit preference, as the owner UI does.
@@ -476,22 +478,57 @@ async fn node_storage_controls_share_probes_persistence_and_permissions_across_b
     std::fs::create_dir(root.path().join("home")).unwrap();
     let probes = Arc::new(Mutex::new(Vec::<Value>::new()));
     let fail_probe = Arc::new(AtomicBool::new(false));
+    let hold_probe = Arc::new(AtomicBool::new(false));
+    let probed = Arc::new(tokio::sync::Notify::new());
+    let release_probe = Arc::new(tokio::sync::Notify::new());
+    let applied = Arc::new(Mutex::new(
+        std::collections::BTreeMap::<String, Value>::new(),
+    ));
+    let holding = hold_probe.clone();
+    let entered = probed.clone();
+    let released = release_probe.clone();
+    let configured = applied.clone();
     let recorded = probes.clone();
     let failure = fail_probe.clone();
-    let controller = axum::Router::new().route(
-        "/internal/execution/{node}/storage-policy",
-        axum::routing::post(move |axum::Json(policy): axum::Json<Value>| {
-            let recorded = recorded.clone();
-            let failure = failure.clone();
-            async move {
-                recorded.lock().unwrap().push(policy);
-                if failure.load(Ordering::SeqCst) {
-                    return StatusCode::CONFLICT;
+    let controller = axum::Router::new()
+        .route(
+            "/internal/execution/{node}/storage-policy/probe",
+            axum::routing::post(move |axum::Json(policy): axum::Json<Value>| {
+                let recorded = recorded.clone();
+                let failure = failure.clone();
+                let holding = holding.clone();
+                let entered = entered.clone();
+                let released = released.clone();
+                async move {
+                    recorded.lock().unwrap().push(policy);
+                    if failure.load(Ordering::SeqCst) {
+                        return StatusCode::CONFLICT;
+                    }
+                    if holding.swap(false, Ordering::SeqCst) {
+                        entered.notify_one();
+                        released.notified().await;
+                    }
+                    StatusCode::OK
                 }
-                StatusCode::OK
-            }
-        }),
-    );
+            }),
+        )
+        .route(
+            "/internal/execution/{node}/storage-policy",
+            axum::routing::post(
+                move |axum::extract::Path(node): axum::extract::Path<String>,
+                      axum::Json(configuration): axum::Json<Value>| {
+                    let configured = configured.clone();
+                    async move {
+                        assert!(configuration["generation"].as_u64().unwrap() > 0);
+                        configured
+                            .lock()
+                            .unwrap()
+                            .insert(node, configuration["policy"].clone());
+                        StatusCode::OK
+                    }
+                },
+            ),
+        );
     let (url, server) = common::serve_locally(controller).await;
     let mut config = common::config(root.path());
     config.public_url = url;
@@ -535,7 +572,7 @@ async fn node_storage_controls_share_probes_persistence_and_permissions_across_b
             endpoint,
             token,
             "update_node_storage",
-            json!({ "nodeId": node, "storage": policy }),
+            json!({ "nodeId": node, "revision": s.get_node(node).await.unwrap().revision, "storage": policy }),
         )
         .await;
         assert_eq!(result(&updated)["storage"], policy);
@@ -550,6 +587,51 @@ async fn node_storage_controls_share_probes_persistence_and_permissions_across_b
             .unwrap();
         assert_eq!(saved["storage"], policy);
 
+        assert_eq!(applied.lock().unwrap().get(node), Some(&policy));
+
+        // A draft that loses its revision during the side-effect-free probe
+        // must not reach the mutating controller route.
+        hold_probe.store(true, Ordering::SeqCst);
+        let pending_app = app.clone();
+        let pending_token = token.to_owned();
+        let pending_node = node.to_owned();
+        let mut draft = policy.clone();
+        draft["memoryCacheMiB"] = 1024.into();
+        let revision = s.get_node(node).await.unwrap().revision;
+        let pending = tokio::spawn(async move {
+            node_management_call(
+                &pending_app,
+                endpoint,
+                &pending_token,
+                "update_node_storage",
+                json!({ "nodeId": pending_node, "revision": revision, "storage": draft }),
+            )
+            .await
+        });
+        probed.notified().await;
+        let current = s.get_node(node).await.unwrap();
+        let (_, changed) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "update_node",
+            json!({ "nodeId": node, "node": {
+                "revision": current.revision, "name": "Changed during probe",
+                "tags": current.tags, "limits": current.limits,
+                "slots": current.slots, "accepting": current.accepting
+            } }),
+        )
+        .await;
+        assert_eq!(result(&changed)["name"], "Changed during probe");
+        release_probe.notify_one();
+        let (_, rejected) = pending.await.unwrap();
+        assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+        assert_eq!(
+            s.get_node(node).await.unwrap().storage,
+            serde_json::from_value(policy.clone()).unwrap()
+        );
+        assert_eq!(applied.lock().unwrap().get(node), Some(&policy));
+
         fail_probe.store(true, Ordering::SeqCst);
         let mut rejected = policy.clone();
         rejected["memoryCacheMiB"] = 1024.into();
@@ -558,14 +640,43 @@ async fn node_storage_controls_share_probes_persistence_and_permissions_across_b
             endpoint,
             token,
             "update_node_storage",
-            json!({ "nodeId": node, "storage": rejected }),
+            json!({ "nodeId": node, "revision": s.get_node(node).await.unwrap().revision, "storage": rejected }),
         )
         .await;
         assert_eq!(response["result"]["isError"], true, "{response}");
-        assert_eq!(s.get("nodes", node).await.unwrap()["storage"], policy);
+        assert_eq!(s.node_boundary(node).await.unwrap()["storage"], policy);
         fail_probe.store(false, Ordering::SeqCst);
         last_node = node.to_owned();
     }
+    hold_probe.store(true, Ordering::SeqCst);
+    let pending_app = app.clone();
+    let pending_token = agent_token.to_owned();
+    let pending_node = last_node.clone();
+    let revision = s.get_node(&last_node).await.unwrap().revision;
+    let mut draft = policy.clone();
+    draft["memoryCacheMiB"] = 1024.into();
+    let pending = tokio::spawn(async move {
+        node_management_call(
+            &pending_app,
+            "/mcp-installation",
+            &pending_token,
+            "update_node_storage",
+            json!({ "nodeId": pending_node, "revision": revision, "storage": draft }),
+        )
+        .await
+    });
+    probed.notified().await;
+    s.agent_fixture(
+        json!({ "name": "Main agent", "access": { "installation": false } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    release_probe.notify_one();
+    let (_, denied) = pending.await.unwrap();
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    assert_eq!(applied.lock().unwrap().get(&last_node), Some(&policy));
+
     let before = probes.lock().unwrap().len();
     let read_token = common::relay_fixture::grant(&s, &["read"]).await;
     let (_, denied) = node_management_call(
@@ -1060,6 +1171,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "cleanup_run",
         "list_runs",
         "get_run",
+        "read_run_history",
         "read_run_content",
     ]);
     public_names.insert(cairn_contracts::RESUME_RUN_ID);
@@ -1076,6 +1188,13 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "cancel_plugin_operation",
     ]);
     public_names.extend([
+        "list_nodes",
+        "list_native_callers",
+        "create_node_enrollment",
+        "update_node",
+        "change_native_node_mode",
+        "update_node_storage",
+        "revoke_node",
         "set_agent_avatar",
         "list_agents",
         "get_agent",
@@ -1170,7 +1289,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     s.store
         .event(
             run["id"].as_str().unwrap(),
-            "engine.retry",
+            &EventKind::EngineRetry,
             "retry",
             Some(engine.clone()),
         )
@@ -1179,10 +1298,29 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     let history = call(&s, &configuration, "get_run", json!({ "runId": run["id"] })).await;
     assert_eq!(result(&history)["run"]["run"]["id"], run["id"]);
     let events = result(&history)["events"].as_array().unwrap().clone();
+    let window = call(
+        &s,
+        &configuration,
+        "read_run_history",
+        json!({
+            "runId": run["id"], "history": result(&history)["history"],
+        }),
+    )
+    .await;
+    assert_ne!(window["result"]["isError"], true);
+    assert!(
+        result(&window)["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|record| record["event"]["type"] == "engine.retry")
+    );
+
     assert!(
         events
             .iter()
-            .any(|event| event["type"] == "engine.retry" && event["payload"] == engine)
+            .any(|record| record["event"]["type"] == "engine.retry"
+                && record["event"]["payload"] == engine)
     );
     let chunk = call(
         &s,
@@ -1665,6 +1803,19 @@ async fn installation_access_can_save_global_and_project_skills() {
     let project_id = project["id"].clone();
 
     let content = "---\nname: independent-review\ndescription: Review until clean.\n---\n\nReview, fix, and repeat.\n";
+    s.store
+        .write(|db| {
+            db.put_message(&json!({
+                "id": "skill-usage",
+                "chatId": "another-device",
+                "text": "$independent-review $independent-review",
+                "status": "delivered",
+                "createdAt": 1,
+            }))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     for scope in [None, Some(project_id.clone())] {
         let mut args = json!({ "name": "independent-review", "content": content });
         let mut list = json!({});
@@ -1680,7 +1831,9 @@ async fn installation_access_can_save_global_and_project_skills() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|skill| skill["name"] == "independent-review" && skill["content"] == content)
+                .any(|skill| skill["name"] == "independent-review"
+                    && skill["content"] == content
+                    && skill["usageCount"] == 1)
         );
     }
 
@@ -2130,12 +2283,11 @@ async fn mission_conversion_matches_public_mcp_and_installation_tools() {
             .unwrap();
         let original = s.store.run(run_id).await.unwrap();
         s.store
-            .set(
-                &format!("run-checkpoint:{run_id}"),
+            .save_checkpoint_boundary(
+                run_id,
                 json!({
                     "prepared": {}, "completed": true,
                 }),
-                None,
             )
             .await
             .unwrap();
@@ -2360,6 +2512,63 @@ async fn both_mcp_endpoints_can_pause_and_delete_instances_pending_package_reapp
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn both_mcp_endpoints_list_current_chat_account_waits() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (target, configuration) = active_run(&s, &main).await;
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = target["id"].clone();
+    s.store.put("chats", chat.clone()).await.unwrap();
+    for required in [None, Some(cairn_contracts::AgentProvider::Codex)] {
+        s.store
+            .change_run(
+                text(&target, "id"),
+                cairn_installation::runs::RunChanges {
+                    account_wait_reason: Some(Some(
+                        "Waiting for a Codex account with available usage.".into(),
+                    )),
+                    account_required: Some(required),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+        for internal in [false, true] {
+            let response = if internal {
+                call(&s, &configuration, "list_chats", json!({})).await
+            } else {
+                public_call(&s, &["read"], "list_chats", json!({})).await
+            };
+            let listed = &result(&response)["chats"][0];
+            assert_eq!(
+                listed["accountWaitReason"],
+                detail["run"]["accountWaitReason"]
+            );
+            assert_eq!(listed["accountRequired"], detail["run"]["accountRequired"]);
+            assert_eq!(listed["accountWaitReason"], detail["accountWaitReason"]);
+            assert_eq!(listed["accountRequired"], detail["accountRequired"]);
+            assert!(listed.get("run").is_none());
+        }
+    }
+    s.store
+        .change_run(
+            text(&target, "id"),
+            cairn_installation::runs::RunChanges {
+                account_wait_reason: Some(None),
+                account_required: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let cleared = s.chat_detail(text(&chat, "id")).await.unwrap();
+    assert!(cleared["accountWaitReason"].is_null());
+    assert!(cleared["accountRequired"].is_null());
 }
 
 #[tokio::test]
@@ -2724,7 +2933,7 @@ async fn chat_questions_redact_private_answers_and_content_chunks_detect_changes
     assert_eq!(result(&questions)["questions"][0]["status"], "pending");
     let answer = json!({
         "chatId": chat_id, "questionId": question_id,
-        "answer": { "id": uuid::Uuid::new_v4(), "answers": { "secret": ["fixture-private-answer"] } },
+        "answer": { "id": uuid::Uuid::new_v4(), "answers": { "secret": { "selected": [], "comment": "fixture-private-answer" } } },
     });
     let answered = call(&s, &configuration, "answer_chat_question", answer.clone()).await;
     assert_eq!(result(&answered)["status"], "answering");
@@ -2738,6 +2947,18 @@ async fn chat_questions_redact_private_answers_and_content_chunks_detect_changes
             "{tool} exposed a private answer"
         );
     }
+    let obsolete = "b".repeat(64);
+    s.question_receive(target["id"].as_str().unwrap(), json!({
+        "id": obsolete, "blocking": false, "fields": [{ "id": "note", "title": "Still useful?" }],
+    })).await.unwrap();
+    let withdrawn = call(
+        &s,
+        &configuration,
+        "withdraw_chat_question",
+        json!({ "chatId": chat_id, "questionId": obsolete }),
+    )
+    .await;
+    assert_eq!(result(&withdrawn)["status"], "cancelled");
     // Populate a long, entirely delivered history so pagination is limited by bytes,
     // independently of the undelivered-message queue limit.
     let chat_key = chat_id.clone();
@@ -2830,11 +3051,7 @@ async fn chat_recovery_tools_preserve_confirmation_and_retention_rules() {
         .await
         .unwrap();
     s.store
-        .set(
-            &format!("run-checkpoint:{run_id}"),
-            json!({ "launched": true }),
-            None,
-        )
+        .save_checkpoint_boundary(run_id, json!({ "launched": true }))
         .await
         .unwrap();
     let mut chat = s.chat_create(json!({})).await.unwrap();
@@ -3198,16 +3415,13 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
     let run = cairn_installation::config::id();
     let node = cairn_installation::config::id();
     s.store
-        .put(
-            "nodes",
-            json!({
-                "id": node,
-                "runtimeId": "development",
-                "capabilities": { "backend": "native" },
-                "nativeEnabled": true,
-                "nativeAccounts": [],
-            }),
-        )
+        .put_node_fixture(json!({
+            "id": node,
+            "runtimeId": "development",
+            "capabilities": { "backend": "native" },
+            "nativeEnabled": true,
+            "nativeAccounts": [],
+        }))
         .await
         .unwrap();
     s.store
@@ -3400,7 +3614,7 @@ async fn neither_agent_interface_can_review_an_administrator_node() {
     let mut nodes = Vec::new();
     for _ in 0..2 {
         let node = cairn_installation::config::id();
-        s.store.put("nodes", json!({
+        s.store.put_node_fixture(json!({
             "id": node, "capabilities": { "backend": "native", "nativeModeProtocol": 1 },
             "nativeModeRequest": { "mode": "administrator", "generation": cairn_installation::config::id() },
             "nativeReviewedAgents": [],
@@ -3422,7 +3636,7 @@ async fn neither_agent_interface_can_review_an_administrator_node() {
     .await;
     assert_eq!(denied["result"]["isError"], true, "{denied}");
     assert!(
-        s.get("nodes", &nodes[0]).await.unwrap()["nativeReviewedAgents"]
+        s.node_boundary(&nodes[0]).await.unwrap()["nativeReviewedAgents"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -3431,7 +3645,7 @@ async fn neither_agent_interface_can_review_an_administrator_node() {
         node_management_call(&app, "/mcp", &owner_token, "replace_agent", args).await;
     assert_eq!(response["result"]["isError"], true, "{response}");
     assert!(
-        s.get("nodes", &nodes[0]).await.unwrap()["nativeReviewedAgents"]
+        s.node_boundary(&nodes[0]).await.unwrap()["nativeReviewedAgents"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -3469,11 +3683,7 @@ async fn chat_compaction_matches_public_mcp_and_installation_tools() {
             .await
             .unwrap();
         s.store
-            .set(
-                &format!("run-checkpoint:{run_id}"),
-                json!({ "launched": true, "completed": true }),
-                None,
-            )
+            .save_checkpoint_boundary(run_id, json!({ "launched": true, "completed": true }))
             .await
             .unwrap();
         let mut chat = s.chat_create(json!({})).await.unwrap();
@@ -3625,12 +3835,7 @@ async fn resume_run_is_one_capability_on_http_public_and_installation() {
         }
         assert_eq!(after["status"], "queued");
         assert!(after["retry"].is_null());
-        let checkpoint = s
-            .store
-            .kv(&format!("run-checkpoint:{id}"))
-            .await
-            .unwrap()
-            .unwrap();
+        let checkpoint = s.store.checkpoint_boundary(id).await.unwrap().unwrap();
         assert_eq!(
             checkpoint["prepared"],
             json!({ "cwd": "/saved/workspace", "marker": "retained" })
@@ -3704,7 +3909,7 @@ async fn concurrent_resume_run_publishes_once_and_a_revoked_grant_cannot_resume(
     let run_id = id.to_owned();
     let events = s
         .store
-        .read(move |db| db.events(&run_id, 0, 100))
+        .read(move |db| db.events_fixture(&run_id, 0, 100))
         .await
         .unwrap();
     assert_eq!(
@@ -4033,6 +4238,67 @@ async fn typed_agent_profiles_preview_and_avatars_match_on_both_tools() {
                 .unwrap()
                 .is_none()
         );
+    }
+}
+
+#[tokio::test]
+async fn automatic_agent_priorities_round_trip_through_both_management_tools() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let nodes = [
+        cairn_installation::config::id(),
+        cairn_installation::config::id(),
+    ];
+    for id in &nodes {
+        s.store
+            .put_node_fixture(
+                json!({ "id": id, "name": id, "capabilities": { "backend": "firecracker" } }),
+            )
+            .await
+            .unwrap();
+    }
+    let target = s.agent_fixture(json!({
+        "name": "Automatic placement", "access": { "backend": "auto", "nodes": nodes }, "nodePriorities": nodes,
+    }), None).await.unwrap();
+    for internal in [false, true] {
+        let mut profile = s.store.agent(text(&target, "id")).await.unwrap().unwrap();
+        profile.settings.node_priorities.reverse();
+        let input = serde_json::to_value(cairn_contracts::ReplaceAgentInput {
+            agent_id: profile.id,
+            revision: profile.revision,
+            settings: profile.settings.clone(),
+            review: cairn_contracts::AgentReview::default(),
+        })
+        .unwrap();
+        let response = if internal {
+            call(&s, &configuration, "replace_agent", input).await
+        } else {
+            public_call(&s, &["manage"], "replace_agent", input).await
+        };
+        assert_ne!(response["result"]["isError"], true, "{response}");
+        let saved: cairn_contracts::Agent =
+            serde_json::from_value(result(&response).clone()).unwrap();
+        assert_eq!(saved.settings, profile.settings);
+        let read = if internal {
+            call(
+                &s,
+                &configuration,
+                "get_agent",
+                json!({ "agentId": saved.id }),
+            )
+            .await
+        } else {
+            public_call(&s, &["read"], "get_agent", json!({ "agentId": saved.id })).await
+        };
+        let read: cairn_contracts::Agent = serde_json::from_value(result(&read).clone()).unwrap();
+        assert_eq!(read.settings.access.backend, "auto");
+        assert_eq!(
+            read.settings.node_priorities,
+            saved.settings.node_priorities
+        );
+        assert_eq!(read.settings.access.nodes, Some(nodes.to_vec()));
     }
 }
 
@@ -4403,4 +4669,77 @@ async fn expired_installation_authorization_cannot_publish_a_prepared_package() 
             .revision
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn quota_coding_agent_switch_has_equivalent_public_and_builtin_tools() {
+    for internal in [false, true] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        let main = enabled_main(&s).await;
+        let (_, configuration) = active_run(&s, &main).await;
+        let invoke = |name, args| {
+            let s = s.clone();
+            let configuration = configuration.clone();
+            async move {
+                if internal {
+                    call(&s, &configuration, name, args).await
+                } else {
+                    public_call(&s, &["read", "manage", "run"], name, args).await
+                }
+            }
+        };
+        let created = invoke("create_chat", json!({})).await;
+        let chat_id = result(&created)["id"].as_str().unwrap();
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let sent = invoke(
+            "send_chat_message",
+            json!({"chatId":chat_id,"message":{"id":message_id,"text":"Keep this request"}}),
+        )
+        .await;
+        result(&sent);
+        s.chat_tick(&std::collections::HashSet::new())
+            .await
+            .unwrap();
+        let detail = s.chat_detail(chat_id).await.unwrap();
+        let run_id = text(&detail, "runId");
+        s.store
+            .change_run(
+                run_id,
+                cairn_installation::runs::RunChanges {
+                    account_wait_reason: Some(Some(
+                        "Waiting for a Codex account with available usage.".into(),
+                    )),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut account = s
+            .accounts
+            .create(
+                &s,
+                cairn_installation::provider::Provider::Claude,
+                "Alternative",
+            )
+            .await
+            .unwrap();
+        account["state"] = "ready".into();
+        s.store.put("agentAccounts", account).await.unwrap();
+        let options = invoke("get_chat_coding_agent_options", json!({"chatId":chat_id})).await;
+        assert_eq!(
+            result(&options)["choices"],
+            json!([{"provider":"claude","label":"Claude Code"}])
+        );
+        let input = json!({"chatId":chat_id,"runId":run_id,"turnId":message_id,"requestId":uuid::Uuid::new_v4(),"provider":"claude"});
+        let denied = public_call(&s, &["read"], "switch_chat_coding_agent", input.clone()).await;
+        assert_eq!(denied["result"]["isError"], true);
+        let switched = invoke("switch_chat_coding_agent", input.clone()).await;
+        assert_eq!(result(&switched)["codingAgentSwitch"]["provider"], "claude");
+        let retried = invoke("switch_chat_coding_agent", input).await;
+        assert_eq!(result(&retried)["codingAgentSwitch"]["provider"], "claude");
+        let stopped = invoke("stop_chat", json!({"chatId":chat_id})).await;
+        result(&stopped);
+        assert!(s.chat_detail(chat_id).await.unwrap()["codingAgentSwitch"].is_null());
+    }
 }

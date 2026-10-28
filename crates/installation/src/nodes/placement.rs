@@ -137,8 +137,18 @@ impl<'a> Request<'a> {
         // An existing environment stays where it is unless it is moving.
         let existing = self.moving || self.checkpoint["nodeId"].as_str().is_none_or(|p| p == id);
         let local_unconfigured = node["local"] == true && !configured;
-        let native = crate::native::policy::native(&self.run["snapshot"]["agent"]);
-        if native != crate::native::policy::node_native(node)
+        // Development's shared process is not an available VM controller.
+        let automatic_needs_controller = policy(&run["snapshot"]["agent"])["backend"] == "auto"
+            && (crate::service::isolated(&run["snapshot"]["agent"])
+                || self.access["nodes"].is_null()
+                || self.access["nodes"]
+                    .as_array()
+                    .is_some_and(|nodes| nodes.iter().any(|node| node != LOCAL_NODE_ID)));
+        let native = crate::native::policy::node_native(node);
+        let backend = if native { "native" } else { "firecracker" };
+        if !crate::native::policy::supports(&self.run["snapshot"]["agent"], backend)
+            || !matches!(self.access["backend"].as_str(), Some("auto") | None)
+                && self.access["backend"] != backend
             || native && node["capabilities"]["ublk"] != true
         {
             return false;
@@ -154,7 +164,7 @@ impl<'a> Request<'a> {
                     && super::seen_within(node, FRESH_HEARTBEAT_MS)));
         !node["maintenance"].is_string()
             && !node["exclusiveReservation"].is_object()
-            && !(local_unconfigured && run["isolated"] == true)
+            && !(local_unconfigured && (run["isolated"] == true || automatic_needs_controller))
             && has_tags
             && only("targetNodeId")
             && allowed(&self.access["nodes"], id)
@@ -218,7 +228,7 @@ impl Fleet<'_> {
 
     fn fit(&self, request: &Request, node: &Value, resources: &Resources) -> Result<Option<f64>> {
         let free = self.free_slots(request, node);
-        let storage_policy = Policy::for_node(&node["storage"])?;
+        let storage_policy = crate::storage::policy::for_node(&node["storage"])?;
         if free == 0
             || node["pressure"].is_string()
             || !self.disk_fits(request, node, resources, &storage_policy)
@@ -286,6 +296,7 @@ impl Fleet<'_> {
 
 struct Candidate {
     preferred: bool,
+    priority: usize,
     headroom: f64,
     node: Value,
     resources: Resources,
@@ -294,8 +305,11 @@ struct Candidate {
 impl Candidate {
     /// Automatic placement spreads work by free-slot fraction; a preferred node wins.
     fn beats(&self, other: &Self) -> bool {
-        (self.preferred && !other.preferred)
-            || (self.preferred == other.preferred && self.headroom > other.headroom)
+        (self.preferred, std::cmp::Reverse(self.priority))
+            > (other.preferred, std::cmp::Reverse(other.priority))
+            || self.preferred == other.preferred
+                && self.priority == other.priority
+                && self.headroom > other.headroom
     }
 }
 
@@ -343,6 +357,7 @@ fn development_node(configured: bool) -> Value {
 /// What a placement decision reads, from one consistent database view.
 struct Snapshot {
     access: Value,
+    priorities: Vec<Value>,
     checkpoint: Value,
     nodes: Vec<Value>,
     attempts: Vec<Value>,
@@ -354,7 +369,7 @@ impl Snapshot {
         let agent = db
             .agent_snapshot(super::run_agent(run))?
             .ok_or_else(|| Error::forbidden("Agent removed."))?;
-        let mut nodes = db.list("nodes")?;
+        let mut nodes = db.nodes_boundary()?;
         // Existing development execution stays available without a controller.
         if !configured && nodes.iter().all(|n| n["id"] != LOCAL_NODE_ID) {
             nodes.push(development_node(configured));
@@ -372,6 +387,10 @@ impl Snapshot {
         });
         Ok(Self {
             access: policy(&agent),
+            priorities: agent["nodePriorities"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
             checkpoint: super::db_checkpoint(db, text(run, "id"))?,
             nodes,
             attempts: db.list("node-attempts")?,
@@ -404,6 +423,11 @@ impl Snapshot {
             };
             let candidate = Candidate {
                 preferred: node["id"] == request.run["preferredNodeId"],
+                priority: self
+                    .priorities
+                    .iter()
+                    .position(|id| id == &node["id"])
+                    .unwrap_or(usize::MAX),
                 headroom,
                 node: node.clone(),
                 resources,
@@ -437,6 +461,19 @@ fn shortage(full: &[String]) -> String {
 }
 
 fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Result<Value> {
+    // Moves deliberately supply a prospective environment. Automatic admission
+    // reads the latest persisted run so stale callers cannot rebind its backend.
+    let persisted;
+    let run = if run["placementTransition"] == true
+        || policy(&run["snapshot"]["agent"])["backend"] != "auto"
+    {
+        run
+    } else {
+        persisted = db
+            .run(text(run, "id"))?
+            .ok_or_else(|| Error::not_found("Conversation removed."))?;
+        &persisted
+    };
     let snapshot = Snapshot::load(db, run, configured)?;
     let request = Request::new(run, &snapshot.access, &snapshot.checkpoint);
     if !request.moving
@@ -688,6 +725,24 @@ fn admit(
     };
     db.put("node-attempts", &serde_json::to_value(record)?)?;
     db.put("node-volumes", &volume)?;
+    if policy(&run["snapshot"]["agent"])["backend"] == "auto" {
+        let mut snapshot = run["snapshot"].clone();
+        let backend = if crate::native::policy::node_native(&best.node) {
+            "native"
+        } else {
+            "firecracker"
+        };
+        snapshot["agent"]["access"]["backend"] = backend.into();
+        snapshot["agent"]["access"]["nodes"] = request.access["nodes"].clone();
+        db.change_run(
+            request.run_id(),
+            crate::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(snapshot)?),
+                ..Default::default()
+            },
+        )?;
+        db.update_run_boundary(request.run_id(), &json!({ "executionBackend": backend }))?;
+    }
     let placement = Placement {
         native_mode: super::native_mode::requested(&best.node),
         node_id: &id.into(),
@@ -702,6 +757,40 @@ pub async fn release(s: &Service, attempt: &str) -> Result<()> {
     let attempt = attempt.to_owned();
     s.store
         .transaction(move |db| release_in(db, &attempt))
+        .await
+}
+
+/// Initial automatic admission precedes workspace preparation. Keep its capacity
+/// until materialization hands the attempt over to the ordinary controller lease.
+pub(crate) async fn renew_preparation(s: &Service, run: &str, attempt: &str) -> Result<()> {
+    let (run, attempt) = (run.to_owned(), attempt.to_owned());
+    s.store
+        .transaction(move |db| {
+            let Some(mut held) = db.get("node-attempts", &attempt)? else {
+                return Ok(());
+            };
+            if held["runId"] != run || held["released"] == true || held["diskMaterialized"] == true
+            {
+                return Ok(());
+            }
+            let current = db.run(&run)?.unwrap_or_default();
+            let agent = db
+                .agent_snapshot(super::run_agent(&current))?
+                .unwrap_or_default();
+            let node = db.node_boundary(text(&held, "nodeId"))?.unwrap_or_default();
+            if current["status"] != RunStatus::Running
+                || !current["cancelRequestedAt"].is_null()
+                || !super::agent_allows(&agent, text(&held, "nodeId"))
+                || node["revoked"] == true
+                || crate::native::policy::node_native(&node)
+                    && !crate::native::policy::allows(db, &current, &node)?
+            {
+                return Ok(());
+            }
+            held["leaseExpiresAt"] = (now() + RESERVATION_LEASE_MS).into();
+            db.put("node-attempts", &held)?;
+            Ok(())
+        })
         .await
 }
 
@@ -812,7 +901,7 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
             crate::validation::uuid(node)?;
             let unauthorized = !allowed(&access["nodes"], node)
                 || (node != LOCAL_NODE_ID
-                    && db.get("nodes", node)?.is_none_or(|n| n["revoked"] == true));
+                    && db.node_boundary(node)?.is_none_or(|n| n["revoked"] == true));
             if unauthorized {
                 return Err(Error::forbidden(
                     "This node is not authorized for the conversation's agent.",
@@ -833,11 +922,11 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
         )?;
     }
     let nodes = db
-        .list("nodes")?
+        .nodes_boundary()?
         .into_iter()
         .filter(|n| n["revoked"] != true && allowed(&access["nodes"], text(n, "id")))
-        .map(super::public)
-        .collect::<Vec<_>>();
+        .map(super::public_boundary)
+        .collect::<Result<Vec<_>>>()?;
     Ok(json!({
         "nodes": nodes,
         "pinnedNodeId": record["pinnedNodeId"],

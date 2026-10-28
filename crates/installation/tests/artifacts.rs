@@ -1,3 +1,4 @@
+use crate::common::run_fixture::DbRunFixture;
 use common::MissionFixture;
 
 mod common;
@@ -337,7 +338,7 @@ async fn publication_is_idempotent_versioned_and_readable_after_restart_without_
     let run_id = f.run.clone();
     let events = s
         .store
-        .read(move |db| db.events(&run_id, 0, 100))
+        .read(move |db| db.events_fixture(&run_id, 0, 100))
         .await
         .unwrap();
     assert_eq!(events.iter().filter(|e| e["type"] == "artifact").count(), 2);
@@ -449,7 +450,7 @@ async fn guest_export_rejects_symlinks_devices_and_parent_paths_and_snapshots_or
         Path::new("/dev/zero").to_owned(),
     ] {
         assert!(
-            file::open_export(&path, root.path()).is_err(),
+            file::open_export(&path, root.path()).await.is_err(),
             "{}",
             path.display()
         );

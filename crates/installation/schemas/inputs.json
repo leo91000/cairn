@@ -123,14 +123,29 @@
           "type": "string"
         },
         "additionalProperties": {
-          "minItems": 1,
-          "maxItems": 1,
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 10000
-          }
+          "type": "object",
+          "properties": {
+            "selected": {
+              "default": [],
+              "maxItems": 30,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "comment": {
+              "default": "",
+              "type": "string",
+              "maxLength": 10000
+            }
+          },
+          "required": [
+            "selected",
+            "comment"
+          ],
+          "additionalProperties": false
         }
       }
     },
@@ -162,6 +177,24 @@
           "default": false,
           "type": "boolean"
         },
+        "mode": {
+          "default": "single",
+          "type": "string",
+          "enum": [
+            "single",
+            "multiple"
+          ]
+        },
+        "minChoices": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "maxChoices": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
         "options": {
           "default": [],
           "maxItems": 30,
@@ -169,19 +202,31 @@
           "items": {
             "type": "object",
             "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
               "label": {
                 "type": "string",
+                "minLength": 1,
                 "maxLength": 2000
               },
               "description": {
                 "default": "",
                 "type": "string",
                 "maxLength": 4000
+              },
+              "recommended": {
+                "default": false,
+                "type": "boolean"
               }
             },
             "required": [
+              "id",
               "label",
-              "description"
+              "description",
+              "recommended"
             ],
             "additionalProperties": false
           }
@@ -191,9 +236,113 @@
         "id",
         "title",
         "secret",
+        "mode",
         "options"
       ],
       "additionalProperties": false
     }
+  },
+  "askQuestions": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "requestId": {
+        "type": "string",
+        "format": "uuid",
+        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+      },
+      "questions": {
+        "minItems": 1,
+        "maxItems": 20,
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 10000
+            },
+            "secret": {
+              "default": false,
+              "type": "boolean"
+            },
+            "mode": {
+              "default": "single",
+              "type": "string",
+              "enum": [
+                "single",
+                "multiple"
+              ]
+            },
+            "minChoices": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30
+            },
+            "maxChoices": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30
+            },
+            "options": {
+              "default": [],
+              "maxItems": 30,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "description": {
+                    "default": "",
+                    "type": "string",
+                    "maxLength": 4000
+                  },
+                  "recommended": {
+                    "default": false,
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "id",
+                  "label",
+                  "description",
+                  "recommended"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "secret",
+            "mode",
+            "options"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "required": [
+      "requestId",
+      "questions"
+    ],
+    "additionalProperties": false,
+    "description": "Create a questionnaire of at most 64 KiB of encoded JSON. Replies arrive asynchronously."
   }
 }

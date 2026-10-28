@@ -1,3 +1,4 @@
+use crate::common::run_fixture::DbRunFixture;
 use common::AgentFixture;
 use common::PluginStoreFixture;
 use common::StoreAgentFixture;
@@ -35,6 +36,8 @@ impl Fixture {
         common::managed_codex_home(&root.path().join("home"));
         let s = Service::new(cairn_installation::config::Config {
             runner_url: "http://unused-runner:4311".into(),
+            opencode_bin: common::fixture("opencode.mjs"),
+            opencode_go_usage_url: "http://127.0.0.1:1/usage".into(),
             ..common::config(root.path())
         })
         .await
@@ -71,11 +74,7 @@ impl Fixture {
         let config = self.s.mcps.run_configuration(&self.s, &run).await.unwrap();
         self.s
             .store
-            .set(
-                &format!("run-checkpoint:{run_id}"),
-                json!({ "completed": true, "launched": true }),
-                None,
-            )
+            .save_checkpoint_boundary(&run_id, json!({ "completed": true, "launched": true }))
             .await
             .unwrap();
         Turn {
@@ -179,7 +178,7 @@ async fn delegation_is_an_opt_in_agent_power() {
     let f = Fixture::new(true).await;
     let turn = f.conversation(MAIN_AGENT_ID).await;
     let tools = f.tools(&turn).await;
-    for tool in ["delegate_task", "task_status", "task_cancel"] {
+    for tool in ["delegate_task", "task_models", "task_status", "task_cancel"] {
         assert!(tools.contains(&tool.to_owned()), "{tool} is offered");
     }
     assert_eq!(
@@ -188,6 +187,133 @@ async fn delegation_is_an_opt_in_agent_power() {
     );
     let run = f.s.store.run(&turn.run).await.unwrap();
     assert_eq!(run["snapshot"]["delegation"], "requester");
+}
+
+#[tokio::test]
+async fn opencode_delegation_discovers_automatic_models_and_rejects_unconnected_routes() {
+    let f = Fixture::new(true).await;
+    let turn = f.conversation(MAIN_AGENT_ID).await;
+    f.s.accounts
+        .connect_api_key(
+            &f.s,
+            cairn_installation::provider::Provider::Opencode,
+            "Go",
+            "opencode-go",
+            "synthetic-delegation-go-key",
+            None,
+        )
+        .await
+        .unwrap();
+    let before = f.s.store.list("chats").await.unwrap().len();
+    for model in [
+        "opencode/ling-3.1-flash-free",
+        "auto/unknown-model",
+        "auto/retired-model",
+    ] {
+        let error = f
+            .delegate(
+                &turn,
+                json!({
+                    "task": "Review", "provider": "opencode", "model": model,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 400);
+        assert!(error.message.contains("task_models"), "{}", error.message);
+    }
+    assert_eq!(f.s.store.list("chats").await.unwrap().len(), before);
+
+    let response = project_workspaces::rpc(
+        &f.s,
+        &turn.token,
+        "tools/call",
+        &json!({ "name": "task_models", "arguments": { "provider": "opencode" } }),
+    )
+    .await
+    .unwrap();
+    assert_ne!(response["isError"], true, "{response}");
+    let catalog = &response["structuredContent"];
+    assert_eq!(catalog["models"][0]["model"], "auto/ling-3-1-flash-free");
+    assert!(!catalog.to_string().contains("synthetic-delegation-go-key"));
+
+    // An explicitly requested connection remains supported when it is connected.
+    let pinned = f
+        .delegate(
+            &turn,
+            json!({
+                "task": "Review through Go", "provider": "opencode",
+                "model": "opencode-go/ling-3.1-flash-free",
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pinned["model"], "opencode-go/ling-3.1-flash-free");
+
+    // Saved explicit routes may still use a deprecated model; only Auto skips it.
+    let retired = f
+        .delegate(
+            &turn,
+            json!({
+                "task": "Review through the saved model", "provider": "opencode",
+                "model": "opencode-go/retired-model",
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retired["model"], "opencode-go/retired-model");
+
+    let request = id();
+    let input = json!({
+        "task": "Review", "provider": "opencode",
+        "model": "auto/ling-3-1-flash-free", "requestId": request,
+    });
+    let delegated = f.delegate(&turn, input.clone()).await.unwrap();
+    assert_eq!(delegated["model"], "auto/ling-3-1-flash-free");
+    // A delivered request stays idempotent even when its connection is paused later.
+    let account =
+        f.s.accounts
+            .of(&f.s, cairn_installation::provider::Provider::Opencode)
+            .await
+            .unwrap()
+            .remove(0);
+    f.s.accounts
+        .update(&f.s, &account.id, &json!({ "enabled": false }))
+        .await
+        .unwrap();
+    let retried = f.delegate(&turn, input).await.unwrap();
+    assert_eq!(retried["chatId"], delegated["chatId"]);
+}
+
+#[tokio::test]
+async fn task_model_discovery_requires_live_delegation_access() {
+    let f = Fixture::new(false).await;
+    let turn = f.conversation(MAIN_AGENT_ID).await;
+    assert!(!f.tools(&turn).await.contains(&"task_models".to_owned()));
+    let response = project_workspaces::rpc(
+        &f.s,
+        &turn.token,
+        "tools/call",
+        &json!({
+            "name": "task_models", "arguments": { "provider": "opencode" },
+        }),
+    )
+    .await;
+    assert!(response.is_err() || response.unwrap()["isError"] == true);
+
+    let f = Fixture::new(true).await;
+    let turn = f.conversation(MAIN_AGENT_ID).await;
+    f.finish(&turn).await;
+    let response = project_workspaces::rpc(
+        &f.s,
+        &turn.token,
+        "tools/call",
+        &json!({
+            "name": "task_models", "arguments": { "provider": "opencode" },
+        }),
+    )
+    .await;
+    assert!(response.is_err() || response.unwrap()["isError"] == true);
 }
 
 #[tokio::test]
@@ -219,7 +345,7 @@ async fn a_delegated_conversation_remembers_its_requester_and_runs_on_the_chosen
     let run = turn.run.clone();
     let events =
         f.s.store
-            .read(move |db| db.events(&run, 0, 500))
+            .read(move |db| db.events_fixture(&run, 0, 500))
             .await
             .unwrap();
     let announced: Vec<_> = events
@@ -400,7 +526,7 @@ async fn omitted_engine_choices_are_recorded_before_the_task_starts() {
     assert_eq!(delegated["model"], "gpt-5.5");
     let events =
         f.s.store
-            .read(move |db| db.events(&turn.run, 0, 500))
+            .read(move |db| db.events_fixture(&turn.run, 0, 500))
             .await
             .unwrap();
     let announced = events

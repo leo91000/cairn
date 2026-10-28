@@ -200,12 +200,12 @@ pub struct Run {
     #[ts(optional = nullable)]
     pub dismissal: Option<serde_json::Value>,
     #[serde(default)]
-    #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "NodeResources"))]
+    #[schemars(with = "Option<crate::NodeResources>")]
     #[ts(optional = nullable)]
     #[ts(type = "import('../../nodes').NodeResources | null")]
     pub resources: Option<serde_json::Value>,
     #[serde(default)]
-    #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "NativeModeState"))]
+    #[schemars(with = "Option<crate::NativeModeRequest>")]
     #[ts(optional = nullable)]
     #[ts(type = "import('../../nodes').NativeModeRequest | null")]
     pub native_mode: Option<serde_json::Value>,
@@ -316,9 +316,9 @@ pub struct ReadRunContentInput {
 pub struct RunHistoryOutput {
     /// Existing byte-bounded preview; full metadata is read through read_run_content.
     pub run: RunMetadataPage,
-    /// Engine/event payloads are owned by A7, not the run-transition conversion.
-    #[ts(type = "Record<string, unknown>[]")]
-    pub events: Vec<serde_json::Value>,
+    pub events: Vec<RunEventPage>,
+    /// Retained-history revision for read_run_history windows.
+    pub history: String,
     #[ts(type = "number")]
     pub next_after: i64,
     pub has_more: bool,

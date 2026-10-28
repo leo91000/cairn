@@ -1,3 +1,4 @@
+use crate::common::run_fixture::DbRunFixture;
 use crate::common::run_fixture::RunFixture;
 use common::AgentFixture;
 use common::MissionFixture;
@@ -370,7 +371,7 @@ async fn delivered_message_retains_its_original_submission_timestamp() {
     let run_id = text(&run, "id").to_owned();
     let events = s
         .store
-        .read(move |db| db.events(&run_id, 0, 100))
+        .read(move |db| db.events_fixture(&run_id, 0, 100))
         .await
         .unwrap();
     let event = events.iter().find(|e| e["type"] == "chat.user").unwrap();
@@ -414,13 +415,14 @@ async fn builtin_mcp_endpoint_exposes_scoped_workspace_tools_and_checks_the_run_
         if method == "tools/list" {
             // Plugin tools such as 1Password's appear only for agents granted an instance.
             let tools = value["result"]["tools"].as_array().unwrap();
-            assert_eq!(tools.len(), 13);
+            assert_eq!(tools.len(), 14);
             assert!(
                 !tools
                     .iter()
                     .any(|tool| tool["name"] == "onepassword" || tool["name"] == "sleep")
             );
             for name in [
+                "ask_questions",
                 "wait_for",
                 "acquire_exclusive",
                 "release_exclusive",
@@ -486,6 +488,7 @@ async fn plan_turns_list_and_call_only_workspace_tools_without_effects() {
     assert_eq!(
         tool_names(&listing),
         [
+            "ask_questions",
             "exclusive_status",
             "list_nodes",
             "open_project",
@@ -524,13 +527,61 @@ async fn plan_turns_list_and_call_only_workspace_tools_without_effects() {
     .await;
     assert!(!pending.to_string().contains("plan turn"), "{pending}");
 
+    // A plan turn can ask the user; the answer continues the plan, never implementation.
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = text(&chat, "id").to_owned();
+    s.store.put("chats", chat).await.unwrap();
+    let ask = |request: &str| {
+        json!({
+            "name": "ask_questions",
+            "arguments": {
+                "requestId": request,
+                "questions": [{ "id": "scope", "title": "Which scope?", "options": [{ "id": "web", "label": "Web" }] }],
+            },
+        })
+    };
+    let answer = |question: &str| {
+        let (s, chat_id, question) = (s.clone(), chat_id.clone(), question.to_owned());
+        async move {
+            let id = id();
+            s.question_answer(
+                &chat_id,
+                &question,
+                json!({ "id": id, "answers": { "scope": { "selected": ["web"] } } }),
+            )
+            .await
+            .unwrap();
+            let detail = s.chat_detail(&chat_id).await.unwrap();
+            detail["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["id"] == id.as_str())
+                .unwrap()
+                .clone()
+        }
+    };
+    let asked = workspace_rpc(&s, &token, "tools/call", ask(&id().to_string())).await;
+    assert_ne!(asked["result"]["isError"], true, "{asked}");
+    let later = workspace_rpc(&s, &token, "tools/call", ask(&id().to_string())).await;
+    let during = answer(text(&asked["result"]["structuredContent"], "questionId")).await;
+    assert_eq!(during["plan"], true);
+    assert_eq!(during["mode"], "steer");
+    // Once a turn that can change files runs, the answer waits for its own plan turn.
+    let ordinary = json!({ "messageId": "ordinary-message", "text": "Implement" });
+    patch_run(&s, &run, json!({ "chatExecution": ordinary })).await;
+    let after = answer(text(&later["result"]["structuredContent"], "questionId")).await;
+    assert_eq!(after["plan"], true);
+    assert_eq!(after["mode"], "queue");
+
     // The next turn's grant offers the whole catalog again.
     let next = json!({ "messageId": "next-message", "text": "Implement", "afterPlan": true });
     patch_run(&s, &run, json!({ "chatExecution": next })).await;
     let run = s.store.run(text(&run, "id")).await.unwrap();
     let token = run_token(&s, &run).await;
     let listing = workspace_rpc(&s, &token, "tools/list", json!({})).await;
-    assert_eq!(tool_names(&listing).len(), 13);
+    assert_eq!(tool_names(&listing).len(), 14);
 }
 
 #[tokio::test]
@@ -1088,4 +1139,477 @@ async fn question_tools_only_withdraw_the_authorized_conversations_pending_quest
     .await;
     // Authorization errors can be returned as tool errors, never as question data.
     assert!(revoked.is_err() || revoked.unwrap()["isError"] == true);
+}
+
+#[tokio::test]
+async fn common_questionnaires_are_idempotent_and_keep_choices_distinct_from_comments() {
+    let (_root, s, _) = fixture().await;
+    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let bearer = running_run_token(&s, &run).await;
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = text(&chat, "id").to_owned();
+    s.store.put("chats", chat).await.unwrap();
+    let input = json!({
+        "requestId": id(),
+        "questions": [
+            {
+                "id": "platforms",
+                "title": "Which platforms?",
+                "mode": "multiple",
+                "minChoices": 2,
+                "maxChoices": 2,
+                "options": [
+                    {
+                        "id": "android",
+                        "label": "Android",
+                        "recommended": true,
+                    },
+                    {
+                        "id": "web",
+                        "label": "Web",
+                    },
+                ],
+            },
+        ],
+    });
+    let call = |args: Value| {
+        json!({
+            "name": "ask_questions",
+            "arguments": args,
+        })
+    };
+    let created = project_workspaces::rpc(&s, &bearer, "tools/call", &call(input.clone()))
+        .await
+        .unwrap();
+    assert_ne!(created["isError"], true, "{created}");
+    let question_id = text(&created["structuredContent"], "questionId");
+    assert!(!question_id.is_empty());
+    let repeated = project_workspaces::rpc(&s, &bearer, "tools/call", &call(input.clone()))
+        .await
+        .unwrap();
+    assert_eq!(repeated["structuredContent"]["questionId"], question_id);
+    assert_eq!(
+        s.chat_detail(&chat_id).await.unwrap()["questions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // A native session closing must not erase a common questionnaire.
+    s.question_release(text(&run, "id"), None).await.unwrap();
+    assert_eq!(
+        s.chat_detail(&chat_id).await.unwrap()["questions"][0]["status"],
+        "pending"
+    );
+    let invalid = json!({
+        "id": id(),
+        "answers": {
+            "platforms": {
+                "selected": [
+                    "android",
+                ],
+                "comment": "Android first",
+            },
+        },
+    });
+    assert!(
+        s.question_answer(&chat_id, question_id, invalid)
+            .await
+            .is_err()
+    );
+    let answer = json!({
+        "id": id(),
+        "answers": {
+            "platforms": {
+                "selected": [
+                    "android",
+                    "web",
+                ],
+                "comment": "Android first",
+            },
+        },
+    });
+    s.question_answer(&chat_id, question_id, answer.clone())
+        .await
+        .unwrap();
+    s.question_answer(&chat_id, question_id, answer)
+        .await
+        .unwrap();
+    let detail = s.chat_detail(&chat_id).await.unwrap();
+    assert_eq!(detail["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        detail["messages"][0]["answers"]["platforms"]["selected"],
+        json!(["android", "web",])
+    );
+    assert_eq!(
+        detail["messages"][0]["answers"]["platforms"]["comment"],
+        "Android first"
+    );
+    assert!(text(&detail["messages"][0], "text").contains("Android first"));
+}
+
+#[tokio::test]
+async fn common_questionnaires_validate_bounds_complete_groups_and_text_only_alternatives() {
+    let (_root, s, _) = fixture().await;
+    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let bearer = running_run_token(&s, &run).await;
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = text(&chat, "id").to_owned();
+    s.store.put("chats", chat).await.unwrap();
+    let input = json!({
+        "requestId": id(),
+        "questions": [
+            {
+                "id": "platforms",
+                "title": "Which platforms?",
+                "mode": "multiple",
+                "minChoices": 2,
+                "maxChoices": 2,
+                "options": [
+                    {
+                        "id": "android",
+                        "label": "Android",
+                    },
+                    {
+                        "id": "web",
+                        "label": "Web",
+                    },
+                    {
+                        "id": "desktop",
+                        "label": "Desktop",
+                    },
+                ],
+            },
+            {
+                "id": "note",
+                "title": "Next step?",
+            },
+        ],
+    });
+    let call = |args: Value| {
+        json!({
+            "name": "ask_questions",
+            "arguments": args,
+        })
+    };
+    for invalid in [
+        json!({
+            "mode": "single",
+            "maxChoices": 2,
+        }),
+        json!({
+            "minChoices": 3,
+            "maxChoices": 2,
+        }),
+        json!({
+            "maxChoices": 4,
+        }),
+        json!({
+            "options": [
+                {
+                    "id": "same",
+                    "label": "A",
+                },
+                {
+                    "id": "same",
+                    "label": "B",
+                },
+            ],
+        }),
+    ] {
+        let mut args = input.clone();
+        cairn_installation::store::merge(&mut args["questions"][0], &invalid);
+        let rejected = project_workspaces::rpc(&s, &bearer, "tools/call", &call(args))
+            .await
+            .unwrap();
+        assert_eq!(rejected["isError"], true, "{rejected}");
+    }
+    let created = project_workspaces::rpc(&s, &bearer, "tools/call", &call(input.clone()))
+        .await
+        .unwrap();
+    let question = text(&created["structuredContent"], "questionId");
+    let mut changed = input;
+    changed["questions"][0]["title"] = "Different content".into();
+    assert_eq!(
+        project_workspaces::rpc(&s, &bearer, "tools/call", &call(changed))
+            .await
+            .unwrap()["isError"],
+        true
+    );
+    for selected in [
+        json!(["android",]),
+        json!(["android", "android",]),
+        json!(["android", "missing",]),
+        json!(["android", "web", "desktop",]),
+    ] {
+        assert!(
+            s.question_answer(
+                &chat_id,
+                question,
+                json!({
+                    "id": id(),
+                    "answers": {
+                        "platforms": {
+                            "selected": selected,
+                            "comment": "A comment does not count as a choice",
+                        },
+                        "note": {
+                            "comment": "Next",
+                        },
+                    },
+                })
+            )
+            .await
+            .is_err()
+        );
+    }
+    for answers in [
+        json!({
+            "platforms": {
+                "comment": "Text only",
+            },
+        }),
+        json!({
+            "platforms": {
+                "comment": "Text only",
+            },
+            "note": {},
+        }),
+    ] {
+        assert!(
+            s.question_answer(
+                &chat_id,
+                question,
+                json!({
+                    "id": id(),
+                    "answers": answers,
+                })
+            )
+            .await
+            .is_err()
+        );
+    }
+    let answer = json!({
+        "id": id(),
+        "answers": {
+            "platforms": {
+                "comment": "  Another idea  ",
+            },
+            "note": {
+                "comment": "Next",
+            },
+        },
+    });
+    s.question_answer(&chat_id, question, answer.clone())
+        .await
+        .unwrap();
+    let detail = s.chat_detail(&chat_id).await.unwrap();
+    assert_eq!(
+        detail["messages"][0]["answers"]["platforms"],
+        json!({
+            "selected": [],
+            "comment": "Another idea",
+        })
+    );
+    assert!(
+        s.chat_edit(&chat_id, text(&answer, "id"), None)
+            .await
+            .is_err()
+    );
+    assert!(
+        s.chat_edit(
+            &chat_id,
+            text(&answer, "id"),
+            Some(json!({
+                "text": "Replacement",
+            }))
+        )
+        .await
+        .is_err()
+    );
+    let pending = json!({
+        "requestId": id(),
+        "questions": [
+            {
+                "id": "followup",
+                "title": "Anything else?",
+            },
+        ],
+    });
+    let pending = project_workspaces::rpc(&s, &bearer, "tools/call", &call(pending))
+        .await
+        .unwrap();
+    s.question_complete(text(&run, "id")).await.unwrap();
+    let detail = s.chat_detail(&chat_id).await.unwrap();
+    assert!(
+        detail["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|q| q["id"] == pending["structuredContent"]["questionId"]
+                && q["status"] == "cancelled")
+    );
+    assert_eq!(detail["messages"].as_array().unwrap().len(), 1);
+    patch_run(
+        &s,
+        &run,
+        json!({
+            "status": RunStatus::Succeeded,
+        }),
+    )
+    .await;
+    let revoked = project_workspaces::rpc(
+        &s,
+        &bearer,
+        "tools/call",
+        &call(json!({
+            "requestId": id(),
+            "questions": [
+                {
+                    "id": "q",
+                    "title": "Forbidden?",
+                },
+            ],
+        })),
+    )
+    .await;
+    assert!(revoked.is_err() || revoked.unwrap()["isError"] == true);
+}
+
+#[tokio::test]
+async fn valid_large_choice_answers_use_the_questionnaire_delivery_budget() {
+    let (_root, s, _) = fixture().await;
+    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let bearer = running_run_token(&s, &run).await;
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = text(&chat, "id").to_owned();
+    s.store.put("chats", chat).await.unwrap();
+    let options = (0..30)
+        .map(|i| {
+            json!({
+                "id": i.to_string(),
+                "label": "a".repeat(2000),
+            })
+        })
+        .collect::<Vec<_>>();
+    let field = json!({
+        "id": "choices",
+        "title": "Select the relevant choices",
+        "mode": "multiple",
+        "options": options,
+    });
+    let call = |questions: Value| {
+        json!({
+            "name": "ask_questions",
+            "arguments": {
+                "requestId": id(),
+                "questions": questions,
+            },
+        })
+    };
+    let created =
+        project_workspaces::rpc(&s, &bearer, "tools/call", &call(json!([field.clone(),])))
+            .await
+            .unwrap();
+    assert_ne!(created["isError"], true, "{created}");
+    s.question_answer(
+        &chat_id,
+        text(&created["structuredContent"], "questionId"),
+        json!({
+            "id": id(),
+            "answers": {
+                "choices": {
+                    "selected": (0..30).map(|i| i.to_string()).collect::<Vec<_>>(),
+                },
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    let detail = s.chat_detail(&chat_id).await.unwrap();
+    assert!(text(&detail["messages"][0], "text").len() > 50_000);
+    let mut other = field.clone();
+    other["id"] = "other".into();
+    let oversized =
+        project_workspaces::rpc(&s, &bearer, "tools/call", &call(json!([field, other,])))
+            .await
+            .unwrap();
+    assert_eq!(oversized["isError"], true, "{oversized}");
+}
+
+#[tokio::test]
+async fn concurrent_large_questionnaire_responses_are_delivered_in_bounded_batches() {
+    let (_root, s, _) = fixture().await;
+    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    running_run_token(&s, &run).await;
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = text(&chat, "id").to_owned();
+    s.store.put("chats", chat).await.unwrap();
+    let fields = (0..20)
+        .map(|i| {
+            json!({
+                "id": i.to_string(),
+                "title": "Details",
+            })
+        })
+        .collect::<Vec<_>>();
+    let answers = (0..20)
+        .map(|i| {
+            (
+                i.to_string(),
+                json!({
+                    "comment": "\0".repeat(10_000),
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    for digit in ["3", "4"] {
+        let question = digit.repeat(64);
+        s.question_receive(
+            text(&run, "id"),
+            json!({
+                "id": question,
+                "blocking": false,
+                "fields": fields,
+            }),
+        )
+        .await
+        .unwrap();
+        s.question_answer(
+            &chat_id,
+            &question,
+            json!({
+                "id": id(),
+                "answers": answers,
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    let inbox = s
+        .config
+        .data_dir
+        .join("runs")
+        .join(text(&run, "id"))
+        .join("chat-input/messages.json");
+    let mut received = Vec::new();
+    for _ in 0..2 {
+        s.chat_tick(&std::collections::HashSet::new())
+            .await
+            .unwrap();
+        let bytes = tokio::fs::read(&inbox).await.unwrap();
+        assert!(bytes.len() <= 2_000_000);
+        let messages: Vec<Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0]["answers"].is_null());
+        let message = text(&messages[0], "id");
+        assert!(!received.iter().any(|old| old == message));
+        received.push(message.to_owned());
+        s.chat_acknowledge(text(&run, "id"), message).await.unwrap();
+    }
+    assert_eq!(received.len(), 2);
 }

@@ -11,7 +11,10 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+
+pub const NATIVE_DENIED: &str =
+    "Native question tools are disabled. Use cairn_workspace.ask_questions to ask the user.";
 
 string_enum! {
     pub enum QuestionStatus {
@@ -24,15 +27,26 @@ string_enum! {
 
 /// One entry of the validated `questions` input schema.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QuestionField {
     pub id: String,
     pub title: String,
     #[serde(default)]
     pub secret: bool,
+    #[serde(default = "single_mode")]
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_choices: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_choices: Option<usize>,
     #[serde(default)]
     pub options: Vec<Value>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+fn single_mode() -> String {
+    "single".into()
 }
 
 /// A persisted question and its delivery state.
@@ -43,6 +57,8 @@ pub struct Question {
     pub chat_id: String,
     pub run_id: String,
     pub blocking: bool,
+    #[serde(default)]
+    pub source: String,
     pub status: QuestionStatus,
     pub fields: Vec<QuestionField>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -108,7 +124,82 @@ fn valid_question_id(id: &str) -> bool {
 #[derive(Deserialize)]
 struct AnswerInput {
     id: String,
-    answers: BTreeMap<String, Vec<String>>,
+    answers: BTreeMap<String, FieldAnswer>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct FieldAnswer {
+    #[serde(default)]
+    selected: Vec<String>,
+    #[serde(default)]
+    comment: String,
+}
+
+fn validate_fields(fields: &[QuestionField]) -> Result<()> {
+    // Together with 20 comments of at most 10,000 characters, this leaves room
+    // for JSON escaping within the adapter inbox's 2 MB delivery budget.
+    if serde_json::to_vec(fields)?.len() > 64 * 1024 {
+        return Err(Error::bad(
+            "Keep the complete questionnaire within 64 KiB of encoded JSON.",
+        ));
+    }
+    let mut ids = HashSet::new();
+    for field in fields {
+        let mut options = HashSet::new();
+        let unique = field
+            .options
+            .iter()
+            .all(|option| options.insert(text(option, "id")));
+        let minimum = field.min_choices.unwrap_or(1);
+        let maximum = field.max_choices.unwrap_or(if field.mode == "single" {
+            1
+        } else {
+            field.options.len()
+        });
+        let has_bounds = field.min_choices.is_some() || field.max_choices.is_some();
+        if !ids.insert(&field.id) || !unique {
+            return Err(Error::bad(
+                "Question and option identifiers must be unique.",
+            ));
+        }
+        if has_bounds
+            && (minimum > maximum
+                || maximum > field.options.len()
+                || (field.mode == "single" && maximum > 1))
+        {
+            return Err(Error::bad(
+                "Selection bounds must fit the mode and the available options.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_answer(field: &QuestionField, answer: &FieldAnswer) -> Result<()> {
+    if answer.selected.is_empty() {
+        if answer.comment.trim().is_empty() {
+            return Err(Error::bad("Answer each question before sending."));
+        }
+        return Ok(());
+    }
+    let mut selected = HashSet::new();
+    let known = answer.selected.iter().all(|id| {
+        selected.insert(id) && field.options.iter().any(|option| text(option, "id") == id)
+    });
+    let maximum = if field.mode == "single" {
+        1
+    } else {
+        field.max_choices.unwrap_or(field.options.len())
+    };
+    if !known
+        || answer.selected.len() < field.min_choices.unwrap_or(1)
+        || answer.selected.len() > maximum
+    {
+        return Err(Error::bad(
+            "Select distinct available options within the question's bounds, or answer using text only.",
+        ));
+    }
+    Ok(())
 }
 
 fn receive(db: &Db<'_>, mut question: Question) -> Result<()> {
@@ -128,11 +219,23 @@ fn receive(db: &Db<'_>, mut question: Question) -> Result<()> {
 }
 
 pub(super) fn release(db: &Db<'_>, run_id: &str, id: Option<&str>) -> Result<()> {
+    release_matching(db, run_id, id, false)
+}
+
+fn release_matching(
+    db: &Db<'_>,
+    run_id: &str,
+    id: Option<&str>,
+    include_common: bool,
+) -> Result<()> {
     let Some(chat) = chat_for_run(db, run_id)? else {
         return Ok(());
     };
     for mut question in questions(db, text(&chat, "id"))? {
-        if question.run_id != run_id || !id.is_none_or(|id| question.id == id) {
+        if question.run_id != run_id
+            || !id.is_none_or(|id| question.id == id)
+            || (!include_common && question.source == "cairn")
+        {
             continue;
         }
         let pending = question.status == QuestionStatus::Pending;
@@ -161,6 +264,83 @@ fn cancel(db: &Db<'_>, chat_id: &str, id: &str) -> Result<Question> {
     question.blocking = false;
     save_question(db, &question)?;
     Ok(question)
+}
+
+pub fn ask_tool() -> Value {
+    json!({
+        "name": "ask_questions",
+        "description": "Ask the user a questionnaire in this conversation. Returns immediately with questionId; answers arrive later as a user message with separate selected options and comment. Reuse requestId only when retrying the same questionnaire. Choose single or multiple selection per question, optional bounds and recommended options (never preselected). Free text is always available. Keep the complete questionnaire within 64 KiB of encoded JSON. Continue independent work or report needs_input and end the turn when a reply is required. Use this tool instead of native question tools.",
+        "inputSchema": crate::validation::input_schema("askQuestions"),
+    })
+}
+
+pub async fn ask(s: &Service, bearer: &str, input: Value) -> Result<Value> {
+    let input = parse("askQuestions", input)?;
+    let fields = parse_as::<Vec<QuestionField>>("questions", input["questions"].clone())?;
+    validate_fields(&fields)?;
+    let bearer = bearer.to_owned();
+    let result = s
+        .store
+        .transaction(move |db| {
+            let run = crate::project_workspaces::authorize_in(db, &bearer)?;
+            let run_id = text(&run, "id");
+            let chat = required(chat_for_run(db, run_id)?, "This run has no conversation.")?;
+            crate::conversation_lifecycle::require_active(&chat)?;
+            let chat_id = text(&chat, "id");
+            let id = crate::auth::hex_digest(&format!("{chat_id}:{}", text(&input, "requestId")));
+            if let Some(existing) = find_question(db, chat_id, &id)? {
+                if serde_json::to_value(&existing.fields)? != serde_json::to_value(&fields)? {
+                    return Err(Error::conflict(
+                        "This requestId has already been used for different questions.",
+                    ));
+                }
+                return Ok(json!({ "questionId": id, "status": existing.status }));
+            }
+            // Answering a plan turn's question continues the plan, never implementation.
+            let mut extra = Map::new();
+            if crate::chats::planning(&run) {
+                extra.insert("plan".into(), true.into());
+            }
+            receive(
+                db,
+                Question {
+                    id: id.clone(),
+                    chat_id: chat_id.to_owned(),
+                    run_id: run_id.to_owned(),
+                    blocking: false,
+                    source: "cairn".into(),
+                    status: QuestionStatus::Pending,
+                    fields,
+                    created_at: Some(now()),
+                    message_id: None,
+                    extra,
+                },
+            )?;
+            Ok(json!({ "questionId": id, "status": "pending" }))
+        })
+        .await?;
+    s.worker.notify();
+    Ok(result)
+}
+
+/// Retire pre-Cairn questionnaires without rewriting historical user messages.
+pub(crate) async fn retire_native(s: &Service) -> Result<()> {
+    s.store
+        .transaction(|db| {
+            for (key, mut question) in db.keys_as::<Value>("chat-question:")? {
+                if question["source"] != "cairn"
+                    && (question["status"] == "pending" || question["blocking"] == true)
+                {
+                    if question["status"] == "pending" {
+                        question["status"] = "cancelled".into();
+                    }
+                    question["blocking"] = false.into();
+                    db.set(&key, &question, None)?;
+                }
+            }
+            Ok(())
+        })
+        .await
 }
 
 pub fn list_tool() -> Value {
@@ -237,12 +417,38 @@ pub async fn for_agent(s: &Service, bearer: &str, input: Option<&Value>) -> Resu
     Ok(result)
 }
 
-fn answer_text(fields: &[QuestionField], answers: &BTreeMap<String, Vec<String>>) -> String {
+fn answer_text(fields: &[QuestionField], answers: &BTreeMap<String, FieldAnswer>) -> String {
     let parts = fields
         .iter()
-        .map(|field| format!("{}\n{}", field.title, answers[&field.id].join("\n")))
+        .map(|field| {
+            let answer = &answers[&field.id];
+            let choices = answer
+                .selected
+                .iter()
+                .map(|id| {
+                    let option = field
+                        .options
+                        .iter()
+                        .find(|option| text(option, "id") == id)
+                        .expect("validated option");
+                    json!({
+                        "id": id,
+                        "label": option["label"],
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "questionId": field.id,
+                "question": field.title,
+                "selected": choices,
+                "comment": answer.comment,
+            })
+        })
         .collect::<Vec<_>>();
-    format!("My answers to your questions:\n\n{}", parts.join("\n\n"))
+    format!(
+        "My answers to your questions:\n\n{}",
+        serde_json::to_string_pretty(&parts).expect("serializable answers")
+    )
 }
 
 fn answer(
@@ -274,14 +480,32 @@ fn answer(
     if !complete {
         return Err(Error::bad("Answer each question before sending."));
     }
-    let message = parse(
+    for field in &question.fields {
+        validate_answer(field, &input.answers[&field.id])?;
+    }
+    // The answer to a plan turn's question is a plan request: it joins a running plan
+    // turn, and otherwise waits for its own rather than joining a turn that can write.
+    let plan = question.extra.get("plan") == Some(&Value::Bool(true));
+    let joins_plan = db
+        .run(text(&chat(db, chat_id)?, "runId"))?
+        .is_some_and(|run| super::planning(&run) && super::run_is_active(&run));
+    let mode = if plan && !joins_plan {
+        "queue"
+    } else {
+        "steer"
+    };
+    let mut message = parse(
         "message",
         json!({
             "id": input.id,
-            "mode": "steer",
-            "text": answer_text(&question.fields, &input.answers),
+            "mode": mode,
+            "text": "Questionnaire response",
+            "plan": plan,
         }),
     )?;
+    // This generated text is bounded by the questionnaire and answer contracts,
+    // independently of the 50,000-character ordinary chat-composer limit.
+    message["text"] = answer_text(&question.fields, &input.answers).into();
     send(db, chat_id, message, Some((question, answers)), origin)?;
     required(find_question(db, chat_id, id)?, "Question not found")
 }
@@ -299,11 +523,13 @@ impl Service {
         else {
             return Ok(());
         };
+        validate_fields(&fields)?;
         let question = Question {
             id: id.to_owned(),
             chat_id: String::new(),
             run_id: run_id.to_owned(),
             blocking,
+            source: "cairn".into(),
             status: QuestionStatus::Pending,
             fields,
             created_at: Some(now()),
@@ -312,6 +538,13 @@ impl Service {
         };
         self.store
             .transaction(move |db| receive(db, question))
+            .await
+    }
+
+    pub async fn question_complete(&self, run_id: &str) -> Result<()> {
+        let run_id = run_id.to_owned();
+        self.store
+            .transaction(move |db| release_matching(db, &run_id, None, true))
             .await
     }
 

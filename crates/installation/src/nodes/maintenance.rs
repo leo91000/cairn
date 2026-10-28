@@ -11,6 +11,7 @@ use axum::{
     extract::{Request, State},
     response::Response,
 };
+use cairn_contracts::EventKind;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -117,7 +118,7 @@ async fn advertise(s: &Service) -> Result<String> {
 
 pub async fn request(s: &Service, node: &str, input: &Value) -> Result<Value> {
     match text(input, "action") {
-        "status" => s.get("nodes", node).await,
+        "status" => s.node_boundary(node).await,
         "complete" => complete(s, node, input).await,
         "drain" => start_drain(s, node).await,
         _ => Err(Error::bad("Invalid maintenance action.")),
@@ -133,14 +134,13 @@ async fn complete(s: &Service, node: &str, input: &Value) -> Result<Value> {
     s.store
         .transaction(move |db| {
             let mut record = db
-                .get("nodes", &node)?
+                .node_boundary(&node)?
                 .ok_or_else(|| Error::not_found("Node removed."))?;
             record["maintenance"] = Value::Null;
             record["maintenanceGeneration"] = Value::Null;
             record["imageDigest"] = image.into();
             record["updateError"] = error.into();
-            record["updatedAt"] = crate::config::now().into();
-            db.put("nodes", &record)?;
+            db.save_node_boundary(&record)?;
             Ok(record)
         })
         .await
@@ -150,7 +150,7 @@ async fn complete(s: &Service, node: &str, input: &Value) -> Result<Value> {
 async fn start_drain(s: &Service, node: &str) -> Result<Value> {
     let node = node.to_owned();
     if !s.node_maintenance_tasks.lock().await.insert(node.clone()) {
-        return s.get("nodes", &node).await;
+        return s.node_boundary(&node).await;
     }
     let timeout = super::publication::settings(s).await?["shutdownTimeoutSeconds"]
         .as_u64()
@@ -163,12 +163,12 @@ async fn start_drain(s: &Service, node: &str) -> Result<Value> {
         s.store
             .transaction(move |db| {
                 let mut record = db
-                    .get("nodes", &id)?
+                    .node_boundary(&id)?
                     .ok_or_else(|| Error::not_found("Node removed."))?;
                 record["maintenance"] = serde_json::to_value(Maintenance::Draining)?;
                 record["maintenanceGeneration"] = generation.into();
                 record["maintenanceStartedAt"] = crate::config::now().into();
-                db.put("nodes", &record)?;
+                db.save_node_boundary(&record)?;
                 Ok(())
             })
             .await
@@ -202,12 +202,12 @@ async fn finish_drain(s: &Service, node: &str, generation: String, error: Value)
     let node = node.to_owned();
     s.store
         .transaction(move |db| {
-            if let Some(mut record) = db.get("nodes", &node)?
+            if let Some(mut record) = db.node_boundary(&node)?
                 && record["maintenanceGeneration"] == generation
             {
                 record["maintenance"] = serde_json::to_value(Maintenance::ReadyToUpdate)?;
                 record["maintenanceError"] = error;
-                db.put("nodes", &record)?;
+                db.save_node_boundary(&record)?;
             }
             Ok(())
         })
@@ -240,7 +240,7 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
         s.store
             .event(
                 run_id,
-                "status",
+                &EventKind::Status,
                 "Node maintenance: pausing and saving the environment before restart.",
                 None,
             )

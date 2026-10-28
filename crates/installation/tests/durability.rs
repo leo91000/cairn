@@ -1,4 +1,5 @@
 use crate::common::run_fixture::DbRunFixture;
+use cairn_contracts::EventKind;
 use common::AgentFixture;
 use common::MissionFixture;
 use common::ProjectFixture;
@@ -67,16 +68,16 @@ async fn restart_restores_missing_chat_summaries_once_without_repeating_existing
                         "type": "item.completed",
                         "item": { "id": "existing", "type": "agent_message", "text": format!("{COMPLETE}\n") },
                     });
-                    db.event(run_id, "item.completed", COMPLETE, Some(&existing))?;
+                    db.event(run_id, &EventKind::ItemCompleted, COMPLETE, Some(&existing))?;
                 }
                 if index == 5 {
                     let longer = json!({
                         "item": { "type": "agent_message", "text": "x".repeat(100_001) },
                     });
-                    db.event(run_id, "item.completed", "", Some(&longer))?;
+                    db.event(run_id, &EventKind::ItemCompleted, "", Some(&longer))?;
                 }
                 if index == 2 {
-                    db.event(run_id, "chat.user", "Check again", None)?;
+                    db.event(run_id, &EventKind::ChatUser, "Check again", None)?;
                 }
             }
             Ok(())
@@ -90,7 +91,7 @@ async fn restart_restores_missing_chat_summaries_once_without_repeating_existing
             let run_id = run_id.clone();
             let events = restarted
                 .store
-                .read(move |db| db.events(&run_id, 0, 100))
+                .read(move |db| db.events_fixture(&run_id, 0, 100))
                 .await
                 .unwrap();
             let answers = events
@@ -450,7 +451,7 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id, question["id"].as_str().unwrap());
     let question_id = question["id"].as_str().unwrap();
-    let answer = json!({ "id": id(), "answers": { "choice": ["A private answer"] } });
+    let answer = json!({ "id": id(), "answers": { "choice": { "selected": [], "comment": "A private answer" } } });
     let (a, b) = tokio::join!(
         service.question_answer(chat_id, question_id, answer.clone()),
         service.question_answer(chat_id, question_id, answer.clone())
@@ -486,7 +487,7 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
         .unwrap();
     let events = reopened
         .store
-        .read(move |db| db.events(&run_id, 0, 100))
+        .read(move |db| db.events_fixture(&run_id, 0, 100))
         .await
         .unwrap();
     assert_eq!(events.len(), 1);
@@ -495,4 +496,59 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
         reopened.chat_detail(chat_id).await.unwrap()["questions"][0]["status"],
         "answered"
     );
+}
+
+#[tokio::test]
+async fn old_pending_questions_are_retired_without_rewriting_historical_answers() {
+    let root = TempDir::new().unwrap();
+    let config = config(&root);
+    let s = Service::new(config.clone()).await.unwrap();
+    let chat = s.chat_create(json!({})).await.unwrap();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    let historical = json!({
+        "id": id(),
+        "chatId": chat_id,
+        "text": "My historical response",
+        "status": "delivered",
+        "createdAt": now(),
+    });
+    let original = historical.clone();
+    let key = format!("chat-question:{chat_id}:{}", "a".repeat(64));
+    s.store
+        .transaction(move |db| {
+            db.put_message(&historical)?;
+            db.set(
+                &key,
+                &json!({
+                    "id": "a".repeat(64),
+                    "chatId": chat_id,
+                    "runId": "old-run",
+                    "blocking": true,
+                    "status": "pending",
+                    "createdAt": now(),
+                    "fields": [
+                        {
+                            "id": "scope",
+                            "title": "An old question",
+                            "options": [
+                                {
+                                    "label": "Old option",
+                                },
+                            ],
+                        },
+                    ],
+                }),
+                None,
+            )
+        })
+        .await
+        .unwrap();
+    let reopened = Service::new(config).await.unwrap();
+    let detail = reopened
+        .chat_detail(original["chatId"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(detail["questions"][0]["status"], "cancelled");
+    assert_eq!(detail["questions"][0]["blocking"], false);
+    assert_eq!(detail["messages"][0]["text"], "My historical response");
 }

@@ -26,7 +26,8 @@ fn stored_manifest(directory: &Path, timeout: std::time::Duration) -> io::Result
 
 impl LazyDisk {
     /// Bootstrap only needs geometry when no resize/recovery is pending. The
-    /// subsequent mounted Volume still performs the complete integrity scan.
+    /// subsequent mounted Volume validates the journal headers during recovery
+    /// and authenticates each payload when it is read.
     pub(crate) fn geometry(directory: &Path) -> io::Result<u64> {
         let manifest = stored_manifest(directory, std::time::Duration::from_secs(5))?;
         Ok(manifest["size"].as_u64().unwrap())
@@ -87,7 +88,7 @@ impl LazyDisk {
 
     /// Private controller context, never included in exported recovery manifests.
     pub fn set_context(&self, value: &Value) -> io::Result<()> {
-        let policy = super::super::policy::Policy::for_node(&value["policy"]).map_err(failure)?;
+        let policy = crate::storage::policy::for_node(&value["policy"]).map_err(failure)?;
         self.memory_budget(policy.memory_cache_mi_b as usize * 1024 * 1024)?;
         let encoded = encode_context(value)?;
         self.db

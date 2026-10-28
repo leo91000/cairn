@@ -1,6 +1,8 @@
+use crate::common::run_fixture::DbRunFixture;
 use common::AgentFixture;
 use common::MissionFixture;
 use common::StoreAgentFixture;
+use common::node_fixture::*;
 
 mod common;
 
@@ -202,7 +204,7 @@ impl Fixture {
     async fn checkpoint(&self, run: &str) -> Value {
         self.service
             .store
-            .kv(&format!("run-checkpoint:{run}"))
+            .checkpoint_boundary(run)
             .await
             .unwrap()
             .unwrap()
@@ -560,7 +562,7 @@ async fn agent_failure_without_a_message_keeps_its_code_for_the_retry() {
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 1000))
+        .read(move |db| db.events_fixture(&id, 0, 1000))
         .await
         .unwrap();
     let failures = events
@@ -631,7 +633,7 @@ async fn agent_retries_stop_after_five_attempts_or_when_the_error_becomes_termin
         let events = fixture
             .service
             .store
-            .read(move |db| db.events(&id, 0, 1000))
+            .read(move |db| db.events_fixture(&id, 0, 1000))
             .await
             .unwrap();
         let failures = events
@@ -679,7 +681,7 @@ async fn cancellation_during_retry_wait_does_not_launch_another_agent() {
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 1000))
+        .read(move |db| db.events_fixture(&id, 0, 1000))
         .await
         .unwrap();
     let after_retry = events
@@ -885,7 +887,7 @@ async fn verbose_tools_do_not_hide_chat_answers_or_failures() {
             .store
             .read(move |db| {
                 Ok((
-                    db.events(&run_id, 0, 500)?,
+                    db.events_fixture(&run_id, 0, 500)?,
                     serde_json::to_value(db.events_before(&run_id, i64::MAX)?.0)?,
                 ))
             })
@@ -1157,7 +1159,7 @@ async fn native_worker_records_artifacts_and_completes_task() {
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 500))
+        .read(move |db| db.events_fixture(&id, 0, 500))
         .await
         .unwrap();
     assert!(events.iter().any(|e| e["payload"].is_object()));
@@ -1238,6 +1240,49 @@ async fn abrupt_restart_fences_previous_process_and_resumes_workspace() {
         fixture.checkpoint(id).await.get("remainingMs"),
         Some(&Value::Null)
     );
+    fixture.stop(false).await;
+}
+
+#[tokio::test]
+async fn automatic_shared_process_turns_do_not_acquire_a_managed_node_owner() {
+    let mut fixture = Fixture::new().await;
+    let s = fixture.service.clone();
+    s.agent_fixture(
+        json!({ "access": { "backend": "auto" } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let chat = fixture.start_chat(message("First automatic message")).await;
+    let run = fixture.chat_run(&chat).await;
+    let first = fixture.until_finished(&run).await;
+    assert_eq!(first["status"], RunStatus::Succeeded, "{first}");
+    assert_eq!(
+        first["snapshot"]["agent"]["access"]["backend"],
+        "firecracker"
+    );
+    let checkpoint = fixture.checkpoint(&run).await;
+    assert!(checkpoint["nodeId"].is_null(), "{checkpoint}");
+    assert!(checkpoint["runnerId"].is_null(), "{checkpoint}");
+    assert!(s.store.list("node-volumes").await.unwrap().is_empty());
+    assert!(
+        s.store
+            .list("node-attempts")
+            .await
+            .unwrap()
+            .iter()
+            .all(|attempt| attempt["released"] == true)
+    );
+    s.chat_send(&chat, message("Second automatic message"))
+        .await
+        .unwrap();
+    let second = fixture
+        .until(&run, |r| {
+            r["status"] == RunStatus::Succeeded && r["resumeCount"] == 1
+        })
+        .await;
+    assert_eq!(second["sessionId"], first["sessionId"]);
+    assert_eq!(second["workspace"], first["workspace"]);
     fixture.stop(false).await;
 }
 
@@ -1349,7 +1394,7 @@ async fn sleeping_chat_survives_worker_restart_and_releases_capacity_before_waki
     let run_id = run.clone();
     let events = s
         .store
-        .read(move |db| db.events(&run_id, 0, 100))
+        .read(move |db| db.events_fixture(&run_id, 0, 100))
         .await
         .unwrap();
     let wake_event = events
@@ -1484,7 +1529,7 @@ async fn waiting_mission_survives_restart_and_releases_capacity_without_finishin
     let id = run_id.to_owned();
     let events = s
         .store
-        .read(move |db| db.events(&id, 0, 300))
+        .read(move |db| db.events_fixture(&id, 0, 300))
         .await
         .unwrap();
     assert_eq!(
@@ -1668,7 +1713,7 @@ async fn condition_wait_yields_the_only_slot_to_its_dependency_and_resumes_the_s
     let run_id = run.clone();
     let events = s
         .store
-        .read(move |db| db.events(&run_id, 0, 100))
+        .read(move |db| db.events_fixture(&run_id, 0, 100))
         .await
         .unwrap();
     assert_eq!(
@@ -1916,12 +1961,12 @@ async fn node_slots_exceed_manager_concurrency_without_overpreparing_the_queue()
     let mut node = fixture
         .service
         .store
-        .get("nodes", LOCAL_NODE_ID)
+        .node_boundary(LOCAL_NODE_ID)
         .await
         .unwrap()
         .unwrap();
     node["slots"] = 12.into();
-    fixture.service.store.put("nodes", node).await.unwrap();
+    fixture.service.store.put_node_fixture(node).await.unwrap();
     let mut runs = Vec::new();
     for _ in 0..13 {
         runs.push(fixture.enqueue("Inspect the VM fixture").await);
@@ -2159,20 +2204,20 @@ async fn refused_local_budget_keeps_presence_and_exposes_the_reason() {
     let mut node = fixture
         .service
         .store
-        .get("nodes", LOCAL_NODE_ID)
+        .node_boundary(LOCAL_NODE_ID)
         .await
         .unwrap()
         .unwrap();
     node["limits"]["memoryMiB"] = 256.into();
     node["lastSeen"] = 0.into();
-    fixture.service.store.put("nodes", node).await.unwrap();
+    fixture.service.store.put_node_fixture(node).await.unwrap();
     cairn_installation::nodes::refresh_local(&fixture.service)
         .await
         .unwrap();
     let node = fixture
         .service
         .store
-        .get("nodes", LOCAL_NODE_ID)
+        .node_boundary(LOCAL_NODE_ID)
         .await
         .unwrap()
         .unwrap();
@@ -2182,14 +2227,19 @@ async fn refused_local_budget_keeps_presence_and_exposes_the_reason() {
     assert!(text(&node, "budgetError").contains("below current usage"));
     let mut restored = node;
     restored["limits"]["memoryMiB"] = 15872.into();
-    fixture.service.store.put("nodes", restored).await.unwrap();
+    fixture
+        .service
+        .store
+        .put_node_fixture(restored)
+        .await
+        .unwrap();
     cairn_installation::nodes::refresh_local(&fixture.service)
         .await
         .unwrap();
     let node = fixture
         .service
         .store
-        .get("nodes", LOCAL_NODE_ID)
+        .node_boundary(LOCAL_NODE_ID)
         .await
         .unwrap()
         .unwrap();
@@ -2346,7 +2396,7 @@ async fn controller_capacity_rejection_waits_and_retries_without_an_agent_sessio
             let mut saved = fixture.checkpoint(run_id).await;
             saved["capacityRetryAt"] = (cairn_installation::config::now() - 1).into();
             s.store
-                .set(&format!("run-checkpoint:{run_id}"), saved, None)
+                .save_checkpoint_boundary(run_id, saved)
                 .await
                 .unwrap();
             let previous = rejections.load(Ordering::SeqCst);
@@ -2366,7 +2416,7 @@ async fn controller_capacity_rejection_waits_and_retries_without_an_agent_sessio
         let mut saved = fixture.checkpoint(run_id).await;
         saved["capacityRetryAt"] = (cairn_installation::config::now() - 1).into();
         s.store
-            .set(&format!("run-checkpoint:{run_id}"), saved, None)
+            .save_checkpoint_boundary(run_id, saved)
             .await
             .unwrap();
         busy.store(false, Ordering::SeqCst);
@@ -2496,7 +2546,7 @@ async fn failed_provider_startup_can_retry_without_replaying_an_uncertain_launch
             let id = run_id.clone();
             let events = s
                 .store
-                .read(move |db| db.events(&id, 0, 500))
+                .read(move |db| db.events_fixture(&id, 0, 500))
                 .await
                 .unwrap();
             assert!(events.iter().any(|event| {
@@ -2727,8 +2777,8 @@ async fn claude_conversations_run_together_and_lowering_limit_does_not_cancel_th
     let mut chats = Vec::new();
     let mut runs = Vec::new();
     for prompt in [
-        "fixture:question",
-        "fixture:question",
+        "fixture:batch",
+        "fixture:batch",
         "Complete third conversation",
     ] {
         let mut sent = message(prompt);
@@ -2745,20 +2795,7 @@ async fn claude_conversations_run_together_and_lowering_limit_does_not_cancel_th
             })
             .await;
     }
-    // Both real fixture subprocesses have received their prompts and are waiting on separate questions.
-    eventually(
-        Duration::from_secs(10),
-        Duration::from_millis(30),
-        async || {
-            for chat in &chats[..2] {
-                if s.chat_detail(chat).await.unwrap()["pendingQuestions"] != 1 {
-                    return None;
-                }
-            }
-            Some(())
-        },
-    )
-    .await;
+    // Both real fixture subprocesses hold independent turns.
     for run in &runs[..2] {
         let credentials = std::fs::read_to_string(
             fixture
@@ -2780,17 +2817,9 @@ async fn claude_conversations_run_together_and_lowering_limit_does_not_cancel_th
         );
     }
     let answer = async |chat: &str| {
-        let question = s.chat_detail(chat).await.unwrap()["questions"][0]["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        s.question_answer(
-            chat,
-            &question,
-            json!({ "id": id(), "answers": { "0": ["Small change"] } }),
-        )
-        .await
-        .unwrap();
+        let mut sent = message("fixture:batch Finish the independent work");
+        sent["mode"] = "steer".into();
+        s.chat_send(chat, sent).await.unwrap();
     };
     answer(&chats[0]).await;
     fixture
@@ -2854,7 +2883,7 @@ async fn unlimited_runs_cancel_and_resume_without_creating_a_deadline() {
             let id = id.to_owned();
             let events = s
                 .store
-                .read(move |db| db.events(&id, 0, 1000))
+                .read(move |db| db.events_fixture(&id, 0, 1000))
                 .await
                 .unwrap();
             events
@@ -3012,7 +3041,7 @@ async fn queued_work_waits_for_node_capacity_without_failing() {
             "pressure": "memory"
         })
     };
-    s.store.put("nodes", put_node("Laptop")).await.unwrap();
+    s.store.put_node_fixture(put_node("Laptop")).await.unwrap();
     let mut agent = s
         .agent_snapshot(cairn_installation::config::MAIN_AGENT_ID)
         .await
@@ -3040,7 +3069,7 @@ async fn queued_work_waits_for_node_capacity_without_failing() {
     );
     assert_eq!(waiting["status"], "queued");
     // New figures replace the reason without repeating the status event.
-    s.store.put("nodes", put_node("Desk")).await.unwrap();
+    s.store.put_node_fixture(put_node("Desk")).await.unwrap();
     let updated = fixture
         .until(run_id, |r| {
             text(r, "accountWaitReason").contains("Desk has")
@@ -3050,7 +3079,7 @@ async fn queued_work_waits_for_node_capacity_without_failing() {
     let id = run_id.to_owned();
     let events = s
         .store
-        .read(move |db| db.events(&id, 0, 500))
+        .read(move |db| db.events_fixture(&id, 0, 500))
         .await
         .unwrap();
     let waits = events

@@ -14,14 +14,17 @@ class EngineStatusTest {
     private fun event(type: String, body: JsonObjectBuilder.() -> Unit = {}): RunEvent {
         val id = ++serial
         return RunEvent(
-            id,
-            id * 1000,
-            type,
-            "",
-            buildJsonObject {
-                put("type", type)
-                body()
-            },
+            id = id,
+            createdAt = id * 1000,
+            type = type,
+            text = "",
+            payload =
+                kotlinx.serialization.json.JsonObject(
+                    buildJsonObject {
+                        put("type", type)
+                        body()
+                    }
+                ),
             runId = "run",
         )
     }
@@ -301,20 +304,23 @@ class EngineStatusTest {
         val resetsAt = 1_893_499_200_000L
         val failed =
             RunEvent(
-                1,
-                1,
-                "turn.failed",
-                "",
-                buildJsonObject {
-                    put(
-                        "error",
+                id = 1,
+                createdAt = 1,
+                type = "turn.failed",
+                text = "",
+                payload =
+                    kotlinx.serialization.json.JsonObject(
                         buildJsonObject {
-                            put("message", "Your usage allowance is used up for now.")
-                            put("code", "usage_limit_reached")
-                            put("resetsAt", resetsAt)
-                        },
-                    )
-                },
+                            put(
+                                "error",
+                                buildJsonObject {
+                                    put("message", "Your usage allowance is used up for now.")
+                                    put("code", "usage_limit_reached")
+                                    put("resetsAt", resetsAt)
+                                },
+                            )
+                        }
+                    ),
                 runId = "run",
             )
         val run =
@@ -358,22 +364,25 @@ class EngineStatusTest {
         // The runner repeats the failure without its reset, in wording the banner recognizes.
         fun failure(id: Long, message: String, reset: Long? = null) =
             RunEvent(
-                id,
-                id,
-                "turn.failed",
-                "",
-                buildJsonObject {
-                    put(
-                        "error",
+                id = id,
+                createdAt = id,
+                type = "turn.failed",
+                text = "",
+                payload =
+                    kotlinx.serialization.json.JsonObject(
                         buildJsonObject {
-                            put("message", message)
-                            if (reset != null) {
-                                put("code", "usage_limit_reached")
-                                put("resetsAt", reset)
-                            }
-                        },
-                    )
-                },
+                            put(
+                                "error",
+                                buildJsonObject {
+                                    put("message", message)
+                                    if (reset != null) {
+                                        put("code", "usage_limit_reached")
+                                        put("resetsAt", reset)
+                                    }
+                                },
+                            )
+                        }
+                    ),
                 runId = "run",
             )
         val known = "Claude AI usage limit reached"

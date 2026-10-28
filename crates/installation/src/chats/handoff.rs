@@ -1,5 +1,7 @@
 //! Prompt text sent to a native agent session for a chat turn.
 use crate::{error::Result, store::Db, validation::text};
+#[cfg(test)]
+use cairn_contracts::EventKind;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
 
@@ -217,14 +219,14 @@ mod tests {
         let attachment = json!({ "attachments": [{ "id": "file", "name": "brief.pdf" }] });
         db.event(
             "run",
-            "chat.user",
+            &EventKind::ChatUser,
             "Keep the existing design",
             Some(&attachment),
         )
         .unwrap();
         db.event(
             "run",
-            "item.updated",
+            &EventKind::ItemUpdated,
             "partial",
             Some(&agent_message("reply", "partial")),
         )
@@ -232,7 +234,7 @@ mod tests {
         for _ in 0..2 {
             db.event(
                 "run",
-                "item.completed",
+                &EventKind::ItemCompleted,
                 "",
                 Some(&agent_message("reply", "Changes committed")),
             )
@@ -240,7 +242,7 @@ mod tests {
         }
         db.event(
             "run",
-            "chat.user",
+            &EventKind::ChatUser,
             "Answered a private question.",
             Some(&json!({ "text": "private-answer-must-not-be-forwarded" })),
         )
@@ -252,7 +254,7 @@ mod tests {
                 "aggregated_output": "tool-secret",
             },
         });
-        db.event("run", "item.completed", "tool-secret", Some(&tool))
+        db.event("run", &EventKind::ItemCompleted, "tool-secret", Some(&tool))
             .unwrap();
         let history = handoff_context(&db, "run").unwrap();
         assert!(history.contains("Keep the existing design"));
@@ -292,10 +294,11 @@ mod tests {
         connection.execute_batch(EVENTS).unwrap();
         connection.execute_batch(crate::runs::SCHEMA).unwrap();
         let db = Db(&connection);
-        db.event("run", "chat.user", "Original scope", None)
+        db.event("run", &EventKind::ChatUser, "Original scope", None)
             .unwrap();
         let huge = agent_message("huge", &format!("{}Recent decision", "é".repeat(150_000)));
-        db.event("run", "item.completed", "", Some(&huge)).unwrap();
+        db.event("run", &EventKind::ItemCompleted, "", Some(&huge))
+            .unwrap();
         let history = handoff_context(&db, "run").unwrap();
         assert!(history.contains("Original scope"));
         assert!(history.contains("Recent decision"));

@@ -48,7 +48,13 @@ export const sandboxOptions = [
  * The execution modes as they apply to the agent's backend: a native process runs under a managed
  * account on the host, without sudo or Docker (see docs/NATIVE-NODES.md).
  */
-export function sandboxOptionsFor(backend: 'firecracker' | 'native') {
+export function sandboxOptionsFor(backend: Backend) {
+  if (backend === 'auto') {
+    return sandboxOptions.map(option => option.value === 'yolo'
+      ? { ...option, description: 'Privileges follow the selected node: private VM or trusted native host.' }
+      : option)
+  }
+
   if (backend !== 'native')
     return sandboxOptions
   return sandboxOptions.map(option => option.value === 'yolo'
@@ -57,7 +63,9 @@ export function sandboxOptionsFor(backend: 'firecracker' | 'native') {
 }
 
 /** Where the agent's conversations run, for the execution mode section. */
-export function isolationNote(backend: 'firecracker' | 'native') {
+export function isolationNote(backend: Backend) {
+  if (backend === 'auto')
+    return 'New conversations use an available authorized VM or native node, following this agent’s priorities. Existing conversations keep their environment until explicitly migrated.'
   return backend === 'native'
     ? 'This agent runs as a native process on its native nodes, with weaker isolation than a VM. Sandboxed runs never bypass denied operations or wait for unattended approvals.'
     : 'Every agent runs in a private VM. Sandboxed runs never bypass denied operations or wait for unattended approvals.'
@@ -80,7 +88,7 @@ export function newAgentDraft(): AgentDraft {
     speed: '',
     timeoutMinutes: 0,
     access: {
-      backend: 'firecracker',
+      backend: 'auto',
       nodes: [LOCAL_NODE_ID],
       projects: [],
       skills: [],
@@ -91,6 +99,7 @@ export function newAgentDraft(): AgentDraft {
       sandbox: 'yolo',
     },
     exclusiveNodes: [],
+    nodePriorities: [],
     plugins: [],
   }
 }
@@ -120,12 +129,24 @@ export function draftOf(agent: Agent): AgentDraft {
     },
     // Responses omit empty live grants: absent means none.
     exclusiveNodes: [...(agent.exclusiveNodes ?? [])],
+    nodePriorities: [...(agent.nodePriorities ?? [])],
     plugins: [...(agent.plugins ?? [])],
   }
 }
 
 function same(left: unknown, right: unknown) {
   return JSON.stringify(left) === JSON.stringify(right)
+}
+
+/** Preserve an edited order and concurrent additions/removals within current grants. */
+function mergePriorities(base: string[], mine: string[], theirs: string[], nodes: string[] | null) {
+  const order = same(base, mine)
+    ? theirs
+    : [
+        ...mine.filter(id => !base.includes(id) || theirs.includes(id)),
+        ...theirs.filter(id => !base.includes(id) && !mine.includes(id)),
+      ]
+  return order.filter(id => nodes === null || nodes.includes(id))
 }
 
 /**
@@ -168,11 +189,12 @@ export function rebaseDraft(base: AgentDraft, mine: AgentDraft, theirs: AgentDra
     .map(key => [key, pick(base.access[key], mine.access[key], theirs.access[key])]))
   for (const key of listAccess)
     access[key] = mergeList(base.access[key], mine.access[key], theirs.access[key])
-  // Nodes belong to one backend: when either side changed it, its node lists are taken whole,
-  // the owner's if they changed it, never merged across backends.
+  // Fixed backends take the switching side's selection. Automatic placement can
+  // merge both kinds while preserving concurrent grant removals.
   const backendChanged = backendOf(mine.access) !== backendOf(base.access) || backendOf(theirs.access) !== backendOf(base.access)
   const ownBackend = backendOf(mine.access) !== backendOf(base.access)
-  if (backendChanged)
+  const compatibleNodes = access.backend === 'auto'
+  if (backendChanged && !compatibleNodes)
     access.nodes = ownBackend ? mine.access.nodes : theirs.access.nodes
   access.mcpTools = mergeTools(base.access.mcpTools ?? {}, mine.access.mcpTools ?? {}, theirs.access.mcpTools ?? {})
   const rebased: AgentDraft = {
@@ -185,11 +207,16 @@ export function rebaseDraft(base: AgentDraft, mine: AgentDraft, theirs: AgentDra
     speed: pick(base.speed, mine.speed, theirs.speed),
     timeoutMinutes: pick(base.timeoutMinutes, mine.timeoutMinutes, theirs.timeoutMinutes),
     access: access as unknown as AgentAccess,
-    exclusiveNodes: backendChanged
+    exclusiveNodes: backendChanged && !compatibleNodes
       ? (ownBackend ? mine.exclusiveNodes : theirs.exclusiveNodes)
       : mergeList(base.exclusiveNodes, mine.exclusiveNodes, theirs.exclusiveNodes) ?? [],
     plugins: mergeList(base.plugins, mine.plugins, theirs.plugins) ?? [],
+    nodePriorities: backendChanged && !compatibleNodes
+      ? (ownBackend ? mine.nodePriorities : theirs.nodePriorities).filter(id => access.nodes === null || (access.nodes as string[]).includes(id))
+      : mergePriorities(base.nodePriorities ?? [], mine.nodePriorities ?? [], theirs.nodePriorities ?? [], access.nodes as string[] | null),
   }
+  // Revocation removes retained preferences even when this editor changed backend.
+  rebased.nodePriorities = rebased.nodePriorities.filter(id => !(base.nodePriorities ?? []).includes(id) || (theirs.nodePriorities ?? []).includes(id))
   return JSON.parse(JSON.stringify(rebased))
 }
 
@@ -235,9 +262,10 @@ export function nodeName(node: Pick<ExecutionNode, 'id' | 'name' | 'local'> | un
   return node?.name ?? 'Removed node'
 }
 
-export type Backend = 'firecracker' | 'native'
+export type Backend = 'auto' | 'firecracker' | 'native'
 
 export const backendOptions = [
+  { value: 'auto', label: 'Automatic · available VM or native node' },
   { value: 'firecracker', label: 'Firecracker VM' },
   { value: 'native', label: 'Native process · trusted people only' },
 ] as const
@@ -246,10 +274,10 @@ export const nativeHelp = 'Uses the host GPU and OS tools with weaker isolation.
 
 /** The agent's execution backend; records from before native execution run in Firecracker VMs. */
 export function backendOf(access: Pick<AgentAccess, 'backend'> | undefined): Backend {
-  return access?.backend === 'native' ? 'native' : 'firecracker'
+  return access?.backend ?? 'firecracker'
 }
 
-export function nodeBackend(node: Pick<ExecutionNode, 'capabilities'>): Backend {
+export function nodeBackend(node: Pick<ExecutionNode, 'capabilities'>): Exclude<Backend, 'auto'> {
   return node.capabilities.backend === 'native' ? 'native' : 'firecracker'
 }
 
@@ -258,6 +286,47 @@ const placeholders = new WeakSet<ExecutionNode>()
 /** The current runner when the node list does not report it: its state is unknown. */
 function currentRunner(): ExecutionNode {
   const node: ExecutionNode = {
+    revision: 'fixture',
+    createdAt: 0,
+    systemTags: [],
+    runtimeSlots: null,
+    nativeEnabled: false,
+    nativeAccounts: [],
+    nativeReviewedAgents: [],
+    nativeModeRequest: null,
+    nativeModeObserved: null,
+    nativeModeProposal: null,
+    nativeModeStatus: null,
+    exclusiveReservations: false,
+    exclusiveReservation: null,
+    exclusiveAgents: [],
+    usage: null,
+    budgetError: null,
+    pressure: null,
+    executionReady: false,
+    maintenance: null,
+    maintenanceError: null,
+    maintenanceGeneration: null,
+    maintenanceStartedAt: null,
+    imageDigest: null,
+    updateError: null,
+    retainedRuns: null,
+    diskGrowthProtocol: null,
+    diskCapacity: null,
+    occupiedSlots: 0,
+    availableSlots: 4,
+    agents: [],
+    staleDisks: { count: 0, diskMiB: 0 },
+    diskAccounting: null,
+    storage: {
+      cacheMiB: 102400,
+      memoryCacheMiB: 256,
+      reserveMiB: 10240,
+      reservePercent: 5,
+      backupSeconds: 60,
+      maxDirtySeconds: 300,
+    },
+
     id: LOCAL_NODE_ID,
     name: 'Current runner',
     local: true,
@@ -266,12 +335,17 @@ function currentRunner(): ExecutionNode {
     status: 'local',
     tags: [],
     capabilities: {
+      backend: 'firecracker',
+      ublk: false,
+      nativeModeProtocol: 0,
+      diskTotalMiB: 0,
       cpu: 0,
       memoryMiB: 0,
       diskMiB: 0,
       os: '',
       arch: '',
       kvm: false,
+
     },
     limits: { cpu: 0, memoryMiB: 0, diskMiB: 0 },
     slots: 0,
@@ -293,8 +367,8 @@ export function unknownNode(node: ExecutionNode) {
  * it. Native grants also require each node to trust the originating people.
  */
 export function nodesFor(nodes: ExecutionNode[], backend: Backend) {
-  const matching = nodes.filter(node => !node.revoked && nodeBackend(node) === backend && !(backend === 'native' && (node.local || node.id === LOCAL_NODE_ID)))
-  if (backend === 'firecracker' && !nodes.some(node => node.local || node.id === LOCAL_NODE_ID))
+  const matching = nodes.filter(node => !node.revoked && (backend === 'auto' || nodeBackend(node) === backend) && !(backend === 'native' && (node.local || node.id === LOCAL_NODE_ID)))
+  if (backend !== 'native' && !nodes.some(node => node.local || node.id === LOCAL_NODE_ID))
     return [currentRunner(), ...matching]
   return matching
 }
@@ -310,7 +384,7 @@ export function runProblem(id: string, access: AgentAccess, nodes: ExecutionNode
     return backendOf(access) === 'native' ? 'backend' : ''
   if (!node || node.revoked)
     return 'missing'
-  return nodeBackend(node) === backendOf(access) ? '' : 'backend'
+  return backendOf(access) === 'auto' || nodeBackend(node) === backendOf(access) ? '' : 'backend'
 }
 
 /**
@@ -328,6 +402,16 @@ export function withRun(access: AgentAccess, exclusiveNodes: string[], node: str
 /** Node access for another execution backend: the choices start over, read-only reservations stay. */
 export function withBackend() {
   return { nodes: [] as string[], exclusiveNodes: [] }
+}
+
+/** Drop preferences outside the explicit selection when leaving wildcard grants. */
+export function withAllNodes(access: AgentAccess, priorities: string[], nodes: ExecutionNode[], all: boolean, agentId = '') {
+  const selected = all
+    ? null
+    : access.nodes ?? nodesFor(nodes, backendOf(access))
+      .filter(node => node.nativeModeRequest?.mode !== 'administrator' || node.nativeReviewedAgents?.includes(agentId))
+      .map(node => node.id)
+  return { nodes: selected, nodePriorities: priorities.filter(id => selected === null || selected.includes(id)) }
 }
 
 /** Whether the agent may run on a node: listed, or every node allowed. */
@@ -446,6 +530,7 @@ export function changes(saved: AgentDraft, draft: AgentDraft) {
   add('sandbox', Number(saved.access.sandbox !== draft.access.sandbox))
   add('powers', Number(saved.access.installation !== draft.access.installation) + Number(!!saved.access.delegation !== !!draft.access.delegation))
   add('nodes', Number(backendOf(saved.access) !== backendOf(draft.access)))
+  add('nodes', Number(!same(saved.nodePriorities ?? [], draft.nodePriorities ?? [])))
   add('nodes', listCount(saved.access.nodes, draft.access.nodes))
   // Responses omit empty live grants: absent means none.
   add('nodes', listCount(saved.exclusiveNodes ?? [], draft.exclusiveNodes ?? []))
@@ -484,7 +569,7 @@ function restrictedTools(saved: AgentAccess, draft: AgentAccess) {
  * secrets, and removed access when `runs` says work is affected.
  */
 export function nativeReviewNodes(draft: AgentDraft, context: Context) {
-  if (backendOf(draft.access) !== 'native' || draft.access.nodes === null)
+  if (backendOf(draft.access) === 'firecracker' || draft.access.nodes === null)
     return []
   return context.nodes.filter(node => node.nativeModeRequest?.mode === 'administrator'
     && draft.access.nodes!.includes(node.id) && !node.nativeReviewedAgents?.includes(context.agentId ?? '')).map(node => node.id)
@@ -498,7 +583,7 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
 
   for (const id of listChanges(saved.exclusiveNodes ?? [], draft.exclusiveNodes ?? []).added)
     lines.push({ kind: 'power', section: 'nodes', text: `Added: exclusive reservation on ${node(id)}. This agent will be able to suspend other agents’ conversations on this machine.` })
-  if (backendOf(draft.access) === 'native' && backendOf(saved.access) !== 'native')
+  if (backendOf(draft.access) !== 'firecracker' && backendOf(saved.access) === 'firecracker')
     lines.push({ kind: 'power', section: 'nodes', text: `Added: native execution. ${nativeHelp}` })
   if (draft.access.installation && !saved.access.installation)
     lines.push({ kind: 'power', section: 'powers', text: 'Added: installation management. This agent will be able to create and change agents, projects, skills, MCP connections, missions and runs on your behalf.' })
@@ -532,7 +617,7 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     removed.push('installation management')
   if (saved.access.delegation && !draft.access.delegation)
     removed.push('task delegation')
-  if (backendOf(saved.access) === 'native' && backendOf(draft.access) !== 'native')
+  if (backendOf(saved.access) !== 'firecracker' && backendOf(draft.access) === 'firecracker')
     removed.push('native execution')
   if (sandboxStrictness[draft.access.sandbox] > sandboxStrictness[saved.access.sandbox]) {
     const mode = sandboxOptions.find(option => option.value === draft.access.sandbox)?.label ?? draft.access.sandbox

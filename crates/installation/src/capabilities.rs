@@ -59,8 +59,12 @@ impl ResumeRun {
                 {
                     return Err(Error::forbidden("The run scope is required."));
                 }
-                // An MCP scope is not a human native-execution proof.
-                (Origin::Unknown, None)
+                // Scopes alone grant no native authority; only the verified
+                // public transport can supply the originating person's identity.
+                (
+                    policy::caller().map_or(Origin::Unknown, Origin::Human),
+                    None,
+                )
             }
             ResumeContext::Installation(bearer) => {
                 let run = crate::installation_mcp::authorize(s, &bearer).await?;
@@ -69,8 +73,8 @@ impl ResumeRun {
             }
         };
         let run = s.store.run(&id).await?;
-        if origin.known() && policy::native(&run["snapshot"]["agent"]) {
-            policy::refresh_agent(s, crate::nodes::run_agent(&run)).await?;
+        if origin.known() && policy::supports(&run["snapshot"]["agent"], "native") {
+            policy::refresh_for(s, &run["snapshot"]["agent"]).await?;
         }
         let commit_id = id.clone();
         s.worker
@@ -296,12 +300,12 @@ pub(crate) const AGENT_OPERATIONS: &[AgentOperation] = &[
     AgentOperation {
         name: "save_agent",
         scope: "manage",
-        description: "Create an agent with a stable optional creationId. Expanding permissions requires the owner.",
+        description: "Create an agent with a stable optional creationId. access.backend=auto chooses an available authorized VM or native node; nodePriorities lists preferred authorized nodes in order. Existing conversations keep their environment. Expanding permissions requires the owner.",
     },
     AgentOperation {
         name: "replace_agent",
         scope: "manage",
-        description: "Replace all settings at the expected revision. Agents cannot expand permissions or approve sensitive rights.",
+        description: "Replace all settings at the expected revision, including access.backend (auto, firecracker or native) and ordered nodePriorities. Owner-granted exclusiveNodes may target matching VM or native nodes whose runtime supports reservations. Priorities confer no access. Agents cannot expand permissions or approve sensitive rights.",
     },
     AgentOperation {
         name: "delete_agent",
@@ -567,3 +571,7 @@ pub(crate) use crate::runs::{RUN_OPERATIONS, RunOperation, run_operation};
 pub(crate) mod plugin_packages;
 
 pub(crate) use plugin_packages::{PLUGIN_PACKAGE_OPERATIONS, plugin_package_operation};
+
+pub(crate) mod nodes;
+
+pub(crate) use nodes::{NODE_OPERATIONS, NodeOperation, node_operation};

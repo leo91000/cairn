@@ -11,7 +11,19 @@ use std::{
 
 pub const MAX_FILE: u64 = 512 * 1024 * 1024;
 
-pub fn open_export(path: &Path, root: &Path) -> Result<std::fs::File> {
+/// Even opening an ext4 path can need a remote block from this runtime. Keep
+/// descriptor traversal and metadata checks off its network/control workers.
+pub async fn open_export(path: &Path, root: &Path) -> Result<std::fs::File> {
+    let (path, root) = (path.to_owned(), root.to_owned());
+    tokio::task::spawn_blocking(move || open_export_sync(&path, &root))
+        .await
+        .map_err(Error::internal)?
+}
+
+fn open_export_sync(path: &Path, root: &Path) -> Result<std::fs::File> {
+    #[cfg(test)]
+    tests::wait_for_open(path);
+
     if !path.is_absolute() || !(path.starts_with(root) || path.starts_with("/tmp")) {
         return Err(Error::bad("Publish files from the run workspace or /tmp."));
     }
@@ -69,15 +81,15 @@ async fn snapshot_to(
 ) -> Result<(tempfile::NamedTempFile, u64)> {
     use std::os::unix::fs::MetadataExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let source = open_export(path, root)?;
-    let before = source.metadata()?;
+    let source = open_export(path, root).await?;
+    let mut source = tokio::fs::File::from_std(source);
+    let before = source.metadata().await?;
     if before.len() > maximum {
         return Err(Error::unavailable(
             "Insufficient disk budget for artifact staging.",
         ));
     }
     let mut output = tokio::fs::File::from_std(temporary.reopen()?);
-    let mut source = tokio::fs::File::from_std(source);
     let size = tokio::io::copy(
         &mut (&mut source).take(maximum.saturating_add(1)),
         &mut output,
@@ -260,4 +272,74 @@ pub fn range(header: Option<&str>, size: u64) -> Result<Option<(u64, u64)>> {
         return Err(invalid());
     }
     Ok(Some((start, end)))
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use std::{
+        collections::HashMap,
+        path::PathBuf,
+        sync::{LazyLock, Mutex, mpsc},
+        time::Duration,
+    };
+
+    struct Gate {
+        started: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    static GATES: LazyLock<Mutex<HashMap<PathBuf, Gate>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) fn delay_open(path: &Path) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (started, opening) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        GATES.lock().unwrap().insert(
+            path.to_owned(),
+            Gate {
+                started,
+                release: wait,
+            },
+        );
+        (opening, release)
+    }
+
+    pub(super) fn wait_for_open(path: &Path) {
+        let gate = GATES.lock().unwrap().remove(path);
+        if let Some(gate) = gate {
+            let _ = gate.started.send(());
+            let _ = gate.release.recv();
+        }
+    }
+
+    #[test]
+    fn delayed_export_open_keeps_control_timers_running() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("result.md");
+        std::fs::write(&path, b"completed result").unwrap();
+        let (opening, release) = delay_open(&path);
+        let directory = root.path().to_owned();
+        let exported = runtime.spawn(async move { snapshot(&path, &directory).await });
+        let opened = opening.recv_timeout(Duration::from_secs(5));
+        let (progress, observed) = mpsc::channel();
+        runtime.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = progress.send(());
+        });
+        let responsive = observed.recv_timeout(Duration::from_secs(2));
+        // Rescue the delayed I/O before asserting, including on the broken code.
+        // An executor timeout alone cannot fire while its worker is blocked.
+        let _ = release.send(());
+        let (file, size) = runtime.block_on(exported).unwrap().unwrap();
+        opened.expect("The export must reach its filesystem open");
+        responsive.expect("Control timers must run while an export waits for its disk");
+        assert_eq!(size, 16);
+        assert_eq!(std::fs::read(file.path()).unwrap(), b"completed result");
+    }
 }

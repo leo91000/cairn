@@ -59,10 +59,10 @@ class CacheMissReproductionTest {
                 val output = "x".repeat(if (large) 2200 * 1024 else 100)
                 fun message(n: Int) =
                     RunEvent(
-                        n.toLong(),
-                        n.toLong(),
-                        "chat.user",
-                        if (n == 40) "Message témoin" else "Message %03d".format(n),
+                        id = n.toLong(),
+                        createdAt = n.toLong(),
+                        type = "chat.user",
+                        text = if (n == 40) "Message témoin" else "Message %03d".format(n),
                         runId = "fixture",
                     )
                 val accepted = if (paged) 40 else 2
@@ -71,24 +71,33 @@ class CacheMissReproductionTest {
                     else
                         listOf(
                             RunEvent(
-                                1,
-                                1,
-                                "item.completed",
-                                output,
-                                mapOf(
-                                    "item" to
-                                        buildJsonObject {
-                                            put("id", "tool")
-                                            put("type", "command_execution")
-                                            put("command", "fixture")
-                                            put("status", "completed")
-                                            put("aggregated_output", output)
-                                            put("exit_code", 0)
-                                        }
-                                ),
+                                id = 1,
+                                createdAt = 1,
+                                type = "item.completed",
+                                text = output,
+                                payload =
+                                    kotlinx.serialization.json.JsonObject(
+                                        mapOf(
+                                            "item" to
+                                                buildJsonObject {
+                                                    put("id", "tool")
+                                                    put("type", "command_execution")
+                                                    put("command", "fixture")
+                                                    put("status", "completed")
+                                                    put("aggregated_output", output)
+                                                    put("exit_code", 0)
+                                                }
+                                        )
+                                    ),
                                 runId = "fixture",
                             ),
-                            RunEvent(2, 2, "chat.user", "Message témoin", runId = "fixture"),
+                            RunEvent(
+                                id = 2,
+                                createdAt = 2,
+                                type = "chat.user",
+                                text = "Message témoin",
+                                runId = "fixture",
+                            ),
                         )
                 val batch =
                     wireJson.encodeToString(
@@ -145,7 +154,12 @@ class CacheMissReproductionTest {
                                     .setHeader("Content-Type", "application/json")
                                     .setBody(
                                         wireJson.encodeToString(
-                                            HistoryPage(emptyList(), "v1:fixture:1", 1, false)
+                                            HistoryPage(
+                                                events = emptyList(),
+                                                history = "v1:fixture:1",
+                                                oldest = 1,
+                                                hasOlder = false,
+                                            )
                                         )
                                     )
                             }
@@ -164,10 +178,10 @@ class CacheMissReproductionTest {
                                     .setBody(
                                         wireJson.encodeToString(
                                             HistoryPage(
-                                                (1..20).map(::message),
-                                                "v1:fixture:1",
-                                                1,
-                                                false,
+                                                events = (1..20).map(::message),
+                                                history = "v1:fixture:1",
+                                                oldest = 1,
+                                                hasOlder = false,
                                             )
                                         )
                                     )

@@ -422,7 +422,7 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
                             .ok_or_else(|| Error::forbidden("Agent no longer exists."))?;
                         let compatible = previous.as_ref().is_none_or(|run| {
                             crate::service::covers(&agent, &run["snapshot"]["agent"])
-                        }) && (!crate::native::policy::native(&agent)
+                        }) && (!crate::native::policy::supports(&agent, "native")
                             || crate::native::policy::chat_grant(db, &chat, &origin).is_ok());
                         compatible.then_some(chat)
                     }
@@ -618,7 +618,7 @@ pub async fn answer(s: &Service, context: &Context, args: &Value) -> Result<Valu
         {
             return Err(Error::bad("Invalid answer."));
         }
-        answers.insert(field.clone(), json!([value]));
+        answers.insert(field.clone(), json!({ "selected": [], "comment": value }));
     }
     let answered = crate::native::policy::DELEGATION
         .scope(

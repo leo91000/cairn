@@ -4,6 +4,12 @@ Cairn permet de conduire des conversations avec des agents et de retrouver leur 
 
 ## Language
 
+**Placement automatique** :
+Le choix d’un node autorisé et disponible pour une nouvelle conversation, qu’il exécute des VM ou des processus natifs. Le type d’environnement choisi est conservé pendant la conversation, sauf migration explicite.
+
+**Priorité de nodes d’un agent** :
+L’ordre de préférence propre à un agent pour placer ses nouvelles conversations. Un node prioritaire indisponible laisse la place au suivant, puis aux autres nodes autorisés. Une préférence ne donne aucun droit d’accès.
+
 **Beacon** :
 Le service hébergé par Cairn qui fournit l’interface web et mobile, les comptes Cairn et l’accès à toutes les installations d’un compte. Il ne conserve pas le travail des agents.
 Il peut conserver les diagnostics techniques de l’application, sans contenu des conversations, pour améliorer ses performances.
@@ -111,7 +117,7 @@ Une conversation supprimée par l’utilisateur, masquée pendant l’effacement
 Retour d’une conversation à l’état actif, sans relancer l’agent, les envois annulés ni les liens publics révoqués.
 
 **Agent de code** :
-Le moteur qui exécute le travail d’un agent : Codex (OpenAI), Claude Code (Anthropic) ou OpenCode. Chaque agent en choisit un, et une conversation peut en changer d’un message à l’autre.
+Le moteur qui exécute le travail d’un agent : Codex (OpenAI), Claude Code (Anthropic) ou OpenCode. Chaque agent en choisit un, et une conversation peut en changer d’un message à l’autre. Quand un quota bloque la demande en cours, l’utilisateur peut choisir un autre agent de code disposant d’un compte disponible pour reprendre cette même demande avec son historique et ses fichiers.
 _À éviter_ : fournisseur, driver, assistant de code.
 
 **Compte d’agent de code** :
@@ -140,6 +146,15 @@ _À éviter_ : plan de travail (la liste de progression d’un agent qui travail
 **Vitesse** :
 Le niveau de service Codex demandé pour un tour (Standard, Fast, Ultrafast…), choisi indépendamment du modèle et du raisonnement pour le prochain message ou par défaut sur un agent. Seuls les niveaux que le catalogue Codex d’un compte annonce pour le modèle sont proposés ; une vitesse plus rapide consomme plus vite l’usage du compte. Claude Code et OpenCode n’en proposent pas.
 _À éviter_ : tier, mode rapide (sauf pour nommer le niveau Fast de Codex).
+
+**Question d’un agent** :
+Une demande de réponse adressée à une personne par un agent dans une conversation Cairn. Elle peut proposer des choix ou laisser la personne s’exprimer librement.
+
+**Questionnaire d’un agent** :
+Un ensemble d’une ou plusieurs questions d’un agent auxquelles une personne répond en un seul envoi. Il reste disponible dans la conversation pendant l’attente des réponses.
+
+**Commentaire de réponse** :
+Le texte libre qu’une personne ajoute aux choix retenus pour une question d’un agent, afin de préciser sa réponse.
 
 **Demandeur d’une mission** :
 La conversation ou la mission dont l’agent a lancé l’exécution d’une mission. Une mission bloquée qui attend son demandeur lui revient plutôt qu’à l’utilisateur, tant que ce demandeur existe.

@@ -13,7 +13,7 @@ const exec = promisify(execFile)
 export class AndroidValidationPendingError extends Error {}
 
 export function trustedAndroidRun(run, config) {
-  return run.event === 'push' && run.head_branch === 'main'
+  return ['push', 'schedule'].includes(run.event) && run.head_branch === 'main'
     && run.head_sha === config.commit
     && run.head_repository?.full_name?.toLowerCase() === config.repository.toLowerCase()
     && run.path === '.github/workflows/android.yaml'
@@ -30,7 +30,6 @@ export async function resolveAndroidRelease(config, {
   const query = new URLSearchParams({
     head_sha: config.commit,
     branch: 'main',
-    event: 'push',
     per_page: '30',
   })
   let discoveryAttempts = 0

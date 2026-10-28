@@ -161,6 +161,7 @@ class SignalJourneyTest {
     private fun journey(
         claudeConnected: Boolean = true,
         liveEvents: List<RunEvent> = emptyList(),
+        feedChats: List<Chat> = chats,
         body: (CairnViewModel) -> Unit,
     ) {
         MockWebServer().use { server ->
@@ -236,7 +237,7 @@ class SignalJourneyTest {
                                 )
                             path == "/api/installations/fixture/api/mcps" -> json("""{"mcps":[]}""")
                             path == "/api/installations/fixture/api/chats/stream" ->
-                                stream(LiveState(chats = chats))
+                                stream(LiveState(chats = feedChats))
                             path == "/api/installations/fixture/api/chats" &&
                                 request.method == "POST" ->
                                 json(
@@ -396,6 +397,30 @@ class SignalJourneyTest {
     }
 
     @Test
+    fun `quota waits appear under scheduled resumptions without a countdown`() =
+        journey(
+            feedChats =
+                listOf(
+                    Chat(
+                        id = "quota",
+                        title = "Attendre le quota",
+                        status = "running",
+                        accountWaitReason =
+                            "Usage exhausted. Waiting for an available Codex account to resume.",
+                    )
+                )
+        ) {
+            waitText("Attendre le quota")
+            compose.onNodeWithText("REPRISE PRÉVUE").assertExists()
+            compose.onNodeWithText("En attente de quota").assertExists()
+            compose.onNodeWithText("Selon disponibilité").assertExists()
+            compose.onNodeWithText("EN COURS").assertDoesNotExist()
+            compose
+                .onAllNodesWithTag("chat-working-avatar", useUnmergedTree = true)
+                .assertCountEquals(0)
+        }
+
+    @Test
     fun `fil groups what needs the user, live work and recent conversations`() = journey {
         waitText("Choisir la pagination")
         compose.onNodeWithText("POUR VOUS").assertExists()
@@ -479,27 +504,36 @@ class SignalJourneyTest {
             liveEvents =
                 listOf(
                     RunEvent(
-                        1,
-                        now - 20 * 60_000,
-                        "chat.user",
-                        "Surveille la CI de la PR 77",
-                        mapOf("text" to JsonPrimitive("Surveille la CI de la PR 77")),
+                        id = 1,
+                        createdAt = now - 20 * 60_000,
+                        type = "chat.user",
+                        text = "Surveille la CI de la PR 77",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf("text" to JsonPrimitive("Surveille la CI de la PR 77"))
+                            ),
                     ),
                     RunEvent(
-                        2,
-                        now - 13 * 60_000,
-                        "turn.waiting",
-                        "",
-                        mapOf(
-                            "type" to JsonPrimitive("turn.waiting"),
-                            "tasks" to
-                                buildJsonArray {
-                                    addJsonObject {
-                                        put("id", "ci")
-                                        put("description", "Wait for PR 77 update and completed CI")
-                                    }
-                                },
-                        ),
+                        id = 2,
+                        createdAt = now - 13 * 60_000,
+                        type = "turn.waiting",
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "type" to JsonPrimitive("turn.waiting"),
+                                    "tasks" to
+                                        buildJsonArray {
+                                            addJsonObject {
+                                                put("id", "ci")
+                                                put(
+                                                    "description",
+                                                    "Wait for PR 77 update and completed CI",
+                                                )
+                                            }
+                                        },
+                                )
+                            ),
                     ),
                 )
         ) {

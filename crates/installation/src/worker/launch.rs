@@ -20,6 +20,7 @@ use crate::{
     supervisor::Supervised,
     validation::text,
 };
+use cairn_contracts::EventKind;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
@@ -76,10 +77,12 @@ async fn execute_inner(
         checkpoint,
         sensitive,
         attempt_id: String::new(),
+        reservation: None,
     };
     execution.mark_running().await?;
     timing.next("access");
     execution.refresh_access().await?;
+    execution.resolve_backend().await?;
     timing.next("workspace");
     let mut workspace = execution.prepare(existing).await?;
     timing.next("session_lookup");
@@ -132,6 +135,7 @@ struct Execution<'a> {
     provider: Provider,
     directory: PathBuf,
     attempt_id: String,
+    reservation: Option<(String, Value)>,
 }
 
 /// The prepared execution environment shared by every launch attempt.
@@ -206,15 +210,42 @@ struct RunnerStorage<'a> {
 }
 
 impl Execution<'_> {
+    /// Reserve before preparing paths: VM and native environments differ. Binding
+    /// the concrete backend shares the atomic admission transaction, so retries
+    /// cannot turn an already-created environment into another execution kind.
+    async fn resolve_backend(&mut self) -> Result<()> {
+        if policy(&self.run["snapshot"]["agent"])["backend"] != "auto" {
+            return Ok(());
+        }
+        let runner = crate::config::id();
+        let placement = placement::reserve(self.s, self.run, &runner).await?;
+        *self.run = self.s.store.run(&self.id).await?;
+        if !execution::uses_vm(self.run, &self.s.config) {
+            // Development's shared process has no controller or retained node disk.
+            // Keep the selected backend, but never give recovery a node to contact.
+            placement::release(self.s, &runner).await?;
+            return Ok(());
+        }
+        let saved_runner = runner.clone();
+        let node = placement["nodeId"].as_str().map(str::to_owned);
+        let runtime = placement["runtimeId"].clone();
+        self.checkpoint
+            .update(|checkpoint| {
+                checkpoint.runner_id = Some(Some(saved_runner));
+                checkpoint.node_id = Some(node);
+                checkpoint.runtime_id = Some(Some(runtime));
+            })
+            .await?;
+        self.reservation = Some((runner, placement));
+        Ok(())
+    }
+
     fn stopping(&self) -> bool {
         self.cancel.is_cancelled() || self.s.shutdown.is_cancelled()
     }
 
     async fn mark_running(&mut self) -> Result<()> {
         let s = self.s;
-        self.checkpoint
-            .update(|state| state.capacity_retry_at = None)
-            .await?;
         let account_name = match self.account.as_ref() {
             Some(account) => s.accounts.get(s, &account.account_id).await?["name"].clone(),
             None => Value::Null,
@@ -237,18 +268,26 @@ impl Execution<'_> {
             retry.next_attempt_at = None;
             patch.retry = Some(Some(retry));
         }
-        s.store.change_run(&self.id, patch).await?;
-        if let Some(name) = account_name.as_str() {
-            let message = format!("Using {} account: {name}", self.provider.label());
-            s.store.event(&self.id, "status", &message, None).await?;
-        }
-        // Marks where an attempt begins, for labels that last one attempt.
-        s.store
-            .event(
-                &self.id,
-                "status",
-                "Preparing workspace",
-                Some(json!({ "attempt": true })),
+        let id = self.id.clone();
+        let account_message = account_name
+            .as_str()
+            .map(|name| format!("Using {} account: {name}", self.provider.label()));
+        self.checkpoint
+            .update_and_publish(
+                |state| state.capacity_retry_at = None,
+                move |db| {
+                    db.change_run(&id, patch)?;
+                    if let Some(message) = account_message {
+                        db.event(&id, &EventKind::Status, &message, None)?;
+                    }
+                    // Marks where an attempt begins, for labels that last one attempt.
+                    db.event(
+                        &id,
+                        &EventKind::Status,
+                        "Preparing workspace",
+                        Some(&json!({ "attempt": true })),
+                    )
+                },
             )
             .await?;
         private_dir(&self.directory).await
@@ -433,15 +472,19 @@ impl Execution<'_> {
                 // Preserve its specific transient failure instead of the previous cause.
                 if let Some(failure) = crate::run_retry::startup_failure(&error) {
                     let cause = crate::run_retry::Cause::classify(&failure["error"]);
+                    let id = self.id.clone();
+                    let message = error.message.clone();
                     self.checkpoint
-                        .update(|saved| {
-                            saved.completed = Some(false);
-                            saved.last_error = Some(Some(error.message.clone()));
-                            saved.retry_cause = Some(cause);
-                        })
-                        .await?;
-                    s.store
-                        .event(&self.id, "turn.failed", &error.message, Some(failure))
+                        .update_and_publish(
+                            |saved| {
+                                saved.completed = Some(false);
+                                saved.last_error = Some(Some(error.message.clone()));
+                                saved.retry_cause = Some(cause);
+                            },
+                            move |db| {
+                                db.event(&id, &EventKind::TurnFailed, &message, Some(&failure))
+                            },
+                        )
                         .await?;
                 }
                 return Err(error);
@@ -449,8 +492,7 @@ impl Execution<'_> {
         };
         let Some(session) = session else {
             s.store.event(
-                &self.id,
-                "status",
+                &self.id, &EventKind::Status,
                 "Restarting with preserved files after the node mode change; no resumable engine session was recorded.",
                 None,
             ).await?;
@@ -462,14 +504,17 @@ impl Execution<'_> {
             resume_available: Some(true),
             ..Default::default()
         };
-        s.store.change_run(&self.id, patch).await?;
+        let id = self.id.clone();
         s.store
-            .event(
-                &self.id,
-                "status",
-                "Resuming saved conversation and workspace",
-                None,
-            )
+            .transaction(move |db| {
+                db.change_run(&id, patch)?;
+                db.event(
+                    &id,
+                    &EventKind::Status,
+                    "Resuming saved conversation and workspace",
+                    None,
+                )
+            })
             .await?;
         Ok(Some(session))
     }
@@ -694,8 +739,15 @@ impl Execution<'_> {
         let s = self.s;
         crate::object_storage::Storage::configured(s)?;
         let mut timing = Operation::new("runner_prepare", &self.id, "placement");
-        let runner = crate::config::id();
-        let placement = placement::reserve(s, &s.store.run(&self.id).await?, &runner).await?;
+        let (runner, placement) = match self.reservation.take() {
+            Some(reservation) => reservation,
+            None => {
+                let runner = crate::config::id();
+                let placement =
+                    placement::reserve(s, &s.store.run(&self.id).await?, &runner).await?;
+                (runner, placement)
+            }
+        };
         timing.next("materialize");
         placement::materialize(s, &runner).await?;
         let node_id = placement["nodeId"].as_str().map(str::to_owned);
@@ -783,12 +835,12 @@ impl Execution<'_> {
                 .await?
         } else {
             s.store
-                .get("nodes", storage_node)
+                .node_boundary(storage_node)
                 .await?
                 .unwrap_or_default()["storage"]
                 .clone()
         };
-        let storage_policy = Policy::for_node(&node_storage)?;
+        let storage_policy = crate::storage::policy::for_node(&node_storage)?;
         let grant = nodes::disk_grants::new_disk(s, self.run, storage_node).await?;
         s.store
             .update_run_boundary(&self.id, json!({ "storage": { "mode": "on-demand" } }))
@@ -855,7 +907,9 @@ impl Execution<'_> {
             ));
         }
         let message = format!("Executing on node {node_id}");
-        s.store.event(&self.id, "status", &message, None).await
+        s.store
+            .event(&self.id, &EventKind::Status, &message, None)
+            .await
     }
 
     /// Launches the supervised process and records its output until it exits.
@@ -1030,15 +1084,11 @@ impl Execution<'_> {
             account_name: Some(None),
             ..Default::default()
         };
-        s.store.change_run(&self.id, patch).await?;
-        s.store
-            .event(
-                &self.id,
-                "status",
-                "Usage exhausted. Saving this session and restoring capacity or switching accounts.",
-                None,
-            )
-            .await?;
+        let id = self.id.clone();
+        s.store.transaction(move |db| {
+            db.change_run(&id, patch)?;
+            db.event(&id, &EventKind::Status, "Usage exhausted. Saving this session and restoring capacity or switching accounts.", None)
+        }).await?;
         s.accounts.refresh(s, &previous.account_id).await?;
         self.wait_for_account(&model).await?;
         let Some(account) = self.account.as_mut() else {
@@ -1057,12 +1107,17 @@ impl Execution<'_> {
             account_name: Some(name.as_str().map(str::to_owned)),
             ..Default::default()
         };
-        s.store.change_run(&self.id, patch).await?;
         let message = format!(
             "Resuming saved session with {label} account: {}",
             name.as_str().unwrap_or("")
         );
-        s.store.event(&self.id, "status", &message, None).await
+        let id = self.id.clone();
+        s.store
+            .transaction(move |db| {
+                db.change_run(&id, patch)?;
+                db.event(&id, &EventKind::Status, &message, None)
+            })
+            .await
     }
 
     async fn wait_for_account(&mut self, model: &str) -> Result<()> {
@@ -1151,7 +1206,7 @@ impl Execution<'_> {
             patch.retry = Some(None);
         }
         let id = self.id.clone();
-        let status = s.store.transaction(move |db| {
+        s.store.transaction(move |db| {
             let current = db.run(&id)?.ok_or_else(|| Error::not_found("Run not found"))?;
             let status = if !current["cancelRequestedAt"].is_null() {
                 RunStatus::Cancelled
@@ -1173,12 +1228,9 @@ impl Execution<'_> {
                 patch.boundary.as_mut().unwrap()["wakeup"] = Value::Null;
             }
             db.change_run(&id, patch)?;
-            Ok(status)
-        }).await?;
-        let details = details.filter(|_| status == RunStatus::Failed);
-        s.store
-            .event(&self.id, "status", status.as_str(), details)
-            .await
+            let details = details.filter(|_| status == RunStatus::Failed);
+            db.event(&id, &EventKind::Status, status.as_str(), details.as_ref())
+        }).await
     }
 
     fn failure_message(&self, status: RunStatus, exit: &Exit, saved: &RunCheckpoint) -> String {

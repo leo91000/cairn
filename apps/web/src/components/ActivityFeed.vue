@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { Provider } from '../../../../packages/contracts/accounts'
 import type { Deliverable } from '../../../../packages/contracts/artifacts'
 import type { ChatWakeup } from '../../../../packages/contracts/chats'
 import type { RunEvent, TaskOutcome } from '../../../../packages/contracts/contracts'
@@ -31,6 +32,7 @@ import {
   NotebookPen,
 } from '../icons'
 import { MessageTimes } from '../message-times'
+import { questionAnswerText } from '../question-answer'
 import { exclusiveSuspensionLabel } from '../run-status'
 import { backgroundWait, waitingStep, workingStep } from '../signal'
 import { mentionSegments } from '../skill-mentions'
@@ -42,7 +44,7 @@ import ArtifactRail from './ArtifactRail.vue'
 import ArtifactViewer from './ArtifactViewer.vue'
 import ChatNotice from './ChatNotice.vue'
 import ChatOutcome from './ChatOutcome.vue'
-import ChatQuotaCard from './ChatQuotaCard.vue'
+import ChatQuotaRecovery from './ChatQuotaRecovery.vue'
 import ChatWaitCard from './ChatWaitCard.vue'
 import ContextCompaction from './ContextCompaction.vue'
 import Icon from './Icon.vue'
@@ -78,6 +80,8 @@ const props = defineProps<{
   /** The conversation's pending wakeup, which keeps its wait card live. */
   wakeup?: LiveWait
   quota?: ChatQuota | null
+  chatId?: string
+  codingAgentSwitch?: { provider: Provider, error: string | null } | null
   canManageAccounts?: boolean
   busy?: boolean
   /** The composer can send an implementation request now. */
@@ -89,6 +93,7 @@ const emit = defineEmits<{
   pauseWait: []
   resumeQuota: []
   implement: []
+  codingAgentSwitched: [provider: Provider]
 }>()
 const skillNames = computed(() => new Set(props.skills ?? []))
 const messageTimes = new MessageTimes()
@@ -115,7 +120,7 @@ const entries = computed(() => {
         role: 'user',
         id: `sending:${message.id}`,
         time: message.createdAt,
-        text: message.text,
+        text: questionAnswerText(message.text, message.questionId),
         attachments: message.attachments,
         delivery: label,
         ...(message.plan ? { plan: true } : {}),
@@ -504,12 +509,15 @@ defineExpose({
                 </ChatOutcome>
               </template>
 
-              <ChatQuotaCard
-                v-if="chat && quota"
+              <ChatQuotaRecovery
+                v-if="chat && chatId"
+                :chat-id="chatId"
                 :quota="quota"
+                :progress="codingAgentSwitch"
                 :can-manage="!!canManageAccounts"
                 :busy="busy"
                 @resume="emit('resumeQuota')"
+                @switched="emit('codingAgentSwitched', $event)"
               />
 
               <ChatOutcome

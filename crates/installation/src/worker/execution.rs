@@ -13,6 +13,7 @@ use crate::{
     service::Service,
     validation::text,
 };
+use cairn_contracts::EventKind;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -71,6 +72,9 @@ async fn heartbeat(s: Arc<Service>, checkpoint: Arc<Checkpoint>, stop: Cancellat
             () = stop.cancelled() => break,
             _ = timer.tick() => {
                 let run_id = checkpoint.id.as_str();
+                if let Some(attempt) = checkpoint.snapshot().await.runner_id() {
+                    let _ = crate::nodes::placement::renew_preparation(&s, run_id, attempt).await;
+                }
                 // Both fail routinely once the run is stopping, moving or revoked;
                 // the next beat retries and execution notices the revocation itself.
                 let _ = crate::nodes::moves::pause_pending(&s, run_id).await;
@@ -137,13 +141,18 @@ async fn record_failure(
     if status != RunStatus::Queued {
         patch.boundary = Some(json!({ "wakeup": null }));
     }
-    s.store.change_run(run_id, patch).await?;
     let kind = if s.shutdown.is_cancelled() {
-        "status"
+        EventKind::Status
     } else {
-        "error"
+        EventKind::Error
     };
-    s.store.event(run_id, kind, &summary, None).await
+    let run_id = run_id.to_owned();
+    s.store
+        .transaction(move |db| {
+            db.change_run(&run_id, patch)?;
+            db.event(&run_id, &kind, &summary, None)
+        })
+        .await
 }
 
 /// Controller recovery is bounded on both local and remote nodes. An explicit
@@ -281,6 +290,9 @@ async fn release(
         clear_credentials(s, run_id).await;
     }
     if let Some(runner) = saved.runner_id() {
+        if fenced {
+            crate::nodes::placement::release(s, runner).await?;
+        }
         let plan = s
             .config
             .data_dir

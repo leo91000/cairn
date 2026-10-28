@@ -158,7 +158,7 @@ fun NodesScreen(
                         )
                         NodeCapacity(
                             "RAM partagée",
-                            formatMiB(available.memoryMiB),
+                            formatMiB(available.memoryMiB.toLong()),
                             node.usage?.let { "${formatMiB(it.memoryMiB)} utilisés" }
                                 ?: "pour tous les slots",
                             Modifier.weight(1f),
@@ -477,7 +477,13 @@ fun NodesScreen(
                 api.request(
                     "PUT",
                     "/nodes/${node.id}/storage",
-                    wireJson.encodeToJsonElement(policy),
+                    wireJson.encodeToJsonElement(
+                        build.cairn.contracts.UpdateNodeStorageInput(
+                            nodeId = node.id,
+                            revision = node.revision,
+                            storage = policy,
+                        )
+                    ),
                 )
                 storage = null
                 load()
@@ -608,8 +614,8 @@ fun NodesScreen(
                 retiring = null
                 notify(
                     when (result.releasedPlacements) {
-                        0 -> "${previous.name} révoquée"
-                        1 ->
+                        0L -> "${previous.name} révoquée"
+                        1L ->
                             "${previous.name} révoquée ; 1 conversation revient au placement automatique"
                         else ->
                             "${previous.name} révoquée ; ${result.releasedPlacements} conversations reviennent au placement automatique"
@@ -809,10 +815,10 @@ internal fun NodeEditor(
     var accepting by remember(node.id) { mutableStateOf(node.accepting) }
     var nativeEnabled by remember(node.id) { mutableStateOf(node.nativeEnabled) }
     var nativeAccounts by remember(node.id) { mutableStateOf(node.nativeAccounts.toSet()) }
-    var slots by remember(node.id) { mutableStateOf(node.slots.toString()) }
+    var slots by remember(node.id) { mutableStateOf((node.slots ?: 4).toString()) }
     var cpu by remember(node.id) { mutableStateOf(node.limits.cpu.toString()) }
     // Ceilings are edited in Gio and stored in Mio.
-    var memory by remember(node.id) { mutableStateOf(gib(node.limits.memoryMiB)) }
+    var memory by remember(node.id) { mutableStateOf(gib(node.limits.memoryMiB.toLong())) }
     var disk by remember(node.id) { mutableStateOf(gib(node.limits.diskMiB)) }
     val memoryMiB = mib(memory)
     val diskMiB = mib(disk)
@@ -823,18 +829,24 @@ internal fun NodeEditor(
         close = dismiss,
         valid =
             name.isNotBlank() &&
-                (cpu.toIntOrNull() ?: 0) > 0 &&
+                (cpu.toIntOrNull() ?: 0) in 1..4096 &&
                 (slots.toIntOrNull() ?: 0) in 1..4096 &&
-                (memoryMiB ?: 0) >= 128 &&
-                (diskMiB ?: 0) >= 128,
+                (memoryMiB ?: 0) in 129L..1073741824L &&
+                (diskMiB ?: 0) in 128L..1099511627776L,
         save = {
             save(
                 NodeConfiguration(
-                    name,
-                    accepting,
-                    tags.split(',').map(String::trim).filter(String::isNotEmpty),
-                    NodeResources(cpu.toInt(), memoryMiB!!, diskMiB!!),
-                    slots.toInt(),
+                    revision = node.revision,
+                    name = name,
+                    accepting = accepting,
+                    tags = tags.split(',').map(String::trim).filter(String::isNotEmpty),
+                    limits =
+                        NodeResources(
+                            cpu = cpu.toInt(),
+                            memoryMiB = memoryMiB!!.toInt(),
+                            diskMiB = diskMiB!!,
+                        ),
+                    slots = slots.toInt(),
                     confirmNativeAdministration = node.nativeModeRequest?.mode == "administrator",
                     nativeEnabled =
                         if (node.capabilities.backend == NATIVE_BACKEND) nativeEnabled else null,
@@ -896,7 +908,7 @@ internal fun NodeEditor(
                     }
                 }
             }
-        if (node.capabilities.backend != NATIVE_BACKEND && !node.exclusiveReservations)
+        if (!node.exclusiveReservations)
             Text(
                 "Mettez à jour le runtime de cette machine pour activer les réservations exclusives.",
                 style = MaterialTheme.typography.bodySmall,
@@ -1018,8 +1030,9 @@ private fun NodeStorageEditor(
     dismiss: () -> Unit,
     save: (NodeStoragePolicy) -> Unit,
 ) {
-    val policy = node.storage ?: NodeStoragePolicy()
+    val policy = node.storage
     var cache by remember { mutableStateOf(policy.cacheMiB.toString()) }
+    var memoryCache by remember { mutableStateOf(policy.memoryCacheMiB.toString()) }
     var reserve by remember { mutableStateOf(policy.reserveMiB.toString()) }
     var percent by remember { mutableStateOf(policy.reservePercent.toString()) }
     var interval by remember { mutableStateOf(policy.backupSeconds.toString()) }
@@ -1030,7 +1043,8 @@ private fun NodeStorageEditor(
         state.error,
         close = dismiss,
         valid =
-            cache.toLongOrNull() in 0L..16777216L &&
+            memoryCache.toLongOrNull() in 4L..4096L &&
+                cache.toLongOrNull() in 0L..16777216L &&
                 reserve.toLongOrNull() in 64L..16777216L &&
                 percent.toIntOrNull() in 1..50 &&
                 interval.toLongOrNull() in 5L..3600L &&
@@ -1038,13 +1052,12 @@ private fun NodeStorageEditor(
         save = {
             save(
                 NodeStoragePolicy(
-                    cache.toLong(),
-                    reserve.toLong(),
-                    percent.toInt(),
-                    interval.toLong(),
-                    dirty.toLong(),
-                    // Edited on the web only; keep it rather than resetting it to the default.
-                    memoryCacheMiB = policy.memoryCacheMiB,
+                    cacheMiB = cache.toLong(),
+                    reserveMiB = reserve.toLong(),
+                    reservePercent = percent.toLong(),
+                    backupSeconds = interval.toLong(),
+                    maxDirtySeconds = dirty.toLong(),
+                    memoryCacheMiB = memoryCache.toLong(),
                 )
             )
         },
@@ -1054,6 +1067,13 @@ private fun NodeStorageEditor(
         )
         Panel {
             Text("Disque local", style = MaterialTheme.typography.titleSmall)
+            Field(
+                "Cache mémoire partagé (Mio)",
+                memoryCache,
+                { memoryCache = it },
+                enabled = !state.busy,
+                keyboardOptions = InputKeyboards.Number,
+            )
             Field(
                 "Cache propre (Mio)",
                 cache,

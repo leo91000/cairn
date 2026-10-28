@@ -1,11 +1,14 @@
 package build.cairn.app.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -13,6 +16,9 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import java.util.UUID
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 
 private val quotaMessage =
@@ -31,6 +37,16 @@ internal data class ChatQuota(
     val reset: String?,
     val automatic: Boolean,
 )
+
+/** A live account wait that recovers automatically, without reconnecting an account. */
+internal fun isQuotaWait(status: String, reason: String?, accountRequired: String?): Boolean =
+    status in listOf("running", "queued") &&
+        accountRequired.isNullOrEmpty() &&
+        Regex(
+                "^(?:Usage exhausted\\.|Waiting for a .+ account with available usage\\.)",
+                RegexOption.IGNORE_CASE,
+            )
+            .containsMatchIn(reason.orEmpty())
 
 private fun quotaFailure(event: RunEvent): String {
     if (event.type !in listOf("turn.failed", "error")) return ""
@@ -179,76 +195,264 @@ internal fun ChatQuotaCard(
     busy: Boolean,
     openConnections: () -> Unit,
     resume: () -> Unit,
+    choices: List<CodingAgentChoice> = emptyList(),
+    switching: String? = null,
+    switchError: String? = null,
+    switch: (String) -> Unit = {},
+    cancelSwitch: () -> Unit = {},
+    loading: Boolean = false,
 ) {
     var expanded by rememberSaveable(quota.message) { mutableStateOf(false) }
-    val tone = signal.warning
-    val surface = signal.warningSoft
     Surface(
         Modifier.fillMaxWidth().testTag("chat-quota").semantics {
             liveRegion = LiveRegionMode.Polite
         },
-        color = surface,
+        color = MaterialTheme.colorScheme.surface,
         contentColor = MaterialTheme.colorScheme.onSurface,
-        shape = RoundedCornerShape(20.dp),
-        border = BorderStroke(1.dp, tone.copy(alpha = 0.3f)),
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
-        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(
+            Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Icon(CairnIcons.Clock, null, Modifier.size(24.dp), tint = tone)
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (switching != null)
+                    CircularProgressIndicator(
+                        Modifier.padding(top = 4.dp).size(14.dp),
+                        strokeWidth = 2.dp,
+                    )
+                else
+                    Box(
+                        Modifier.padding(top = 7.dp)
+                            .size(6.dp)
+                            .background(signal.warning, CircleShape)
+                    )
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
-                        "Quota ${quota.provider} atteint",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = tone,
+                        when {
+                            switching != null -> "Passage à $switching…"
+                            quota.spend -> "Limite de dépense ${quota.provider} atteinte"
+                            else -> "Quota ${quota.provider} atteint"
+                        },
+                        style = MaterialTheme.typography.titleSmall,
                     )
                     Text(
-                        if (quota.spend) "La limite de dépense du compte est atteinte."
-                        else "La limite d’usage du compte est atteinte.",
-                        style = MaterialTheme.typography.bodyMedium,
+                        when {
+                            switching != null -> "La conversation et les fichiers sont conservés."
+                            quota.automatic ->
+                                "Reprise automatique dès qu’un compte est disponible."
+                            else -> "Reprenez la conversation quand un compte est disponible."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (switching == null)
+                        quota.reset?.let {
+                            Text(
+                                "Réinitialisation annoncée : $it",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                 }
             }
-            quota.reset?.let {
-                Text(
-                    "Réinitialisation annoncée : $it",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = tone,
-                )
+            if (switching != null) {
+                TextButton(onClick = cancelSwitch, enabled = !busy) {
+                    Text("Annuler le changement")
+                }
+            } else if (choices.isNotEmpty() || !quota.automatic || loading) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    choices.forEach { choice ->
+                        FilledTonalButton(onClick = { switch(choice.provider) }, enabled = !busy) {
+                            Text("Continuer avec ${choice.label}")
+                        }
+                    }
+                    if (loading && choices.isEmpty())
+                        Row(
+                            Modifier.padding(vertical = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Text(
+                                "Vérification des alternatives…",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    if (!quota.automatic)
+                        TextButton(onClick = resume, enabled = !busy) {
+                            Text("Reprendre la conversation")
+                        }
+                }
             }
-            Text(
-                if (quota.automatic) "Reprise automatique dès qu’un compte est disponible."
-                else "Reprenez la conversation quand un compte est disponible.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            if (canManage || quota.message.isNotBlank())
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (canManage)
+                        TextButton(onClick = openConnections, enabled = !busy) {
+                            Text("Gérer les comptes")
+                        }
+                    if (quota.message.isNotBlank())
+                        TextButton(onClick = { expanded = !expanded }) {
+                            Icon(
+                                if (expanded) CairnIcons.Down else CairnIcons.Right,
+                                null,
+                                Modifier.size(16.dp),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("Détails techniques")
+                        }
+                }
+            if (expanded && quota.message.isNotBlank())
+                Text(quota.message, style = MaterialTheme.typography.bodySmall)
+            switchError?.let {
+                Text(it, color = signal.warning, style = MaterialTheme.typography.bodySmall)
+            }
+            if (
+                !canManage &&
+                    choices.isEmpty() &&
+                    switching == null &&
+                    !loading &&
+                    switchError == null
             )
-            if (canManage)
-                Button(
-                    onClick = openConnections,
-                    enabled = !busy,
-                    colors =
-                        ButtonDefaults.buttonColors(containerColor = tone, contentColor = surface),
-                ) {
-                    Text("Gérer les comptes")
-                }
-            else
                 Text(
                     "Demandez au propriétaire de l’installation de vérifier les comptes.",
                     style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-            if (!quota.automatic)
-                TextButton(onClick = resume, enabled = !busy) { Text("Reprendre la conversation") }
-            if (quota.message.isNotBlank()) {
-                TextButton(onClick = { expanded = !expanded }) {
-                    Icon(
-                        if (expanded) CairnIcons.Down else CairnIcons.Right,
-                        null,
-                        Modifier.size(16.dp),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text("Détails techniques", color = tone)
-                }
-                if (expanded) Text(quota.message, style = MaterialTheme.typography.bodySmall)
-            }
         }
     }
+}
+
+/** One explicit choice, with the manager retaining a switch across disconnects/restarts. */
+@Composable
+internal fun ChatQuotaRecovery(
+    vm: CairnViewModel,
+    chat: Chat,
+    quota: ChatQuota?,
+    canManage: Boolean,
+    busy: Boolean,
+    openConnections: () -> Unit,
+    resume: () -> Unit,
+    followConversation: () -> Unit,
+) {
+    var options by remember(chat.id) { mutableStateOf<CodingAgentOptions?>(null) }
+    var pending by remember(chat.id) { mutableStateOf<String?>(null) }
+    var failure by remember(chat.id) { mutableStateOf<String?>(null) }
+    var readFailure by remember(chat.id) { mutableStateOf<String?>(null) }
+    var sending by remember(chat.id) { mutableStateOf(false) }
+    var loading by remember(chat.id) { mutableStateOf(false) }
+    var optionsRefresh by remember(chat.id) { mutableIntStateOf(0) }
+    val scope = rememberCoroutineScope()
+    val switching = pending ?: options?.switching?.provider ?: chat.codingAgentSwitch?.provider
+    LaunchedEffect(
+        chat.id,
+        quota != null,
+        chat.codingAgentSwitch,
+        pending,
+        sending,
+        optionsRefresh,
+    ) {
+        if (sending || (quota == null && switching == null)) return@LaunchedEffect
+        do {
+            loading = options == null
+            try {
+                val result =
+                    wireJson.decodeFromString<CodingAgentOptions>(
+                        vm.api.request("GET", "/chats/${segment(chat.id)}/coding-agent")
+                    )
+                options = result
+                if (result.switching != null && pending == null) {
+                    pending = result.switching.provider
+                    followConversation()
+                }
+                if (pending != null && result.switching == null && !sending) {
+                    pending = null
+                }
+                readFailure = null
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (error: Exception) {
+                readFailure = error.message
+            } finally {
+                loading = false
+            }
+            if (quota == null && pending == null && options?.switching == null) break
+            delay(
+                if (pending != null || options?.switching != null) 1000
+                else if (readFailure != null) 2000 else 5000
+            )
+        } while (true)
+    }
+    val shown =
+        quota
+            ?: if (switching != null)
+                ChatQuota(
+                    codingAgent(options?.provider ?: "codex").label,
+                    "",
+                    false,
+                    null,
+                    true,
+                )
+            else null
+    if (shown == null) return
+    ChatQuotaCard(
+        shown,
+        canManage,
+        busy || sending,
+        openConnections,
+        resume,
+        choices = options?.choices.orEmpty(),
+        loading = loading,
+        switching = switching?.let { codingAgent(it).label },
+        switchError = failure ?: readFailure ?: options?.switching?.error,
+        switch = { provider ->
+            val selected = options
+            if (selected?.runId != null && selected.turnId != null && !sending) {
+                sending = true
+                pending = provider
+                failure = null
+                scope.launch {
+                    try {
+                        vm.api.request(
+                            "POST",
+                            "/chats/${segment(chat.id)}/coding-agent",
+                            buildJsonObject {
+                                put("requestId", UUID.randomUUID().toString())
+                                put("runId", selected.runId)
+                                put("turnId", selected.turnId)
+                                put("provider", provider)
+                            },
+                        )
+                        followConversation()
+                    } catch (cancel: kotlinx.coroutines.CancellationException) {
+                        throw cancel
+                    } catch (error: Exception) {
+                        pending = null
+                        failure = error.message
+                        optionsRefresh++
+                    } finally {
+                        sending = false
+                    }
+                }
+            }
+        },
+        cancelSwitch = {
+            sending = true
+            failure = null
+            scope.launch {
+                try {
+                    vm.api.request("POST", "/chats/${segment(chat.id)}/stop")
+                    pending = null
+                    options = null
+                } catch (cancel: kotlinx.coroutines.CancellationException) {
+                    throw cancel
+                } catch (error: Exception) {
+                    failure = error.message
+                } finally {
+                    sending = false
+                }
+            }
+        },
+    )
 }

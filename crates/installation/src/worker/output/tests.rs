@@ -1,4 +1,5 @@
 use super::*;
+use crate::run_fixture::DbRunFixture;
 use crate::{
     config::{Config, MAIN_AGENT_ID},
     performance::Activity,
@@ -96,7 +97,7 @@ impl Fixture {
         let id = self.id.clone();
         self.service
             .store
-            .read(move |db| db.events(&id, 0, 1000))
+            .read(move |db| db.events_fixture(&id, 0, 1000))
             .await
             .unwrap()
             .into_iter()
@@ -144,7 +145,7 @@ async fn runtime_disk_notice_preserves_publication_metadata_and_redacts_all_payl
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 100))
+        .read(move |db| db.events_fixture(&id, 0, 100))
         .await
         .unwrap();
     assert!(events.iter().any(|event| event["type"] == "status"));
@@ -178,7 +179,7 @@ async fn speed_checks_before_a_turn_become_conversation_notices() {
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 100))
+        .read(move |db| db.events_fixture(&id, 0, 100))
         .await
         .unwrap();
     let notices = events
@@ -231,7 +232,7 @@ async fn partial_guest_stdout_cannot_hide_controller_failure_after_exhausted_log
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 1000))
+        .read(move |db| db.events_fixture(&id, 0, 1000))
         .await
         .unwrap();
     let failures = events
@@ -294,7 +295,7 @@ async fn controller_failures_survive_exhausted_logs_without_provider_retry() {
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 1000))
+        .read(move |db| db.events_fixture(&id, 0, 1000))
         .await
         .unwrap();
     let failures = events
@@ -331,7 +332,7 @@ async fn native_retry_notices_survive_log_budget_without_claiming_the_final_fail
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 1000))
+        .read(move |db| db.events_fixture(&id, 0, 1000))
         .await
         .unwrap();
     let notice = events
@@ -392,7 +393,7 @@ async fn engine_reports_survive_log_budget_redacted_and_only_a_reported_limit_ex
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 1000))
+        .read(move |db| db.events_fixture(&id, 0, 1000))
         .await
         .unwrap();
     // The run's own queued status precedes them.
@@ -738,7 +739,7 @@ fn question_event(id: &str, blocking: bool) -> Value {
 }
 
 #[tokio::test]
-async fn closed_questions_leave_the_pending_badge_without_becoming_answers() {
+async fn common_questions_survive_native_closures_without_becoming_answers() {
     for blocking in [false, true] {
         let mut fixture = Fixture::new().await;
         let chat = question_chat(&fixture).await;
@@ -746,18 +747,35 @@ async fn closed_questions_leave_the_pending_badge_without_becoming_answers() {
         fixture.event(question_event(&question, blocking)).await;
         assert_eq!(
             fixture.service.chat_detail(&chat).await.unwrap()["pendingQuestions"],
+            0
+        );
+        fixture
+            .service
+            .question_receive(
+                &fixture.id,
+                question_event(&question, false)["question"].clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture.service.chat_detail(&chat).await.unwrap()["pendingQuestions"],
             1
         );
         fixture
             .event(json!({ "type": "chat.question.closed", "questionId": question }))
             .await;
-        // A duplicate event must not reopen a withdrawn question.
+        // Native events cannot replace or retire a common questionnaire.
         fixture.event(question_event(&question, blocking)).await;
         let detail = fixture.service.chat_detail(&chat).await.unwrap();
-        assert_eq!(detail["pendingQuestions"], 0);
-        assert_eq!(detail["questions"][0]["status"], "cancelled");
+        assert_eq!(detail["pendingQuestions"], 1);
+        assert_eq!(detail["questions"][0]["status"], "pending");
         assert_eq!(detail["questions"][0]["blocking"], false);
         assert_eq!(detail["messages"], json!([]));
+        fixture
+            .service
+            .question_cancel(&chat, &question)
+            .await
+            .unwrap();
         assert!(
             fixture
                 .service
@@ -765,7 +783,10 @@ async fn closed_questions_leave_the_pending_badge_without_becoming_answers() {
                     &chat,
                     &question,
                     json!({
-                        "id": crate::config::id(), "answers": { "scope": ["Everything"] },
+                        "id": crate::config::id(),
+                        "answers": {
+                            "scope": { "selected": [], "comment": "Everything" },
+                        },
                     })
                 )
                 .await
@@ -796,7 +817,14 @@ async fn a_completed_outcome_retires_questions_but_input_needed_and_old_reports_
             )
             .await
             .unwrap();
-        fixture.event(question_event(&"a".repeat(64), false)).await;
+        fixture
+            .service
+            .question_receive(
+                &fixture.id,
+                question_event(&"a".repeat(64), false)["question"].clone(),
+            )
+            .await
+            .unwrap();
         fixture.event(json!({ "type": "turn.completed" })).await;
         assert_eq!(
             fixture.service.chat_detail(&chat).await.unwrap()["pendingQuestions"],
@@ -806,7 +834,7 @@ async fn a_completed_outcome_retires_questions_but_input_needed_and_old_reports_
 }
 
 #[tokio::test]
-async fn releasing_a_session_preserves_answers_in_delivery() {
+async fn releasing_a_session_preserves_common_questions_and_answers_in_delivery() {
     let mut fixture = Fixture::new().await;
     let chat = question_chat(&fixture).await;
     let pending = "a".repeat(64);
@@ -816,8 +844,16 @@ async fn releasing_a_session_preserves_answers_in_delivery() {
         .chat_send(&chat, json!({ "id": crate::config::id(), "text": "Start" }))
         .await
         .unwrap();
-    fixture.event(question_event(&pending, true)).await;
-    fixture.event(question_event(&answering, true)).await;
+    for question in [&pending, &answering] {
+        fixture
+            .service
+            .question_receive(
+                &fixture.id,
+                question_event(question, false)["question"].clone(),
+            )
+            .await
+            .unwrap();
+    }
     let answer = crate::config::id();
     fixture
         .service
@@ -825,7 +861,10 @@ async fn releasing_a_session_preserves_answers_in_delivery() {
             &chat,
             &answering,
             json!({
-                "id": answer, "answers": { "scope": ["Keep this answer"] },
+                "id": answer,
+                "answers": {
+                    "scope": { "selected": [], "comment": "Keep this answer" },
+                },
             }),
         )
         .await
@@ -841,11 +880,11 @@ async fn releasing_a_session_preserves_answers_in_delivery() {
         .event(json!({ "type": "chat.question.closed" }))
         .await;
     let detail = fixture.service.chat_detail(&chat).await.unwrap();
-    assert_eq!(detail["pendingQuestions"], 0);
+    assert_eq!(detail["pendingQuestions"], 1);
     let questions = detail["questions"].as_array().unwrap();
     assert_eq!(
         questions.iter().find(|q| q["id"] == pending).unwrap()["status"],
-        "cancelled"
+        "pending"
     );
     assert_eq!(
         questions.iter().find(|q| q["id"] == answering).unwrap()["status"],
@@ -1057,7 +1096,7 @@ async fn context_usage_survives_log_budget_and_keeps_the_latest_snapshot_on_the_
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 1000))
+        .read(move |db| db.events_fixture(&id, 0, 1000))
         .await
         .unwrap();
     let usage = events
@@ -1078,4 +1117,135 @@ async fn context_usage_survives_log_budget_and_keeps_the_latest_snapshot_on_the_
         .await;
     let run = fixture.service.store.run(&fixture.id).await.unwrap();
     assert_eq!(run["contextUsage"]["contextTokens"], 6_200);
+}
+
+#[tokio::test]
+async fn failed_event_publication_rolls_back_the_checkpoint_and_does_not_notify() {
+    let mut fixture = Fixture::new().await;
+    let before = fixture.service.store.revision();
+    fixture.service.store.write(|db| {
+        db.0.execute_batch("CREATE TRIGGER reject_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'fixture publication failure'); END;")?;
+        Ok(())
+    }).await.unwrap();
+    let output = Output::new(
+        false,
+        json!({"type":"turn.completed","usage":{"input_tokens":42}}).to_string(),
+    );
+    let result = record(
+        &fixture.service,
+        &output,
+        &fixture.checkpoint,
+        false,
+        &[],
+        &mut fixture.log_total,
+        &mut fixture.activity,
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(fixture.service.store.revision(), before);
+    assert!(!fixture.checkpoint.snapshot().await.completed());
+    assert!(
+        RunCheckpoint::load(&fixture.service.store, &fixture.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(fixture.service.store.run(&fixture.id).await.unwrap()["usage"].is_null());
+    fixture
+        .service
+        .store
+        .write(|db| {
+            db.0.execute_batch("DROP TRIGGER reject_event")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    fixture.output(output).await;
+    assert!(fixture.checkpoint.snapshot().await.completed());
+    assert!(
+        RunCheckpoint::load(&fixture.service.store, &fixture.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .completed()
+    );
+    assert_eq!(
+        fixture.service.store.run(&fixture.id).await.unwrap()["usage"]["input_tokens"],
+        42
+    );
+}
+
+#[tokio::test]
+async fn unknown_engine_events_remain_redacted_data_without_changing_checkpoint_state() {
+    let mut fixture = Fixture::new().await;
+    fixture
+        .event(json!({"type":"engine.future","payload":{"token":"sensitive-tool-credential"}}))
+        .await;
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.event_page(&id, 0, 100))
+        .await
+        .unwrap();
+    let event = events
+        .iter()
+        .find(|event| matches!(&event.kind, EventKind::External(kind) if kind == "engine.future"))
+        .unwrap();
+    let encoded = serde_json::to_string(event).unwrap();
+    assert!(!encoded.contains("sensitive-tool-credential"));
+    assert!(encoded.contains("[redacted]"));
+    assert!(!fixture.checkpoint.snapshot().await.completed());
+}
+
+#[tokio::test]
+async fn display_redaction_cannot_change_engine_lifecycle_or_session_identity() {
+    let mut fixture = Fixture::new().await;
+    let frames = [
+        json!({"type":"thread.started","thread_id":"session-original"}),
+        json!({"type":"context.usage","usage":{"contextTokens":400,"contextWindow":200000}}),
+        json!({"type":"item.completed","item":{"id":"reply","type":"agent_message","text":"session private text"}}),
+        json!({"type":"turn.completed","usage":{"input_tokens":42}}),
+    ];
+    for frame in frames {
+        let output = Output::new(false, frame.to_string());
+        record(
+            &fixture.service,
+            &output,
+            &fixture.checkpoint,
+            false,
+            &["completed".into(), "text".into(), "session".into()],
+            &mut fixture.log_total,
+            &mut fixture.activity,
+        )
+        .await
+        .unwrap();
+    }
+    let run = fixture.service.store.run(&fixture.id).await.unwrap();
+    assert_eq!(run["sessionId"], "session-original");
+    assert_eq!(run["contextUsage"]["contextTokens"], 400);
+    assert_eq!(run["usage"]["input_tokens"], 42);
+    let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saved.completed());
+    assert_eq!(saved.last_message(), "[redacted] private [redacted]");
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events_fixture(&id, 0, 100))
+        .await
+        .unwrap();
+    let session = events
+        .iter()
+        .find(|event| event["payload"]["thread_id"].is_string())
+        .unwrap();
+    assert_eq!(session["payload"]["thread_id"], "[redacted]-original");
+    assert!(
+        events
+            .iter()
+            .any(|event| event["payload"]["type"] == "turn.[redacted]")
+    );
 }

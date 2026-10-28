@@ -55,18 +55,19 @@ class OlderPagesScopeTest {
                                                 .setBody(
                                                     wireJson.encodeToString(
                                                         HistoryPage(
-                                                            listOf(
-                                                                RunEvent(
-                                                                    9,
-                                                                    9,
-                                                                    "chat.user",
-                                                                    "Older $label",
-                                                                    runId = "r1",
-                                                                )
-                                                            ),
-                                                            "v1:r1:1",
-                                                            9,
-                                                            false,
+                                                            events =
+                                                                listOf(
+                                                                    RunEvent(
+                                                                        id = 9,
+                                                                        createdAt = 9,
+                                                                        type = "chat.user",
+                                                                        text = "Older $label",
+                                                                        runId = "r1",
+                                                                    )
+                                                                ),
+                                                            history = "v1:r1:1",
+                                                            oldest = 9,
+                                                            hasOlder = false,
                                                         )
                                                     )
                                                 )
@@ -83,10 +84,10 @@ class OlderPagesScopeTest {
                                             LiveBatch(
                                                 listOf(
                                                     RunEvent(
-                                                        10,
-                                                        10,
-                                                        "chat.user",
-                                                        "$label $path",
+                                                        id = 10,
+                                                        createdAt = 10,
+                                                        type = "chat.user",
+                                                        text = "$label $path",
                                                         runId = "r1",
                                                     )
                                                 ),
