@@ -120,6 +120,9 @@ data class Chat(
     /** The conversation that delegated this one, while it still exists. */
     val requester: ChatRequester? = null,
     val codingAgentSwitch: CodingAgentSwitch? = null,
+    /** The current run's account wait, also available in conversation lists. */
+    val accountWaitReason: String? = null,
+    val accountRequired: String? = null,
 ) {
     val exclusiveSuspended
         get() =

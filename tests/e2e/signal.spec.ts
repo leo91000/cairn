@@ -103,6 +103,40 @@ test('delegated conversations keep their requester in attention cards and live r
   }
 })
 
+test('automatic quota waits appear with scheduled resumptions without a deadline', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const quota = {
+    ...chat,
+    title: 'Waiting on Codex quota',
+    status: 'running',
+    accountWaitReason: 'Usage exhausted. Waiting for an available Codex account to resume.',
+    accountRequired: null,
+    agentName: 'Ops',
+    pendingQuestions: 0,
+  }
+  await page.route('**/api/chats/stream?**', route => route.fulfill({
+    contentType: 'text/event-stream',
+    body: `id: 0\nevent: batch\ndata: ${JSON.stringify({
+      events: [],
+      state: {
+        run: null,
+        chat: null,
+        chats: [quota],
+        artifacts: [],
+      },
+      reset: true,
+      more: false,
+    })}\n\n`,
+  }))
+  await signIn(page)
+  const waiting = page.getByRole('region', { name: 'Waiting', exact: true })
+  const row = waiting.locator(`[data-fil-key="chat:${chat.id}"]`)
+  await expect(row.getByText('Waiting for quota', { exact: true })).toBeVisible()
+  await expect(row.getByText('Awaiting availability', { exact: true })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Live', exact: true })).toHaveCount(0)
+})
+
 test('exclusive suspension stays live and suppresses working indicators until release', async ({ page, workspace }) => {
   test.setTimeout(90000)
   const chat = await workspace.api('/api/chats', 'POST', {})

@@ -44,6 +44,84 @@ class SignalPresentationTest {
         assertEquals("Erreur prioritaire", feed.forYou.last().subtitle)
     }
 
+    @Test
+    fun `automatic quota waits follow dated resumptions and preserve attention and suspension`() {
+        val quota =
+            Chat(
+                "quota",
+                status = "running",
+                accountWaitReason =
+                    "Usage exhausted. Waiting for an available Codex account to resume.",
+            )
+        val feed =
+            buildFeed(
+                listOf(
+                    quota,
+                    quota.copy(
+                        id = "admission",
+                        status = "queued",
+                        accountWaitReason =
+                            "Waiting for a Claude Code account with available usage.",
+                    ),
+                    quota.copy(id = "question", pendingQuestions = 1),
+                    quota.copy(id = "paused", paused = true),
+                    quota.copy(id = "failed", status = "failed"),
+                    quota.copy(id = "reconnect", accountRequired = "codex"),
+                    quota.copy(
+                        id = "suspended",
+                        suspendedByExclusive =
+                            ExclusiveReservation(
+                                "reservation",
+                                "node",
+                                "owner",
+                                "Build",
+                                "acquired",
+                            ),
+                    ),
+                    Chat(
+                        "dated",
+                        status = "succeeded",
+                        wakeup =
+                            ChatWakeup(
+                                id = "wake",
+                                reason = "",
+                                seconds = 60,
+                                createdAt = 1,
+                                wakeAt = 300,
+                            ),
+                    ),
+                ),
+                listOf(
+                    Run(
+                        id = "mission-run",
+                        taskId = "mission",
+                        status = "queued",
+                        accountWaitReason = quota.accountWaitReason,
+                    )
+                ),
+                emptyList(),
+            )
+        assertEquals(
+            listOf("chat:dated", "chat:quota", "chat:admission", "run:mission-run"),
+            feed.waiting.map { it.key },
+        )
+        assertTrue(
+            feed.waiting.drop(1).all {
+                it.subtitle == "En attente de quota" && it.wakeAt == null && !it.working
+            }
+        )
+        assertEquals(listOf("chat:question", "chat:failed"), feed.forYou.map { it.key })
+        assertEquals(listOf("chat:paused"), feed.recent.map { it.key })
+        assertEquals(listOf("chat:reconnect", "chat:suspended"), feed.running.map { it.key })
+        assertEquals(
+            FeedKind.RUNNING_CHAT,
+            buildFeed(listOf(quota.copy(accountWaitReason = null)), emptyList(), emptyList())
+                .running
+                .single()
+                .kind,
+        )
+    }
+
     private val zone = ZoneId.of("Europe/Paris")
 
     private fun at(year: Int, month: Int, day: Int, hour: Int, minute: Int = 0) =

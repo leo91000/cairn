@@ -28,6 +28,8 @@ fn summary(chat: &Value) -> Value {
         "runId",
         "paused",
         "status",
+        "accountWaitReason",
+        "accountRequired",
         "lifecycle",
         "createdAt",
         "updatedAt",

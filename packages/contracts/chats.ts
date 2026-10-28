@@ -145,6 +145,9 @@ export interface ChatCompaction {
   reason: string | null
 }
 export interface ChatView extends Chat {
+  /** The current run's account wait, also available without loading its detail. */
+  accountWaitReason?: Run['accountWaitReason']
+  accountRequired?: Run['accountRequired']
   codingAgentSwitch?: { provider: Provider, error: string | null } | null
   suspendedByExclusive?: Run['suspendedByExclusive']
   pendingQuestions: number

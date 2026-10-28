@@ -179,7 +179,7 @@
   },
   {
     "name": "list_chats",
-    "description": "List conversations with pagination, optional agent/project filters and active/trash view. Returns metadata, without messages or marking chats read.",
+    "description": "List conversations with pagination, optional agent/project filters and active/trash view. Returns metadata including accountWaitReason and accountRequired for quota waits, without messages or marking chats read.",
     "scope": "read",
     "destructive": false,
     "inputSchema": {
