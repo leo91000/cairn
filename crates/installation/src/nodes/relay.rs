@@ -209,7 +209,8 @@ fn route(method: &str, path: &str) -> Result<()> {
         ["snapshots", id, hash] => {
             uuid(id)
                 && ((method == "GET" && super::snapshots::valid_hash(hash))
-                    || (method == "POST" && matches!(*hash, "blocks" | "publication"))
+                    || (method == "POST"
+                        && matches!(*hash, "blocks" | "publication" | "direct-upload"))
                     || (method == "DELETE" && *hash == "discard"))
         }
         ["runs", id] => uuid(id) && ["POST", "DELETE"].contains(&method),
@@ -250,7 +251,9 @@ fn route(method: &str, path: &str) -> Result<()> {
 
 /// How long the controller may take to answer, by operation.
 fn controller_timeout(method: &str, path: &str, native: bool) -> Duration {
-    Duration::from_secs(if method == "POST" && path.ends_with("/publication") {
+    Duration::from_secs(if method == "POST" && path.ends_with("/direct-upload") {
+        crate::storage::direct::TRANSFER_SECONDS + 60
+    } else if method == "POST" && path.ends_with("/publication") {
         super::snapshots::PUBLICATION_STARTUP.as_secs()
     } else if path.ends_with("/restore") {
         120

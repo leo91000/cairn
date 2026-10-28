@@ -11,6 +11,7 @@ pub use device::{Disk, DiskWrite, LocalDisk, export};
 
 pub mod block_codec;
 pub mod digest;
+pub mod direct;
 mod lazy;
 pub(crate) mod metrics;
 
@@ -22,6 +23,7 @@ pub mod transport;
 pub mod ublk;
 
 pub mod remote;
+mod reports;
 
 pub mod source;
 

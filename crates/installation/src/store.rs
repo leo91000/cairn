@@ -33,7 +33,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-const DATABASE_VERSION: i64 = 12;
+const DATABASE_VERSION: i64 = 13;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -66,7 +66,7 @@ impl Store {
         let fresh = !file.exists();
         let mut writer = Connection::open(&file)?;
         let version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !fresh && version != DATABASE_VERSION {
+        if !fresh && version != DATABASE_VERSION && version != 12 {
             return Err(Error::bad(
                 "Unsupported installation database version; a complete reinstallation is required.",
             ));
@@ -74,6 +74,15 @@ impl Store {
         writer.busy_timeout(std::time::Duration::from_secs(5))?;
         writer.set_prepared_statement_cache_capacity(128);
         writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        if !fresh && version == 12 {
+            // Only small metadata changes here; v2 disk objects migrate lazily.
+            // Fence older binaries before publishing the first v3 object.
+            let tx = writer.transaction()?;
+            tx.execute_batch("CREATE TABLE direct_storage_grants(object TEXT PRIMARY KEY REFERENCES shared_objects(id) ON DELETE CASCADE,expires_at INTEGER NOT NULL,settled INTEGER NOT NULL DEFAULT 0 CHECK(settled IN (0,1)));")?;
+            tx.execute_batch("CREATE TABLE direct_read_authorizations(grant_id TEXT NOT NULL,object TEXT NOT NULL,hash TEXT NOT NULL,run_id TEXT NOT NULL,PRIMARY KEY(grant_id,object));CREATE INDEX direct_read_authorizations_object ON direct_read_authorizations(object);")?;
+            tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
+            tx.commit()?;
+        }
         if fresh {
             let tx = writer.transaction()?;
             tx.execute_batch(
@@ -945,8 +954,58 @@ mod schema_tests {
     }
 
     #[test]
+    fn version_twelve_upgrade_preserves_data_and_fences_older_binaries() {
+        let root = tempfile::tempdir().unwrap();
+        drop(Store::open(root.path()).unwrap());
+        let file = root.path().join("manager.db");
+        let db = Connection::open(&file).unwrap();
+        db.execute_batch("DROP TABLE direct_storage_grants; DROP TABLE direct_read_authorizations; PRAGMA user_version=12;
+            INSERT INTO kv(key,data) VALUES('migration-fixture','{\"preserved\":true}');
+            INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES('old-object','bucket','hash',4096,'{}','ready');").unwrap();
+        drop(db);
+
+        drop(Store::open(root.path()).unwrap());
+        drop(Store::open(root.path()).unwrap());
+        let db = Connection::open(file).unwrap();
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            DATABASE_VERSION
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT data FROM kv WHERE key='migration-fixture'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "{\"preserved\":true}"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT state FROM shared_objects WHERE id='old-object'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "ready"
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM direct_storage_grants", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+    }
+
+    #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 99] {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();

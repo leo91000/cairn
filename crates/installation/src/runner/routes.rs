@@ -191,6 +191,12 @@ async fn snapshot_file(
 ) -> Result<Response> {
     uuid(snapshot)?;
     let directory = broker.state.join("snapshots").join(snapshot);
+    if request.method() == "POST" && hash == "direct-upload" {
+        let bytes = body(request, 131_072, "Invalid direct publication batch.").await?;
+        return json_response(
+            super::super::nodes::snapshots::upload_direct(&directory, &bytes).await?,
+        );
+    }
     if request.method() == "DELETE" && hash == "discard" {
         tokio::fs::remove_dir_all(directory).await?;
         return json_response(json!({ "ok": true }));
@@ -304,9 +310,14 @@ async fn disk_storage(
     let backup_id = receipt.backup_id;
     uuid(&backup_id)?;
     let disk = volume.disk.clone();
-    tokio::task::spawn_blocking(move || disk.commit_published(generation, &backup_id))
-        .await
-        .map_err(Error::internal)??;
+    tokio::task::spawn_blocking(move || {
+        volume.source.acknowledge(|| {
+            disk.commit_published(generation, &backup_id)
+                .map_err(Error::internal)
+        })
+    })
+    .await
+    .map_err(Error::internal)??;
     json_response(json!({ "committed": true }))
 }
 

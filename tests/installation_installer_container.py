@@ -370,6 +370,7 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
                         'existing_disks_keep_publishing_reading_and_purging_on_their_original_storage',
                         '--nocapture'], check=True, env={
                             **os.environ,
+                            'DATA_DIR': str(ROOT / 'data'),
                             'CAIRN_INSTALLER_TEST_STORAGE_CONFIG': str(ROOT / 'data/storage-s3.json.integrated'),
                             'CAIRN_INSTALLER_TEST_EXTERNAL_ENDPOINT': endpoint,
                         })

@@ -665,15 +665,14 @@ def main():
                 assert error.code == 409
             else:
                 raise AssertionError('Eviction removed an active writer cache.')
-            # Real cgroup backpressure must stop all descendant CPUs while the
-            # controller/backend remain able to publish and acknowledge blocks.
+            # Upload lag is visible while safe local work continues.
             policy = dict(contexts[run]['policy'], backupSeconds=5, maxDirtySeconds=5)
             storage_policy(policy)
-            eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is True, timeout=25)
+            eventually(lambda: api('/disks/' + run + '/storage-status')['backupDegraded'] is True, timeout=25)
+            assert api('/disks/' + run + '/storage-status')['paused'] is False
             descendant = managed(run) / 'descendant'
             size = descendant.stat().st_size
-            time.sleep(0.5)
-            assert descendant.stat().st_size == size, 'Storage pause left a descendant running.'
+            eventually(lambda: descendant.stat().st_size > size)
             # Acknowledgement retires the earlier point; restore the current
             # retained publication rather than requesting a collected history.
             point = manager('live-publish', run=run)
@@ -682,10 +681,24 @@ def main():
             status = api('/disks/' + run + '/storage-status')
             receipt = dict(attempt=resumed, backupId=point['backupId'], generation=point['generation'], grantId=status['grantId'])
             storage_policy(contexts[run]['policy'])
+            # Real disk-reserve pressure must still stop every descendant CPU.
+            # The maximum supported reserve exceeds this disposable host's free
+            # space without allocating a pressure file or exhausting its disk.
+            pressure_policy = dict(contexts[run]['policy'], reserveMiB=16 * 1024 * 1024)
+            storage_policy(pressure_policy)
+            eventually(lambda: api('/disks/' + run + '/storage-status')['waitingFor'] == 'disk-space', timeout=25)
+            eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is True)
+            size = descendant.stat().st_size
+            time.sleep(0.5)
+            assert descendant.stat().st_size == size, 'Storage pause left a descendant running.'
+            storage_policy(contexts[run]['policy'])
+            eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is False)
+            eventually(lambda: descendant.stat().st_size > size)
             (managed(run) / 'persisted').write_text('unpublished mutation')
             # Stopping a protected workload must thaw its owned unit before
             # systemd can deliver termination signals. No manual thaw in this test.
-            storage_policy(policy)
+            storage_policy(pressure_policy)
+            eventually(lambda: api('/disks/' + run + '/storage-status')['waitingFor'] == 'disk-space', timeout=25)
             eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is True, timeout=25)
             api('/runs/' + resumed, method='DELETE')
             fenced(run, resumed)

@@ -1765,6 +1765,17 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             uuid(snapshot)?;
             let directory = controller.state.join("snapshots").join(snapshot);
             match (method.as_str(), *operation) {
+                ("POST", "direct-upload") => {
+                    let value = input(request, 131_072).await?;
+                    return Ok(Json(
+                        crate::nodes::snapshots::upload_direct(
+                            &directory,
+                            &serde_json::to_vec(&value)?,
+                        )
+                        .await?,
+                    )
+                    .into_response());
+                }
                 ("DELETE", "discard") => {
                     tokio::fs::remove_dir_all(directory).await?;
                     json!({ "ok": true })

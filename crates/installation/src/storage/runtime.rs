@@ -81,9 +81,6 @@ pub(crate) fn configure(state: &Path, policy: &Policy) -> Result<()> {
     Ok(())
 }
 
-/// Longest pause waiting for a late backup before the VM continues without it.
-pub const BACKUP_LAG_PAUSE_MS: i64 = 10 * 60 * 1000;
-
 /// An attempt keeps its acquired volume's stop token independently of the registry.
 /// Normal completion cancels only `execution`, so a retained VM can keep its disk.
 pub(crate) struct AttemptStop {
@@ -131,9 +128,7 @@ pub struct Volume {
     control_policy: RwLock<Policy>,
     active_since: AtomicI64,
     active_attempt: Mutex<String>,
-    /// When the current late backlog first paused the VM; zero when none.
-    backup_lag_since: AtomicI64,
-    /// The backlog outlived its pause: the VM runs while backups keep failing.
+    /// Upload lag is visible without suspending safe local work.
     backup_degraded: AtomicBool,
     pressure: AtomicBool,
     space_pressure: AtomicBool,
@@ -232,11 +227,14 @@ fn open_volume(directory: &Path) -> Result<Arc<Volume>> {
             "Unassigned disks must belong to the prepared environment namespace.",
         ));
     }
-    let source = Arc::new(if unassigned {
-        Source::prepared(tokio::runtime::Handle::current(), stop.clone())
-    } else {
-        Source::new(&context, tokio::runtime::Handle::current(), stop.clone())?
-    });
+    let source = Arc::new(
+        if unassigned {
+            Source::prepared(tokio::runtime::Handle::current(), stop.clone())
+        } else {
+            Source::new(&context, tokio::runtime::Handle::current(), stop.clone())?
+        }
+        .persistent(&root)?,
+    );
     let disk = Arc::new(LazyDisk::open(&root, source.clone())?);
     if unassigned && disk.has_remote_base()? {
         return Err(Error::conflict(
@@ -255,7 +253,6 @@ fn open_volume(directory: &Path) -> Result<Arc<Volume>> {
         policy: RwLock::new(policy),
         active_since: AtomicI64::new(0),
         active_attempt: Mutex::new(String::new()),
-        backup_lag_since: AtomicI64::new(0),
         backup_degraded: AtomicBool::new(false),
         pressure: AtomicBool::new(false),
         space_pressure: AtomicBool::new(false),
@@ -428,15 +425,18 @@ async fn create_source(
 ) -> Result<Arc<LazyDisk>> {
     let (directory, manifest, context) = (directory.to_owned(), manifest.clone(), context.clone());
     blocking(move || {
-        let source = Arc::new(if prepared {
-            Source::prepared(tokio::runtime::Handle::current(), CancellationToken::new())
-        } else {
-            Source::new(
-                &context,
-                tokio::runtime::Handle::current(),
-                CancellationToken::new(),
-            )?
-        });
+        let source = Arc::new(
+            if prepared {
+                Source::prepared(tokio::runtime::Handle::current(), CancellationToken::new())
+            } else {
+                Source::new(
+                    &context,
+                    tokio::runtime::Handle::current(),
+                    CancellationToken::new(),
+                )?
+            }
+            .persistent(&directory)?,
+        );
         let disk = Arc::new(LazyDisk::create_at_generation(
             &directory, &manifest, source, generation,
         )?);
@@ -546,26 +546,10 @@ impl Volume {
         let late = self.disk.dirty_since().is_some_and(|at| {
             now.saturating_sub(at.max(active_since)) >= (policy.max_dirty_seconds * 1000) as i64
         });
-        if !late {
-            self.backup_lag_since.store(0, Ordering::Release);
-            self.backup_degraded.store(false, Ordering::Release);
-            return Ok(None);
-        }
-
-        // The pause gives backups time to catch up. When they keep failing,
-        // the VM continues without them instead of freezing indefinitely.
-        let since = match self.backup_lag_since.compare_exchange(
-            0,
-            now,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => now,
-            Err(since) => since,
-        };
-        let expired = now.saturating_sub(since) >= BACKUP_LAG_PAUSE_MS;
-        self.backup_degraded.store(expired, Ordering::Release);
-        Ok((!expired).then_some("backup-lag"))
+        self.backup_degraded.store(late, Ordering::Release);
+        // A remote publication backlog does not endanger the durable local
+        // journal. Keep work running; only integrity, space and needed reads pause.
+        Ok(None)
     }
 
     /// VM and native attempts share the bounded active synchronization window.
@@ -716,8 +700,12 @@ impl Volume {
                 crate::config::now(),
             )
         };
-        let degraded = self.backup_degraded.load(Ordering::Acquire);
-        let reason = reason.filter(|reason| !(degraded && *reason == "backup-lag"));
+        let degraded = status["dirtySince"].as_i64().is_some_and(|at| {
+            crate::config::now().saturating_sub(at.max(self.active_since.load(Ordering::Acquire)))
+                >= policy.max_dirty_seconds as i64 * 1000
+        });
+        self.backup_degraded.store(degraded, Ordering::Release);
+        let reason = reason.filter(|reason| *reason != "backup-lag");
         status["backupDegraded"] = degraded.into();
         status["mode"] = "on-demand".into();
         status["grantId"] = self.source.authorization()?.into();
@@ -1318,10 +1306,8 @@ mod tests {
         let resumed = dirty_since + 3_600_000;
         volume.active_since.store(resumed, Ordering::Release);
         assert_eq!(volume.control_reason(resumed + 299_999).unwrap(), None);
-        assert_eq!(
-            volume.control_reason(resumed + 300_000).unwrap(),
-            Some("backup-lag")
-        );
+        assert_eq!(volume.control_reason(resumed + 300_000).unwrap(), None);
+        assert!(volume.backup_degraded.load(Ordering::Acquire));
         assert_eq!(volume.disk.accounting().unwrap()["dirtySince"], dirty_since);
         volume.fault.store(true, Ordering::SeqCst);
         assert_eq!(volume.control_reason(resumed).unwrap(), Some("integrity"));
@@ -1331,49 +1317,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failing_backups_pause_a_vm_once_then_let_it_run() {
+    async fn failed_uploads_never_pause_local_work_but_disk_faults_still_do() {
         let root = tempfile::tempdir().unwrap();
         let (volume, _, _) = controller_fixture(root.path()).await;
         volume.disk.write_at(0, b"unsaved work").unwrap();
-        let dirty_since = volume.disk.dirty_since().unwrap();
-        let lagging = dirty_since + 300_000;
-        assert_eq!(volume.control_reason(lagging).unwrap(), Some("backup-lag"));
-        assert_eq!(
-            volume
-                .control_reason(lagging + BACKUP_LAG_PAUSE_MS - 1)
-                .unwrap(),
-            Some("backup-lag")
-        );
-
-        // Production 2026-10-05: a node whose backups kept failing held its
-        // VM paused for 11 hours. The VM continues once the pause expires.
-        assert_eq!(
-            volume
-                .control_reason(lagging + BACKUP_LAG_PAUSE_MS)
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            volume
-                .control_reason(lagging + 10 * BACKUP_LAG_PAUSE_MS)
-                .unwrap(),
-            None
-        );
-        assert_eq!(volume.health().unwrap()["backupDegraded"], true);
-
-        // Pauses that protect the disk itself are never bounded.
+        let dirty = volume.disk.dirty_since().unwrap();
+        for age in [300_000, 900_000, 86_400_000] {
+            assert_eq!(volume.control_reason(dirty + age).unwrap(), None);
+            assert!(volume.backup_degraded.load(Ordering::Acquire));
+            volume.disk.write_at(0, b"still working").unwrap();
+        }
         volume.pressure.store(true, Ordering::SeqCst);
         assert_eq!(
-            volume
-                .control_reason(lagging + 10 * BACKUP_LAG_PAUSE_MS)
-                .unwrap(),
+            volume.control_reason(dirty + 86_400_000).unwrap(),
             Some("disk-space")
         );
         volume.pressure.store(false, Ordering::SeqCst);
-
-        // Once the backlog is no longer late, a later backlog pauses again.
-        assert_eq!(volume.control_reason(dirty_since).unwrap(), None);
-        assert_eq!(volume.control_reason(lagging).unwrap(), Some("backup-lag"));
+        volume.fault.store(true, Ordering::SeqCst);
+        assert_eq!(
+            volume.control_reason(dirty + 86_400_000).unwrap(),
+            Some("integrity")
+        );
+        volume.fault.store(false, Ordering::SeqCst);
+        assert_eq!(volume.control_reason(dirty).unwrap(), None);
+        assert!(!volume.backup_degraded.load(Ordering::Acquire));
     }
 
     #[tokio::test]

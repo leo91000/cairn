@@ -1,4 +1,6 @@
 mod common;
+#[path = "../../installation/tests/common/node_fixture.rs"]
+mod node_fixture;
 
 use axum::{
     Json, Router,
@@ -12,6 +14,7 @@ use cairn_installation::{
     object_storage::Storage,
 };
 use common::RelayedInstallation;
+use node_fixture::{DbNodeFixture, direct_snapshot_upload};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
@@ -53,6 +56,17 @@ async fn existing_disks_keep_publishing_reading_and_purging_on_their_original_st
                 );
                 return data.into_response();
             }
+            if request.method() == "POST" && request.uri().path().ends_with("/direct-upload") {
+                let body = to_bytes(request.into_body(), 131_072).await.unwrap();
+                let data = source.lock().unwrap().clone();
+                let root = tempfile::tempdir().unwrap();
+                let disk = root.path().join("source");
+                tokio::fs::write(&disk, &data).await.unwrap();
+                let manifest = cairn_installation::nodes::snapshots::index(&disk)
+                    .await
+                    .unwrap();
+                return direct_snapshot_upload(&disk, manifest, &body, false).await;
+            }
             StatusCode::METHOD_NOT_ALLOWED.into_response()
         }
     });
@@ -72,16 +86,28 @@ async fn existing_disks_keep_publishing_reading_and_purging_on_their_original_st
     .unwrap();
     let original_storage = Storage::configured(service).unwrap();
     let run_id = id();
+    let agent_id = id();
     let record = json!({
         "id": run_id,
         "taskId": run_id,
         "createdAt": 0,
         "status": "succeeded",
+        "snapshot": {"agent": {"id": agent_id}},
         "nodeId": LOCAL_NODE_ID
     });
     service
         .store
         .write(move |db| {
+            db.put_node_fixture(&json!({"id": LOCAL_NODE_ID, "local": true}))?;
+            let settings = serde_json::from_value(json!({
+                "name": "Storage continuity fixture",
+                "access": {"nodes": [LOCAL_NODE_ID], "mcpTools": {}},
+                "exclusiveNodes": [], "plugins": []
+            }))?;
+            db.save_agent(&cairn_installation::agents::new_agent(
+                settings,
+                Some(serde_json::from_value(json!(agent_id))?),
+            ))?;
             db.admit_run(
                 &serde_json::from_value(record)?,
                 None,
@@ -183,7 +209,11 @@ async fn existing_disks_keep_publishing_reading_and_purging_on_their_original_st
                 .unwrap(),
             vec![expected; 4096]
         );
-        objects.push(shared_blocks::key(hash, block["object"].as_str().unwrap()));
+        objects.push(shared_blocks::object_key(
+            3,
+            hash,
+            block["object"].as_str().unwrap(),
+        ));
     }
     publication::purge(service, &run_id).await.unwrap();
     // Advance the existing GC grace period; production purge is asynchronous.

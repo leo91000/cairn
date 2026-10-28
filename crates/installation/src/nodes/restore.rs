@@ -10,6 +10,7 @@ use axum::{
     extract::{Request, State},
     response::{IntoResponse, Response},
 };
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
@@ -74,11 +75,17 @@ pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Resu
 pub async fn handle(State(app): State<App>, request: Request) -> Result<Response> {
     let s = &app.service;
     if request.method() != "GET"
-        && !(request.method() == "POST" && request.uri().path().ends_with("/renew"))
+        && !(request.method() == "POST"
+            && (request.uri().path().ends_with("/renew")
+                || request.uri().path().ends_with("/report")))
     {
         return Err(Error::method_not_allowed("Method not allowed."));
     }
     let credential = super::bearer(request.headers()).unwrap_or("");
+    if request.method() == "POST" && request.uri().path().ends_with("/report") {
+        let credential = credential.to_owned();
+        return integrity_report(s, &credential, request).await;
+    }
     let grant = s
         .store
         .get("node-disk-grants", &crate::auth::digest(credential))
@@ -111,6 +118,57 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
         let Some(block) = super::snapshots::find_block(&manifest, hash) else {
             continue;
         };
+        if block["envelope"] == 3 {
+            if request.uri().query() != Some("direct=1") {
+                return Err(Error::conflict(
+                    "This node must support direct storage reads.",
+                ));
+            }
+            let storage = super::publication::storage_for(s, &backup)?;
+            let object = text(block, "object");
+            let ticket = storage
+                .direct_read(
+                    &s.vault,
+                    hash,
+                    object,
+                    block["size"]
+                        .as_u64()
+                        .ok_or_else(|| Error::bad("Invalid block size."))?,
+                )
+                .await?;
+            let (object, until) = (
+                object.to_owned(),
+                ticket.expires_at + crate::storage::direct::TRANSFER_SECONDS as i64 * 1000,
+            );
+            let grant_id = crate::auth::digest(credential);
+            let hash = hash.to_owned();
+            let run_id = text(&grant, "runId").to_owned();
+            // Keep the object beyond every issued read and its bounded transfer.
+            s.store
+                .transaction(move |db| {
+                    if super::disk_grants::authorize_id_db(db, &grant_id)?.is_none() {
+                        return Err(Error::unauthorized("Disk grant expired."));
+                    }
+                    db.0.execute(
+                        "UPDATE shared_objects SET retry_at=MAX(retry_at,?2) WHERE id=?1",
+                        rusqlite::params![object, until],
+                    )?;
+                    // Retain only historical identity provenance, independently
+                    // of pointer/grant removal and payload collection. This can
+                    // authorize quarantine, never a GET/key or renewed access.
+                    db.0.execute(
+                        "INSERT OR IGNORE INTO direct_read_authorizations(grant_id,object,hash,run_id) VALUES(?1,?2,?3,?4)",
+                        rusqlite::params![grant_id, object, hash, run_id],
+                    )?;
+                    Ok(())
+                })
+                .await?;
+            return Ok((
+                [(crate::storage::direct::RESPONSE_HEADER, "v3")],
+                axum::Json(ticket),
+            )
+                .into_response());
+        }
         let bytes = super::publication::read_manifest_block(s, &backup, block).await?;
         return Ok((
             [("content-length", bytes.len().to_string())],
@@ -119,6 +177,78 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
             .into_response());
     }
     Err(Error::forbidden("Block outside disk scope."))
+}
+
+async fn integrity_report(s: &Service, credential: &str, request: Request) -> Result<Response> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Report {
+        object: String,
+        hash: String,
+    }
+    let body = axum::body::to_bytes(request.into_body(), 1024)
+        .await
+        .map_err(|_| Error::bad("Invalid direct storage failure report."))?;
+    let report: Report = serde_json::from_slice(&body)
+        .map_err(|_| Error::bad("Invalid direct storage failure report."))?;
+    crate::validation::uuid(&report.object)?;
+    if !super::snapshots::valid_hash(&report.hash) {
+        return Err(Error::bad("Invalid direct storage failure report."));
+    }
+    let grant = crate::auth::digest(credential);
+    let (scope_grant, scope_object, scope_hash) =
+        (grant.clone(), report.object.clone(), report.hash.clone());
+    let run = s
+        .store
+        .read(move |db| {
+            let run = db
+                .0
+                .query_row(
+                    "SELECT run_id FROM direct_read_authorizations WHERE grant_id=?1 AND object=?2 AND hash=?3",
+                    rusqlite::params![scope_grant, scope_object, scope_hash],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?;
+            run.ok_or_else(|| Error::forbidden("Reported block outside historical disk scope."))
+        })
+        .await?;
+    // An earlier publication must finish (or have its local acknowledgement
+    // refused by the pending outbox) before reconciliation clears that outbox.
+    let _publication = s.node_backup_operation.read(&run).await;
+    s.store
+        .transaction(move |db| {
+            let authorized: bool = db.0.query_row(
+                "SELECT EXISTS(SELECT 1 FROM direct_read_authorizations WHERE grant_id=?1 AND object=?2 AND hash=?3)",
+                rusqlite::params![grant, report.object, report.hash],
+                |r| r.get(0),
+            )?;
+            if !authorized {
+                return Err(Error::forbidden("Reported block outside historical disk scope."));
+            }
+
+            db.0.execute(
+                "UPDATE shared_objects SET state='invalid' WHERE id=?1 AND hash=?2 AND state='ready'",
+                rusqlite::params![report.object, report.hash],
+            )?;
+            let mut affected = db.0.prepare(
+                "SELECT DISTINCT run_id FROM direct_read_authorizations WHERE object=?1
+                 UNION SELECT p.run_id FROM shared_publications p
+                 JOIN shared_references r ON r.publication=p.id WHERE r.object=?1",
+            )?;
+            let runs = affected
+                .query_map([&report.object], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for run in runs {
+                if let Some(current) = db.run(&run)? {
+                    let mut backup = current["backup"].as_object().cloned().unwrap_or_default();
+                    backup.insert("snapshotId".into(), Value::Null);
+                    db.update_run_boundary(&run, &json!({ "backup": backup }))?;
+                }
+            }
+            Ok(())
+        })
+        .await?;
+    Ok(axum::Json(json!({ "invalidated": true })).into_response())
 }
 
 pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> {
