@@ -1,7 +1,8 @@
 # Production releases on cairn.build
 
 Use this runbook for releases and recovery of the existing Beacon service and
-its approved installation image. The next release requires the complete reinstallation below.
+its approved installation image. Preserve the existing installation and Beacon
+data during routine upgrades; check the supported schema path below.
 
 - [Production configuration](PRODUCTION-CAIRN-SETUP.md): provisioning and changes
   to the host, Coolify, proxy, DNS/TLS, providers and installation networking.
@@ -52,11 +53,30 @@ is the release/deployment path; production jobs are serialized. The hosted web
 application and account service belong to Beacon. Installations keep the agents'
 work and update separately through their existing host supervisor.
 
+## Data-preserving upgrades
+
+Installation database version 11 upgrades automatically to version 12 at manager
+startup through the [typed inventory migration](migrations/0012-typed-node-inventory.md).
+Stop the old manager and retain a consistent database/WAL backup first. Keep the
+installation identity, configuration, data roots, node state and object storage.
+The migration preserves node identities, credentials, configuration and references;
+conversion failures leave version 11 available for repair and retry. Earlier
+layouts need their explicit migrations; do not replace a migration with a schema
+version edit or a data reset. Deploy matching manager, runner, node and guest
+versions before resuming work.
+
+Beacon has its own Postgres migration ledger. Validate its compatibility before
+promotion; this installation migration neither resets Beacon nor authorizes
+discarding accounts. A historical incompatible ledger requires a separately
+prepared data-preserving migration before rollout. See
+[Beacon database compatibility](BEACON.md#next-release-recreate-the-beacon-database).
+
 ## Réinstallation complète
 
-La prochaine release repart de données vierges, avec l’accord du propriétaire.
-Les anciens formats ne sont ni lus ni migrés. Manager, runner, nodes et guests
-se déploient à la même version ; un écart de version doit être corrigé avant reprise.
+Cette procédure destructive est réservée à une demande explicite d’effacement et
+de réinstallation. Elle ne fait pas partie d’une release ordinaire ni de la migration
+11 → 12 ci-dessus. Ne pas l’utiliser pour réparer un échec de migration en conservant
+les données.
 
 1. Arrêter les timers de mise à jour, le manager, le runner et toutes les nodes.
    Supprimer les conteneurs de l’installation avec `docker compose down`, avant
@@ -73,7 +93,7 @@ se déploient à la même version ; un écart de version doit être corrigé ava
 4. Reconnecter les comptes et plugins, réimporter les projets et vérifier une nouvelle
    conversation. Les anciennes conversations et identités ne sont pas récupérées.
 
-Pour la base Beacon, suivre aussi le [runbook de réinitialisation](BEACON.md#next-release-recreate-the-beacon-database).
+L’effacement de Beacon est une opération distincte ; cette procédure ne l’autorise pas.
 
 ## Installation updates and temporary offline status
 
@@ -112,7 +132,7 @@ Releases do not create backups. Existing release archives and their off-host
 copies have been removed. No data restore point is provided by the release system.
 
 If a rollout fails, stop further releases and inspect the updater state before
-intervening. Record the current and previous immutable image pairs. Use a forward fix or a complete reinstallation; automatic update retries retain
+intervening. Record the current and previous immutable image pairs. Use a forward fix or an explicitly validated compatible recovery image; automatic update retries retain
 the candidate image instead of starting an older binary against current data. Preserve the active installation directory, Garage, private
 identity and Beacon database while investigating.
 

@@ -280,9 +280,10 @@ expected tested commit, `/install/release` reports the paired digest, `/` and
 `/claim` serve the SPA with framing protection, and an email-code sign-in works.
 Use the release checks and failure procedure in the
 [release runbook](PRODUCTION-CAIRN.md#failed-releases) for subsequent updates.
-Releases create no backups. The next installation release requires the
-[complete reinstallation](PRODUCTION-CAIRN.md#réinstallation-complète); do not reuse
-a historical manager database.
+Releases create no backups. Existing version-11 installations support the
+[data-preserving upgrade](PRODUCTION-CAIRN.md#data-preserving-upgrades); retain their
+identity, data and a consistent database/WAL backup. Check explicit compatibility
+for other historical manager layouts before deployment.
 
 Configure GitHub's **production** environment:
 

@@ -92,12 +92,20 @@ upstream SQLx migration macro is imported directly from `sqlx-macros`: the full
 builds. A build script tracks the directory so adding a migration recompiles it.
 Rate limits are shared through Postgres.
 
-### Next release: recreate the Beacon database
+<a id="next-release-recreate-the-beacon-database"></a>
+
+### Beacon database compatibility and historical reset
 
 The refactor campaign replaces all 28 historical migrations with one initial
-schema. The owner has accepted losing the Beacon database at the next release;
-there is no ledger rewrite or automatic upgrade path. During that release's
-maintenance window:
+schema. Databases with an incompatible historical SQLx ledger have no automatic
+upgrade path in this refactor. Check the persisted ledger against the exact image
+before promotion. A mismatch blocks routine rollout until a data-preserving
+migration is prepared; it does not authorize deleting Beacon data. The installation
+database's [11 → 12 upgrade](migrations/0012-typed-node-inventory.md) is independent.
+
+The destructive historical reset below requires a separate explicit instruction
+to discard Beacon accounts and access state. It is not part of a routine release
+or installation upgrade. Only for that separately authorized reset:
 
 1. Stop Beacon and keep its public ingress closed.
 2. Recreate its database as an empty database, retaining the configured database
@@ -105,12 +113,12 @@ maintenance window:
 3. Start the new Beacon binary with its matching web bundle. Startup applies the
    initial migration. Verify account sign-in on the empty database before reopening
    ingress, then reconnect Android with the matching app version.
-4. Recreate accounts and claim the newly reinstalled installations. Sessions,
+4. Recreate accounts and explicitly recover or claim the retained installations. Sessions,
    passkeys, sharing, MCP grants and notification registrations must be set up again.
 
-This runbook is for the next authorized release, not an instruction to alter a
-running production service during the refactor. Existing databases intentionally
-fail SQLx validation. Beacon, installations and apps must use the current protocol;
+Historical incompatible ledgers fail SQLx validation; preserve them for migration
+and recovery rather than recreating them during a routine rollout. Beacon,
+installations and apps must use the current protocol;
 a different version is rejected with an update-required message.
 
 Only **one beacon relay process** is supported for deployment. Route all browser
