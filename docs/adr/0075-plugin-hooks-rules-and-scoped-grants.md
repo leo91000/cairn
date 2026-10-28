@@ -1,4 +1,4 @@
-> Remplace la délégation externe d’[ADR-0038](0038-luau-installation-plugins-and-external-bot-delegation.md), d’[ADR-0046](0046-plugin-transports-and-forms-in-luau.md), d’[ADR-0057](0057-guided-plugin-setup.md) et d’[ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md), et étend les droits par instance d’[ADR-0051](0051-agent-centric-permissions.md).
+> Remplace la délégation externe d’[ADR-0038](0038-luau-installation-plugins-and-external-bot-delegation.md), d’[ADR-0045](0045-declarative-plugin-contributions.md), d’[ADR-0046](0046-plugin-transports-and-forms-in-luau.md), d’[ADR-0057](0057-guided-plugin-setup.md), d’[ADR-0059](0059-delegated-tasks.md) et d’[ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) ; étend les droits par instance d’[ADR-0051](0051-agent-centric-permissions.md) et les rôles d’[ADR-0029](0029-sharing-whole-installations.md).
 
 # Hooks de plugins, règles sans code et droits restreints par ressource
 
@@ -13,55 +13,77 @@ redessine dans Discord la progression, les questions, le bouton Stop et la répo
 lire un fil, ni réagir, ni poster ailleurs. Ce mécanisme ne sert qu’au bot
 conversationnel et ne se réutilise pas pour « quand X arrive, fais Y » (une pull
 request ouverte, un e-mail reçu). L’instance choisit enfin l’agent qui répond et les
-personnes autorisées, à l’inverse d’[ADR-0051](0051-agent-centric-permissions.md) où l’agent porte ses droits ; un plugin
-est accordé à un agent en entier, avec tous ses outils.
+personnes autorisées, à l’inverse d’[ADR-0051](0051-agent-centric-permissions.md)
+où l’agent porte ses droits ; un plugin est accordé à un agent en entier.
 
 ## Décision
 
-Un plugin ne fait que déclarer ; le propriétaire décide de tout le reste.
+Un plugin ne fait que déclarer ; le propriétaire et les membres décident du reste.
 
-- **Hooks** : le plugin déclare les événements qu’il émet et leur payload (par
-  exemple `message` avec auteur, canal et fil). Cairn émet aussi quatre hooks pour
-  ses conversations : réponse prête (texte et livrables), question posée,
-  progression (environ toutes les 8 secondes, une étape courte sans détail) et fin
-  (terminée, échouée ou annulée). La progression, déjà cadencée par Cairn, ne compte
-  pas dans le plafond d’exécutions d’une règle.
-- **Outils** : le plugin déclare ses outils et leur schéma d’entrée, comme
-  aujourd’hui.
-- **Ressources** : le plugin fournit de quoi lister ce sur quoi portent ses hooks et
-  ses outils (serveurs, salons, personnes, dépôts…) et indique quelles entrées
-  d’outil et quels champs de payload désignent ces ressources.
-- **Droits par agent** : le propriétaire accorde à un agent soit l’accès complet à
-  une instance, sans limite et y compris ce qu’une version suivante du plugin
-  ajoutera, soit ses contributions une par une. Les outils, commandes et hooks
-  accordés un par un peuvent être restreints à des ressources choisies (par exemple
-  `discord.post` seulement dans #support, ou le hook `message` seulement pour
-  #support) : Cairn applique la restriction à chaque appel d’outil, avant le plugin,
-  et ne livre pas à la règle un événement dont la payload désigne une autre
-  ressource. Ce qui ne passe ni par une entrée ni par une payload (identifiants de
-  run, instructions ajoutées au prompt, conditions d’attente) s’accorde aussi un par
-  un, sans restriction. Rien n’est accordé par défaut.
-- **Accès des comptes aux agents** : le propriétaire, et lui seul, donne ou retire à
-  des membres l’accès à un agent ; un agent ne peut pas le faire, même avec l’accès à
-  l’installation. Le propriétaire a accès à tous les agents ; à la mise en place, les
-  membres gardent l’accès aux agents existants. L’agent agit comme un rôle : y avoir accès, c’est pouvoir
-  obtenir tout ce qu’il peut faire. Les personnes externes (un auteur Discord)
-  n’ont aucune identité ni aucun droit dans Cairn : elles ne sont qu’une donnée de la
-  payload, que les conditions d’une règle examinent. La conversation qu’une règle
-  démarre appartient à son créateur et note l’auteur externe comme origine.
-- **Règles de hook** : une interface sans code associe à un hook un arbre d’actions,
-  exécuté pour chaque événement. Le hook d’un plugin doit être accordé à l’agent
-  d’exécution de la règle : un membre ne peut pas écouter une instance que ses agents
-  n’ont pas le droit d’écouter. Le créateur choisit ainsi explicitement, pour chaque
-  hook, qui peut déclencher quoi : un bot ouvert à tous est une règle qui ne teste
-  pas l’auteur. Il n’y a pas de filtre séparé de l’arbre. Cairn déduplique les
-  événements de lui-même. Une exécution qui se termine sans effet (aucun outil
-  appelé, aucun agent déclenché ou orienté, rien mémorisé) ne compte pas dans les
-  plafonds horaires et n’est pas gardée dans l’historique, qui n’en garde que le
-  nombre : un salon actif n’épuise pas le budget de la règle.
-- **Versions** : une exécution garde la version de la règle avec laquelle elle a
-  commencé ; une modification ne vaut que pour les événements suivants. Les droits
-  sont revérifiés à chaque action.
+### Ce qu’un plugin déclare
+
+- **Hooks** : les événements qu’il émet et leur payload (par exemple `message` avec
+  auteur, salon et fil). Son transport émet ces hooks ; les capacités `inbound` et
+  `conversations.submit` disparaissent. Cairn garde une file bornée par instance et
+  déduplique les événements, comme pour l’admission qu’il remplace.
+- **Outils et commandes** : leur schéma d’entrée, comme aujourd’hui.
+- **Ressources** : ce sur quoi portent ses hooks et ses outils (serveurs, salons,
+  fils, personnes, dépôts…), de quoi les lister, leur hiérarchie (un fil appartient à
+  un salon, qui appartient à un serveur) et les entrées d’outil et champs de payload
+  qui les désignent.
+- **Modèles de règles** : des ensembles de règles prêts à l’emploi (« Bot
+  conversationnel », « Support »). Installer un modèle demande ses paramètres
+  (agent, salon…) puis crée des règles ordinaires appartenant à celui qui l’installe,
+  sans lien avec le modèle : une mise à jour du plugin ne les modifie pas.
+
+Les obligations du protocole d’un service (accuser réception d’un clic Discord en
+moins de 3 secondes, heartbeats, reconnexions) restent au transport, qui répond
+d’abord puis émet le hook ; les règles, asynchrones, modifient ensuite ce qu’il faut.
+
+### Droits des agents
+
+Le propriétaire accorde à un agent, pour une instance, soit l’accès complet, sans
+limite et y compris ce qu’une version suivante du plugin ajoutera, soit ses
+contributions une par une. Les outils, commandes et hooks accordés un par un peuvent
+être restreints à des ressources : `discord.post` seulement dans #support, le hook
+`message` seulement pour #support. Un droit sur une ressource couvre ses descendants
+(un salon couvre ses fils). Cairn applique la restriction avant le plugin, à chaque
+appel d’outil, et ne livre pas à une règle un événement dont la payload désigne une
+autre ressource ; une entrée ou une payload qui ne désigne aucune ressource
+identifiable est refusée. Ce qui ne passe ni par une entrée ni par une payload
+(identifiants de run, instructions ajoutées au prompt, conditions d’attente)
+s’accorde aussi un par un, sans restriction. Rien n’est accordé par défaut.
+
+### Accès des comptes aux agents
+
+Un membre ne fait travailler que les agents auxquels il a accès, et ne les utilise
+que comme agents d’exécution de ses règles. L’agent agit comme un rôle : y avoir
+accès, c’est pouvoir obtenir tout ce qu’il peut faire. Un agent qui a l’accès à
+l’installation la gère entière
+([ADR-0064](0064-opt-in-installation-tools-for-agents.md)) : avoir accès à cet agent
+revient à avoir accès à tous les agents.
+
+Seul le propriétaire donne ou retire ces accès, depuis l’interface ou le MCP public ;
+`cairn_installation` ne l’expose pas, par exception à la parité des interfaces, pour
+qu’aucun agent ne puisse le faire. Le propriétaire a accès à tous les agents ; un
+nouvel agent est accessible au propriétaire et à son créateur ; à la mise en place,
+les membres gardent l’accès aux agents existants.
+
+Les personnes externes (un auteur Discord) n’ont ni identité ni droit dans Cairn :
+elles ne sont qu’une donnée de la payload, que les conditions d’une règle examinent.
+
+### Règles de hook
+
+Une règle associe à un hook un arbre exécuté pour chaque événement. Le créateur
+choisit ainsi, pour chaque hook, qui peut déclencher quoi : un bot ouvert à tous est
+une règle qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l’arbre.
+
+- **Agent d’exécution** : la règle désigne l’agent dont les droits encadrent le hook
+  qu’elle écoute et les outils qu’elle appelle elle-même ; son créateur doit y avoir
+  accès. Un membre ne peut donc pas écouter une instance que ses agents n’ont pas le
+  droit d’écouter. Les droits sur les hooks et les outils n’existent que sur les
+  agents.
+- **Blocs** : si / sinon imbriqués et boucles.
 - **Conditions** : un éditeur structuré de groupes ET / OU imbriqués, d’opérateurs
   sur tout champ de la payload (égal, contient, expression régulière, dans une liste,
   présent) et de prédicats de Cairn (l’auteur fait partie de personnes choisies,
@@ -70,38 +92,31 @@ Un plugin ne fait que déclarer ; le propriétaire décide de tout le reste.
 - **Formules** : toute valeur d’une action ou d’une condition peut être une formule
   en [CEL](https://cel.dev) (Common Expression Language), complétée par des fonctions
   de Cairn (tronquer, découper en morceaux, formater une date…). Une formule est pure,
-  sans effet de bord ni boucle, et son coût d’évaluation est borné ; les boucles sont
-  des blocs de l’arbre.
+  sans effet de bord ni boucle, et son coût d’évaluation est borné.
 - **Actions** : déclencher un agent, orienter une conversation, appeler un outil,
   annuler la conversation d’une clé, répondre à la question d’un agent, mémoriser une
-  valeur par clé, attendre puis reprendre. Chaque action peut utiliser la payload et
-  le résultat des actions précédentes (`{{steps.post.messageId}}`). Chaque action ne
-  fait qu’une chose : déclencher un agent avec une clé déjà liée échoue, et c’est la
-  règle qui choisit d’orienter la conversation existante.
-- **Blocs de contrôle** : une règle est un arbre qui dispose des blocs standard, si /
-  sinon imbriqués et boucles, dont les conditions utilisent l’éditeur ci-dessus.
-- **Événements hors des règles** : les obligations du protocole d’un service
-  (accuser réception d’un clic Discord en moins de 3 secondes, heartbeats,
-  reconnexions) restent au transport du plugin, qui répond d’abord puis émet le hook.
-  Les règles, asynchrones, modifient ensuite ce qu’il faut.
-- **Agent d’exécution** : une règle désigne l’agent dont les droits encadrent le hook
-  qu’elle écoute et ses appels d’outils directs ; son créateur doit avoir accès à cet
-  agent. Les droits sur les hooks et les outils n’existent que sur les agents. Une
-  règle n’utilise un agent natif que si son créateur détient l’autorité native
-  ([ADR-0050](0050-trusted-native-execution.md)) quand il l’enregistre : elle est
-  conservée avec la version de la règle et revérifiée à chaque exécution, comme
-  pour les délégations d’ADR-0068.
-- **Valeurs mémorisées** : une règle mémorise des valeurs soit sur une conversation,
-  par sa clé, partagées par toutes les règles qui la touchent et supprimées avec
-  elle, soit pour elle seule.
-- **Clé de conversation** : déclencher un agent peut associer la conversation à une
-  clé tirée de la payload (`discord:{{threadId}}`). Orienter vise la conversation
-  d’une clé, et les hooks de cette conversation la portent, ce qui permet de répondre
-  au bon endroit.
-- **Modèles de règles** : un plugin peut fournir des ensembles de règles prêts à
-  l’emploi (« Bot conversationnel », « Support »). Installer un modèle demande ses
-  paramètres (agent, salon…) puis crée des règles ordinaires appartenant à celui qui
-  l’installe, sans lien avec le modèle : une mise à jour du plugin ne les modifie pas.
+  valeur, attendre puis reprendre. Chaque action peut utiliser la payload et le
+  résultat des actions précédentes (`{{steps.post.messageId}}`) et ne fait qu’une
+  chose : déclencher un agent avec une clé déjà liée échoue, et c’est l’arbre qui
+  choisit d’orienter la conversation existante.
+- **Clé de conversation** : déclencher un agent peut rattacher la conversation à une
+  clé tirée de la payload (`discord:{{threadId}}`), unique dans l’installation.
+  Orienter, annuler, répondre à une question ou mémoriser une valeur sur la
+  conversation d’une clé exige que le créateur ait accès à l’agent de cette
+  conversation.
+- **Valeurs mémorisées** : soit sur une conversation, par sa clé, partagées par les
+  règles qui la touchent et supprimées avec elle, soit propres à la règle.
+- **Hooks de Cairn** : Cairn émet quatre hooks pour les conversations rattachées à
+  une clé : réponse prête (texte et livrables), question posée, progression (environ
+  toutes les 8 secondes, une étape courte sans détail, une seule en attente par
+  conversation) et fin (terminée, échouée ou annulée). Une règle ne les reçoit que
+  pour les conversations dont son créateur a accès à l’agent.
+- **Conversations démarrées** : une conversation démarrée par une règle a son créateur
+  pour auteur, qui ne la rend pas privée
+  ([ADR-0029](0029-sharing-whole-installations.md)) ; elle note l’auteur externe
+  comme origine.
+- **Versions** : une exécution garde la version de la règle avec laquelle elle a
+  commencé ; une modification ne vaut que pour les événements suivants.
 - **Échecs** : une erreur passagère (limite de débit, service indisponible) fait
   réessayer l’action en échec seule, avec un délai croissant qui respecte celui que
   demande le service ; les actions déjà faites ne sont pas rejouées. Une erreur
@@ -111,73 +126,94 @@ Un plugin ne fait que déclarer ; le propriétaire décide de tout le reste.
 Un bot Discord devient un agent qui a le hook `message` et les outils `read`, `post`
 et `react` limités à un salon, accompagné des règles du modèle « Bot
 conversationnel », dont les conditions choisissent les auteurs Discord auxquels il
-répond. Le plugin garde son transport, ses hooks, ses outils et ses
-ressources ; le rendu des conversations Cairn dans Discord disparaît.
+répond. Le plugin garde son transport, ses hooks, ses outils et ses ressources ; le
+rendu des conversations Cairn dans Discord disparaît.
+
+### Autorité des règles
+
+Une règle s’exécute avec l’autorité de son créateur, revérifiée à chaque action : un
+droit manquant pour une action la fait échouer. Seul le créateur modifie sa règle.
+Les autres membres la voient sans pouvoir la modifier ; ils peuvent la dupliquer
+s’ils ont tous les droits qu’elle utilise, le duplicata leur appartenant et démarrant
+désactivé pour ne pas répondre deux fois au même événement. Le propriétaire peut
+supprimer n’importe quelle règle ou la mettre en pause en urgence, sans la modifier ;
+la pause arrête aussi ses exécutions en cours.
+
+Quand le créateur perd l’accès à l’agent d’exécution, ou que cet agent perd le hook
+écouté, la règle est suspendue, pas supprimée ; elle repart quand le droit revient.
+Comme les tâches ([ADR-0029](0029-sharing-whole-installations.md)), une règle
+appartient à une adhésion : retirer, faire partir ou supprimer le créateur la
+désactive définitivement, et le réinviter ne la relance pas. Elle reste visible ; le
+propriétaire peut la supprimer et un membre la dupliquer.
+
+Un agent qui a l’accès à l’installation peut créer des règles : leur créateur est le
+compte pour lequel il travaille, et non le propriétaire comme pour les missions. Il
+ne peut accorder de droits à aucun agent ni à aucun compte.
+
+Une règle n’utilise un agent qui peut s’exécuter en natif que si son créateur
+détient l’autorité native ([ADR-0050](0050-trusted-native-execution.md)) dans la
+requête authentifiée qui l’enregistre. Une requête de `cairn_installation`, ou du MCP
+public sans autorité native, ne peut pas l’accorder, comme pour les tâches déléguées
+([ADR-0059](0059-delegated-tasks.md)). L’autorité est conservée avec la version de la
+règle et revérifiée à chaque exécution.
+
+### Budget du moteur
+
+Le moteur est borné pour qu’une boucle (une action qui déclenche le hook qui l’a
+lancée) s’arrête d’elle-même. Cairn ne peut pas toujours relier un appel d’outil à
+l’événement qu’il provoque en retour chez le service ; le budget est donc porté par
+chaque règle : un plafond d’exécutions et un plafond de déclenchements d’agent par
+heure, avec des valeurs par défaut que le créateur peut changer. Au dépassement, la
+règle se met en pause et son créateur est prévenu. Les chaînes que Cairn sait suivre,
+quand une action provoque un hook de Cairn, ont en plus une profondeur maximale.
+Chaque exécution est limitée en nombre de pas (blocs et itérations) et d’appels
+d’outils, sans compter les attentes ; au dépassement, elle s’arrête en erreur.
+
+Une exécution qui se termine sans effet (aucun outil appelé, aucun agent déclenché ou
+orienté, rien mémorisé) ne compte pas dans les plafonds horaires et n’est pas gardée
+dans l’historique, qui n’en garde que le nombre : un salon actif n’épuise pas le
+budget de la règle. La progression, déjà cadencée par Cairn, ne compte pas non plus.
+
+### Sans migration
+
+Les bots et délégations existants sont supprimés plutôt que convertis : la seule
+installation qui les utilise est celle du propriétaire du projet. Leur suppression
+révoque leur travail en cours et ses descendants. Les droits existants d’un agent sur
+une instance deviennent un accès complet à cette instance, qui comprend désormais ses
+hooks.
 
 ## Options écartées
 
 - **Garder la délégation par instance** : spécifique au bot conversationnel et
   contraire au modèle où l’agent porte ses droits.
 - **Donner des droits à des identités externes** : inutile dès qu’une règle agit
-  avec l’autorité de son créateur ; filtrer l’auteur suffit.
+  avec l’autorité de son créateur ; examiner l’auteur suffit.
 - **Donner aux comptes des droits directs sur les outils** : un second système de
   permissions à côté de celui des agents.
+- **Seulement des droits sur l’instance entière** : impossible alors de donner un
+  salon sans donner tout le serveur.
 - **Un langage de formules propre à Cairn, ou des expressions Luau** : le premier
   serait à écrire et maintenir, les secondes rapprochent les règles du code et
   alourdissent chaque évaluation. CEL est standard, borné et a une implémentation
   Rust (`cel-interpreter`).
 - **Des filtres séparés de l’arbre** : écartés au profit d’un seul arbre par règle.
 - **Une suite d’actions linéaire** : il aurait fallu doubler les règles avec des
-  filtres opposés pour chaque alternative.
+  conditions opposées pour chaque alternative.
 - **Seulement des hooks et des outils, sans règles** : chaque message déclencherait un
-  agent, sans filtrage préalable ni moyen de répondre de façon fiable.
-- **Seulement des droits sur l’instance entière** : impossible alors de donner un
-  salon sans donner tout le serveur.
-
-## Autorité des règles
-
-Une règle de hook s’exécute avec l’autorité de son créateur, revérifiée à chaque
-action : s’il n’a pas accès à ce qu’une action utilise, l’action échoue et c’est à
-lui de régler ses droits ou sa règle. Seul le créateur modifie sa règle. Les autres
-membres la voient sans pouvoir la modifier ; ils peuvent la dupliquer s’ils ont tous
-les droits qu’elle utilise, le duplicata leur appartenant et démarrant désactivé pour
-ne pas répondre deux fois au même événement. Le propriétaire de l’installation peut
-supprimer n’importe quelle règle ou la mettre en pause en urgence, sans la modifier.
-
-Quand le créateur perd ses droits ou quitte l’installation, ses règles sont
-suspendues, pas supprimées : elles restent visibles, le propriétaire peut les
-supprimer et un membre les dupliquer. Elles repartent si le créateur retrouve ses
-droits.
-
-Le moteur d’exécution est borné pour qu’une boucle (une action qui déclenche le hook
-qui l’a lancée) s’arrête d’elle-même. Cairn ne peut pas toujours relier un appel
-d’outil à l’événement qu’il provoque en retour chez le service ; le budget est donc
-porté par chaque règle : un plafond d’exécutions et un plafond de déclenchements
-d’agent par heure, avec des valeurs par défaut que le créateur peut changer. Au
-dépassement, la règle se met en pause et son créateur est prévenu. Les chaînes que
-Cairn sait suivre, quand une action provoque un hook de Cairn, ont en plus une
-profondeur maximale. Chaque exécution est en outre limitée en nombre de pas (blocs et
-itérations) et d’appels d’outils, sans compter les attentes ; au dépassement, elle
-s’arrête en erreur. Ces limites ont aussi des valeurs par défaut que le créateur peut
-changer.
-
-## Sans migration
-
-Les bots et délégations existants sont supprimés plutôt que convertis : la seule
-installation qui les utilise est celle du propriétaire du projet. Les droits
-existants d’un agent sur une instance ([ADR-0051](0051-agent-centric-permissions.md)) deviennent un accès complet à cette
-instance : rien ne change pour les agents en place.
+  agent, sans moyen de répondre de façon fiable.
 
 ## Conséquences
 
 Les risques d’un droit trop large relèvent du propriétaire ; Cairn doit en revanche
 rendre ces droits lisibles et n’en accorder aucun par défaut. Les capacités d’un
 plugin qui ne passent pas par des entrées d’outil ne peuvent pas être restreintes :
-un outil doit recevoir en entrée ce qu’il touche. Comme toute capacité de l’interface,
-les règles (éditeur compris), les droits par ressource et l’accès des comptes aux
-agents arrivent sur le web, Android, le MCP public et `cairn_installation` en même
-temps. Un agent qui a accès à l’installation
-([ADR-0064](0064-opt-in-installation-tools-for-agents.md)) peut créer des règles :
-leur créateur est le compte pour lequel il travaille, et non le propriétaire comme
-pour les missions. Il ne peut accorder de droits ni à lui-même, ni à l’agent
-d’exécution choisi, ni à un compte sur un agent.
+un outil doit recevoir en entrée ce qu’il touche.
+
+Un agent déclenché par une règle agit pour son créateur, à partir d’un contenu écrit
+par des inconnus. S’il a l’accès à l’installation, un auteur externe peut tenter de
+lui faire créer des règles au nom du créateur : un agent qui répond à un salon public
+ne devrait pas avoir cet accès.
+
+Comme toute capacité de l’interface, les règles (éditeur compris), les droits par
+ressource et l’accès des comptes aux agents arrivent sur le web, Android, le MCP
+public et `cairn_installation` en même temps, sauf l’exception ci-dessus.

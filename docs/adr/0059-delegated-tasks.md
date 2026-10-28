@@ -1,3 +1,5 @@
+> Saved plugin bot approvals disappear with external delegation ([ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md)).
+
 # Delegated tasks across coding agents and models
 
 Date: 2026-10-23.

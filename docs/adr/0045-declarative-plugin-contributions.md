@@ -1,5 +1,7 @@
 > Statut : Remplacée par [ADR-0046](0046-plugin-transports-and-forms-in-luau.md) pour les transports/formulaires, [ADR-0047](0047-multi-file-plugin-packages.md) pour les packages et [ADR-0049](0049-plugin-program-installers-and-toml-manifests.md) pour les installateurs de programmes ; les contributions déclaratives restent applicables.
 
+> External delegation, kept unchanged here, is removed by [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md).
+
 # Declarative plugin contributions and declared programs
 
 Date: 2026-10-16.

@@ -1,4 +1,4 @@
-> Statut : Étendue par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) : un droit sur une instance de plugin devient un accès complet, à côté de droits outil par outil restreints à des ressources ; les délégations externes disparaissent.
+> Statut : Étendue par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) : un droit sur une instance de plugin devient un accès complet, à côté de droits contribution par contribution, dont les outils, commandes et hooks peuvent être restreints à des ressources ; les délégations externes disparaissent.
 
 # Toutes les permissions d’un agent se règlent sur sa page
 

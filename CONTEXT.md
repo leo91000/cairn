@@ -181,7 +181,7 @@ L’emplacement d’où une skill a été importée par la source de skills d’
 **Instance de plugin** :
 Une configuration d’un plugin par le propriétaire, par exemple un bot Discord, un
 compte de service 1Password ou un compte GitHub : ses réglages et ses secrets
-chiffrés. Les droits des agents sur l’instance, complets ou outil par outil, se
+chiffrés. Les droits des agents sur l’instance, complets ou contribution par contribution, se
 choisissent sur la page de chaque agent, ou à la dernière étape de sa création, qui
 ne fait qu’ajouter des droits. Aucun agent n’est autorisé par défaut.
 _Avoid_ : connexion (réservé aux comptes des agents de code)
@@ -232,10 +232,13 @@ les hôtes déclarés, tient les obligations du protocole du service et émet le
 plugin.
 _Avoid_ : transport natif
 
-**Hook d’un plugin** :
-Un événement qu’un plugin, ou Cairn pour ses conversations, déclare pouvoir émettre,
-avec ce qu’il transporte : par exemple un message écrit dans un salon Discord, avec son
-auteur et son fil. Un hook ne fait rien seul ; ce sont les règles de hook qui y réagissent.
+**Hook** :
+Un événement qu’un plugin déclare pouvoir émettre, avec ce qu’il transporte : par
+exemple un message écrit dans un salon Discord, avec son auteur et son fil. Cairn émet
+aussi les siens pour les conversations rattachées à une clé (réponse prête, question,
+progression, fin). Un hook ne fait rien seul ; ce sont les règles de hook qui y
+réagissent. Le hook d’un plugin s’accorde à un agent ; ceux de Cairn suivent l’accès à
+l’agent de la conversation.
 _Avoid_ : webhook (le mécanisme HTTP), trigger
 
 **Règle de hook** :
@@ -252,7 +255,8 @@ appelle elle-même. Le créateur de la règle doit y avoir accès.
 **Ressource d’un plugin** :
 Ce sur quoi portent les hooks et les outils d’un plugin, et que le plugin sait lister :
 un serveur ou un salon Discord, une personne, un dépôt GitHub. Le droit d’un agent sur
-un outil peut être limité à certaines ressources.
+un outil, une commande ou un hook peut être limité à certaines ressources et à ce
+qu’elles contiennent.
 _Avoid_ : scope, portée
 
 **Clé de conversation** :

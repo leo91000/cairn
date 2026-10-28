@@ -1,3 +1,5 @@
+> Statut : étendue par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) : un membre ne fait travailler que les agents auxquels le propriétaire lui donne accès, et ses règles de hook appartiennent à son adhésion comme ses tâches.
+
 # Partage d’une installation entière, sans conversations privées
 
 Date : 2026-10-03.
