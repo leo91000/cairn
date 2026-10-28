@@ -13,6 +13,42 @@ import {
   workspacePath,
 } from './fixtures'
 
+let existingAccountIds: Set<string>
+let existingChatIds: Set<string>
+let existingRunIds: Set<string>
+
+test.beforeEach(async ({ workspace }) => {
+  existingAccountIds = new Set((await workspace.api('/api/accounts')).accounts.map((account: { id: string }) => account.id))
+  existingChatIds = new Set(workspace.service.store.list('chats').map(chat => chat.id))
+  existingRunIds = new Set(workspace.service.store.runs().map(run => run.id))
+})
+
+test.afterEach(async ({ workspace }) => {
+  // The application is worker-scoped, but these accounts and requests belong to
+  // one scenario. Stop its pending work before releasing its account leases.
+  for (const chat of workspace.service.store.list('chats')) {
+    if (!existingChatIds.has(chat.id))
+      await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
+  }
+
+  for (const run of workspace.service.store.runs()) {
+    if (!existingRunIds.has(run.id) && ['queued', 'running', 'waiting'].includes(run.status))
+      await workspace.api(`/api/runs/${run.id}/cancel`, 'POST')
+  }
+
+  await expect.poll(async () => {
+    const { accounts } = await workspace.api('/api/accounts')
+    return accounts.filter((account: { id: string }) => !existingAccountIds.has(account.id))
+      .flatMap((account: { activeRunIds: string[] }) => account.activeRunIds)
+  }, { timeout: 15000 }).toEqual([])
+
+  const { accounts } = await workspace.api('/api/accounts')
+  for (const account of accounts) {
+    if (!existingAccountIds.has(account.id))
+      await workspace.api(`/api/accounts/${account.id}`, 'DELETE')
+  }
+})
+
 test('a Claude spend limit waits automatically and appears once in the real conversation', async ({ page, workspace }, testInfo) => {
   test.setTimeout(120000)
   expect((await connectClaude(workspace, 'Quota test', 'fixture-code:quota@example.test')).state).toBe('complete')
