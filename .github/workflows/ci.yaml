@@ -34,6 +34,7 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
       - name: Verify qualified application inputs and browser version
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           mkdir -p signal-evidence
           python3 - <<'PYVERIFY'
           import hashlib, json, shlex, subprocess
