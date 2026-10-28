@@ -6686,8 +6686,10 @@ async fn saved_storage_policy_is_retried_after_the_controller_fails_to_confirm_i
 async fn node_mutations_and_placement_keep_real_occupancy_grants_and_stale_disk_summaries() {
     let owner = Owner::new().await;
     let (node, agent, run, attempt) = (id(), id(), id(), id());
-    let mut record = schedulable_node(&node, &limits(7, 16384, 131072));
+    let shared_limits = limits(7, 16384, 131072);
+    let mut record = schedulable_node(&node, &shared_limits);
     record["slots"] = 4.into();
+    record["capabilities"] = capabilities(true, 8, 32768, 262144);
     owner.put_node_fixture(record).await;
     owner.grant_nodes(&agent, json!([node])).await;
     let mut persisted = run_record(&run, RunStatus::Running);
@@ -6712,7 +6714,13 @@ async fn node_mutations_and_placement_keep_real_occupancy_grants_and_stale_disk_
         .send(
             "PUT",
             &format!("/api/nodes/{node}"),
-            json!({ "name": "Still occupied", "tags": [], "limits": limits(7, 16384, 131072), "slots": 4, "accepting": true }),
+            json!({
+                "name": "Still occupied",
+                "tags": [],
+                "limits": shared_limits,
+                "slots": 4,
+                "accepting": true,
+            }),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{saved}");

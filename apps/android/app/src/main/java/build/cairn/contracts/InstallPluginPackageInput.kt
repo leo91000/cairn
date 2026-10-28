@@ -29,6 +29,4 @@ value class Modules(
     Map<
         String,
         String,
-    > by value {
-    init {}
-}
+    > by value

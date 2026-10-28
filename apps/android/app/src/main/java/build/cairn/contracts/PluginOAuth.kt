@@ -34,9 +34,7 @@ value class AuthorizationParameters(
     Map<
         String,
         String,
-    > by value {
-    init {}
-}
+    > by value
 
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
@@ -51,6 +49,4 @@ value class ScopeSettings(
     Map<
         String,
         List<String>,
-    > by value {
-    init {}
-}
+    > by value
