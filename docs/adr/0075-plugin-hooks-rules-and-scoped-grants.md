@@ -1,8 +1,8 @@
-> Remplace la délégation externe d’[ADR-0038](0038-luau-installation-plugins-and-external-bot-delegation.md), d’[ADR-0045](0045-declarative-plugin-contributions.md), d’[ADR-0046](0046-plugin-transports-and-forms-in-luau.md), d’[ADR-0057](0057-guided-plugin-setup.md), d’[ADR-0059](0059-delegated-tasks.md) et d’[ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) ; étend les droits par instance d’[ADR-0051](0051-agent-centric-permissions.md) et les rôles d’[ADR-0029](0029-sharing-whole-installations.md) ; précise [ADR-0064](0064-opt-in-installation-tools-for-agents.md).
-
 # Hooks de plugins, règles sans code et droits restreints par ressource
 
 Date : 2026-10-28.
+
+Cette décision remplace la délégation externe d’[ADR-0038](0038-luau-installation-plugins-and-external-bot-delegation.md), d’[ADR-0045](0045-declarative-plugin-contributions.md), d’[ADR-0046](0046-plugin-transports-and-forms-in-luau.md), d’[ADR-0057](0057-guided-plugin-setup.md), d’[ADR-0059](0059-delegated-tasks.md) et d’[ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) ; remplace les droits par instance d’[ADR-0045](0045-declarative-plugin-contributions.md) et d’[ADR-0051](0051-agent-centric-permissions.md) et les rôles d’[ADR-0029](0029-sharing-whole-installations.md) ; précise [ADR-0064](0064-opt-in-installation-tools-for-agents.md).
 
 ## Constat
 
@@ -49,21 +49,28 @@ contributions une par une. Les outils, commandes et hooks accordés un par un pe
 `message` seulement pour #support. Un droit sur une ressource couvre ses descendants
 (un salon couvre ses fils). Cairn applique la restriction avant le plugin, à chaque
 appel d’outil, et ne livre pas à une règle un événement dont la payload désigne une
-autre ressource. Quand une entrée ou une payload désigne plusieurs ressources, toutes
-doivent être couvertes ; si elle n’en désigne aucune identifiable, elle est refusée.
+autre ressource. Une restriction porte sur un type de ressource : chaque ressource de
+ce type que désigne l’entrée ou la payload doit être couverte, les autres types
+restant libres (restreindre le hook `message` à #support n’empêche pas son auteur
+d’être n’importe qui). Si l’entrée ou la payload ne désigne aucune ressource
+identifiable d’un type restreint, elle est refusée.
 Les identifiants de run et les instructions ajoutées au prompt s’accordent aussi un
 par un, sans restriction ; les conditions d’attente restent bornées par l’accès aux
 projets. Rien n’est accordé par défaut. `cairn_installation` peut lire et réduire ces
-droits, jamais les accorder.
+droits, jamais les accorder. Un agent délégué
+([ADR-0059](0059-delegated-tasks.md)) doit être couvert par son demandeur contribution
+par contribution et ressource par ressource, pas seulement instance par instance.
 
 ### Accès des comptes aux agents
 
-Un membre ne démarre, ne poursuit, n’oriente, ne lance à la main et n’utilise comme
-agent d’exécution d’une règle que les agents auxquels il a accès ; il continue de voir
+Un membre ne démarre, ne poursuit, n’oriente, n’arrête, ne lance à la main, ne
+répond aux questions et n’utilise comme agent d’exécution d’une règle que les agents
+auxquels il a accès ; il continue de voir
 toutes les conversations ([ADR-0029](0029-sharing-whole-installations.md)). Ses
 tâches planifiées sur un agent auquel il perd l’accès sont suspendues comme ses
 règles. L’agent agit comme un rôle : y avoir accès, c’est pouvoir obtenir tout ce
-qu’il peut faire. Un agent qui a l’accès à l’installation la gère entière, avec
+qu’il peut faire. Un agent délégué n’exige pas cet accès : la couverture par son
+demandeur borne déjà ses droits. Un agent qui a l’accès à l’installation la gère entière, avec
 l’autorité de gestion du propriétaire
 ([ADR-0064](0064-opt-in-installation-tools-for-agents.md)) : avoir accès à cet agent
 revient à avoir accès à tous les agents, et ce qu’un membre lui fait créer survit à
@@ -125,6 +132,9 @@ une règle qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l�
   comme origine.
 - **Versions** : une exécution garde la version de la règle avec laquelle elle a
   commencé ; une modification ne vaut que pour les événements suivants.
+- **Historique** : chacun voit l’état des exécutions des règles qu’il voit ; leur
+  détail (payload et résultats des actions) n’est visible que du créateur, du
+  propriétaire et des membres qui ont accès à l’agent d’exécution.
 - **Échecs** : une erreur passagère (limite de débit, service indisponible) fait
   réessayer l’action en échec seule, avec un délai croissant qui respecte celui que
   demande le service ; les actions déjà faites ne sont pas rejouées. Une erreur
@@ -146,6 +156,9 @@ s’ils ont tous les droits qu’elle utilise, le duplicata leur appartenant et 
 désactivé pour ne pas répondre deux fois au même événement. Le propriétaire peut
 supprimer n’importe quelle règle ou la mettre en pause en urgence, sans la modifier ;
 la pause arrête aussi ses exécutions en cours, et seul le propriétaire la lève.
+Lever cette pause et supprimer la règle d’un autre restent hors de
+`cairn_installation` ; un agent n’y modifie ou ne supprime que les règles dont le
+créateur est le compte pour lequel il travaille.
 
 Quand le créateur perd l’accès à l’agent d’exécution, ou que cet agent perd le hook
 de plugin écouté, la règle est suspendue, pas supprimée ; elle repart quand le droit revient.
@@ -156,11 +169,13 @@ propriétaire peut la supprimer et un membre la dupliquer. Comme pour les tâche
 planifiées, une exécution exige une adhésion vérifiée récemment ; si elle ne peut pas
 l’être, l’exécution attend.
 
-Un agent qui a l’accès à l’installation peut créer des règles. Leur créateur est
-l’auteur de la conversation ou de la tâche dans laquelle il travaille ; pour une
-mission créée par un agent, c’est le propriétaire
-([ADR-0064](0064-opt-in-installation-tools-for-agents.md)). Il ne peut accorder de
-droits à aucun agent ni à aucun compte.
+Un agent qui a l’accès à l’installation peut créer des règles. Leur créateur est le
+compte pour lequel il travaille : celui qui a écrit le message que traite son tour,
+l’auteur de la tâche pour une exécution planifiée (le propriétaire pour une mission
+créée par un agent, [ADR-0064](0064-opt-in-installation-tools-for-agents.md)), ou le
+créateur de la règle pour un tour qu’une règle a déclenché. Il ne peut accorder de
+droits à aucun agent ni à aucun compte. Une règle créée par le MCP public a pour
+créateur le propriétaire qui a autorisé ce client.
 
 Une règle n’atteint un agent dont la politique autorise l’exécution native, ou une
 conversation qui s’exécute en natif, que si son créateur détenait l’autorité native
@@ -169,7 +184,8 @@ enregistré cette version de la règle. Une requête de `cairn_installation`, ou
 public sans autorité native, ne peut pas l’accorder, comme pour les tâches déléguées
 ([ADR-0059](0059-delegated-tasks.md)). L’autorité est conservée avec la version et
 revérifiée à chaque action qui résout, à l’exécution, un agent ou une conversation
-natifs ; sans elle, l’action échoue.
+natifs ; sans elle, l’action échoue. Le travail natif qu’une règle démarre garde les
+limites de node et le renouvellement de bail de tout travail natif.
 
 ### Budget du moteur
 
@@ -177,8 +193,10 @@ Le moteur est borné pour qu’une boucle (une action qui déclenche le hook qui
 lancée) s’arrête d’elle-même. Cairn ne peut pas toujours relier un appel d’outil à
 l’événement qu’il provoque en retour chez le service ; le budget est donc porté par
 chaque règle : un plafond d’exécutions et un plafond de déclenchements d’agent par
-heure, avec des valeurs par défaut que le créateur peut changer. Au dépassement, la
-règle se met en pause et son créateur est prévenu. Les chaînes que Cairn sait suivre,
+heure, avec des valeurs par défaut que le créateur peut changer sous un maximum fixé
+par Cairn. Au dépassement, la règle est suspendue jusqu’à ce que son créateur ou le
+propriétaire la relance, et son créateur est prévenu ; cette suspension laisse finir
+les exécutions en cours, que bornent leurs propres limites. Les chaînes que Cairn sait suivre,
 quand une action provoque un hook de Cairn, ont en plus une profondeur maximale.
 Chaque exécution est limitée en nombre de pas (blocs et itérations) et d’appels
 d’outils, sans compter les attentes ; au dépassement, elle s’arrête en erreur.

@@ -144,7 +144,7 @@ Le niveau de service Codex demandé pour un tour (Standard, Fast, Ultrafast…),
 _À éviter_ : tier, mode rapide (sauf pour nommer le niveau Fast de Codex).
 
 **Question d’un agent** :
-Une demande de réponse adressée à une personne par un agent dans une conversation Cairn. Elle peut proposer des choix ou laisser la personne s’exprimer librement.
+Une demande de réponse adressée à une personne par un agent dans une conversation Cairn ; une règle de hook peut aussi y répondre. Elle peut proposer des choix ou laisser la personne s’exprimer librement.
 
 **Questionnaire d’un agent** :
 Un ensemble d’une ou plusieurs questions d’un agent auxquelles une personne répond en un seul envoi. Il reste disponible dans la conversation pendant l’attente des réponses.
@@ -169,7 +169,7 @@ Le choix d’un compte de retirer de « Pour vous » le résultat bloqué d’un
 _Avoid_ : archivage (qui retire la mission elle-même)
 
 **Auteur d’une tâche** :
-Le compte Cairn qui a créé une tâche. Le retrait de cet auteur met fin aux déclenchements planifiés de ses tâches ; leur travail reste partagé avec toute l’installation.
+Le compte Cairn qui a créé une tâche. Le retrait de cet auteur met fin aux déclenchements planifiés de ses tâches, et la perte de son accès à l’agent d’une tâche les suspend ; leur travail reste partagé avec toute l’installation.
 
 **Skill** :
 Un savoir-faire réutilisable que les agents appliquent : ses instructions et les fichiers qui les accompagnent (références, modèles, scripts, images). Une skill est globale ou propre à un projet ; une conversation ou une exécution reçoit les skills sélectionnées telles qu’elles étaient à sa création.
@@ -189,8 +189,9 @@ _Avoid_ : connexion (réservé aux comptes des agents de code)
 **Assistant de configuration d’un plugin** :
 Les étapes que le propriétaire suit pour ajouter ou modifier une instance, dans
 l’ordre où chacune devient possible : ce qu’il crée d’abord chez le service (par
-exemple une app Google Cloud), les réglages, la connexion et les agents. Le catalogue annonce ce que la connexion demande : se connecter, coller un
-jeton ou créer sa propre app. Une étape partagée, comme le client OAuth d’une app,
+exemple une app Google Cloud), les réglages, la connexion et les agents. Le catalogue
+annonce ce que la connexion demande : se connecter, coller un jeton ou créer sa propre
+app. Une étape partagée, comme le client OAuth d’une app,
 se configure une fois et se réutilise pour les instances suivantes du même plugin.
 _Avoid_ : wizard, onboarding
 
@@ -246,7 +247,12 @@ Ce que son créateur décide, sans code, de faire quand un hook se produit : un 
 conditions, de boucles et d’actions (déclencher un agent, orienter une conversation,
 appeler un outil…). Elle agit avec l’autorité de son créateur, seul à pouvoir la
 modifier. Un plugin peut proposer des modèles de règles prêts à l’emploi.
-_Avoid_ : hook (l’événement auquel elle réagit), automation, workflow, réponse
+_Avoid_ : hook (l’événement auquel elle réagit), automation, workflow
+
+**Exécution d’une règle** :
+Le traitement d’un événement par une règle de hook, de sa première condition à sa
+dernière action, avec la version de la règle en vigueur à son début.
+_Avoid_ : run (réservé au tour d’un agent)
 
 **Agent d’exécution d’une règle** :
 L’agent dont les droits encadrent le hook qu’une règle écoute et les outils qu’elle
