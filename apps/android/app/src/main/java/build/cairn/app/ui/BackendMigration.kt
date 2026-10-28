@@ -126,7 +126,7 @@ fun BackendMigration(vm: CairnViewModel, runId: String, onCompleted: () -> Unit 
             title = "Migrer cette conversation ?",
             description =
                 if (value.environmentExpired)
-                    "Les anciens fichiers de travail ont été supprimés après inactivité. Confirmez $target pour un nouvel environnement vide. Le fil, l’historique, les pièces jointes et les livrables sont conservés. Le prochain message ouvre une nouvelle session du moteur avec le contexte de la conversation. Les outils et dépendances devront être réinstallés. La préférence de node précédente est effacée."
+                    "Les anciens fichiers de travail ont été supprimés après inactivité. Confirmez $target pour un nouvel environnement vide. Le fil, l’historique, les pièces jointes et les livrables sont conservés. Le prochain message ouvre une nouvelle session du moteur avec le contexte de la conversation. Les outils et dépendances devront être réinstallés. Le node choisi est épinglé pour le nouvel environnement. Vous pouvez modifier ce choix dans les préférences du fil."
                 else
                     "L’exécution s’arrête et les fichiers sont transférés vers $target. Le fil et son historique restent identiques. Le prochain message ouvre une nouvelle session du moteur avec le contexte de la conversation. Certains outils ou dépendances système peuvent nécessiter une réinstallation. L’environnement d’origine est conservé si la migration échoue. La préférence de node précédente est effacée.",
             busy = busy,

@@ -46,7 +46,9 @@ If the agent's execution backend changed after expiration, use the existing
 explicit backend migration confirmation in its execution-node details. It checks
 current management, destination and provenance grants, then selects the new backend
 without reading or converting the deleted disk. The next message creates an empty
-environment on that backend. History, uploads and published artifacts remain; other
+environment on that backend. The selected destination is pinned for fresh admission;
+its node preference can still be changed before starting. History, uploads and
+published artifacts remain; other
 reduced resource permissions still prevent continuation under the existing policy.
 The same confirmed action is available through public MCP and `cairn_installation`;
 its preview reports `environmentExpired`. Cleanup must finish before it is allowed.

@@ -949,7 +949,18 @@ async fn expired_conversations_explicitly_change_backend_without_recovering_dele
         } else {
             &vm
         };
-        f.service.agent_fixture(json!({ "access": { "backend": destination_backend, "nodes": [destination["id"]] } }), f.agent["id"].as_str()).await.unwrap();
+        let mut preferred = destination.clone();
+        preferred["id"] = id().into();
+        preferred["nativeAccounts"] = json!([TRUSTED, OTHER]);
+        f.service
+            .store
+            .put_node_fixture(preferred.clone())
+            .await
+            .unwrap();
+        f.service.agent_fixture(json!({
+            "access": { "backend": destination_backend, "nodes": [preferred["id"], destination["id"]] },
+            "nodePriorities": [preferred["id"], destination["id"]],
+        }), f.agent["id"].as_str()).await.unwrap();
         let path = format!("/api/nodes/placement/{run_id}/backend-migration");
         let input =
             json!({ "nodeId": destination["id"], "backend": destination_backend, "confirm": true });
@@ -959,7 +970,13 @@ async fn expired_conversations_explicitly_change_backend_without_recovering_dele
         assert_eq!(preview["required"], true);
         // Only the trusted caller has native authority; management cannot invent it.
         if destination_backend == "native" {
-            assert!(preview["nodes"].as_array().unwrap().is_empty());
+            assert!(
+                !preview["nodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|node| node["id"] == destination["id"])
+            );
             assert_eq!(
                 f.owner_call("POST", &path, input.clone()).await.0,
                 StatusCode::FORBIDDEN
@@ -1022,6 +1039,24 @@ async fn expired_conversations_explicitly_change_backend_without_recovering_dele
             .unwrap()
             .unwrap();
         assert!(checkpoint["prepared"].is_null());
+        assert_eq!(migrated["pinnedNodeId"], destination["id"]);
+        // No disk has been created, so the existing preference control can
+        // change this choice without trying to transfer a deleted environment.
+        let placement_path = format!("/api/nodes/placement/{run_id}");
+        for selected in [&preferred, destination] {
+            let (status, selection) = f
+                .owner_call(
+                    "PUT",
+                    &placement_path,
+                    json!({
+                        "pinnedNodeId": selected["id"],
+                        "preferredNodeId": null,
+                    }),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{selection}");
+            assert_eq!(selection["pinnedNodeId"], selected["id"]);
+        }
         assert_eq!(
             f.service.get("chats", &chat_id).await.unwrap()["paused"],
             true
@@ -1055,6 +1090,13 @@ async fn expired_conversations_explicitly_change_backend_without_recovering_dele
         assert_eq!(
             f.service.get("chats", &chat_id).await.unwrap()["runId"],
             run_id
+        );
+        let admission = placement::reserve(&f.service, &continued, &id())
+            .await
+            .unwrap();
+        assert_eq!(
+            admission["nodeId"], destination["id"],
+            "An explicitly confirmed destination must win over automatic priorities"
         );
     }
 }

@@ -238,7 +238,9 @@ fn change_expired_backend(
         "nodeId": node["id"],
         "targetNodeId": null,
         "requiredRuntime": node["runtimeId"],
-        "pinnedNodeId": null,
+        // No disk exists yet: constrain fresh placement without recording a
+        // materialized checkpoint. The owner can still change this preference.
+        "pinnedNodeId": node["id"],
         "preferredNodeId": null,
         "backendMigration": null,
         "backendMigrationError": null,

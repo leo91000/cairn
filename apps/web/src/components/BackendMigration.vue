@@ -151,7 +151,12 @@ async function migrate() {
         <p v-if="!state?.environmentExpired">
           The original environment is retained if migration fails.
         </p>
-        <p>The conversation's previous node preference will be cleared.</p>
+        <p v-if="state?.environmentExpired">
+          Your chosen node is pinned for the new environment. You can change this in the conversation's node preferences.
+        </p>
+        <p v-else>
+          The conversation's previous node preference will be cleared.
+        </p>
         <div class="mt-4 flex justify-end gap-2">
           <UiButton :disabled="busy" @click="confirm = false">
             Cancel

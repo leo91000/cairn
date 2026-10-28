@@ -1987,6 +1987,8 @@ async fn workspace_transfer_preserves_files_and_links_without_following_them() {
         std::fs::Permissions::from_mode(0o755),
     )
     .unwrap();
+    std::fs::write(source.join("empty"), []).unwrap();
+    std::fs::set_permissions(source.join("empty"), std::fs::Permissions::from_mode(0o640)).unwrap();
     std::os::unix::fs::symlink("/etc", source.join("external")).unwrap();
     let mut bytes = Vec::new();
     files::send(&source, &mut bytes).await.unwrap();
@@ -1999,6 +2001,8 @@ async fn workspace_transfer_preserves_files_and_links_without_following_them() {
         Path::new("/etc")
     );
     assert_eq!(mode(&target.join("nested/tool")), 0o755);
+    assert!(std::fs::read(target.join("empty")).unwrap().is_empty());
+    assert_eq!(mode(&target.join("empty")), 0o640);
     let malicious =
         b"{\"path\":\"external/passwd\",\"kind\":\"file\",\"size\":0}\n{\"complete\":true}\n";
     assert!(
