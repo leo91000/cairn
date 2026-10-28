@@ -620,7 +620,11 @@ async fn attachment_previews_and_summaries_are_rendered_on_demand() {
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
             continue;
         }
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{name} preview using {tool}"
+        );
         assert_eq!(response.headers()["content-type"], "image/jpeg");
         assert!(read_bytes(response).await.starts_with(&[0xff, 0xd8, 0xff]));
     }
