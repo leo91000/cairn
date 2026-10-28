@@ -111,6 +111,16 @@ coverage used, not a claim that every production account/provider was exercised.
 ## Platform equivalents
 
 - Quota exhaustion appears once as an inline conversation card on both clients.
+  The compact neutral surface uses a small amber marker, a short status and a
+  prominent alternative-agent action; account management and technical details
+  are secondary. Spending limits remain distinct in the title, and any announced
+  reset remains visible. Both clients show the initial alternatives check and
+  refresh choices every five seconds while quota blocks the conversation (one
+  second during switching, two seconds after a failed read). A temporarily empty
+  or failed options response no longer requires reopening the conversation.
+  These are presentation and read-refresh changes: the existing
+  `get_chat_coding_agent_options` and `switch_chat_coding_agent` public MCP and
+  installation tools retain the same availability and authorization checks.
   It folds the current quota's assistant echo, failed-turn notice and failed-status
   notice, while the run activity retains its diagnostics. Recovered quota
   interruptions stay hidden in the chat after account rotation or manual resume.

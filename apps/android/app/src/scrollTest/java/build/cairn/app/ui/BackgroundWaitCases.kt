@@ -28,6 +28,61 @@ abstract class BackgroundWaitCases {
     protected open fun capture(name: String) {}
 
     @Test
+    fun rejectedQuotaSwitchRemainsVisibleAfterOptionsRefresh() =
+        conversation("running", quota = true, codingAgentChoices = true, rejectSwitch = true) {
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Continuer avec Codex").performScrollTo().performClick()
+            // The changed label proves the options response after the POST was rendered.
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex disponible")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Switch refused. Review the accounts.").assertExists()
+        }
+
+    @Test
+    fun quotaAlternativesRefreshWhenCodexBecomesAvailable() =
+        conversation(
+            "running",
+            quota = true,
+            codingAgentChoices = true,
+            initialAlternatives = "unavailable",
+        ) {
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Continuer avec Codex").performScrollTo().assertIsDisplayed()
+        }
+
+    @Test
+    fun quotaAlternativesRetryAfterAReadFailure() =
+        conversation(
+            "running",
+            quota = true,
+            codingAgentChoices = true,
+            initialAlternatives = "error",
+        ) {
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Continuer avec Codex").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Alternatives temporarily unavailable.").assertDoesNotExist()
+        }
+
+    @Test
     fun quotaOffersOneClickCodingAgentSwitchForTheCurrentTurn() =
         conversation("running", quota = true, codingAgentChoices = true) { server ->
             compose.waitUntil(5000) {
@@ -79,7 +134,9 @@ abstract class BackgroundWaitCases {
     fun quotaWaitFoldsDuplicateErrorsAndExpandsOneTechnicalMessage() =
         conversation("running", quota = true) {
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
-            compose.onAllNodesWithText("Quota Claude Code atteint").assertCountEquals(1)
+            compose
+                .onAllNodesWithText("Limite de dépense Claude Code atteinte")
+                .assertCountEquals(1)
             compose
                 .onNodeWithText("Reprise automatique dès qu’un compte est disponible.")
                 .assertIsDisplayed()
@@ -128,7 +185,7 @@ abstract class BackgroundWaitCases {
             },
         ) {
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
-            compose.onNodeWithText("La limite d’usage du compte est atteinte.").assertIsDisplayed()
+            compose.onNodeWithText("Quota Claude Code atteint").assertIsDisplayed()
             compose
                 .onNodeWithText("La limite de dépense du compte est atteinte.")
                 .assertDoesNotExist()
@@ -538,6 +595,8 @@ abstract class BackgroundWaitCases {
         conditional: Boolean = false,
         quota: Boolean = false,
         codingAgentChoices: Boolean = false,
+        initialAlternatives: String? = null,
+        rejectSwitch: Boolean = false,
         paused: Boolean = false,
         reason: String = "Attendre la CI",
         history: ((ChatWakeup?, Long) -> List<RunEvent>)? = null,
@@ -645,6 +704,8 @@ abstract class BackgroundWaitCases {
             server.dispatcher =
                 object : Dispatcher() {
                     @Volatile var switching = false
+                    var switchRejected = false
+                    var alternativesReads = 0
 
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
@@ -655,16 +716,39 @@ abstract class BackgroundWaitCases {
                                 .setBody("{}")
                         }
                         if (codingAgentChoices && path.endsWith("/coding-agent")) {
+                            if (request.method == "POST" && rejectSwitch) {
+                                switchRejected = true
+                                return MockResponse()
+                                    .setResponseCode(409)
+                                    .setHeader("Content-Type", "application/json")
+                                    .setBody("""{"error":"Switch refused. Review the accounts."}""")
+                            }
+                            if (request.method == "GET" && alternativesReads++ == 0) {
+                                if (initialAlternatives == "error")
+                                    return MockResponse()
+                                        .setResponseCode(500)
+                                        .setHeader("Content-Type", "application/json")
+                                        .setBody(
+                                            """{"error":"Alternatives temporarily unavailable."}"""
+                                        )
+                                if (initialAlternatives == "unavailable")
+                                    return MockResponse()
+                                        .setHeader("Content-Type", "application/json")
+                                        .setBody(
+                                            """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"claude","choices":[]}"""
+                                        )
+                            }
                             if (request.method == "POST") switching = true
                             val progress =
                                 if (switching) ""","switching":{"provider":"codex","error":null}"""
                                 else ""
+                            val label = if (switchRejected) "Codex disponible" else "Codex"
                             return MockResponse()
                                 .setHeader("Content-Type", "application/json")
                                 .setBody(
                                     if (request.method == "POST") "{}"
                                     else
-                                        """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"claude","choices":[{"provider":"codex","label":"Codex"}]$progress}"""
+                                        """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"claude","choices":[{"provider":"codex","label":"$label"}]$progress}"""
                                 )
                         }
 

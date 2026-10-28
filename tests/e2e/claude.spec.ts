@@ -56,6 +56,103 @@ test('a Claude spend limit waits automatically and appears once in the real conv
   }
 })
 
+for (const initial of ['unavailable', 'error'] as const) {
+  test(`quota alternatives recover from an initially ${initial} response without reopening the conversation`, async ({ page, workspace }) => {
+    test.setTimeout(60000)
+    await connectClaude(workspace, `Quota alternatives ${initial}`, `fixture-code:alternatives-${initial}@example.test`)
+    await seedCodexAccount(workspace, 'Available alternative', limits(10, 20))
+    await workspace.api('/api/accounts/refresh', 'POST')
+    const chat = await workspace.api('/api/chats', 'POST', {})
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'Preserve my request. fixture:spend-limit', provider: 'claude' })
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.accountWaitReason, { timeout: 30000 }).toContain('Usage exhausted.')
+    await useRelayForHttpMocks(page)
+    let attempts = 0
+    let releaseFirstRead: () => void = () => {}
+    const firstRead = new Promise<void>((resolve) => {
+      releaseFirstRead = resolve
+    })
+    await page.route(`**/chats/${chat.id}/coding-agent`, async (route) => {
+      attempts++
+      if (attempts > 1) {
+        await route.continue()
+        return
+      }
+
+      await firstRead
+      if (initial === 'error') {
+        await route.fulfill({ status: 500, json: { error: 'Alternatives temporarily unavailable.' } })
+        return
+      }
+
+      const response = await route.fetch()
+      await route.fulfill({ response, json: { ...await response.json(), choices: [] } })
+    })
+    try {
+      await page.goto(workspacePath(`/chats/${chat.id}`))
+      await authenticateWorkspace(page)
+      const card = page.getByRole('status', { name: 'Coding agent quota reached' })
+      await expect(card).toBeVisible()
+      await expect(card.getByText('Checking alternatives…')).toBeVisible()
+      releaseFirstRead()
+      await expect(card.getByRole('button', { name: 'Continue with Codex', exact: true })).toBeVisible({ timeout: 15000 })
+      expect(attempts).toBeGreaterThan(1)
+      await expect(card.getByRole('alert')).toHaveCount(0)
+    }
+    finally {
+      releaseFirstRead()
+      await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
+    }
+  })
+}
+
+test('a quota switch response does not restart alternatives polling after leaving the conversation', async ({ page, workspace }) => {
+  test.setTimeout(60000)
+  await connectClaude(workspace, 'Leaving quota switch', 'fixture-code:leaving-switch@example.test')
+  await seedCodexAccount(workspace, 'Available while leaving', limits(10, 20))
+  await workspace.api('/api/accounts/refresh', 'POST')
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'Keep this request. fixture:spend-limit', provider: 'claude' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.accountWaitReason, { timeout: 30000 }).toContain('Usage exhausted.')
+  await useRelayForHttpMocks(page)
+  let releaseSwitch: () => void = () => {}
+  const switchResponse = new Promise<void>((resolve) => {
+    releaseSwitch = resolve
+  })
+  let reads = 0
+  let switchDelivered = false
+  await page.route(`**/chats/${chat.id}/coding-agent`, async (route) => {
+    if (route.request().method() === 'POST') {
+      await switchResponse
+      await route.fulfill({ json: {} })
+      switchDelivered = true
+      return
+    }
+
+    reads++
+    await route.continue()
+  })
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    const card = page.getByRole('status', { name: 'Coding agent quota reached' })
+    await card.getByRole('button', { name: 'Continue with Codex', exact: true }).click()
+    await expect(card.getByText('Switching to Codex…', { exact: true })).toBeVisible()
+    await page.getByRole('link', { name: 'Fil', exact: true }).first().click()
+    await expect(card).toHaveCount(0)
+    const readsAfterLeaving = reads
+    releaseSwitch()
+    await expect.poll(() => switchDelivered).toBe(true)
+    // Observe longer than the five-second polling period, including real HTTP.
+    await page.waitForTimeout(5500)
+    expect(reads).toBe(readsAfterLeaving)
+  }
+  finally {
+    releaseSwitch()
+    await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
+  }
+})
+
 test('the quota card continues the pending request with Codex once, preserving files and history', async ({ page, workspace }, testInfo) => {
   test.setTimeout(120000)
   await connectClaude(workspace, 'Exhausted for switching', 'fixture-code:switch-running@example.test')
