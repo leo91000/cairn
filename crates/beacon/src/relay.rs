@@ -2,6 +2,8 @@ pub(crate) mod direct;
 pub(crate) mod nodes;
 
 #[cfg(test)]
+mod response_deadline_tests;
+#[cfg(test)]
 mod session_expiry_tests;
 
 use super::{ApiError, Service, digest, installations};
@@ -1305,15 +1307,7 @@ async fn send(
                 "Installation busy or unavailable",
             )
         })?;
-    let response = tokio::time::timeout(REQUEST_TIMEOUT, response)
-        .await
-        .map_err(|_| {
-            ApiError::Http(
-                StatusCode::GATEWAY_TIMEOUT,
-                "Installation request timed out",
-            )
-        })?
-        .map_err(|_| ApiError::Http(StatusCode::BAD_GATEWAY, "Installation connection lost"))?;
+    let response = installation_response(response).await?;
     let status = StatusCode::from_u16(response.status)
         .map_err(|_| ApiError::Http(StatusCode::BAD_GATEWAY, "Invalid installation response"))?;
     let is_stream = streaming && response.body.is_empty();
@@ -1378,6 +1372,25 @@ async fn send(
         .insert("cache-control", HeaderValue::from_static("no-store"));
 
     Ok(output)
+}
+
+async fn installation_response(
+    response: oneshot::Receiver<ApiResponse>,
+) -> Result<ApiResponse, ApiError> {
+    // The deadline must win if a stalled runtime observes both expiry and a
+    // response (or connection loss) on the same poll.
+    tokio::select! {
+        biased;
+
+        () = tokio::time::sleep(REQUEST_TIMEOUT) => Err(ApiError::Http(
+            StatusCode::GATEWAY_TIMEOUT,
+            "Installation request timed out",
+        )),
+        result = response => result.map_err(|_| ApiError::Http(
+            StatusCode::BAD_GATEWAY,
+            "Installation connection lost",
+        )),
+    }
 }
 
 // Dropping an HTTP body records cancellation before waking the socket loop.
