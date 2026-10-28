@@ -17,6 +17,7 @@
     "test": "vitest run",
     "test:e2e": "playwright test",
     "check": "pnpm lint && pnpm test && pnpm build",
+    "validate:pr": "node scripts/validate-pr.mjs",
     "format": "pnpm lint:fix",
     "format:rust": "node scripts/rust-format.mjs",
     "format:android": "cd apps/android && ./gradlew spotlessApply --no-daemon",

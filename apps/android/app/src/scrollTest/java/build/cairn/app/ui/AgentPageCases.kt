@@ -77,7 +77,7 @@ abstract class AgentPageCases {
         """[{"id":"$LOCAL_NODE_ID","name":"local","local":true,"status":"online","accepting":true,"executionReady":true,"exclusiveReservations":true},""" +
             """{"id":"475328ca-1491-5a74-abfb-fb52c2e04160","name":"gpu-box","status":"online","accepting":true,"executionReady":true,"exclusiveReservations":true,"tags":["475328ca-1491-5a74-abfb-fb52c2e04160","linux"]},""" +
             """{"id":"17ce976c-733b-5e32-9840-7888af8907c0","name":"mac-mini","status":"offline","accepting":true,"tags":["macos"]},""" +
-            """{"id":"aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503","name":"desk-native","status":"online","accepting":true,"executionReady":true,"capabilities":{"backend":"native"}}]"""
+            """{"id":"aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503","name":"desk-native","status":"online","accepting":true,"executionReady":true,"exclusiveReservations":true,"capabilities":{"backend":"native"}}]"""
 
     private val catalog =
         PluginCatalog(
@@ -857,12 +857,21 @@ abstract class AgentPageCases {
                 .onNodeWithContentDescription("Exécuter ses conversations sur gpu-box")
                 .assertDoesNotExist()
             compose
+                .onNodeWithContentDescription("Réserver desk-native en exclusivité")
+                .assertIsNotEnabled()
+            compose
                 .onNodeWithContentDescription("Exécuter ses conversations sur desk-native")
                 .assertIsOff()
                 .performClick()
+            compose
+                .onNodeWithContentDescription("Réserver desk-native en exclusivité")
+                .assertIsEnabled()
+                .performClick()
             back()
             compose
-                .onNodeWithContentDescription("Nodes, Exécution native · 1 sur 1, modifié")
+                .onNodeWithContentDescription(
+                    "Nodes, Exécution native · 1 sur 1 · exclusivité sur 1, modifié"
+                )
                 .assertExists()
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(15000) {
@@ -879,6 +888,10 @@ abstract class AgentPageCases {
             assertEquals(
                 JsonArray(listOf(JsonPrimitive("aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503"))),
                 access["nodes"],
+            )
+            assertEquals(
+                JsonArray(listOf(JsonPrimitive("aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503"))),
+                fixture.saved.single().second["settings"]!!.jsonObject["exclusiveNodes"],
             )
         }
     }

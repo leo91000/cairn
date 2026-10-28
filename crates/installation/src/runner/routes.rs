@@ -1,5 +1,6 @@
 //! HTTP interface of the VM controller.
 use super::broker::{Broker, ProjectImport, erase_attempt_content};
+use crate::runner::exclusive::Reservations;
 use crate::{
     auth::safe_equal,
     error::{Error, Result},

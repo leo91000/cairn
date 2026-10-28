@@ -590,8 +590,8 @@ test('native enrollment requires explicit people and native agent grants', async
   await expect(dialog.getByLabel('Enable native execution')).not.toBeChecked()
   await expect(dialog.getByRole('group', { name: 'Trusted people', exact: true })).toBeVisible()
   await expect(dialog).toContainText('All slots share these budgets.')
-  // Native nodes never take exclusive reservations, so no runtime update is suggested.
-  await expect(dialog).not.toContainText('needs an update before exclusive reservations')
+  // Older native runtimes need an update before the exclusive grant can be used.
+  await expect(dialog).toContainText('needs an update before exclusive reservations')
   const callers = await workspace.api('/api/nodes/native-callers')
   expect(callers.length).toBeGreaterThan(0)
   await dialog.getByLabel(callers[0].email, { exact: true }).check()

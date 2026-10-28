@@ -305,7 +305,7 @@ pub(crate) const AGENT_OPERATIONS: &[AgentOperation] = &[
     AgentOperation {
         name: "replace_agent",
         scope: "manage",
-        description: "Replace all settings at the expected revision, including access.backend (auto, firecracker or native) and ordered nodePriorities. Priorities confer no access. Agents cannot expand permissions or approve sensitive rights.",
+        description: "Replace all settings at the expected revision, including access.backend (auto, firecracker or native) and ordered nodePriorities. Owner-granted exclusiveNodes may target matching VM or native nodes whose runtime supports reservations. Priorities confer no access. Agents cannot expand permissions or approve sensitive rights.",
     },
     AgentOperation {
         name: "delete_agent",
