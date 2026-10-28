@@ -36,6 +36,15 @@ serial read/hash/codec/PUT loop remains serial, so no producer upload-capacity w
 or final parallel drain is needed. Failures before transfer still emit the correlated
 operation phase; transfer errors and dropped futures retain their partial summary.
 
+Direct v3 transfers propagate the same optional metadata in authenticated upload
+plans. Node aggregates cover local production, hash/codec, upload admission,
+checksum and provider HTTP work; replay reads include GET and decode stages.
+The manager's `nodeHeaders` includes the entire node batch upload, because the
+node drains its PUTs before returning a receipt. Receipt JSON parsing is residual,
+not plaintext `nodeBody` traffic. Direct node codec jobs do not use the manager's
+codec admission semaphore. Their `putSlot` / `getSlot` stages report the separate
+node budgets. Direct cold reads retain context through the host-executor hop.
+
 ## Units and interpretation
 
 All `*Us` fields are **wall-clock microseconds**, including synchronous codec jobs.

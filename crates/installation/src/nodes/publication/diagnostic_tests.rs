@@ -16,6 +16,10 @@ use axum::{
 use std::sync::atomic::{AtomicBool, Ordering};
 
 async fn service(root: &Path) -> Arc<Service> {
+    service_with_runner(root, String::new()).await
+}
+
+pub(super) async fn service_with_runner(root: &Path, runner_url: String) -> Arc<Service> {
     Service::new(crate::config::Config {
         data_dir: root.join("data"),
         home: root.join("home"),
@@ -30,13 +34,13 @@ async fn service(root: &Path) -> Arc<Service> {
         concurrency: 1,
         logger: false,
         worker_enabled: false,
-        runner_url: String::new(),
+        runner_url,
     })
     .await
     .unwrap()
 }
 
-async fn peer(app: Router) -> (String, tokio::task::AbortHandle) {
+pub(super) async fn peer(app: Router) -> (String, tokio::task::AbortHandle) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -119,6 +123,8 @@ async fn transfer_diagnostics_isolate_concurrent_attempts_and_conserve_volumes()
         snapshot: &snapshot,
         snapshot_id: &snapshot_id,
         budget: 0,
+
+        block_envelope: 2,
     };
     let first = diagnostic::Metrics::new(&attempt, &run_id, &snapshot_id, "manager");
     let second = diagnostic::Metrics::new(&other_attempt, &run_id, &snapshot_id, "manager");
@@ -265,6 +271,8 @@ async fn transfer_diagnostics_measure_base_get_decode_and_failed_put_without_los
         snapshot: &snapshot,
         snapshot_id: &snapshot_id,
         budget: 0,
+
+        block_envelope: 2,
     };
     let backup = Arc::new(
         json!({ "destination": "s3", "endpoint": logical_endpoint, "bucket": "diagnostics", "runId": run_id }),
@@ -353,7 +361,11 @@ async fn default_logging_filter_correlates_pretransfer_failure_and_cancelled_sum
         .with_writer(move || LogWriter(output.clone()))
         .finish();
     async {
-        assert!(capture_owned(&s, &json!({ "id": id() })).await.is_err());
+        assert!(
+            capture_owned(&s, &json!({ "id": id() }), CaptureProtocol::Direct)
+                .await
+                .is_err()
+        );
         let metrics =
             diagnostic::Metrics::new(&id(), "credential-not-a-uuid", "path-not-a-uuid", "manager");
         let _summary = diagnostic::Summary {
@@ -523,4 +535,244 @@ async fn converted_publications_have_distinct_attempt_summaries_on_success_and_f
     }
     assert!(!logs.contains(logical_endpoint));
     server.abort();
+}
+
+#[tokio::test]
+async fn old_controller_drain_retries_lost_put_and_ack_across_restart_without_direct_fallback() {
+    use crate::{node_fixture::StoreNodeFixture, run_fixture::DbRunFixture};
+    use std::collections::BTreeMap;
+    use std::sync::atomic::AtomicUsize;
+
+    let root = tempfile::tempdir().unwrap();
+    let run = id();
+    let attempt = id();
+    let grant = id();
+    let bytes = vec![37; 4096];
+    let hash = digest::block(&bytes);
+    let manifest = json!({
+        "version": 1,
+        "size": bytes.len(),
+        "blockSize": snapshots::BLOCK,
+        "blocks": [{ "offset": 0, "size": bytes.len(), "hash": hash }],
+        "onDemand": true,
+        "generation": 1,
+        "capturedAt": now()
+    });
+    let retained = Arc::new(AtomicBool::new(true));
+    let lose_ack = Arc::new(AtomicBool::new(true));
+    let legacy_reads = Arc::new(AtomicUsize::new(0));
+    let unsupported = Arc::new(AtomicUsize::new(0));
+    let baselines = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let controller = Router::new().fallback({
+        let baselines = baselines.clone();
+        let (manifest, grant, bytes, retained, lose_ack, legacy_reads, unsupported) = (
+            manifest.clone(),
+            grant.clone(),
+            bytes.clone(),
+            retained.clone(),
+            lose_ack.clone(),
+            legacy_reads.clone(),
+            unsupported.clone(),
+        );
+        move |request: Request| {
+            let baselines = baselines.clone();
+            let (manifest, grant, bytes, retained, lose_ack, legacy_reads, unsupported) = (
+                manifest.clone(),
+                grant.clone(),
+                bytes.clone(),
+                retained.clone(),
+                lose_ack.clone(),
+                legacy_reads.clone(),
+                unsupported.clone(),
+            );
+            async move {
+                let path = request.uri().path();
+                if path == "/health" {
+                    return axum::Json(json!({ "status": "ok", "nodeProtocol": 2 }))
+                        .into_response();
+                }
+                if path.ends_with("/direct-upload") || path.ends_with("/publication-fence") {
+                    unsupported.fetch_add(1, Ordering::Relaxed);
+                    return StatusCode::METHOD_NOT_ALLOWED.into_response();
+                }
+                if path.ends_with("/snapshot") {
+                    let body = to_bytes(request.into_body(), 4096).await.unwrap();
+                    let input: Value = serde_json::from_slice(&body).unwrap();
+                    baselines.lock().unwrap().push(input["baseline"].clone());
+                    return axum::Json(
+                        json!({ "id": id(), "manifest": manifest, "grantId": grant }),
+                    )
+                    .into_response();
+                }
+                if path.ends_with("/publication") {
+                    legacy_reads.fetch_add(1, Ordering::Relaxed);
+                    return bytes.into_response();
+                }
+                if path.ends_with("/published") {
+                    if lose_ack.load(Ordering::Relaxed) {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    retained.store(false, Ordering::Relaxed);
+                }
+                axum::Json(json!({ "ok": true })).into_response()
+            }
+        }
+    });
+    let (controller, controller_task) = peer(controller).await;
+    let lost_put = Arc::new(AtomicBool::new(true));
+    let objects = Arc::new(tokio::sync::Mutex::new(BTreeMap::<String, Vec<u8>>::new()));
+    let provider = Router::new().fallback({
+        let (objects, lost_put) = (objects.clone(), lost_put.clone());
+        move |request: Request| {
+            let (objects, lost_put) = (objects.clone(), lost_put.clone());
+            async move {
+                let key = request.uri().path().to_owned();
+                if request.method() == axum::http::Method::DELETE {
+                    objects.lock().await.remove(&key);
+                    return StatusCode::NO_CONTENT.into_response();
+                }
+                if request.method() == axum::http::Method::PUT {
+                    let body = to_bytes(request.into_body(), 1024 * 1024).await.unwrap();
+                    objects.lock().await.insert(key, body.to_vec());
+                    if lost_put.swap(false, Ordering::Relaxed) {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    return StatusCode::OK.into_response();
+                }
+                if let Some(bytes) = objects.lock().await.get(&key) {
+                    return bytes.clone().into_response();
+                }
+                StatusCode::NOT_FOUND.into_response()
+            }
+        }
+    });
+    let (provider, provider_task) = peer(provider).await;
+    let logical = "https://upgrade-fixture.example";
+    let s = service_with_runner(root.path(), controller.clone()).await;
+    std::fs::write(
+        s.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket": "fixture", "endpoint": logical, "region": "us-east-1" }).to_string(),
+    )
+    .unwrap();
+    fixture_storage_at(&provider, logical, "fixture", s.hot_s3.clone()).await;
+    s.store
+        .put_node_fixture(json!({ "id": super::super::LOCAL_NODE_ID, "revoked": false }))
+        .await
+        .unwrap();
+    let (saved_run, saved_attempt, saved_grant) = (run.clone(), attempt.clone(), grant.clone());
+    s.store
+        .transaction(move |db| {
+            let record = json!({
+                "id": saved_run,
+                "taskId": id(),
+                "status": "succeeded",
+                "createdAt": 0,
+                "nodeId": super::super::LOCAL_NODE_ID,
+                "sessionId": "old-controller-session",
+                "snapshot": { "agent": { "id": crate::config::MAIN_AGENT_ID } }
+            });
+            db.add_run_fixture(&record, None)?;
+            db.save_checkpoint_boundary(
+                &saved_run,
+                &json!({
+                    "nodeId": super::super::LOCAL_NODE_ID,
+                    "runnerId": saved_attempt
+                }),
+            )?;
+            db.put(
+                "node-disk-grants",
+                &json!({
+                    "id": saved_grant,
+                    "runId": saved_run,
+                    "nodeId": super::super::LOCAL_NODE_ID,
+                    "backups": []
+                }),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    // A provider response is lost after accepting bytes; no pointer/ACK is committed.
+    assert!(
+        capture_for_update(
+            &s,
+            &s.store.run(&run).await.unwrap(),
+            super::super::LOCAL_NODE_ID
+        )
+        .await
+        .is_err()
+    );
+    assert!(retained.load(Ordering::Relaxed));
+    assert!(s.store.run(&run).await.unwrap()["backup"]["id"].is_null());
+    // The next upload commits, but the old controller loses its ACK response.
+    assert!(
+        capture_for_update(
+            &s,
+            &s.store.run(&run).await.unwrap(),
+            super::super::LOCAL_NODE_ID
+        )
+        .await
+        .is_err()
+    );
+    assert!(retained.load(Ordering::Relaxed));
+    let first = s.store.run(&run).await.unwrap()["backup"]["id"].clone();
+    let previous_snapshot = s.store.run(&run).await.unwrap()["backup"]["snapshotId"].clone();
+    assert!(first.is_string());
+    assert_eq!(unsupported.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        s.store
+            .read(|db| Ok(db.0.query_row(
+                "SELECT count(*) FROM direct_journal_acknowledgements",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .await
+            .unwrap(),
+        0
+    );
+    drop(s);
+    let s = service_with_runner(root.path(), controller).await;
+    fixture_storage_at(&provider, logical, "fixture", s.hot_s3.clone()).await;
+    lose_ack.store(false, Ordering::Relaxed);
+    let point = capture_for_update(
+        &s,
+        &s.store.run(&run).await.unwrap(),
+        super::super::LOCAL_NODE_ID,
+    )
+    .await
+    .unwrap();
+    assert_ne!(point["blockEnvelope"], 3);
+    assert!(!retained.load(Ordering::Relaxed));
+    assert_eq!(
+        s.store.run(&run).await.unwrap()["backup"]["status"],
+        "ready"
+    );
+    assert_eq!(unsupported.load(Ordering::Relaxed), 0);
+    let saved = s
+        .get("node-backups", point["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        baselines.lock().unwrap().as_slice(),
+        &[Value::Null, Value::Null, previous_snapshot]
+    );
+    let manifest = super::manifest(&s, &saved).await.unwrap();
+    assert_eq!(
+        read_manifest_block(&s, &saved, &manifest["blocks"][0])
+            .await
+            .unwrap(),
+        bytes
+    );
+    let reads = legacy_reads.load(Ordering::Relaxed);
+    // An ordinary direct capture still fails on this old controller; it cannot
+    // retry its payload through the explicit maintenance compatibility route.
+    assert!(
+        capture(&s, &s.store.run(&run).await.unwrap())
+            .await
+            .is_err()
+    );
+    assert_eq!(unsupported.load(Ordering::Relaxed), 1);
+    assert_eq!(legacy_reads.load(Ordering::Relaxed), reads);
+    controller_task.abort();
+    provider_task.abort();
 }

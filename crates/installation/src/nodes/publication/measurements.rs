@@ -175,6 +175,8 @@ async fn publication_transfer_overhead_measurement() {
             snapshot: &snapshot,
             snapshot_id: &snapshot_id,
             budget: 0,
+
+            block_envelope: 2,
         };
 
         let mut reads = Vec::new();

@@ -1503,6 +1503,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         systemd::tools(&runtime_id)?;
         return Ok(Json(json!({
             "status": "ok", "backend": "native", "nodeProtocol": 2,
+            "directStorageProtocol": 1,
             "runtimeId": runtime_id,
             "dataRoot": controller.data, "capabilities": capabilities,
             "nativeMode": controller.mode.lock().await.clone(),
@@ -1708,6 +1709,14 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             let receipt = input(request, 16384).await?;
             block::published(&controller.state, run, &receipt).await?
         }
+        ("POST", ["disks", run, "publication-fence"]) => {
+            uuid(run)?;
+            let receipt = input(request, 16384).await?;
+            let publication = text(&receipt, "backupId");
+            uuid(publication)?;
+            crate::storage::runtime::fence_publication(&controller.state, run, publication).await?;
+            json!({"fenced":publication})
+        }
         ("POST", ["disks", run, "snapshot-completed"]) => {
             uuid(run)?;
             controller.stopped_snapshot(run, false).await?
@@ -1765,6 +1774,17 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             uuid(snapshot)?;
             let directory = controller.state.join("snapshots").join(snapshot);
             match (method.as_str(), *operation) {
+                ("POST", "direct-upload") => {
+                    let value = input(request, 131_072).await?;
+                    return Ok(Json(
+                        crate::nodes::snapshots::upload_direct(
+                            &directory,
+                            &serde_json::to_vec(&value)?,
+                        )
+                        .await?,
+                    )
+                    .into_response());
+                }
                 ("DELETE", "discard") => {
                     tokio::fs::remove_dir_all(directory).await?;
                     crate::performance::publication::discard_snapshot(snapshot);

@@ -858,3 +858,135 @@ mod journal_tests {
         assert_eq!(stages["nodeBaseRead"]["started"], 0);
     }
 }
+
+#[cfg(test)]
+mod direct_tests {
+    use super::*;
+    use crate::storage::{digest, direct};
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn direct_batches_keep_node_context_through_owned_routes_and_codec_workers() {
+        let payload = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let stored = payload.clone();
+        let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+            let stored = stored.clone();
+            async move {
+                if request.method() == axum::http::Method::GET {
+                    return stored.lock().await.clone();
+                }
+                let bytes = axum::body::to_bytes(request.into_body(), 16384)
+                    .await
+                    .unwrap();
+                *stored.lock().await = bytes.to_vec();
+                Vec::new()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/object", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = tempfile::tempdir().unwrap();
+        let bytes = vec![37; 8192];
+        tokio::fs::write(root.path().join("disk"), &bytes)
+            .await
+            .unwrap();
+        let manifest = crate::nodes::snapshots::index(&root.path().join("disk"))
+            .await
+            .unwrap();
+        tokio::fs::write(root.path().join("manifest.json"), manifest.to_string())
+            .await
+            .unwrap();
+        let snapshot = crate::config::id();
+        let attempt = crate::config::id();
+        let run = crate::config::id();
+        let read = direct::Read {
+            object: crate::config::id(),
+            hash: digest::block(&bytes),
+            size: bytes.len() as u64,
+            key: STANDARD.encode([7; 32]),
+            expires_at: crate::config::now() + 180_000,
+            get: direct::Request {
+                url: endpoint.clone(),
+                headers: BTreeMap::new(),
+                installation_local: false,
+            },
+        };
+        let upload = || direct::Upload {
+            read: read.clone(),
+            put: direct::Request {
+                url: endpoint.clone(),
+                headers: BTreeMap::from([("if-none-match".into(), "*".into())]),
+                installation_local: false,
+            },
+        };
+        let batch = |final_batch| direct::Batch {
+            publication_id: snapshot.clone(),
+            objects: vec![upload()],
+            diagnostics: Some(Request {
+                attempt: attempt.clone(),
+                run: run.clone(),
+                final_batch,
+            }),
+        };
+        // The real route spawns an owning task, so caller task-locals alone cannot
+        // supply its node context. It must come from the authenticated plan.
+        crate::nodes::snapshots::upload_direct(
+            root.path(),
+            &serde_json::to_vec(&batch(false)).unwrap(),
+        )
+        .await
+        .unwrap();
+        let metrics = registry()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|entry| entry.metrics.attempt == attempt)
+            .unwrap()
+            .metrics
+            .clone();
+        crate::nodes::snapshots::upload_direct(
+            root.path(),
+            &serde_json::to_vec(&batch(true)).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !registry()
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.metrics.attempt == attempt)
+        );
+        assert_eq!(
+            scope(Some(metrics.clone()), direct::download(read))
+                .await
+                .unwrap(),
+            bytes
+        );
+        let value = metrics.snapshot();
+        for stage in [
+            "nodeOpen",
+            "nodeProduce",
+            "compress",
+            "encrypt",
+            "putSlot",
+            "putChecksum",
+            "putRequest",
+        ] {
+            assert_eq!(value["stages"][stage]["completed"], 2, "{stage}: {value}");
+        }
+        for stage in ["getSlot", "getHeaders", "getBody", "decrypt", "decompress"] {
+            assert_eq!(value["stages"][stage]["completed"], 1, "{stage}: {value}");
+        }
+        assert_eq!(value["stages"]["nodeProduce"]["bytes"], 16384);
+        assert!(
+            value["stages"]["blockingQueue"]["completed"]
+                .as_u64()
+                .unwrap()
+                >= 3
+        );
+        assert_eq!(value["stages"]["hash"]["completed"], 5);
+        server.abort();
+    }
+}

@@ -222,9 +222,40 @@ impl LazyDisk {
     /// Call only after the master has durably published every dependency and
     /// authorized reads of the new base. Completion drains readers of the old base.
     pub fn commit_published(&self, generation: i64, backup_id: &str) -> io::Result<()> {
+        self.commit_published_guarded(generation, backup_id, false, || Ok(()))
+    }
+
+    pub(crate) fn try_commit_published_guarded<G>(
+        &self,
+        generation: i64,
+        backup_id: &str,
+        guard: impl FnOnce() -> io::Result<G>,
+    ) -> io::Result<()> {
+        self.commit_published_guarded(generation, backup_id, true, guard)
+    }
+
+    fn commit_published_guarded<G>(
+        &self,
+        generation: i64,
+        backup_id: &str,
+        nonblocking: bool,
+        guard: impl FnOnce() -> io::Result<G>,
+    ) -> io::Result<()> {
         let mut timing =
             crate::performance::Operation::new("journal_publish", backup_id, "reader_lock");
-        let _publication = self.publication.write().map_err(failure)?;
+        let _publication = if nonblocking {
+            self.publication.try_write().map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Journal readers must finish before acknowledgement.",
+                ),
+                error => failure(error),
+            })?
+        } else {
+            self.publication.write().map_err(failure)?
+        };
+        // Readers take publication before reporting; never reverse that order.
+        let _guard = guard()?;
         timing.next("commit");
         let mut journal = self.journal.lock().map_err(failure)?;
         let mut db = self.db.lock().map_err(failure)?;

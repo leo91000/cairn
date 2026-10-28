@@ -110,6 +110,10 @@ Dernier état cohérent de l’environnement d’une conversation disponible à 
 **Synchronisation d’une conversation** :
 Mise à disposition à distance de son environnement de travail courant. Elle progresse en arrière-plan ; son retard indique le travail encore exposé à la perte de la node d’origine.
 
+**Transfert direct de stockage** :
+Échange des données d’un environnement de travail entre sa node d’exécution et le stockage distant, sans transit des contenus par le manager. Le manager conserve la coordination et les autorisations de la synchronisation.
+_Avoid_ : connexion directe, qui désigne le transport entre l’interface et l’installation
+
 **Conversation à la corbeille** :
 Une conversation supprimée par l’utilisateur, masquée pendant l’effacement définitif de ses données associées. Les nouvelles suppressions sont irréversibles immédiatement ; seules les conversations déjà à la corbeille avant ce changement conservent leur délai de récupération initial.
 

@@ -9,6 +9,47 @@ use cairn_installation::{
 };
 use serde_json::{Value, json};
 
+/// Serve the shipped node-side transfer through synthetic snapshot controllers.
+/// The fixture has a raw disk, while real nodes read their immutable journal prefix.
+pub async fn direct_snapshot_upload(
+    disk: &std::path::Path,
+    mut manifest: Value,
+    body: &[u8],
+    corrupt: bool,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let root = tempfile::tempdir().unwrap();
+    if corrupt {
+        let mut bytes = tokio::fs::read(disk).await.unwrap();
+        let plan: Value = serde_json::from_slice(body).unwrap();
+        for object in plan["objects"].as_array().unwrap() {
+            let block = manifest["blocks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|block| block["hash"] == object["read"]["hash"])
+                .unwrap();
+            let offset = block["offset"].as_u64().unwrap() as usize;
+            bytes[offset] ^= 255;
+        }
+        tokio::fs::write(root.path().join("disk"), bytes)
+            .await
+            .unwrap();
+    } else {
+        tokio::fs::hard_link(disk, root.path().join("disk"))
+            .await
+            .unwrap();
+    }
+    manifest["onDemand"] = false.into();
+    tokio::fs::write(root.path().join("manifest.json"), manifest.to_string())
+        .await
+        .unwrap();
+    match cairn_installation::nodes::snapshots::upload_direct(root.path(), body).await {
+        Ok(receipt) => axum::Json(receipt).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
 pub fn node(mut value: Value) -> Result<ExecutionNode> {
     let mut complete = json!({
         "id": id(), "name":"Fixture node", "revision": id(), "createdAt":now(),

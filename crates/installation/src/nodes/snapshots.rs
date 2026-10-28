@@ -189,6 +189,24 @@ pub async fn served(directory: &Path, hash: &str) -> Result<Vec<u8>> {
     Reader::open(directory).await?.block(hash).await
 }
 
+/// Shared native/VM node operation. The controller authenticates the caller;
+/// this owned task drains all started uploads even if the HTTP caller leaves.
+pub async fn upload_direct(directory: &Path, body: &[u8]) -> Result<Value> {
+    if body.len() > 131_072 {
+        return Err(Error::bad(
+            "Direct publication plan exceeds its size limit.",
+        ));
+    }
+    let batch = serde_json::from_slice(body)
+        .map_err(|_| Error::bad("Invalid direct publication batch."))?;
+    let directory = directory.to_owned();
+    let task =
+        tokio::spawn(
+            async move { crate::storage::direct::upload_snapshot(&directory, batch).await },
+        );
+    serde_json::to_value(task.await.map_err(Error::internal)??).map_err(Error::internal)
+}
+
 // A response owns the reader: cancellation releases stopped reads, and no cache
 // or timer can retain an idle journal after the response has ended.
 struct JournalReader {
@@ -198,7 +216,7 @@ struct JournalReader {
     generation: i64,
 }
 
-struct Reader {
+pub(crate) struct Reader {
     directory: std::path::PathBuf,
     manifest: Value,
     journal: Option<JournalReader>,
@@ -206,7 +224,7 @@ struct Reader {
 }
 
 impl Reader {
-    async fn open(directory: &Path) -> Result<Self> {
+    pub(crate) async fn open(directory: &Path) -> Result<Self> {
         let manifest: Value =
             serde_json::from_slice(&tokio::fs::read(directory.join("manifest.json")).await?)?;
         if manifest["onDemand"] == true {
@@ -253,7 +271,7 @@ impl Reader {
         })
     }
 
-    async fn block(&self, hash: &str) -> Result<Vec<u8>> {
+    pub(crate) async fn block(&self, hash: &str) -> Result<Vec<u8>> {
         if let Some(journal) = &self.journal {
             let (volume, generation, hash) =
                 (journal.volume.clone(), journal.generation, hash.to_owned());

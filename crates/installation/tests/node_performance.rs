@@ -373,6 +373,13 @@ async fn master_reuses_unchanged_blocks() {
             if request.uri().path().ends_with("/snapshot") {
                 return Json(json!({ "id": id(), "manifest": manifest })).into_response();
             }
+            if request.uri().path().ends_with("/direct-upload") {
+                let body = axum::body::to_bytes(request.into_body(), 131_072)
+                    .await
+                    .unwrap();
+                return direct_snapshot_upload(&source, data.read().await.clone(), &body, false)
+                    .await;
+            }
             if request.uri().path().ends_with("/blocks")
                 || request.uri().path().ends_with("/publication")
             {
@@ -390,9 +397,14 @@ async fn master_reuses_unchanged_blocks() {
     });
     let (runner, task) = common::serve_locally(app).await;
     let s = service(&root, format!("http://{}", common::HOST), runner).await;
+    s.store
+        .put_node_fixture(json!({ "id": LOCAL_NODE_ID, "revoked": false }))
+        .await
+        .unwrap();
     let run = id();
     let record = json!({
         "id": run,
+        "snapshot": {},
         "taskId": run,
         "createdAt": now(),
         "status": RunStatus::Running,
