@@ -82,6 +82,28 @@ describe('device startup readiness', () => {
     expect(run.time()).toBe(8000)
   })
 
+  it('keeps ADB timeouts positive integers near a fractional deadline', async () => {
+    let time = 0
+    const timeouts = []
+    const ready = waitForDeviceReady({
+      adb: async (_args, { timeout }) => {
+        timeouts.push(timeout)
+        time += 0.25
+        return { stdout: wire({ step: timeouts.length, boot: '' }) }
+      },
+      now: () => time,
+      sleep: async (ms) => { time += ms },
+      timeoutMs: 7.25,
+      intervalMs: 2,
+      log: () => {},
+    })
+
+    await expect(ready).rejects.toThrow('Boot is not complete')
+    expect(timeouts.every(timeout => Number.isInteger(timeout) && timeout > 0)).toBe(true)
+    expect(timeouts).toContain(1)
+    expect(time).toBe(7.25)
+  })
+
   it('fails closed on partial or malformed ADB output and CPU counters that stop advancing', async () => {
     for (const response of ['', '__CAIRN_BOOT__\n1\n', wire().replace('cpu 1000', 'cpu nope'), wire()]) {
       const run = loop(() => response, { timeoutMs: 6000 })

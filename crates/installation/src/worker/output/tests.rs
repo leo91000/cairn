@@ -723,7 +723,12 @@ async fn question_chat(fixture: &Fixture) -> String {
     let mut chat = fixture.service.chat_create(json!({})).await.unwrap();
     chat["runId"] = fixture.id.clone().into();
     let id = text(&chat, "id").to_owned();
-    fixture.service.store.put("chats", chat).await.unwrap();
+    fixture
+        .service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
     id
 }
 

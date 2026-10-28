@@ -39,5 +39,7 @@ data class Mission(
         java.util.UUID.fromString(id)
         nextRun?.let { require(it in 0L..9007199254740991L) }
         projectId?.let { java.util.UUID.fromString(it) }
+        skills?.let { require(it.size <= 100) }
+        require(tags.size <= 10)
     }
 }

@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "available": {
+      "type": "boolean"
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "running": {
+      "type": "boolean"
+    },
+    "supported": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "supported",
+    "running",
+    "available"
+  ],
+  "title": "ChatCompaction",
+  "type": "object"
+}

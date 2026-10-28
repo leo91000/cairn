@@ -186,3 +186,7 @@ pub use accounts::*;
 mod models;
 
 pub use models::*;
+
+mod conversations;
+
+pub use conversations::*;

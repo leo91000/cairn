@@ -186,7 +186,7 @@ fn read_page(
         resume,
     } = request;
     let chat = if scope.single_chat() {
-        crate::chats::detail(db, &scope.id)?
+        crate::chats::public_detail(db, &scope.id)?
     } else {
         Value::Null
     };

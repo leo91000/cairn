@@ -417,9 +417,6 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
     );
     assert_eq!(a.unwrap(), b.unwrap());
     let run_id = id();
-    let mut chat = chat.clone();
-    chat["runId"] = run_id.clone().into();
-    service.store.put("chats", chat).await.unwrap();
     let run = json!({
         "id": run_id,
         "taskId": chat_id,
@@ -430,6 +427,18 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
         "snapshot": { "agent": { "id": MAIN_AGENT_ID, "provider": "codex" } },
     });
     common::add_run(&service.store, &run).await;
+    let mut current = service
+        .store
+        .conversation_boundary(chat_id)
+        .await
+        .unwrap()
+        .unwrap();
+    current["runId"] = run_id.clone().into();
+    service
+        .store
+        .save_conversation_boundary(current)
+        .await
+        .unwrap();
     let question = json!({
         "id": "a".repeat(64),
         "blocking": false,

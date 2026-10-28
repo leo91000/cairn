@@ -5,20 +5,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 
-/**
- * How full the coding agent's context was at its latest report. [contextTokens] is what the latest
- * model request occupied, never the conversation's cumulative spend.
- */
-@Serializable
-data class ContextUsage(
-    val contextTokens: Long = 0,
-    /** The model's context window; absent when the coding agent does not report it. */
-    val contextWindow: Long? = null,
-    /** Of [contextTokens], input read from the prompt cache, when reported. */
-    val cachedTokens: Long? = null,
-    /** A local estimate: before the session's first response, or right after a compaction. */
-    val estimated: Boolean = false,
-)
+typealias ContextUsage = build.cairn.contracts.ContextUsage
 
 @Serializable
 data class TaskOutcome(
@@ -33,12 +20,7 @@ data class TaskOutcome(
 
 @Serializable data class OutcomeDismissal(val until: Long? = null)
 
-@Serializable
-data class ChatExecution(
-    val messageId: String,
-    val text: String = "",
-    val recovery: Boolean = false,
-)
+typealias ChatExecution = build.cairn.contracts.ChatExecution
 
 @Serializable
 data class ChatWakeup(

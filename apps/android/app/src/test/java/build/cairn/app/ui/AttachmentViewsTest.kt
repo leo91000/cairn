@@ -88,10 +88,17 @@ class AttachmentViewsTest {
         }
 
     private fun file(name: String, chat: String = "", size: Long = 3 * 1024) =
-        ChatAttachment(name, chat, name, size)
+        ChatAttachment(id = name, chatId = chat, name = name, size = size.toInt())
 
     private fun image(name: String, chat: String = "") =
-        ChatAttachment(name, chat, name, 2048, "image/png", "image")
+        ChatAttachment(
+            id = name,
+            chatId = chat,
+            name = name,
+            size = 2048,
+            mediaType = "image/png",
+            kind = "image",
+        )
 
     @Test
     fun copyingRenamedImagesKeepsTheImageMimeAndOriginalBytes() {

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { ChatView } from '../../../../packages/contracts/chats'
 import { ref } from 'vue'
+import { deleteChat } from '../../../../packages/contracts/generated/deleteChat'
 import { api, state } from '../api'
 import Modal from './Modal.vue'
 import UiButton from './UiButton.vue'
@@ -16,7 +17,7 @@ async function remove() {
   deleting.value = true
   error.value = ''
   try {
-    await api(`/chats/${props.chat.id}`, { method: 'DELETE', body: JSON.stringify({ confirm: true }) })
+    await deleteChat(api, { chatId: props.chat.id, confirm: true })
     const draftScope = state.installationId ? `${state.installationId}:` : ''
     sessionStorage.removeItem(`cairn-chat-draft:${draftScope}${props.chat.id}`)
     emit('deleted', props.chat.id)

@@ -62,6 +62,8 @@ Direct-storage releases then continue to version 13 through a separate
 Version 13 then upgrades to version 14 through the
 [typed account pool migration](migrations/0014-typed-account-pool.md), preserving
 account identities, quota state, order, encrypted credentials and references.
+Version 14 then upgrades to 15 through the
+[typed conversation migration](migrations/0015-typed-conversations.md).
 Stop the old manager and retain a consistent database/WAL backup first. Keep the
 installation identity, configuration, data roots, node state and object storage.
 The migration preserves node identities, credentials, configuration and references;

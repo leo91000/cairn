@@ -597,19 +597,10 @@ pub(crate) fn authorize_chat(db: &Db<'_>, chat: &mut Value, source: &Origin) -> 
 
 /// Commit a directing control's provenance in the same transaction as its effect.
 pub(crate) fn authorize_chat_in(db: &Db<'_>, id: &str, source: &Origin) -> Result<()> {
-    let mut chat = crate::error::required(db.get("chats", id)?, "Chat not found")?;
+    let mut chat = crate::error::required(db.conversation_boundary(id)?, "Chat not found")?;
     authorize_chat(db, &mut chat, source)?;
-    db.put("chats", &chat)?;
+    db.save_conversation_boundary(&chat)?;
     Ok(())
-}
-
-/// Prove directing authority without recording a historical director.
-pub(crate) fn chat_proof(id: &str) -> impl Fn(&Db<'_>) -> Result<()> + Clone + Send + 'static {
-    let (id, source) = (id.to_owned(), origin());
-    move |db| {
-        let chat = crate::error::required(db.get("chats", &id)?, "Chat not found")?;
-        chat_grant(db, &chat, &source).map(|_| ())
-    }
 }
 
 pub(crate) fn chat_authorization(
@@ -636,7 +627,7 @@ pub(crate) fn authorize_run_in(db: &Db<'_>, id: &str, source: &Origin) -> Result
     let grant = run_grant(db, &run, source)?;
     if let Some(mut chat) = crate::chats::chat_for_run(db, id)? {
         apply(&mut chat, &grant);
-        db.put("chats", &chat)?;
+        db.save_conversation_boundary(&chat)?;
         if let Some(current) = chat["runId"].as_str()
             && current != id
             && db.run(current)?.is_some()
@@ -728,7 +719,7 @@ async fn chat_agent(s: &Service, chat: &str) -> Result<Value> {
     let chat = chat.to_owned();
     s.store
         .read(move |db| {
-            let chat = crate::error::required(db.get("chats", &chat)?, "Chat not found")?;
+            let chat = crate::error::required(db.conversation_boundary(&chat)?, "Chat not found")?;
             let agent = crate::error::required(
                 db.agent_snapshot(text(&chat, "agentId"))?,
                 "Agent not found",
@@ -795,7 +786,8 @@ pub async fn authorize_request(s: &Service, input: &crate::http::Input) -> Resul
             let origin = caller.map_or(Origin::Unknown, Origin::Human);
             authorize_origin(db, &agent, &origin)?;
             if chat_target {
-                let chat = crate::error::required(db.get("chats", &target)?, "Chat not found")?;
+                let chat =
+                    crate::error::required(db.conversation_boundary(&target)?, "Chat not found")?;
                 chat_grant(db, &chat, &origin)?;
             } else {
                 let run = crate::error::required(db.run(&target)?, "Run not found")?;
