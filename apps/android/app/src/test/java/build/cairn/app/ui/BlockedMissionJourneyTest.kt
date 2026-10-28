@@ -33,6 +33,8 @@ import org.robolectric.annotation.GraphicsMode
 class BlockedMissionJourneyTest {
     @get:Rule val compose = createComposeRule()
 
+    private var debugModel: CairnViewModel? = null
+
     private val calls = CopyOnWriteArrayList<Triple<String, String, String>>()
     private val activityReads = CopyOnWriteArrayList<List<Run>>()
     private val savedMissions = ConcurrentHashMap<String, Task>()
@@ -266,6 +268,7 @@ class BlockedMissionJourneyTest {
                     MemoryVault(),
                     beaconOrigin = "",
                 )
+            debugModel = vm
             compose.setContent {
                 LaunchedEffect(Unit) {
                     vm.state.first { it.ready }
@@ -281,13 +284,25 @@ class BlockedMissionJourneyTest {
         }
     }
 
-    private fun waitText(value: String, substring: Boolean = false) =
-        compose.waitUntil(15000) {
-            compose
-                .onAllNodesWithText(value, substring = substring)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
+    private fun waitText(value: String, substring: Boolean = false) {
+        println("[DEBUG-handoff] wait $value at ${System.nanoTime()}")
+        try {
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodesWithText(value, substring = substring)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+        } catch (error: Throwable) {
+            val state = debugModel?.state?.value
+            println(
+                "[DEBUG-handoff] missing $value at ${System.nanoTime()} ready=${state?.ready} busy=${state?.busy} auth=${state?.session?.authenticated} installation=${state?.installation?.id} tasks=${state?.tasks?.size} error=${state?.error}; calls=${calls.map { it.second }}"
+            )
+            println(compose.onRoot().printToString())
+            throw error
         }
+        println("[DEBUG-handoff] found $value at ${System.nanoTime()}")
+    }
 
     private fun waitCall(method: String, path: String) =
         compose.waitUntil(15000) {
