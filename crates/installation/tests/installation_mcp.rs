@@ -2529,6 +2529,24 @@ async fn both_mcp_endpoints_manage_chat_queues_and_lifecycle() {
                 }
             }
         };
+        let retention = invoke("get_conversation_retention", json!({})).await;
+        assert_eq!(result(&retention)["inactivityDays"], 7);
+        let retention = invoke(
+            "set_conversation_retention",
+            json!({ "inactivityDays": 14 }),
+        )
+        .await;
+        assert_eq!(result(&retention)["inactivityDays"], 14);
+        assert_eq!(
+            s.conversation_retention().await.unwrap()["inactivityDays"],
+            14
+        );
+        let invalid = invoke(
+            "set_conversation_retention",
+            json!({ "inactivityDays": -1 }),
+        )
+        .await;
+        assert_eq!(invalid["result"]["isError"], true);
         let created = invoke("create_chat", json!({})).await;
         let chat_id = result(&created)["id"].as_str().unwrap();
         assert_eq!(result(&created)["agentId"], MAIN_AGENT_ID);
@@ -2713,6 +2731,31 @@ async fn chat_file_tools_read_private_artifacts_and_attachments_in_bounded_chunk
     )
     .await
     .unwrap();
+    // Retention keeps originals and their authorization contracts on both MCP interfaces.
+    s.store
+        .change_run(
+            text(&target, "id"),
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Succeeded),
+                finished_at: Some(Some(1)),
+                recovery_pending: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut expired = s.store.get("chats", chat_id).await.unwrap().unwrap();
+    expired["lastActivityAt"] = 1.into();
+    s.store.put("chats", expired).await.unwrap();
+    s.cleanup_conversations().await.unwrap();
+    assert_eq!(
+        s.chat_detail(chat_id).await.unwrap()["environmentState"],
+        "expired"
+    );
+    let detail = call(&s, &configuration, "get_chat", json!({ "chatId": chat_id })).await;
+    assert_eq!(result(&detail)["chat"]["environmentState"], "expired");
+    let detail = public_call(&s, &["read"], "get_chat", json!({ "chatId": chat_id })).await;
+    assert_eq!(result(&detail)["chat"]["environmentState"], "expired");
     let listed = call(
         &s,
         &configuration,
@@ -2838,7 +2881,7 @@ async fn chat_file_tools_read_private_artifacts_and_attachments_in_bounded_chunk
     assert_eq!(result(&stopped)["paused"], true);
     assert_eq!(
         s.store.run(target["id"].as_str().unwrap()).await.unwrap()["status"],
-        RunStatus::Cancelled
+        RunStatus::Succeeded
     );
 }
 

@@ -86,6 +86,11 @@ pub(crate) fn candidate(run: &Value) -> Value {
 fn chat_run(db: &Db<'_>, chat_id: &str) -> Result<(Value, Value, Value, bool)> {
     let chat = required(db.get("chats", chat_id)?, "Chat not found")?;
     require_active(&chat)?;
+    if chat["environmentState"].is_string() {
+        return Err(Error::conflict(
+            "The environment expired. Send a new message to recreate it before migrating.",
+        ));
+    }
     let run = required(db.run(text(&chat, "runId"))?, "Run not found")?;
     let mut agent = required(
         db.agent_snapshot(text(&chat, "agentId"))?,

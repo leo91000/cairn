@@ -35,6 +35,9 @@ pub(crate) fn progress(db: &Db<'_>, chat: &str) -> Result<Value> {
 }
 
 pub(crate) fn quota_blocked(db: &Db<'_>, run: &Value) -> Result<bool> {
+    if run["environmentState"].is_string() {
+        return Ok(false);
+    }
     if is_compaction(run)
         || run["backendMigration"].is_object()
         || !run["cancelRequestedAt"].is_null()

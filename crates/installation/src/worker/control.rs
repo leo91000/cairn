@@ -246,7 +246,9 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
     crate::conversation_lifecycle::require_active_run(db, id)?;
     let replay_refused = db.list("chats")?.iter().any(|chat| {
         chat["runId"] == id
-            && (chat["cancelledByDeletion"] == true || chat["sessionRestartRequested"] == true)
+            && (chat["cancelledByDeletion"] == true
+                || chat["sessionRestartRequested"] == true
+                || chat["environmentState"].is_string())
     });
     if replay_refused {
         return Err(Error::conflict(

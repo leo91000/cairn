@@ -823,7 +823,10 @@ async fn empty_and_converted_chats_start_their_inactivity_clock_at_creation() {
         }
         app.service.store.put("chats", chat.clone()).await.unwrap();
         app.service.cleanup_conversations().await.unwrap();
-        assert_eq!(app.get(&chat_path(&chat)).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(
+            app.get(&chat_path(&chat)).await.1["environmentState"],
+            "expired"
+        );
     }
 }
 
@@ -859,7 +862,171 @@ async fn retention_defaults_to_seven_days_and_validates_persisted_owner_settings
 }
 
 #[tokio::test]
-async fn seven_day_expiration_removes_history_files_and_public_access() {
+async fn expired_remote_conversation_continues_with_history_without_fencing_a_retired_node() {
+    let app = App::new().await;
+    std::fs::create_dir_all(&app.service.config.home).unwrap();
+    let chat = app.create_chat().await;
+    let path = chat_path(&chat);
+    let first = id();
+    app.request(
+        "POST",
+        &format!("{path}/messages"),
+        json!({ "id": first, "text": "Preserve this decision" }),
+    )
+    .await;
+    app.tick().await;
+    let detail = app.get(&path).await.1;
+    let run = text(&detail["run"], "id").to_owned();
+    assert!(!run.is_empty(), "{detail}");
+    assert!(
+        app.service.config.runner_url.is_empty(),
+        "Control-only manager fixture"
+    );
+    let node = id();
+    app.service
+        .store
+        .put_node_fixture(json!({ "id": node, "revoked": true, "local": false }))
+        .await
+        .unwrap();
+    let chat_id = text(&chat, "id").to_owned();
+    let run_id = run.clone();
+    app.service
+        .store
+        .transaction(move |db| {
+            for mut message in db.messages(&chat_id)? {
+                message["status"] = "delivered".into();
+                db.put_message(&message).expect("fixture delivered message");
+            }
+            db.event(
+                &run_id,
+                &EventKind::ChatUser,
+                "Preserve this decision",
+                None,
+            )
+            .expect("fixture history");
+            db.change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    status: Some(RunStatus::Succeeded),
+                    finished_at: Some(Some(cairn_installation::config::now() - 8 * DAY)),
+                    recovery_pending: Some(false),
+                    session_id: Some(Some("old-native-session".into())),
+                    boundary: Some(json!({ "isolated": true })),
+                    ..Default::default()
+                },
+            )
+            .expect("fixture finished run");
+            db.save_checkpoint_boundary(
+                &run_id,
+                &json!({
+                        "prepared": { "workspace": "old-workspace" },
+                        "launched": true,
+                        "completed": true,
+                        "workspaceInitialized": true,
+                        "runnerId": id(),
+                "nodeId": node,
+                    }),
+            )
+            .expect("fixture checkpoint");
+            let mut chat = db.get("chats", &chat_id)?.unwrap();
+            chat["lastActivityAt"] = (cairn_installation::config::now() - 8 * DAY).into();
+            db.put("chats", &chat)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    app.service.cleanup_conversations().await.unwrap();
+    assert_eq!(app.get(&path).await.1["environmentState"], "expired");
+    assert_eq!(
+        app.request(
+            "POST",
+            &format!("{path}/messages"),
+            json!({ "id": id(), "text": "Continue" })
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    app.tick().await;
+    let detail = app.get(&path).await.1;
+    assert!(detail["environmentState"].is_null(), "{detail}");
+    assert_eq!(detail["run"]["id"], run);
+    assert_eq!(detail["run"]["status"], "queued");
+    assert_eq!(detail["run"]["isolated"], false);
+    cairn_installation::recovery::fence(&app.service, &detail["run"])
+        .await
+        .unwrap();
+    assert!(detail["run"]["sessionId"].is_null());
+    assert!(text(&detail["run"]["chatExecution"], "context").contains("Preserve this decision"));
+    assert!(detail["run"]["environmentExpiredAt"].is_number());
+    let checkpoint = app
+        .service
+        .store
+        .checkpoint_boundary(&run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(checkpoint["prepared"].is_null());
+    assert!(checkpoint["runnerId"].is_null());
+    assert_ne!(checkpoint["workspaceInitialized"], true);
+    assert_eq!(checkpoint["launched"], false);
+    assert_eq!(checkpoint["completed"], false);
+}
+
+#[tokio::test]
+async fn interrupted_environment_cleanup_blocks_execution_and_retries_after_policy_is_disabled() {
+    let app = App::new().await;
+    let mut chat = old_chat(&app, 8).await;
+    let run = id();
+    app.add_finished_run(
+        &run,
+        RunStatus::Succeeded,
+        json!({
+            "workspaces": [{ "kind": "worktree", "path": app._root.path().to_str().unwrap() }],
+        }),
+        "Kept history",
+    )
+    .await;
+    chat["runId"] = run.clone().into();
+    app.service.store.put("chats", chat.clone()).await.unwrap();
+    app.service.cleanup_conversations().await.unwrap();
+    let detail = app.get(&chat_path(&chat)).await.1;
+    assert_eq!(detail["environmentState"], "cleaning");
+    assert!(detail["environmentError"].is_string());
+    assert_eq!(
+        app.request(
+            "POST",
+            &format!("{}/messages", chat_path(&chat)),
+            json!({ "id": id(), "text": "Wait for erasure" })
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    app.request("PUT", RETENTION, json!({ "inactivityDays": 0 }))
+        .await;
+    app.service
+        .store
+        .update_run_boundary(&run, json!({ "workspaces": [] }))
+        .await
+        .unwrap();
+    let mut current = app
+        .service
+        .store
+        .get("chats", text(&chat, "id"))
+        .await
+        .unwrap()
+        .unwrap();
+    current["environmentRetryAfter"] = 0.into();
+    app.service.store.put("chats", current).await.unwrap();
+    app.service.cleanup_conversations().await.unwrap();
+    let detail = app.get(&chat_path(&chat)).await.1;
+    assert_eq!(detail["environmentState"], "expired");
+    assert!(detail["environmentError"].is_null());
+}
+
+#[tokio::test]
+async fn seven_day_expiration_preserves_history_uploads_artifacts_and_public_access() {
     let app = App::new().await;
     let mut expired = old_chat(&app, 8).await;
     let recent = old_chat(&app, 6).await;
@@ -912,19 +1079,26 @@ async fn seven_day_expiration_removes_history_files_and_public_access() {
         )
         .await
         .unwrap();
+    let workspace = app.service.config.data_dir.join("runs").join(&run);
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("unpublished.txt"), "unpublished work").unwrap();
     assert_eq!(app.get(&chat_path(&expired)).await.0, StatusCode::OK);
     app.service.cleanup_conversations().await.unwrap();
-    assert_eq!(app.get(&chat_path(&expired)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        app.get(&chat_path(&expired)).await.1["environmentState"],
+        "expired"
+    );
     assert_eq!(app.get(&chat_path(&recent)).await.0, StatusCode::OK);
-    assert!(!attachments.exists());
-    assert!(!artifact_path.exists());
+    assert!(!workspace.exists());
+    assert!(attachments.exists());
+    assert!(artifact_path.exists());
     assert!(
         app.service
             .store
             .kv("artifact-share:expired-share")
             .await
             .unwrap()
-            .is_none()
+            .is_some()
     );
     let run_id = run.clone();
     assert!(
@@ -933,8 +1107,35 @@ async fn seven_day_expiration_removes_history_files_and_public_access() {
             .read(move |db| db.run(&run_id))
             .await
             .unwrap()
-            .is_none()
+            .is_some()
     );
+
+    let checkpoint = app
+        .service
+        .store
+        .checkpoint_boundary(&run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(checkpoint["prepared"].is_null());
+    let retained = app.service.store.run(&run).await.unwrap();
+    assert!(retained["sessionId"].is_null());
+    assert_eq!(retained["resumeAvailable"], false);
+    assert_eq!(
+        app.request("POST", &format!("/api/runs/{run}/resume"), json!({}))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    // Another sweep cannot erase retained files or re-expire an already empty environment.
+    app.service.cleanup_conversations().await.unwrap();
+    assert!(artifact_path.exists());
+    // Explicit deletion still erases everything, including previously retained artifacts.
+    app.request("DELETE", &chat_path(&expired), json!({})).await;
+    app.service.cleanup_conversations().await.unwrap();
+    assert!(!artifact_path.exists());
+    assert!(!attachments.exists());
+    assert_eq!(app.get(&chat_path(&expired)).await.0, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -956,7 +1157,10 @@ async fn disabling_and_extending_retention_preserves_old_chats_but_manual_deleti
     app.request("PUT", RETENTION, json!({ "inactivityDays": 3 }))
         .await;
     app.service.cleanup_conversations().await.unwrap();
-    assert_eq!(app.get(&chat_path(&chat)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        app.get(&chat_path(&chat)).await.1["environmentState"],
+        "expired"
+    );
 }
 
 #[tokio::test]
@@ -1047,6 +1251,10 @@ async fn retention_protects_pending_work_recent_completion_and_worker_finalizati
             "active",
             "{protection}"
         );
+        assert!(
+            app.get(&chat_path(&chat)).await.1["environmentState"].is_null(),
+            "{protection}"
+        );
     }
 }
 
@@ -1063,10 +1271,26 @@ async fn expiration_uses_recorded_activity_and_bounds_each_pass() {
     let expired = old_chat(&app, 8).await;
     let second = old_chat(&app, 8).await;
     app.service.cleanup_conversations().await.unwrap();
-    assert_eq!(app.service.store.list("chats").await.unwrap().len(), 2);
+    assert_eq!(
+        app.service
+            .store
+            .list("chats")
+            .await
+            .unwrap()
+            .iter()
+            .filter(|c| c["environmentState"] == "expired")
+            .count(),
+        1
+    );
     app.service.cleanup_conversations().await.unwrap();
-    assert_eq!(app.get(&chat_path(&expired)).await.0, StatusCode::NOT_FOUND);
-    assert_eq!(app.get(&chat_path(&second)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        app.get(&chat_path(&expired)).await.1["environmentState"],
+        "expired"
+    );
+    assert_eq!(
+        app.get(&chat_path(&second)).await.1["environmentState"],
+        "expired"
+    );
     assert_eq!(app.get(&chat_path(&recent)).await.0, StatusCode::OK);
 }
 

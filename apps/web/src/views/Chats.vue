@@ -1126,6 +1126,21 @@ function key(event: KeyboardEvent) {
             @pause-wait="busy || action('pause', { paused: true })"
           />
           <div v-if="!inactive" class="mx-auto w-full max-w-205 shrink-0 px-5 pb-1 pt-3 phone:px-0 phone:pt-2">
+            <UiNotice
+              v-if="detail?.environmentState"
+              role="status"
+              class="mb-3"
+              tone="info"
+              title="Working environment expired"
+            >
+              <p>
+                {{ detail.environmentState === 'cleaning' ? 'Removing the working environment after inactivity. Please wait before sending another message.' : 'The working environment was removed after inactivity. Your next message starts a fresh environment using the conversation history.' }}
+                History, uploaded attachments, published files and shared links are retained. Unpushed changes and other working files are no longer available.
+              </p>
+              <p v-if="detail.environmentError">
+                Cleanup will retry: {{ detail.environmentError }}
+              </p>
+            </UiNotice>
             <ChatQuestions
               v-if="detail"
               :questions="detail.questions || []"

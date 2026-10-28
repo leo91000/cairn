@@ -179,7 +179,7 @@
   },
   {
     "name": "list_chats",
-    "description": "List conversations with pagination, optional agent/project filters and active/trash view. Returns metadata, without messages or marking chats read.",
+    "description": "List conversations with pagination, optional agent/project filters and active/trash view. Returns metadata, without messages or marking chats read. Metadata includes environmentState (cleaning, expired or null), environmentExpiredAt and environmentError. Send a new message after expiration to start a fresh environment using the preserved history.",
     "scope": "read",
     "destructive": false,
     "inputSchema": {
@@ -220,7 +220,7 @@
   },
   {
     "name": "get_chat",
-    "description": "Read conversation metadata and a bounded page of user/queued messages in chronological order. Use chat.runId with get_run for assistant replies and activity. Continue with nextOffset while hasMore. Use read_chat_content for records marked truncated. Private answers are redacted.",
+    "description": "Read conversation metadata and a bounded page of user/queued messages in chronological order. Use chat.runId with get_run for assistant replies and activity. Continue with nextOffset while hasMore. Use read_chat_content for records marked truncated. Private answers are redacted. Metadata includes environmentState (cleaning, expired or null), environmentExpiredAt and environmentError. Send a new message after expiration to start a fresh environment using the preserved history.",
     "scope": "read",
     "destructive": false,
     "inputSchema": {
@@ -1128,6 +1128,39 @@
         "provider"
       ],
       "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_conversation_retention",
+    "description": "Read the installation inactivity policy. Default 7 days; 0 disables automatic environment expiration. Conversations, uploaded attachments, published artifact versions and public links are retained.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "set_conversation_retention",
+    "description": "Set the installation inactivity delay (0 disables, default 7 days). Applies to existing conversations. Expiration irreversibly removes working environments and unpushed changes, while retaining history, uploaded attachments and published artifacts with their public links. Pending work is protected. Explicit deletion still removes the entire conversation.",
+    "scope": "manage",
+    "destructive": true,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "inactivityDays": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 36500
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "inactivityDays"
+      ]
     }
   }
 ]

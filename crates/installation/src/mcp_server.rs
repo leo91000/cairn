@@ -889,6 +889,11 @@ pub(crate) async fn invoke(
 ) -> Result<Value> {
     let authorize = crate::installation_mcp::management_authorization(bearer);
     match name {
+        "get_conversation_retention" => s.conversation_retention_authorized(authorize).await,
+        "set_conversation_retention" => {
+            s.save_conversation_retention_authorized(args, authorize)
+                .await
+        }
         "get_chat_backend_migration" => {
             crate::backend_migration::preview(s, text(&args, "chatId"), authorize).await
         }

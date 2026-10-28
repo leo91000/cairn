@@ -150,6 +150,9 @@ async fn delete_disk_for_purge(s: &Service, run: &str, destination: Option<&str>
 }
 
 async fn delete_disks(s: &Service, run: &str) -> Result<()> {
+    if run.is_empty() {
+        return Ok(());
+    }
     let volumes = s
         .store
         .list("node-volumes")
@@ -158,6 +161,9 @@ async fn delete_disks(s: &Service, run: &str) -> Result<()> {
         .filter(|v| v["runId"] == run)
         .collect::<Vec<_>>();
     if volumes.is_empty() {
+        if s.store.run(run).await?["environmentState"] == "expired" {
+            return Ok(());
+        }
         return delete_disk_for_purge(s, run, None).await;
     }
     for volume in volumes {
@@ -295,6 +301,67 @@ pub async fn purge(s: &Service, chat: Value) -> Result<()> {
     crate::nodes::publication::purge(s, &run).await?;
     files(s, &chat).await?;
     s.store.transaction(move |db| forget(db, &cid, &run)).await
+}
+
+/// Retires only the disposable environment. Messages, uploads, artifacts and
+/// public artifact URLs belong to the conversation and remain available.
+pub async fn expire_environment(s: &Service, chat: Value) -> Result<()> {
+    let cid = text(&chat, "id").to_owned();
+    let run = text(&chat, "runId").to_owned();
+    if !run.is_empty() {
+        s.accounts.recover_run(s, &s.store.run(&run).await?).await?;
+        delete_disks(s, &run).await?;
+        crate::nodes::publication::expire_environment(s, &run).await?;
+        detach_worktrees(s, &chat).await?;
+        remove(&s.config.data_dir.join("runs").join(&run)).await?;
+    }
+    s.store.transaction(move |db| {
+        if !run.is_empty() {
+            let boundary = json!({
+                "environmentState": "expired",
+                "environmentExpiredAt": chat["environmentExpiredAt"],
+                // Disk deletion already fenced the old environment. Recovery
+                // must not contact its retired node before fresh placement.
+                "isolated": false,
+                "backup": null,
+                "storage": null,
+                "nodeId": null,
+                "targetNodeId": null,
+                "preferredNodeId": null,
+                "pinnedNodeId": null,
+                "requiredRuntimeId": null,
+                "requiredRuntime": null,
+                "runtimeId": null,
+                "nodeState": null,
+                "workspaces": [],
+                "restoredAt": null,
+                "contextUsage": null,
+                "movementError": null,
+            });
+            db.change_run(&run, crate::runs::RunChanges {
+                session_id: Some(None),
+                resume_available: Some(false),
+                workspace: Some(None),
+                workspace_cleaned_at: Some(None),
+                recovery_pending: Some(false),
+                boundary: Some(boundary),
+                ..Default::default()
+            })?;
+            crate::worker::checkpoint::RunCheckpoint {
+                completed: Some(true),
+                ..Default::default()
+            }.store_in(db, &run)?;
+            db.event(&run, &cairn_contracts::EventKind::Status,
+                "Environment removed after inactivity. Conversation history, uploads and published artifacts are retained. The next message starts a fresh environment.", None)?;
+        }
+        if let Some(mut current) = db.get("chats", &cid)? {
+            current["environmentState"] = "expired".into();
+            current["environmentError"] = Value::Null;
+            current["environmentRetryAfter"] = Value::Null;
+            db.put("chats", &current)?;
+        }
+        Ok(())
+    }).await
 }
 
 #[cfg(test)]
