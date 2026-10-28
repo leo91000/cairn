@@ -272,7 +272,7 @@ for (const state of ['queued', 'failed'] as const) {
     if (state === 'queued') {
       const accounts = await workspace.api('/api/accounts')
       for (const claude of accounts.accounts.filter((a: { provider: string }) => a.provider === 'claude'))
-        workspace.service.store.put('agentAccounts', { ...workspace.service.store.get('agentAccounts', claude.id), exhausted: { at: Date.now(), model: '', usage: null } })
+        workspace.service.store.saveAccountFixture({ ...workspace.service.store.accountFixture(claude.id), exhausted: { at: Date.now(), model: '', usage: null } })
     }
 
     const messageId = crypto.randomUUID()

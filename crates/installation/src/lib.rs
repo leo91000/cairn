@@ -95,3 +95,7 @@ pub(crate) mod run_fixture;
 #[cfg(test)]
 #[path = "../tests/common/node_fixture.rs"]
 pub(crate) mod node_fixture;
+
+#[cfg(test)]
+#[path = "../tests/common/account_fixture.rs"]
+pub(crate) mod account_fixture;

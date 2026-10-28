@@ -575,3 +575,6 @@ pub(crate) use plugin_packages::{PLUGIN_PACKAGE_OPERATIONS, plugin_package_opera
 pub(crate) mod nodes;
 
 pub(crate) use nodes::{NODE_OPERATIONS, NodeOperation, node_operation};
+
+pub(crate) mod accounts;
+pub(crate) use accounts::{ACCOUNT_OPERATIONS, AccountOperation, account_operation};

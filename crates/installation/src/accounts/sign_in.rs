@@ -7,12 +7,12 @@ use crate::{
     service::Service,
 };
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-pub use cairn_contracts::{SignInState, SignInPhase as Phase};
+pub use cairn_contracts::{SignInPhase as Phase, SignInState};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,7 +103,17 @@ impl SignIn {
 
     pub fn view(&self) -> cairn_contracts::AccountSignIn {
         let p = self.login.view.borrow();
-        cairn_contracts::AccountSignIn { account_id:self.account_id.clone(), provider:self.provider.into(), state:p.state, phase:p.phase, url:p.url.clone(), code:p.code.clone(), accepts_code:p.accepts_code, expires_at:p.expires_at, error:p.error.clone() }
+        cairn_contracts::AccountSignIn {
+            account_id: self.account_id.clone(),
+            provider: self.provider.into(),
+            state: p.state,
+            phase: p.phase,
+            url: p.url.clone(),
+            code: p.code.clone(),
+            accepts_code: p.accepts_code,
+            expires_at: p.expires_at,
+            error: p.error.clone(),
+        }
     }
 
     pub fn waits_for_code(&self) -> bool {

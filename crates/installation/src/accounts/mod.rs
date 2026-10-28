@@ -10,8 +10,8 @@ pub mod codex;
 pub(crate) mod lenient;
 pub mod opencode;
 mod record;
-pub mod sql;
 mod sign_in;
+pub mod sql;
 pub mod usage;
 
 pub use record::{Account, AccountState, Exhaustion};
@@ -20,15 +20,14 @@ pub use sign_in::{Login, Phase, Progress, SignInState};
 use crate::{
     config::now,
     error::{Error, Result, required},
-    http::Input,
     provider::Provider,
     service::Service,
     skills::private_dir,
     store::Db,
-    validation::{text, uuid},
+    validation::text,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use serde::Deserialize;
 use sign_in::SignIn;
 use std::{
     borrow::Cow,
@@ -166,9 +165,14 @@ pub struct Accounts {
     signing_in: Mutex<Option<SignIn>>,
 }
 
-use cairn_contracts::{AccountStatus as Status, CodingAgentAccount, CodingAgentAccounts, AgentProvider, AccountSettings};
+use cairn_contracts::{
+    AccountSettings, AccountStatus as Status, AgentProvider, CodingAgentAccount,
+    CodingAgentAccounts,
+};
 
-fn stored(db: &Db<'_>) -> Result<Vec<Account>> { db.coding_accounts() }
+fn stored(db: &Db<'_>) -> Result<Vec<Account>> {
+    db.coding_accounts()
+}
 
 pub(crate) async fn save(s: &Service, account: &Account) -> Result<()> {
     s.store.save_coding_account(account).await?;
@@ -304,7 +308,12 @@ impl Accounts {
         self.initialized
             .get_or_try_init(|| async {
                 // Runtime credentials and their leases never survive a manager restart.
-                s.store.transaction(|db| { db.0.execute("DELETE FROM account_leases", [])?; Ok(()) }).await?;
+                s.store
+                    .transaction(|db| {
+                        db.0.execute("DELETE FROM account_leases", [])?;
+                        Ok(())
+                    })
+                    .await?;
                 // Sign-ins never survive a restart.
                 remove_directory(&s.config.data_dir.join("account-login")).await?;
                 for provider in Provider::ALL {
@@ -316,7 +325,7 @@ impl Accounts {
         Ok(())
     }
 
-    /// Leases live in memory, so after a restart only recovering runs may still own
+    /// Runtime leases are invalidated on restart; only recovering runs may still own
     /// credentials; removes anything the others left behind.
     async fn recover_runs(&self, s: &Service) -> Result<()> {
         let Ok(mut entries) = tokio::fs::read_dir(s.config.data_dir.join("runs")).await else {
@@ -367,12 +376,21 @@ impl Accounts {
     }
 
     pub async fn lease(&self, s: &Service, run_id: &str) -> Result<Option<Lease>> {
-        Ok(s.store.read(|db|db.account_leases()).await?.into_iter().find(|lease|lease.run_id==run_id))
+        Ok(s.store
+            .read(|db| db.account_leases())
+            .await?
+            .into_iter()
+            .find(|lease| lease.run_id == run_id))
     }
 
     /// The account's leases, ordered by run.
     pub async fn active(&self, s: &Service, id: &str) -> Result<Vec<Lease>> {
-        Ok(s.store.read(|db|db.account_leases()).await?.into_iter().filter(|lease|lease.account_id==id).collect())
+        Ok(s.store
+            .read(|db| db.account_leases())
+            .await?
+            .into_iter()
+            .filter(|lease| lease.account_id == id)
+            .collect())
     }
 
     async fn recovering(&self, s: &Service, id: &str) -> Result<bool> {
@@ -478,8 +496,8 @@ impl Accounts {
         timing.next("availability");
         driver.warm(s, model).await?;
         let available = {
-            let leases = s.store.read(|db|db.account_leases()).await?;
-            if leases.iter().any(|lease|lease.run_id==run_id) {
+            let leases = s.store.read(|db| db.account_leases()).await?;
+            if leases.iter().any(|lease| lease.run_id == run_id) {
                 return Err(Error::conflict("This run already holds an account."));
             }
             !self
@@ -496,8 +514,8 @@ impl Accounts {
         }
         timing.next("selection");
         let _selection = self.selection.lock().await;
-        let leases = s.store.read(|db|db.account_leases()).await?;
-        if leases.iter().any(|lease|lease.run_id==run_id) {
+        let leases = s.store.read(|db| db.account_leases()).await?;
+        if leases.iter().any(|lease| lease.run_id == run_id) {
             return Err(Error::conflict("This run already holds an account."));
         }
         let candidates = self.eligible(s, provider, model, speed, &leases).await?;
@@ -509,7 +527,7 @@ impl Accounts {
             let Some(mut account) = self.find(s, &candidate.id).await? else {
                 continue;
             };
-            let leases = s.store.read(|db|db.account_leases()).await?;
+            let leases = s.store.read(|db| db.account_leases()).await?;
             let available = schedulable(&account, driver, model)
                 && running(&leases, &account.id) < account.parallel_runs();
             drop(leases);
@@ -531,10 +549,14 @@ impl Accounts {
             account.last_used_at = Some(now());
             let saved = account.clone();
             let reserved = lease.clone();
-            if let Err(error) = s.store.transaction(move |db| {
-                db.save_coding_account(&saved)?;
-                db.save_account_lease(&reserved)
-            }).await {
+            if let Err(error) = s
+                .store
+                .transaction(move |db| {
+                    db.save_coding_account(&saved)?;
+                    db.reserve_account_lease(&reserved)
+                })
+                .await
+            {
                 driver.clear(&lease.home).await?;
                 return Err(error);
             }
@@ -560,7 +582,7 @@ impl Accounts {
                 compatible.push(account);
             }
         }
-        let leases = s.store.read(|db|db.account_leases()).await?;
+        let leases = s.store.read(|db| db.account_leases()).await?;
         let full = |a: &&Account| a.enabled && running(&leases, &a.id) >= a.parallel_runs();
         let message = if ready.is_empty() && accounts.iter().any(|a| a.state == AccountState::Error)
         {
@@ -593,7 +615,9 @@ impl Accounts {
         let _guard = self.lock(&lease.account_id).await;
         let cleared = lease.provider.driver().clear(&lease.home).await;
         let run = lease.run_id.clone();
-        s.store.transaction(move |db|db.remove_account_lease(&run)).await?;
+        s.store
+            .transaction(move |db| db.remove_account_lease(&run))
+            .await?;
         cleared
     }
 
@@ -608,7 +632,9 @@ impl Accounts {
         driver.clear(&lease.home).await?;
         lease.home = home.to_owned();
         let saved = lease.clone();
-        s.store.transaction(move |db|db.save_account_lease(&saved)).await?;
+        s.store
+            .transaction(move |db| db.relocate_account_lease(&saved))
+            .await?;
         Ok(())
     }
 
@@ -625,14 +651,18 @@ impl Accounts {
             provider.driver().recover(s, run_id).await?;
         }
         let run_id = run_id.to_owned();
-        s.store.transaction(move |db|db.remove_account_lease(&run_id)).await?;
+        s.store
+            .transaction(move |db| db.remove_account_lease(&run_id))
+            .await?;
         Ok(())
     }
 
     /// Answers a run's broker request.
     pub async fn access(&self, s: &Service, lease: &Lease, request: &Value) -> Result<Value> {
         let request = broker::Request::deserialize(request).unwrap_or_default();
-        let ended = self.lease(s, &lease.run_id).await?
+        let ended = self
+            .lease(s, &lease.run_id)
+            .await?
             .is_none_or(|l| l.account_id != lease.account_id || l.home != lease.home);
         if ended {
             return Err(Error::conflict("This account lease has ended."));
@@ -653,8 +683,7 @@ impl Accounts {
         let (id, model) = (id.to_owned(), model.to_owned());
         s.store
             .transaction(move |db| {
-                let mut account =
-                    required(db.coding_account(&id)?, "Account not found.")?;
+                let mut account = required(db.coding_account(&id)?, "Account not found.")?;
                 account.exhausted = Some(Exhaustion {
                     at: now(),
                     model,
@@ -741,7 +770,7 @@ impl Accounts {
     pub async fn list(&self, s: &Service) -> Result<Vec<CodingAgentAccount>> {
         let mut accounts = self.all(s).await?;
         accounts.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.name.cmp(&b.name)));
-        let leases = s.store.read(|db|db.account_leases()).await?;
+        let leases = s.store.read(|db| db.account_leases()).await?;
         let mut next = Vec::new();
         for provider in Provider::ALL {
             if let Some(first) = self.eligible(s, provider, "", "", &leases).await?.first() {
@@ -775,11 +804,7 @@ impl Accounts {
     }
 
     pub async fn sign_in(&self) -> Option<cairn_contracts::AccountSignIn> {
-        self.signing_in
-            .lock()
-            .await
-            .as_ref()
-            .map(SignIn::view)
+        self.signing_in.lock().await.as_ref().map(SignIn::view)
     }
 
     /// Adds an account that is not signed in yet.
@@ -806,7 +831,12 @@ impl Accounts {
     }
 
     /// Adds an account and starts its sign-in.
-    pub async fn add(&self, s: &Arc<Service>, provider: Provider, name: &str) -> Result<cairn_contracts::AccountSignIn> {
+    pub async fn add(
+        &self,
+        s: &Arc<Service>,
+        provider: Provider,
+        name: &str,
+    ) -> Result<cairn_contracts::AccountSignIn> {
         self.initialize(s).await?;
         let _selection = self.selection.lock().await;
         let mut current = self.signing_in.lock().await;
@@ -880,7 +910,11 @@ impl Accounts {
             .ok_or_else(|| Error::not_found("Account not found."))?)
     }
 
-    pub async fn reconnect(&self, s: &Arc<Service>, id: &str) -> Result<cairn_contracts::AccountSignIn> {
+    pub async fn reconnect(
+        &self,
+        s: &Arc<Service>,
+        id: &str,
+    ) -> Result<cairn_contracts::AccountSignIn> {
         self.initialize(s).await?;
         let _selection = self.selection.lock().await;
         let mut current = self.signing_in.lock().await;
@@ -947,7 +981,25 @@ impl Accounts {
             .submit(code)
     }
 
-    pub async fn update(&self, s: &Service, id: &str, input: &AccountSettings) -> Result<CodingAgentAccount> {
+    pub async fn update(
+        &self,
+        s: &Service,
+        id: &str,
+        input: &AccountSettings,
+    ) -> Result<CodingAgentAccount> {
+        let account = self.account(s, id).await?;
+        self.update_authorized(s, id, &account.revision, input, |_| Ok(()))
+            .await
+    }
+
+    pub(crate) async fn update_authorized(
+        &self,
+        s: &Service,
+        id: &str,
+        revision: &str,
+        input: &AccountSettings,
+        authorize: impl Fn(&Db<'_>) -> Result<()> + Send + 'static,
+    ) -> Result<CodingAgentAccount> {
         let _guard = self.lock(id).await;
         if self.connecting.lock().await.as_deref() == Some(id) {
             return Err(Error::conflict(
@@ -955,11 +1007,24 @@ impl Accounts {
             ));
         }
         let mut account = self.account(s, id).await?;
+        if account.revision != revision {
+            return Err(Error::conflict(
+                "Account settings changed. Reload them and try again.",
+            ));
+        }
+        account.revision = crate::config::id();
         account.name = valid_name(&input.name)?.into();
-        if !(1..=9_007_199_254_740_991).contains(&input.max_concurrent_runs) { return Err(Error::bad("Parallel runs must be a positive wire integer.")); }
+        if !(1..=9_007_199_254_740_991).contains(&input.max_concurrent_runs) {
+            return Err(Error::bad("Parallel runs must be a positive wire integer."));
+        }
         account.enabled = input.enabled;
         account.max_concurrent_runs = Some(input.max_concurrent_runs);
-        save(s, &account).await?;
+        s.store
+            .transaction(move |db| {
+                authorize(db)?;
+                db.save_coding_account(&account)
+            })
+            .await?;
         Ok(self
             .list(s)
             .await?
@@ -969,7 +1034,22 @@ impl Accounts {
     }
 
     /// Saves the user's order for `provider`'s accounts; `ids` lists every account once.
-    pub async fn reorder(&self, s: &Service, provider: Provider, ids: &[String]) -> Result<CodingAgentAccounts> {
+    pub async fn reorder(
+        &self,
+        s: &Service,
+        provider: Provider,
+        ids: &[String],
+    ) -> Result<CodingAgentAccounts> {
+        self.reorder_authorized(s, provider, ids, |_| Ok(())).await
+    }
+
+    pub(crate) async fn reorder_authorized(
+        &self,
+        s: &Service,
+        provider: Provider,
+        ids: &[String],
+        authorize: impl Fn(&Db<'_>) -> Result<()> + Send + 'static,
+    ) -> Result<CodingAgentAccounts> {
         if !provider.driver().ordered() {
             return Err(Error::bad("This coding agent does not order its accounts."));
         }
@@ -992,6 +1072,7 @@ impl Accounts {
         let ids = ids.to_vec();
         s.store
             .transaction(move |db| {
+                authorize(db)?;
                 let mut accounts = stored(db)?;
                 accounts.retain(|a| a.provider == provider);
                 let mut expected = accounts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>();
@@ -1074,18 +1155,37 @@ fn status(account: &Account, driver: &dyn Driver, runs: usize, next: bool) -> St
 
 fn view(account: &Account, leases: &[Lease], next: bool) -> CodingAgentAccount {
     let driver = account.provider.driver();
-    let mut runs = leases.iter().filter(|l|l.account_id==account.id).map(|l|l.run_id.clone()).collect::<Vec<_>>();
+    let mut runs = leases
+        .iter()
+        .filter(|l| l.account_id == account.id)
+        .map(|l| l.run_id.clone())
+        .collect::<Vec<_>>();
     runs.sort();
     let usage = account.usage();
     CodingAgentAccount {
-        id: account.id.clone(), provider: account.provider.into(), name: account.name.clone(), enabled: account.enabled,
-        email: account.email.clone(), plan: account.plan.clone(), model_provider: account.model_provider.clone(), model_provider_name: account.model_provider_name.clone(), priority: account.priority,
-        state: account.state, error: account.error.clone(), reset_error: account.reset_error.clone(),
-        created_at: account.created_at, checked_at: account.checked_at, last_used_at: account.last_used_at,
-        usage: account.usage.clone(), resets_at: usage.limiting("").and_then(|w|w.resets_at),
-        remaining_percent: usage.remaining(""), stale: !fresh(account,driver),
-        status: status(account,driver,runs.len(),next), active_run_ids: runs,
-        max_concurrent_runs: account.parallel_runs() as u64, exhausted: account.exhausted.is_some(),
+        id: account.id.clone(),
+        revision: account.revision.clone(),
+        provider: account.provider.into(),
+        name: account.name.clone(),
+        enabled: account.enabled,
+        email: account.email.clone(),
+        plan: account.plan.clone(),
+        model_provider: account.model_provider.clone(),
+        model_provider_name: account.model_provider_name.clone(),
+        priority: account.priority,
+        state: account.state,
+        error: account.error.clone(),
+        reset_error: account.reset_error.clone().unwrap_or_default(),
+        created_at: account.created_at,
+        checked_at: account.checked_at,
+        last_used_at: account.last_used_at,
+        usage: account.usage.clone(),
+        resets_at: usage.limiting("").and_then(|w| w.resets_at),
+        remaining_percent: usage.remaining(""),
+        stale: !fresh(account, driver),
+        status: status(account, driver, runs.len(), next),
+        active_run_ids: runs,
+        max_concurrent_runs: account.parallel_runs() as u64,
+        exhausted: account.exhausted.is_some(),
     }
 }
-

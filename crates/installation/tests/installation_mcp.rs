@@ -1,5 +1,6 @@
 use crate::common::run_fixture::DbRunFixture;
 use cairn_contracts::EventKind;
+use common::account_fixture::AccountFixtures;
 use common::node_fixture::*;
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
@@ -4723,17 +4724,19 @@ async fn quota_coding_agent_switch_has_equivalent_public_and_builtin_tools() {
             )
             .await
             .unwrap();
-        let mut account = s
-            .accounts
-            .create(
-                &s,
-                cairn_installation::provider::Provider::Claude,
-                "Alternative",
-            )
-            .await
-            .unwrap();
+        let mut account = serde_json::to_value(
+            s.accounts
+                .create(
+                    &s,
+                    cairn_installation::provider::Provider::Claude,
+                    "Alternative",
+                )
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         account["state"] = "ready".into();
-        s.store.put("agentAccounts", account).await.unwrap();
+        s.store.save_account_fixture(account).await.unwrap();
         let options = invoke("get_chat_coding_agent_options", json!({"chatId":chat_id})).await;
         assert_eq!(
             result(&options)["choices"],
@@ -4750,4 +4753,45 @@ async fn quota_coding_agent_switch_has_equivalent_public_and_builtin_tools() {
         result(&stopped);
         assert!(s.chat_detail(chat_id).await.unwrap()["codingAgentSwitch"].is_null());
     }
+}
+
+#[tokio::test]
+async fn typed_account_management_has_tool_parity_without_human_sign_in_authority() {
+    use cairn_installation::{accounts::{Account,AccountState}, provider::Provider};
+    let root=TempDir::new().unwrap();
+    let s=service(&root).await;
+    let main=enabled_main(&s).await;
+    let (_,configuration)=active_run(&s,&main).await;
+    let agent_token=configuration["env"]["CAIRN_MCP_RUN_TOKEN"].as_str().unwrap();
+    let owner_token=common::relay_fixture::grant(&s,&["read","manage"]).await;
+    let read_token=common::relay_fixture::grant(&s,&["read"]).await;
+    let app=common::relay_fixture::router(s.clone()).await.unwrap();
+    let mut account=Account::new(Provider::Codex,"Private",AccountState::Ready);
+    account.identity=Some("synthetic-private-fingerprint".into());
+    s.store.save_coding_account(&account).await.unwrap();
+    for (endpoint,token) in [("/mcp",owner_token.as_str()),("/mcp-installation",agent_token)] {
+        let (status,response)=node_management_call(&app,endpoint,token,"list_coding_agent_accounts",json!({})).await;
+        assert_eq!(status,StatusCode::OK,"{response}");
+        let listed=result(&response);
+        assert_eq!(listed["accounts"][0]["id"],account.id);
+        assert!(listed["accounts"][0].get("identity").is_none());
+        assert!(listed["signIn"].is_null());
+        let current=s.accounts.account(&s,&account.id).await.unwrap();
+        let (_,response)=node_management_call(&app,endpoint,token,"replace_coding_agent_account",json!({"accountId":account.id,"revision":current.revision,"settings":{"name":"Managed","enabled":false,"maxConcurrentRuns":2}})).await;
+        assert_eq!(result(&response)["name"],"Managed");
+        let before=s.store.coding_accounts().await.unwrap().len();
+        let (_,response)=node_management_call(&app,endpoint,token,"connect_coding_agent_account",json!({"provider":"codex","name":"Human flow"})).await;
+        assert_eq!(result(&response)["kind"],"humanRequired");
+        assert_eq!(s.store.coding_accounts().await.unwrap().len(),before);
+        let (_,response)=node_management_call(&app,endpoint,token,"delete_coding_agent_account",json!({"accountId":account.id})).await;
+        assert_eq!(response["result"]["isError"],true);
+        assert!(s.store.coding_account(&account.id).await.unwrap().is_some());
+    }
+    let current=s.accounts.account(&s,&account.id).await.unwrap();
+    let (_,denied)=node_management_call(&app,"/mcp",&read_token,"replace_coding_agent_account",json!({"accountId":account.id,"revision":current.revision,"settings":{"name":"Forbidden","enabled":true,"maxConcurrentRuns":1}})).await;
+    assert_eq!(denied["result"]["isError"],true);
+    assert_eq!(s.accounts.account(&s,&account.id).await.unwrap(),current);
+    s.store.delete(&format!("test-relay:{}",cairn_installation::auth::digest(&owner_token))).await.unwrap();
+    let (_,revoked)=node_management_call(&app,"/mcp",&owner_token,"list_coding_agent_accounts",json!({})).await;
+    assert!(revoked.get("error").is_some() || revoked["result"]["isError"]==true,"{revoked}");
 }

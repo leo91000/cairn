@@ -3,9 +3,9 @@
 //! `{"allowed":bool,"windows":[AccountWindow],"resets":{"available":n,"credits":[..]}|null}`, where a
 //! window is `{"id","label","usedPercent","resetsAt","durationMins","models","reached"}`. A window
 //! with no models limits every model; otherwise it only limits the models it names.
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::{Number, Value};
 use ts_rs::TS;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -58,7 +58,9 @@ pub struct AccountWindow {
     pub label: String,
     /// Kept as reported, so integer readings stay integers.
     #[serde(default)]
-    pub used_percent: Option<f64>,
+    #[schemars(with = "Option<f64>")]
+    #[ts(type = "number | null")]
+    pub used_percent: Option<Number>,
     #[serde(default)]
     #[ts(type = "number | null")]
     pub resets_at: Option<i64>,
@@ -78,7 +80,7 @@ pub struct AccountResets {
     pub available: u64,
     /// Codex's own credit objects, kept verbatim.
     #[serde(default)]
-    #[schemars(with = "Vec<serde_json::Map<String, Value>>")]
+    #[schemars(with = "Vec<crate::PluginValues>")]
     #[ts(type = "Array<Record<string, unknown>>")]
     pub credits: Vec<Value>,
 }
@@ -89,7 +91,7 @@ impl AccountWindow {
     }
 
     fn used(&self) -> Option<f64> {
-        self.used_percent
+        self.used_percent.as_ref().and_then(Number::as_f64)
     }
 
     fn left(&self) -> Option<f64> {
@@ -212,6 +214,9 @@ pub fn blocked(usage: &Value, model: &str) -> bool {
 
 /// Compare each window: one can reset while another still limits total capacity.
 pub fn recovered(before: &Value, after: &Value, model: &str) -> bool {
-    AccountUsage::recovered(&AccountUsage::from_value(before), &AccountUsage::from_value(after), model)
+    AccountUsage::recovered(
+        &AccountUsage::from_value(before),
+        &AccountUsage::from_value(after),
+        model,
+    )
 }
-

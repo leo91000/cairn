@@ -2,6 +2,7 @@ use crate::common::run_fixture::DbRunFixture;
 use common::AgentFixture;
 use common::PluginStoreFixture;
 use common::StoreAgentFixture;
+use common::account_fixture::AccountFixtures;
 
 mod common;
 
@@ -193,17 +194,20 @@ async fn delegation_is_an_opt_in_agent_power() {
 async fn opencode_delegation_discovers_automatic_models_and_rejects_unconnected_routes() {
     let f = Fixture::new(true).await;
     let turn = f.conversation(MAIN_AGENT_ID).await;
-    f.s.accounts
-        .connect_api_key(
-            &f.s,
-            cairn_installation::provider::Provider::Opencode,
-            "Go",
-            "opencode-go",
-            "synthetic-delegation-go-key",
-            None,
-        )
-        .await
-        .unwrap();
+    serde_json::to_value(
+        f.s.accounts
+            .connect_api_key(
+                &f.s,
+                cairn_installation::provider::Provider::Opencode,
+                "Go",
+                "opencode-go",
+                "synthetic-delegation-go-key",
+                None,
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let before = f.s.store.list("chats").await.unwrap().len();
     for model in [
         "opencode/ling-3.1-flash-free",
@@ -277,10 +281,13 @@ async fn opencode_delegation_discovers_automatic_models_and_rejects_unconnected_
             .await
             .unwrap()
             .remove(0);
-    f.s.accounts
-        .update(&f.s, &account.id, &json!({ "enabled": false }))
-        .await
-        .unwrap();
+    common::account_fixture::update_account_fixture(
+        &f.s,
+        &account.id,
+        &json!({ "enabled": false }),
+    )
+    .await
+    .unwrap();
     let retried = f.delegate(&turn, input).await.unwrap();
     assert_eq!(retried["chatId"], delegated["chatId"]);
 }

@@ -24,6 +24,40 @@ fn main() {
     let root = Path::new(&root);
     fs::create_dir_all(root).unwrap();
     let mut generator = SchemaSettings::draft07().for_serialize().into_generator();
+    export::<CodingAgentAccount>(root, &mut generator, Contract::Deserialize);
+    export::<CodingAgentAccounts>(root, &mut generator, Contract::Deserialize);
+    export::<AccountUsage>(root, &mut generator, Contract::Deserialize);
+    export::<AccountWindow>(root, &mut generator, Contract::Deserialize);
+    export::<AccountResets>(root, &mut generator, Contract::Deserialize);
+    export::<AccountSignIn>(root, &mut generator, Contract::Deserialize);
+    export::<ListAccountsInput>(root, &mut generator, Contract::Deserialize);
+    export::<AccountInput>(root, &mut generator, Contract::Deserialize);
+    export::<AccountSettings>(root, &mut generator, Contract::Deserialize);
+    export::<ReplaceAccountInput>(root, &mut generator, Contract::Deserialize);
+    export::<OrderAccountsInput>(root, &mut generator, Contract::Deserialize);
+    export::<ConnectAccountInput>(root, &mut generator, Contract::Deserialize);
+    export::<ReplaceAccountKeyInput>(root, &mut generator, Contract::Deserialize);
+    export::<AccountCodeInput>(root, &mut generator, Contract::Deserialize);
+    export::<AccountMutationOutput>(root, &mut generator, Contract::Deserialize);
+    export::<ApiKeyProvider>(root, &mut generator, Contract::Deserialize);
+    export::<ConnectAccountOutput>(root, &mut generator, Contract::Deserialize);
+    let account_clients = serde_json::json!([
+        {"name":"listCodingAgentAccounts","input":"ListAccountsInput","output":"CodingAgentAccounts","method":"GET","path":"/accounts"},
+        {"name":"refreshCodingAgentAccounts","input":"ListAccountsInput","output":"CodingAgentAccounts","method":"POST","path":"/accounts/refresh"},
+        {"name":"connectCodingAgentAccount","input":"ConnectAccountInput","output":"ConnectAccountOutput","method":"POST","path":"/accounts"},
+        {"name":"reconnectCodingAgentAccount","input":"AccountInput","output":"ConnectAccountOutput","method":"POST","path":"/accounts/{accountId}/sign-in"},
+        {"name":"replaceCodingAgentAccountKey","input":"ReplaceAccountKeyInput","output":"ConnectAccountOutput","method":"POST","path":"/accounts/{accountId}/api-key"},
+        {"name":"replaceCodingAgentAccount","input":"ReplaceAccountInput","output":"CodingAgentAccount","method":"PUT","path":"/accounts/{accountId}"},
+        {"name":"orderCodingAgentAccounts","input":"OrderAccountsInput","output":"CodingAgentAccounts","method":"POST","path":"/accounts/order"},
+        {"name":"deleteCodingAgentAccount","input":"AccountInput","output":"AccountMutationOutput","method":"DELETE","path":"/accounts/{accountId}"},
+        {"name":"submitCodingAgentAccountCode","input":"AccountCodeInput","output":"AccountMutationOutput","method":"POST","path":"/accounts/sign-in/code"},
+        {"name":"cancelCodingAgentAccountSignIn","input":"ListAccountsInput","output":"AccountMutationOutput","method":"DELETE","path":"/accounts/sign-in"}
+    ]);
+    fs::write(
+        root.join("account-clients.json"),
+        serde_json::to_string_pretty(&account_clients).unwrap() + "\n",
+    )
+    .unwrap();
     export::<ExecutionNode>(root, &mut generator, Contract::Deserialize);
     export::<NodeConfiguration>(root, &mut generator, Contract::Deserialize);
     export::<NodeCapabilities>(root, &mut generator, Contract::Deserialize);
@@ -694,6 +728,13 @@ fn main() {
     // Kotlin consumes run views as well as emitting commands. Honor Rust's
     // deserialization defaults (notably absent nullable timestamps in summaries).
     // The public output schemas above still describe the serialized wire shape.
+    let mut account_decoder = SchemaSettings::draft07().for_deserialize().into_generator();
+    account_decoder.subschema_for::<CodingAgentAccounts>();
+    for (name, schema) in account_decoder.take_definitions(true) {
+        if name != "AgentProvider" {
+            definitions.insert(name, schema);
+        }
+    }
     let mut node_decoder = SchemaSettings::draft07().for_deserialize().into_generator();
     node_decoder.subschema_for::<ExecutionNode>();
     for (name, schema) in node_decoder.take_definitions(true) {

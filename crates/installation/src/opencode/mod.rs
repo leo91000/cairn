@@ -466,7 +466,7 @@ impl Catalog {
         let mut connected = Vec::<String>::new();
         for provider in accounts
             .iter()
-            .filter_map(|a| a.extra.get("modelProvider").and_then(Value::as_str))
+            .filter_map(|a| a.model_provider.as_deref())
         {
             if !connected.iter().any(|p| p == provider) {
                 connected.push(provider.to_owned());

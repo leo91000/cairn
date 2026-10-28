@@ -721,3 +721,5 @@ pub async fn owner_plugin_route(
 }
 
 pub mod node_fixture;
+
+pub mod account_fixture;

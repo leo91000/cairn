@@ -10,12 +10,14 @@ use serde_json::Value;
 
 pub use cairn_contracts::AccountState;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub id: String,
     pub provider: Provider,
     pub name: String,
+    #[serde(default)]
+    pub revision: String,
     pub enabled: bool,
     pub email: Option<String>,
     pub plan: Option<String>,
@@ -39,7 +41,7 @@ pub struct Account {
 }
 
 /// A run stopped on the account's usage limit for `model`, with the usage read at that time.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Exhaustion {
     pub at: i64,
     pub model: String,
@@ -54,6 +56,7 @@ impl Account {
             id: id(),
             provider,
             name: name.into(),
+            revision: id(),
             enabled: true,
             email: None,
             plan: None,
@@ -120,4 +123,3 @@ impl Account {
         self.checked_at = Some(now());
     }
 }
-

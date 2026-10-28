@@ -472,6 +472,8 @@ use crate::run_fixture::DbRunFixture;
 
 #[cfg(test)]
 mod tests {
+    use crate::account_fixture::AccountFixtures;
+
     use super::*;
     use crate::provider::Provider;
 
@@ -497,11 +499,13 @@ mod tests {
         };
         let s = Service::new(config).await.unwrap();
         s.accounts.initialize(&s).await.unwrap();
-        let account = s
-            .accounts
-            .create(&s, Provider::Codex, "Title fixture")
-            .await
-            .unwrap();
+        let account = serde_json::to_value(
+            s.accounts
+                .create(&s, Provider::Codex, "Title fixture")
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         let tokens = json!({
             "tokens": {
                 "access_token": "synthetic",
@@ -603,8 +607,14 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        for account in s.accounts.list(&s).await.unwrap() {
-            assert!(s.accounts.active(text(&account, "id")).await.is_empty());
+        for account in crate::account_fixture::account_values(s.accounts.list(&s).await.unwrap()) {
+            assert!(
+                s.accounts
+                    .active(&s, text(&account, "id"))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         }
         enqueue(&s, "run").await.unwrap();
         let pending = s.store.kv("chat-title-pending:chat").await.unwrap();
@@ -653,8 +663,14 @@ mod tests {
                     .unwrap()
                     .is_some()
             );
-            for account in s.accounts.list(&s).await.unwrap() {
-                assert!(s.accounts.active(text(&account, "id")).await.is_empty());
+            for account in crate::account_fixture::account_values(s.accounts.list(&s).await.unwrap()) {
+                assert!(
+                    s.accounts
+                        .active(&s, text(&account, "id"))
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
             }
             s.shutdown.cancel();
         }
@@ -664,13 +680,19 @@ mod tests {
     async fn background_generation_releases_capacity_when_foreground_work_arrives() {
         let root = tempfile::TempDir::new().unwrap();
         let s = service(&root, "hang").await;
-        let account = s.store.list(crate::accounts::KIND).await.unwrap().remove(0);
+        let account = s.store.account_fixtures().await.unwrap().remove(0);
         let task = tokio::spawn({
             let s = s.clone();
             async move { tick(&s).await }
         });
         tokio::time::timeout(Duration::from_secs(5), async {
-            while s.accounts.active(text(&account, "id")).await.is_empty() {
+            while s
+                .accounts
+                .active(&s, text(&account, "id"))
+                .await
+                .unwrap()
+                .is_empty()
+            {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             let foreground = json!({
@@ -691,7 +713,13 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(s.accounts.active(text(&account, "id")).await.is_empty());
+        assert!(
+            s.accounts
+                .active(&s, text(&account, "id"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             s.get("chats", "chat").await.unwrap()["title"],
             "Configurer GitHub"
@@ -958,8 +986,14 @@ mod tests {
                     .unwrap()
                     .is_some()
             );
-            for account in s.accounts.list(&s).await.unwrap() {
-                assert!(s.accounts.active(text(&account, "id")).await.is_empty());
+            for account in crate::account_fixture::account_values(s.accounts.list(&s).await.unwrap()) {
+                assert!(
+                    s.accounts
+                        .active(&s, text(&account, "id"))
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
             }
             s.shutdown.cancel();
         }

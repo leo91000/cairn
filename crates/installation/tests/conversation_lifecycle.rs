@@ -1,3 +1,4 @@
+use common::account_fixture::AccountFixtures;
 use crate::common::run_fixture::DbRunFixture;
 use cairn_contracts::EventKind;
 use common::node_fixture::*;
@@ -1446,8 +1447,7 @@ async fn quota_switch_fixture(app: &App) -> (String, Value) {
         )
         .await
         .unwrap();
-    let mut account = app
-        .service
+    let mut account = serde_json::to_value(app.service
         .accounts
         .create(
             &app.service,
@@ -1455,11 +1455,11 @@ async fn quota_switch_fixture(app: &App) -> (String, Value) {
             "Alternative",
         )
         .await
-        .unwrap();
+        .unwrap()).unwrap();
     account["state"] = "ready".into();
     app.service
         .store
-        .put("agentAccounts", account)
+        .save_account_fixture(account)
         .await
         .unwrap();
     let input = json!({"requestId":uuid::Uuid::new_v4(),"runId":run["id"],"turnId":run["chatExecution"]["messageId"],"provider":"claude"});
@@ -1519,11 +1519,11 @@ async fn quota_switch_is_revision_checked_idempotent_and_cancellable() {
                 .is_some()
         );
         // Accepted identities remain idempotent even if the account is paused meanwhile.
-        for mut account in app.service.store.list("agentAccounts").await.unwrap() {
+        for mut account in app.service.store.account_fixtures().await.unwrap() {
             account["enabled"] = false.into();
             app.service
                 .store
-                .put("agentAccounts", account)
+                .save_account_fixture(account)
                 .await
                 .unwrap();
         }
@@ -1594,11 +1594,11 @@ async fn accepted_quota_switch_recovers_after_restart_without_releasing_paused_f
             StatusCode::OK
         );
         // Keep the new execution queued so this test observes recovery without invoking a CLI.
-        for mut account in app.service.store.list("agentAccounts").await.unwrap() {
+        for mut account in app.service.store.account_fixtures().await.unwrap() {
             account["enabled"] = false.into();
             app.service
                 .store
-                .put("agentAccounts", account)
+                .save_account_fixture(account)
                 .await
                 .unwrap();
         }
@@ -1711,8 +1711,7 @@ async fn quota_switch_does_not_offer_or_accept_an_engine_that_cannot_preserve_th
         )
         .await
         .unwrap();
-    let mut account = app
-        .service
+    let mut account = serde_json::to_value(app.service
         .accounts
         .create(
             &app.service,
@@ -1720,12 +1719,12 @@ async fn quota_switch_does_not_offer_or_accept_an_engine_that_cannot_preserve_th
             "Alternative",
         )
         .await
-        .unwrap();
+        .unwrap()).unwrap();
     account["state"] = "ready".into();
     account["modelProvider"] = "opencode".into();
     app.service
         .store
-        .put("agentAccounts", account)
+        .save_account_fixture(account)
         .await
         .unwrap();
     let endpoint = format!("{path}/coding-agent");

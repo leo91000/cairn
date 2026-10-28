@@ -124,7 +124,7 @@ fn normalize(bytes: &[u8], checked: i64) -> Result<Usage> {
         usage.windows.push(Window {
             id: id.into(),
             label: label.into(),
-            used_percent: Some(window.usage_percent),
+            used_percent: serde_json::Number::from_f64(window.usage_percent),
             resets_at: Some(resets_at),
             duration_mins: Some(minutes),
             models: Vec::new(),
@@ -396,11 +396,10 @@ impl Driver for Opencode {
 
 #[cfg(test)]
 mod tests {
+    use crate::account_fixture::AccountFixtures;
+
     use super::*;
-    use crate::{
-        accounts::{AccountState, KIND},
-        config::Config,
-    };
+    use crate::{accounts::AccountState, config::Config};
     use axum::{
         Router,
         extract::State,
@@ -455,11 +454,13 @@ mod tests {
         let root = TempDir::new().unwrap();
         let (url, _, task) = endpoint(current_reading(100)).await;
         let s = service(&root, &url).await;
-        let account = s
-            .accounts
-            .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", KEY, None)
-            .await
-            .unwrap();
+        let account = serde_json::to_value(
+            s.accounts
+                .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", KEY, None)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         let id = text(&account, "id");
         s.accounts.refresh(&s, id).await.unwrap();
         let usage = s.accounts.account(&s, id).await.unwrap().usage();
@@ -588,32 +589,39 @@ mod tests {
         let root = TempDir::new().unwrap();
         let (url, response, task) = endpoint(reading(85, false)).await;
         let s = service(&root, &url).await;
-        let go = s
-            .accounts
-            .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", KEY, None)
-            .await
-            .unwrap();
-        let zen = s
-            .accounts
-            .connect_api_key(
-                &s,
-                Provider::Opencode,
-                "Zen",
-                "opencode",
-                "synthetic-zen-key",
-                None,
-            )
-            .await
-            .unwrap();
+        let go = serde_json::to_value(
+            s.accounts
+                .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", KEY, None)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let zen = serde_json::to_value(
+            s.accounts
+                .connect_api_key(
+                    &s,
+                    Provider::Opencode,
+                    "Zen",
+                    "opencode",
+                    "synthetic-zen-key",
+                    None,
+                )
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         let go_id = text(&go, "id");
-        s.accounts
-            .reorder(
-                &s,
-                Provider::Opencode,
-                &[go_id.into(), text(&zen, "id").into()],
-            )
-            .await
-            .unwrap();
+        serde_json::to_value(
+            s.accounts
+                .reorder(
+                    &s,
+                    Provider::Opencode,
+                    &[go_id.into(), text(&zen, "id").into()],
+                )
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         s.opencode.models(&s).await.unwrap();
         s.accounts.refresh(&s, go_id).await.unwrap();
         let lease = s
@@ -623,7 +631,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(lease.account_id, go_id);
-        s.accounts.release(&lease).await.unwrap();
+        s.accounts.release(&s, &lease).await.unwrap();
 
         *response.lock().unwrap() = (StatusCode::OK, reading(100, false).to_string());
         expire(&s, go_id).await;
@@ -635,8 +643,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(lease.account_id, text(&zen, "id"));
-        s.accounts.release(&lease).await.unwrap();
-        let listed = s.accounts.list(&s).await.unwrap();
+        s.accounts.release(&s, &lease).await.unwrap();
+        let listed = crate::account_fixture::account_values(s.accounts.list(&s).await.unwrap());
         let limited = listed.iter().find(|a| a["id"] == go_id).unwrap();
         assert_eq!(limited["status"], "waiting");
         assert_eq!(limited["remainingPercent"].as_f64(), Some(0.0));
@@ -666,7 +674,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(lease.account_id, go_id);
-        s.accounts.release(&lease).await.unwrap();
+        s.accounts.release(&s, &lease).await.unwrap();
 
         *response.lock().unwrap() = (StatusCode::OK, reading(100, true).to_string());
         expire(&s, go_id).await;
@@ -678,7 +686,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(lease.account_id, go_id);
-        s.accounts.release(&lease).await.unwrap();
+        s.accounts.release(&s, &lease).await.unwrap();
         let usage = s.accounts.account(&s, go_id).await.unwrap().usage();
         assert_eq!(usage.remaining(MODEL), Some(0.0));
         assert!(usage.available(MODEL));
@@ -707,7 +715,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(lease.account_id, text(&zen, "id"));
-        s.accounts.release(&lease).await.unwrap();
+        s.accounts.release(&s, &lease).await.unwrap();
 
         let mut account = s.accounts.account(&s, go_id).await.unwrap();
         account.exhausted.as_mut().unwrap().at = now() - Opencode.fresh_for() - 1;
@@ -729,20 +737,22 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(lease.account_id, go_id);
-        s.accounts.release(&lease).await.unwrap();
+        s.accounts.release(&s, &lease).await.unwrap();
 
-        let replaced = s
-            .accounts
-            .connect_api_key(
-                &s,
-                Provider::Opencode,
-                "Go",
-                "opencode-go",
-                "replacement-go-key",
-                Some(go_id),
-            )
-            .await
-            .unwrap();
+        let replaced = serde_json::to_value(
+            s.accounts
+                .connect_api_key(
+                    &s,
+                    Provider::Opencode,
+                    "Go",
+                    "opencode-go",
+                    "replacement-go-key",
+                    Some(go_id),
+                )
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         assert!(replaced["usage"].is_null());
         task.abort();
     }
@@ -752,29 +762,36 @@ mod tests {
         let root = TempDir::new().unwrap();
         let (url, _response, task) = endpoint(reading(85, false)).await;
         let s = service(&root, &url).await;
-        let go = s
-            .accounts
-            .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", KEY, None)
-            .await
-            .unwrap();
-        let zen = s
-            .accounts
-            .connect_api_key(
-                &s,
-                Provider::Opencode,
-                "Zen",
-                "opencode",
-                "synthetic-zen-key",
-                None,
-            )
-            .await
-            .unwrap();
+        let go = serde_json::to_value(
+            s.accounts
+                .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", KEY, None)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let zen = serde_json::to_value(
+            s.accounts
+                .connect_api_key(
+                    &s,
+                    Provider::Opencode,
+                    "Zen",
+                    "opencode",
+                    "synthetic-zen-key",
+                    None,
+                )
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         let go_id = text(&go, "id");
         let zen_id = text(&zen, "id");
-        s.accounts
-            .reorder(&s, Provider::Opencode, &[go_id.into(), zen_id.into()])
-            .await
-            .unwrap();
+        serde_json::to_value(
+            s.accounts
+                .reorder(&s, Provider::Opencode, &[go_id.into(), zen_id.into()])
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         s.opencode.models(&s).await.unwrap();
 
         for (monthly, rejected) in [(100, false), (85, true), (30, false)] {
@@ -841,7 +858,7 @@ mod tests {
             assert_eq!(current.usage(), expected_usage);
             assert_eq!(current.state, expected_state);
             assert_eq!(current.error, account.error);
-            s.accounts.release(&lease).await.unwrap();
+            s.accounts.release(&s, &lease).await.unwrap();
         }
         task.abort();
     }
@@ -852,11 +869,12 @@ mod tests {
         let (url, response, task) = endpoint(reading(35, false)).await;
         let s = service(&root, &url).await;
         let mut account = Account::new(Provider::Opencode, "Go", AccountState::Ready);
-        account
-            .extra
-            .insert("modelProvider".into(), "opencode-go".into());
+        account.model_provider = Some("opencode-go".into());
         let id = account.id.clone();
-        s.store.put(KIND, account.to_value()).await.unwrap();
+        s.store
+            .save_account_fixture(account.to_value())
+            .await
+            .unwrap();
         s.vault
             .set(
                 &secret_id(&id),
@@ -964,11 +982,13 @@ mod tests {
     async fn other_providers_never_call_the_go_usage_endpoint() {
         let root = TempDir::new().unwrap();
         let s = service(&root, "http://127.0.0.1:1/must-not-be-called").await;
-        let account = s
-            .accounts
-            .connect_api_key(&s, Provider::Opencode, "Zen", "opencode", "zen-key", None)
-            .await
-            .unwrap();
+        let account = serde_json::to_value(
+            s.accounts
+                .connect_api_key(&s, Provider::Opencode, "Zen", "opencode", "zen-key", None)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         let id = text(&account, "id");
         refresh_at(&s, id, "http://127.0.0.1:1/must-not-be-called")
             .await

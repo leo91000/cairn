@@ -32,6 +32,23 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import build.cairn.app.data.*
+import build.cairn.contracts.AccountInput
+import build.cairn.contracts.AccountSettings
+import build.cairn.contracts.ReplaceAccountInput
+import build.cairn.contracts.ReplaceAccountKeyInput
+import build.cairn.contracts.ConnectAccountInput
+import build.cairn.contracts.OrderAccountsInput
+import build.cairn.contracts.ListAccountsInput
+import build.cairn.contracts.listCodingAgentAccounts
+import build.cairn.contracts.refreshCodingAgentAccounts
+import build.cairn.contracts.connectCodingAgentAccount
+import build.cairn.contracts.reconnectCodingAgentAccount
+import build.cairn.contracts.replaceCodingAgentAccountKey
+import build.cairn.contracts.replaceCodingAgentAccount
+import build.cairn.contracts.orderCodingAgentAccounts
+import build.cairn.contracts.deleteCodingAgentAccount
+import build.cairn.contracts.submitCodingAgentAccountCode
+import build.cairn.contracts.cancelCodingAgentAccountSignIn
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -88,9 +105,9 @@ internal fun windowLabel(window: AccountWindow): String {
     val minutes = window.durationMins
     if (window.models.isEmpty() && minutes != null)
         when {
-            minutes == 10080 -> return "Semaine"
-            minutes % 1440 == 0 -> return count(minutes / 1440, "jour")
-            minutes % 60 == 0 -> return count(minutes / 60, "heure")
+            minutes == 10080L -> return "Semaine"
+            minutes % 1440 == 0L -> return count((minutes / 1440).toInt(), "jour")
+            minutes % 60 == 0L -> return count((minutes / 60).toInt(), "heure")
         }
     // Model windows keep the server's label, such as "Weekly · Opus".
     return window.label
@@ -456,11 +473,16 @@ internal fun AccountSheet(
         withContext(Dispatchers.Main) { runs = active }
     }
     fun update(vararg fields: Pair<String, JsonPrimitive>) = vm.perform {
-        api.request(
-            "PATCH",
-            "/accounts/${segment(account.id)}",
-            buildJsonObject { fields.forEach { (key, value) -> put(key, value) } },
-        )
+        val changes = fields.toMap()
+        api.replaceCodingAgentAccount(ReplaceAccountInput(
+            accountId = account.id,
+            revision = account.revision,
+            settings = AccountSettings(
+                name = changes["name"]?.content ?: account.name,
+                enabled = changes["enabled"]?.content?.toBooleanStrict() ?: account.enabled,
+                maxConcurrentRuns = changes["maxConcurrentRuns"]?.content?.toLong() ?: account.maxConcurrentRuns,
+            ),
+        ))
         changed()
     }
     val general = account.usage?.general.orEmpty()
@@ -709,7 +731,7 @@ internal fun AccountSheet(
             { removing = false },
         ) {
             vm.perform {
-                api.request("DELETE", "/accounts/${segment(account.id)}")
+                api.deleteCodingAgentAccount(AccountInput(account.id))
                 removing = false
                 changed()
                 close()
@@ -739,7 +761,7 @@ private fun Legend(color: Color, title: String, detail: String?) {
 }
 
 @Composable
-private fun Stepper(value: Int, enabled: Boolean, change: (Int) -> Unit) {
+private fun Stepper(value: Long, enabled: Boolean, change: (Long) -> Unit) {
     Row(
         Modifier.clip(CircleShape).background(MaterialTheme.colorScheme.surfaceContainer),
         verticalAlignment = Alignment.CenterVertically,
@@ -820,7 +842,7 @@ internal fun AccountSignInSheet(
     fun dismiss() {
         if (flow != null)
             vm.perform {
-                api.request("DELETE", "/accounts/sign-in")
+                api.cancelCodingAgentAccountSignIn(ListAccountsInput())
                 changed()
             }
         close()
@@ -974,24 +996,11 @@ internal fun AccountSignInSheet(
                         vm.perform {
                             val accountName =
                                 name.trim().ifBlank { "Compte ${providerLabel(provider)}" }
-                            val input =
-                                if (usesKey) {
-                                    body(
-                                        "provider" to provider,
-                                        "name" to accountName,
-                                        "modelProvider" to modelProvider,
-                                        "apiKey" to apiKey,
-                                    )
-                                } else {
-                                    body("provider" to provider, "name" to accountName)
-                                }
-                            api.request(
-                                "POST",
-                                if (usesKey && account != null)
-                                    "/accounts/${segment(account.id)}/api-key"
-                                else "/accounts",
-                                input,
-                            )
+                            if (usesKey && account != null) {
+                                api.replaceCodingAgentAccountKey(ReplaceAccountKeyInput(accountId=account.id, modelProvider=modelProvider, apiKey=apiKey))
+                            } else {
+                                api.connectCodingAgentAccount(ConnectAccountInput(provider=provider, name=accountName, modelProvider=if (usesKey) modelProvider else null, apiKey=if (usesKey) apiKey else null))
+                            }
                             changed()
                             if (usesKey)
                                 withContext(Dispatchers.Main) {
@@ -1015,7 +1024,7 @@ internal fun AccountSignInSheet(
                             enabled = !state.busy,
                         ) {
                             vm.perform {
-                                api.request("POST", "/accounts/${segment(flow.accountId)}/sign-in")
+                                api.reconnectCodingAgentAccount(AccountInput(flow.accountId))
                                 changed()
                             }
                         }

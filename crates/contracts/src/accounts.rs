@@ -32,7 +32,9 @@ pub struct CodingAgentAccount {
     #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
     pub provider: AgentProvider,
     pub name: String,
+    #[serde(default = "account_enabled")]
     pub enabled: bool,
+    pub revision: String,
     pub email: Option<String>,
     pub plan: Option<String>,
     pub model_provider: Option<String>,
@@ -41,10 +43,13 @@ pub struct CodingAgentAccount {
     pub priority: Option<u64>,
     #[schemars(with = "String", pattern("^(pending|ready|error)$"))]
     pub state: AccountState,
-    #[schemars(with = "String", pattern("^(signIn|reconnect|paused|unavailable|waiting|full|next|low|ready)$"))]
+    #[schemars(
+        with = "String",
+        pattern("^(signIn|reconnect|paused|unavailable|waiting|full|next|low|ready)$")
+    )]
     pub status: AccountStatus,
     pub error: String,
-    pub reset_error: Option<String>,
+    pub reset_error: String,
     #[ts(type = "number | null")]
     pub created_at: Option<i64>,
     #[ts(type = "number | null")]
@@ -52,26 +57,39 @@ pub struct CodingAgentAccount {
     #[ts(type = "number | null")]
     pub last_used_at: Option<i64>,
     #[ts(type = "number")]
+    #[serde(default = "account_parallel_runs")]
     pub max_concurrent_runs: u64,
     pub active_run_ids: Vec<String>,
     pub usage: Option<AccountUsage>,
     pub remaining_percent: Option<f64>,
     #[ts(type = "number | null")]
     pub resets_at: Option<i64>,
+    #[serde(default = "account_enabled")]
     pub stale: bool,
     pub exhausted: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
-pub enum SignInState { Pending, Complete, Failed, Cancelled }
+pub enum SignInState {
+    #[default]
+    Pending,
+    Complete,
+    Failed,
+    Cancelled,
+}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
-pub enum SignInPhase { Starting, Authorizing, Verifying }
+pub enum SignInPhase {
+    #[default]
+    Starting,
+    Authorizing,
+    Verifying,
+}
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(default, rename_all = "camelCase")]
 pub struct AccountSignIn {
     pub account_id: String,
     #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
@@ -120,15 +138,20 @@ pub struct AccountSettings {
     pub max_concurrent_runs: u64,
 }
 
-fn parallel_runs<'de,D: serde::Deserializer<'de>>(d: D) -> Result<u64,D::Error> {
+fn parallel_runs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
     let n = u64::deserialize(d)?;
-    if !(1..=9_007_199_254_740_991).contains(&n) { return Err(serde::de::Error::custom("Parallel runs must be a positive wire integer.")); }
+    if !(1..=9_007_199_254_740_991).contains(&n) {
+        return Err(serde::de::Error::custom(
+            "Parallel runs must be a positive wire integer.",
+        ));
+    }
     Ok(n)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReplaceAccountInput {
+    pub revision: String,
     #[schemars(with = "Uuid")]
     pub account_id: String,
     pub settings: AccountSettings,
@@ -167,19 +190,40 @@ pub struct ReplaceAccountKeyInput {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AccountCodeInput { pub code: String }
+pub struct AccountCodeInput {
+    pub code: String,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
-pub struct AccountMutationOutput { pub done: bool }
+pub struct AccountMutationOutput {
+    pub done: bool,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct ApiKeyProvider { pub id: String, pub name: String }
+pub struct ApiKeyProvider {
+    pub id: String,
+    pub name: String,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ConnectAccountOutput {
     SignIn { sign_in: AccountSignIn },
     Connected { account: CodingAgentAccount },
     HumanRequired { message: String, path: String },
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountProviderInput {
+    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    pub provider: AgentProvider,
+}
+
+fn account_enabled() -> bool {true}
+fn account_parallel_runs() -> u64 {4}

@@ -98,12 +98,12 @@ test('OpenCode answers common questionnaires, steers a busy session and replaces
   initializeRepository(workspace.projectPath)
   let account = (await workspace.api('/api/accounts')).accounts.find((a: { modelProvider?: string }) => a.modelProvider === 'opencode')
   if (!account) {
-    account = await workspace.api('/api/accounts', 'POST', {
+    account = (await workspace.api('/api/accounts', 'POST', {
       provider: 'opencode',
       name: 'Zen test',
       modelProvider: 'opencode',
       apiKey: 'synthetic-browser-zen-key',
-    })
+    })).account
   }
 
   const chat = await workspace.api('/api/chats', 'POST', {})
@@ -329,12 +329,12 @@ test('OpenCode explains a regional Privacy refusal and offers retry or a new con
 test('OpenCode Go displays three quotas, reset times and the provider balance setting', async ({ page, workspace }, testInfo) => {
   test.setTimeout(90000)
   const apiKey = 'synthetic-browser-go-usage-key'
-  const account = await workspace.api('/api/accounts', 'POST', {
+  const account = (await workspace.api('/api/accounts', 'POST', {
     provider: 'opencode',
     name: 'Go usage',
     modelProvider: 'opencode-go',
     apiKey,
-  })
+  })).account
   await workspace.api('/api/accounts/refresh', 'POST')
   await page.goto(workspacePath('/connections'))
   await signIn(page)

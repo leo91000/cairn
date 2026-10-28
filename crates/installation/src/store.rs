@@ -461,7 +461,8 @@ impl Db<'_> {
     pub fn put(&self, kind: &str, value: &Value) -> Result<Value> {
         if matches!(
             kind,
-            "nodes"
+            "agentAccounts"
+                | "nodes"
                 | "projects"
                 | "agents"
                 | "mcps"

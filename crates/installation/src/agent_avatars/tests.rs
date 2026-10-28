@@ -1,4 +1,5 @@
 use super::*;
+use crate::account_fixture::AccountFixtures;
 use crate::config::Config;
 use crate::run_fixture::DbRunFixture;
 use axum::{
@@ -85,11 +86,13 @@ impl Fixture {
         let s = Service::new(config).await.unwrap();
         s.accounts.initialize(&s).await.unwrap();
         if configured {
-            let account = s
-                .accounts
-                .create(&s, Provider::Codex, "Portrait fixture")
-                .await
-                .unwrap();
+            let account = serde_json::to_value(
+                s.accounts
+                    .create(&s, Provider::Codex, "Portrait fixture")
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
             s.vault
                 .set(
                     &format!("codex-account:{}", text(&account, "id")),
@@ -243,8 +246,13 @@ async fn creation_is_nonblocking_and_portrait_survives_edits_with_private_authen
     reply.send(generated(png([50, 100, 180]))).unwrap();
     let ready = f.wait(id, "ready").await;
     assert_eq!(ready["name"], "Renamed agent");
-    for account in f.s.accounts.list(&f.s).await.unwrap() {
-        assert!(f.s.accounts.active(text(&account, "id")).await.is_empty());
+    for account in crate::account_fixture::account_values(f.s.accounts.list(&f.s).await.unwrap()) {
+        assert!(
+            f.s.accounts
+                .active(&f.s, text(&account, "id"))
+                .await?
+                .is_empty()
+        );
     }
     let current: Agent = serde_json::from_value(ready.clone()).unwrap();
     let mut input = cairn_contracts::ReplaceAgentInput {
@@ -487,8 +495,13 @@ async fn missing_or_invalid_images_fail_without_retry_and_release_the_account() 
         let failed = f.wait(text(&agent, "id"), "failed").await;
         assert!(failed["avatar"]["url"].is_null());
         assert!(f.requests.try_recv().is_err());
-        for account in f.s.accounts.list(&f.s).await.unwrap() {
-            assert!(f.s.accounts.active(text(&account, "id")).await.is_empty());
+        for account in crate::account_fixture::account_values(f.s.accounts.list(&f.s).await.unwrap()) {
+            assert!(
+                f.s.accounts
+                    .active(&f.s, text(&account, "id"))
+                    .await?
+                    .is_empty()
+            );
         }
     }
 }
@@ -518,8 +531,13 @@ async fn close_drains_running_and_queued_portraits_and_rejects_new_jobs() {
             "Codex process is still alive after close"
         );
     }
-    for account in f.s.store.list(crate::accounts::KIND).await.unwrap() {
-        assert!(f.s.accounts.active(text(&account, "id")).await.is_empty());
+    for account in f.s.store.account_fixtures().await.unwrap() {
+        assert!(
+            f.s.accounts
+                .active(&f.s, text(&account, "id"))
+                .await?
+                .is_empty()
+        );
     }
     assert!(
         tokio::fs::read_dir(f.s.config.data_dir.join("runs"))
@@ -548,15 +566,10 @@ async fn close_drains_running_and_queued_portraits_and_rejects_new_jobs() {
 #[tokio::test]
 async fn occupied_account_capacity_does_not_start_a_second_codex_session() {
     let mut f = Fixture::new(true).await;
-    let mut account =
-        f.s.store
-            .list(crate::accounts::KIND)
-            .await
-            .unwrap()
-            .remove(0);
+    let mut account = f.s.store.account_fixtures().await.unwrap().remove(0);
     account["maxConcurrentRuns"] = 1.into();
     f.s.store
-        .put(crate::accounts::KIND, account.clone())
+        .save_account_fixture(account.clone())
         .await
         .unwrap();
     let foreground =
@@ -569,19 +582,17 @@ async fn occupied_account_capacity_does_not_start_a_second_codex_session() {
     let failed = f.wait(text(&agent, "id"), "failed").await;
     assert!(text(&failed["avatar"], "error").contains("No Codex account is available"));
     assert!(f.requests.try_recv().is_err());
-    assert_eq!(f.s.accounts.active(text(&account, "id")).await.len(), 1);
-    f.s.accounts.release(&foreground).await.unwrap();
+    assert_eq!(
+        f.s.accounts.active(&f.s, text(&account, "id")).await?.len(),
+        1
+    );
+    f.s.accounts.release(&f.s, &foreground).await.unwrap();
 }
 
 #[tokio::test]
 async fn portrait_selection_respects_the_explicit_models_quota() {
     let mut f = Fixture::new(true).await;
-    let mut limited =
-        f.s.store
-            .list(crate::accounts::KIND)
-            .await
-            .unwrap()
-            .remove(0);
+    let mut limited = f.s.store.account_fixtures().await.unwrap().remove(0);
     limited["usage"]["windows"]
         .as_array_mut()
         .unwrap()
@@ -592,14 +603,16 @@ async fn portrait_selection_respects_the_explicit_models_quota() {
             "reached": true,
         }));
     f.s.store
-        .put(crate::accounts::KIND, limited.clone())
+        .save_account_fixture(limited.clone())
         .await
         .unwrap();
-    let available =
+    let available = serde_json::to_value(
         f.s.accounts
             .create(&f.s, Provider::Codex, "Available")
             .await
-            .unwrap();
+            .unwrap(),
+    )
+    .unwrap();
     f.s.vault
         .set(
             &format!("codex-account:{}", text(&available, "id")),
@@ -614,8 +627,13 @@ async fn portrait_selection_respects_the_explicit_models_quota() {
     let agent = f.create().await;
     let (request, reply) = f.next().await;
     assert_eq!(request["model"], "gpt-6-astra");
-    assert!(f.s.accounts.active(text(&limited, "id")).await.is_empty());
-    let leases = f.s.accounts.active(text(&available, "id")).await;
+    assert!(
+        f.s.accounts
+            .active(&f.s, text(&limited, "id"))
+            .await?
+            .is_empty()
+    );
+    let leases = f.s.accounts.active(&f.s, text(&available, "id")).await?;
     assert_eq!(leases.len(), 1);
     assert_eq!(leases[0].model, "gpt-6-astra");
     reply.send(generated(png([10, 20, 30]))).unwrap();
@@ -625,15 +643,10 @@ async fn portrait_selection_respects_the_explicit_models_quota() {
 #[tokio::test]
 async fn queued_conversation_interrupts_portrait_and_gets_the_single_account_slot() {
     let mut f = Fixture::new(true).await;
-    let mut account =
-        f.s.store
-            .list(crate::accounts::KIND)
-            .await
-            .unwrap()
-            .remove(0);
+    let mut account = f.s.store.account_fixtures().await.unwrap().remove(0);
     account["maxConcurrentRuns"] = 1.into();
     f.s.store
-        .put(crate::accounts::KIND, account.clone())
+        .save_account_fixture(account.clone())
         .await
         .unwrap();
     let agent = f.create().await;
@@ -654,7 +667,7 @@ async fn queued_conversation_interrupts_portrait_and_gets_the_single_account_slo
             .unwrap()
             .unwrap();
     assert_eq!(foreground.account_id, account["id"].as_str().unwrap());
-    f.s.accounts.release(&foreground).await.unwrap();
+    f.s.accounts.release(&f.s, &foreground).await.unwrap();
     let _ = reply.send(generated(png([0, 0, 0])));
     assert!(f.requests.try_recv().is_err());
 }
@@ -681,8 +694,13 @@ async fn foreground_queue_and_deployment_prevent_starting_a_portrait() {
         let failed = f.wait(text(&agent, "id"), "failed").await;
         assert!(text(&failed["avatar"], "error").contains("yielded"));
         assert!(f.requests.try_recv().is_err());
-        for account in f.s.store.list(crate::accounts::KIND).await.unwrap() {
-            assert!(f.s.accounts.active(text(&account, "id")).await.is_empty());
+        for account in f.s.store.account_fixtures().await.unwrap() {
+            assert!(
+                f.s.accounts
+                    .active(&f.s, text(&account, "id"))
+                    .await?
+                    .is_empty()
+            );
         }
     }
 }

@@ -317,7 +317,7 @@ impl Limit {
         Some(usage::Window {
             id,
             label: label.into(),
-            used_percent: Some(used),
+            used_percent: serde_json::Number::from_f64(used),
             resets_at,
             duration_mins: Some(minutes),
             models,

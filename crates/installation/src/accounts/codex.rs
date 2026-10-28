@@ -1,8 +1,8 @@
 //! Codex: ChatGPT sign-in through the app-server device code, credentials in the encrypted
 //! vault, usage from `account/rateLimits/read`, and banked resets redeemed at 2% remaining.
 use super::{
-    Account, AccountState, Driver, Lease, Login, broker, lenient, remove_directory,
-    remove_file, save,
+    Account, AccountState, Driver, Lease, Login, broker, lenient, remove_directory, remove_file,
+    save,
     usage::{self, Resets, Usage},
 };
 use crate::{
@@ -176,7 +176,7 @@ impl Bucket {
             windows.push(usage::Window {
                 id: format!("{key}:{slot}"),
                 label,
-                used_percent: window.used_percent.as_ref().and_then(serde_json::Number::as_f64),
+                used_percent: window.used_percent.clone(),
                 resets_at: window.resets_at,
                 duration_mins: minutes,
                 models: models.to_vec(),
@@ -774,10 +774,15 @@ impl Driver for Codex {
     }
 
     async fn due(&self, s: &Service, account: &Account, attempted: i64) -> Result<bool> {
-        let model = s.accounts.active(&account.id).await.first().map_or_else(
-            || account.exhausted_model("").to_owned(),
-            |l| l.model.clone(),
-        );
+        let model = s
+            .accounts
+            .active(s, &account.id)
+            .await?
+            .first()
+            .map_or_else(
+                || account.exhausted_model("").to_owned(),
+                |l| l.model.clone(),
+            );
         let pending = s.store.kv(&reset_key(&account.id)).await?.is_some();
         let usage = account.usage();
         let attention = account.exhausted.is_some()

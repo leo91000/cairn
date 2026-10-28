@@ -177,18 +177,10 @@ impl ExecutionAdapter for Opencode {
         };
         let selected = text(plan, "model").to_owned();
         let record = s.accounts.account(s, &account.account_id).await?;
-        let field = |name: &str| {
-            record
-                .extra
-                .get(name)
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned()
-        };
         let (name, via) = if selected.starts_with(crate::opencode::AUTO) {
             let route = s
                 .opencode
-                .route(s, &selected, &field("modelProvider"))
+                .route(s, &selected, record.model_provider.as_deref().unwrap_or_default())
                 .await?
                 .ok_or_else(|| {
                     Error::conflict(
@@ -214,7 +206,7 @@ impl ExecutionAdapter for Opencode {
                 .opencode
                 .display_name(&selected)
                 .unwrap_or(selected.clone());
-            (name, field("modelProviderName"))
+            (name, record.model_provider_name.unwrap_or_default())
         };
         // Conversations label the replies that follow with the provider that wrote them.
         let payload = json!({ "route": { "model": plan["model"], "providerName": via } });

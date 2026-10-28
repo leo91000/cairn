@@ -115,8 +115,8 @@ struct Choice {
     model: String,
 }
 
-fn available(account: &Value) -> bool {
-    matches!(text(account, "status"), "next" | "ready" | "low" | "full")
+fn available(account: &cairn_contracts::CodingAgentAccount) -> bool {
+    matches!(account.status, cairn_contracts::AccountStatus::Next | cairn_contracts::AccountStatus::Ready | cairn_contracts::AccountStatus::Low | cairn_contracts::AccountStatus::Full)
 }
 
 fn selection(agent: &Value, provider: Provider, model: &str) -> Value {
@@ -135,7 +135,7 @@ async fn choices(s: &Service, agent: &Value) -> Result<Vec<Choice>> {
         if provider.as_str() == text(agent, "provider")
             || !accounts
                 .iter()
-                .any(|account| account["provider"] == provider.as_str() && available(account))
+                .any(|account| account.provider == provider.into() && available(account))
         {
             continue;
         }
@@ -161,9 +161,9 @@ async fn choices(s: &Service, agent: &Value) -> Result<Vec<Choice>> {
                         .any(|route| {
                             route["hidden"] != true
                                 && accounts.iter().any(|account| {
-                                    account["provider"] == "opencode"
+                                    account.provider == cairn_contracts::AgentProvider::Opencode
                                         && available(account)
-                                        && account["modelProvider"] == route["provider"]
+                                        && account.model_provider.as_deref() == route["provider"].as_str()
                                 })
                         })
                 })

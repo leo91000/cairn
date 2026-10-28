@@ -1,6 +1,8 @@
 //! Normalized usage from the existing coding-agent drivers.
+pub use cairn_contracts::{
+    AccountResets as Resets, AccountUsage as Usage, AccountWindow as Window,
+};
 use serde_json::Value;
-pub use cairn_contracts::{AccountUsage as Usage, AccountWindow as Window, AccountResets as Resets};
 
 pub fn empty() -> Value {
     Usage::default().to_value()
