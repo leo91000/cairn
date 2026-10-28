@@ -62,7 +62,7 @@ abstract class OpenCodeGoUsageCases {
             .performScrollTo()
             .assertIsDisplayed()
         assertTrue(
-            wireJson.decodeFromString<Account>(wireJson.encodeToString(account)).usage!!.useBalance
+            wireJson.decodeFromString<Account>(wireJson.encodeToString(account)).usage!!.useBalance == true
         )
         assertFalse(
             wireJson

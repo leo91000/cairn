@@ -175,7 +175,12 @@ export function useAccounts() {
     error,
     refresh: () => action(async () => apply(await refreshCodingAgentAccounts(api, {}))),
     add: (provider: Provider, name: string) => action(async () => {
-      const result = await connectCodingAgentAccount(api, { provider, name })
+      const result = await connectCodingAgentAccount(api, {
+        provider,
+        name,
+        modelProvider: null,
+        apiKey: null,
+      })
       if (result.kind === 'signIn')
         return result.signIn
       throw new Error('Connect this account in Connections with an owner session.')

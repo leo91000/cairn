@@ -52,11 +52,13 @@ impl StorageEntity for Account {
         }
         for usage in ["usage", "exhausted"] {
             let value = if usage == "usage" {
-                &mut value[usage]
+                value.get_mut(usage)
             } else {
-                &mut value[usage]["usage"]
+                value
+                    .get_mut(usage)
+                    .and_then(|exhausted| exhausted.get_mut("usage"))
             };
-            if let Some(object) = value.as_object_mut() {
+            if let Some(object) = value.and_then(Value::as_object_mut) {
                 if object.get("useBalance") == Some(&Value::Bool(false)) {
                     object.remove("useBalance");
                 }

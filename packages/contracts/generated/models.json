@@ -139,6 +139,19 @@
       ],
       "type": "object"
     },
+    "AccountProviderInput": {
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "type": "object"
+    },
     "AccountResets": {
       "properties": {
         "available": {
