@@ -16,22 +16,19 @@ use std::{collections::HashSet, sync::Arc};
 
 const RECEIPT_TTL_MS: i64 = 7 * 86_400_000;
 
-fn request_key(chat: &str, request: &str) -> String {
-    format!("chat-coding-agent-request:{chat}:{request}")
-}
-
-pub(crate) fn key(chat: &str) -> String {
-    format!("chat-coding-agent:{chat}")
-}
-
-pub(crate) fn progress(db: &Db<'_>, chat: &str) -> Result<Value> {
-    Ok(db
-        .kv(&key(chat))?
-        .filter(|value| value["pending"] == true)
-        .map_or(
-            Value::Null,
-            |value| json!({ "provider": value["provider"], "error": value["error"] }),
-        ))
+pub(crate) fn progress(
+    db: &Db<'_>,
+    chat: &str,
+) -> Result<Option<cairn_contracts::CodingAgentSwitch>> {
+    db.engine_switch(chat)?
+        .filter(|state| state.pending)
+        .map(|state| {
+            Ok(cairn_contracts::CodingAgentSwitch {
+                provider: serde_json::from_value(Value::from(state.provider))?,
+                error: state.error,
+            })
+        })
+        .transpose()
 }
 
 pub(crate) fn quota_blocked(db: &Db<'_>, run: &Value) -> Result<bool> {
@@ -245,7 +242,12 @@ impl Service {
     where
         F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
     {
-        let input = crate::validation::parse("mcp:switch_chat_coding_agent", input)?;
+        let input: cairn_contracts::SwitchChatCodingAgentInput =
+            serde_json::from_value(input).map_err(|e| Error::bad(e.to_string()))?;
+        if input.turn_id.is_empty() || input.turn_id.chars().count() > 200 {
+            return Err(Error::bad("Invalid turn identifier."));
+        }
+        let input = serde_json::to_value(input)?;
         let target = Provider::parse(text(&input, "provider"))?;
         let origin = policy::origin();
         if origin.known() {
@@ -272,23 +274,21 @@ impl Service {
                 let id = text(&saved, "chatId");
                 let chat = chat(db, id)?;
                 super::require_active(&chat)?;
-                let current = db.kv(&key(id))?;
-                let receipt = db.kv(&request_key(id, text(&saved, "requestId")))?.or_else(|| {
-                    current.as_ref().filter(|value| value["requestId"] == saved["requestId"]).cloned()
-                });
+                let current = db.engine_switch(id)?;
+                let receipt = db.engine_switch_receipt(id, text(&saved, "requestId"))?;
                 if let Some(previous) = receipt {
-                    if previous["provider"] != saved["provider"]
-                        || previous["runId"] != saved["runId"]
-                        || previous["turnId"] != saved["turnId"]
+                    if previous.provider != text(&saved, "provider")
+                        || previous.run_id != text(&saved, "runId")
+                        || previous.turn_id != text(&saved, "turnId")
                     {
                         return Err(Error::conflict("This switch identity was already used."));
                     }
                     let stopping_previous = current.as_ref().is_some_and(|value| {
-                        value["requestId"] == saved["requestId"] && value["pending"] == true
+                        value.request_id == text(&saved, "requestId") && value.pending
                     });
                     return Ok((view(db, chat)?, stopping_previous));
                 }
-                if current.is_some_and(|value| value["pending"] == true) {
+                if current.is_some_and(|value| value.pending) {
                     return Err(Error::conflict("A coding agent switch is already in progress."));
                 }
                 let Some(choice) = available.iter().find(|choice| choice.provider == target) else {
@@ -312,12 +312,20 @@ impl Service {
                 let replacement = selection(&run["snapshot"]["agent"], target, &choice.model);
                 target.adapter().validate_agent(&replacement)?;
                 policy::authorize_chat_in(db, id, &origin)?;
-                let mut pending = saved.clone();
-                pending["model"] = choice.model.clone().into();
-                pending["pending"] = true.into();
-                pending["error"] = Value::Null;
-                db.set(&key(id), &pending, None)?;
-                db.set(&request_key(id, text(&saved, "requestId")), &saved, Some(now() + RECEIPT_TTL_MS))?;
+                let pending = super::engine_switch::EngineSwitch {
+                    chat_id: id.to_owned(),
+                    request_id: text(&saved, "requestId").to_owned(),
+                    run_id: text(&saved, "runId").to_owned(),
+                    turn_id: text(&saved, "turnId").to_owned(),
+                    provider: target.as_str().to_owned(),
+                    model: choice.model.clone(),
+                    pending: true,
+                    error: None,
+                    retry_at: None,
+                    receipt_expires_at: now() + RECEIPT_TTL_MS,
+                    current_expires_at: None,
+                };
+                db.save_engine_switch(&pending)?;
                 db.change_run(
                     text(&run, "id"),
                     crate::runs::RunChanges {
@@ -347,16 +355,24 @@ impl Service {
 /// Recover accepted switches after restart. The per-run preparation lock excludes both
 /// competing switch tasks and ordinary admission while the old execution is fenced.
 pub(crate) async fn tick(s: &Arc<Service>, active: &HashSet<String>) -> Result<()> {
-    for chat in s.store.list("chats").await? {
+    for chat in s.store.conversations_boundary().await? {
         let id = text(&chat, "id");
         if !super::is_active(&chat) {
             continue;
         }
-        let Some(pending) = s.store.kv(&key(id)).await?.filter(|v| v["pending"] == true) else {
+        let Some(pending) = s
+            .store
+            .read({
+                let id = id.to_owned();
+                move |db| db.engine_switch(&id)
+            })
+            .await?
+            .filter(|v| v.pending)
+        else {
             continue;
         };
-        let run = text(&pending, "runId");
-        if active.contains(run) || pending["retryAt"].as_i64().is_some_and(|at| at > now()) {
+        let run = &pending.run_id;
+        if active.contains(run) || pending.retry_at.is_some_and(|at| at > now()) {
             continue;
         }
         let lock = s.worker.run_preparation_lock(run).await;
@@ -367,11 +383,7 @@ pub(crate) async fn tick(s: &Arc<Service>, active: &HashSet<String>) -> Result<(
         s.worker.clone().spawn_recovery(async move {
             let _guard = guard;
             if s.shutdown.is_cancelled()
-                || s.worker
-                    .active
-                    .lock()
-                    .await
-                    .contains_key(text(&pending, "runId"))
+                || s.worker.active.lock().await.contains_key(&pending.run_id)
             {
                 return;
             }
@@ -385,14 +397,14 @@ pub(crate) async fn tick(s: &Arc<Service>, active: &HashSet<String>) -> Result<(
                 let _ = s
                     .store
                     .transaction(move |db| {
-                        let Some(mut current) = db.kv(&key(&id))?.filter(|value| {
-                            value["requestId"] == pending["requestId"] && value["pending"] == true
+                        let Some(mut current) = db.engine_switch(&id)?.filter(|value| {
+                            value.request_id == pending.request_id && value.pending
                         }) else {
                             return Ok(());
                         };
-                        current["error"] = message.into();
-                        current["retryAt"] = (now() + 2_000).into();
-                        db.set(&key(&id), &current, None)
+                        current.error = Some(message);
+                        current.retry_at = Some(now() + 2_000);
+                        db.save_engine_switch(&current)
                     })
                     .await;
             } else {
@@ -403,32 +415,38 @@ pub(crate) async fn tick(s: &Arc<Service>, active: &HashSet<String>) -> Result<(
     Ok(())
 }
 
-async fn advance(s: &Service, id: &str, pending: &Value) -> Result<()> {
-    let run = s.store.run(text(pending, "runId")).await?;
+async fn advance(
+    s: &Service,
+    id: &str,
+    pending: &super::engine_switch::EngineSwitch,
+) -> Result<()> {
+    let run = s.store.run(&pending.run_id).await?;
     crate::recovery::fence(s, &run).await?;
     s.accounts.recover_run(s, &run).await?;
     let (id, pending) = (id.to_owned(), pending.clone());
     s.store
         .transaction(move |db| {
             let Some(mut current) = db
-                .kv(&key(&id))?
-                .filter(|p| p["pending"] == true && p["requestId"] == pending["requestId"])
+                .engine_switch(&id)?
+                .filter(|p| p.pending && p.request_id == pending.request_id)
             else {
                 return Ok(());
             };
             let chat = chat(db, &id)?;
             super::require_active(&chat)?;
-            if chat["runId"] != pending["runId"] || chat["cancelledByDeletion"] == true {
+            if chat["runId"].as_str() != Some(pending.run_id.as_str())
+                || chat["cancelledByDeletion"] == true
+            {
                 return Err(Error::conflict("The conversation changed while switching."));
             }
-            let run = required(db.run(text(&pending, "runId"))?, "Run not found")?;
-            if run["chatExecution"]["messageId"] != pending["turnId"] {
+            let run = required(db.run(&pending.run_id)?, "Run not found")?;
+            if run["chatExecution"]["messageId"].as_str() != Some(pending.turn_id.as_str()) {
                 return Err(Error::conflict("The pending turn changed."));
             }
-            let target = Provider::parse(text(&pending, "provider"))?;
+            let target = Provider::parse(&pending.provider)?;
             let mut snapshot = run.clone();
             snapshot["snapshot"]["agent"] =
-                selection(&run["snapshot"]["agent"], target, text(&pending, "model"));
+                selection(&run["snapshot"]["agent"], target, &pending.model);
             target
                 .adapter()
                 .validate_agent(&snapshot["snapshot"]["agent"])?;
@@ -447,15 +465,21 @@ async fn advance(s: &Service, id: &str, pending: &Value) -> Result<()> {
             checkpoint.last_error = Some(None);
             checkpoint.store_in(db, run_id)?;
             let execution = ChatExecution {
-                message_id: run["chatExecution"]["messageId"].clone(),
+                message_id: text(&run["chatExecution"], "messageId").to_owned(),
                 text: text(&run["chatExecution"], "text").to_owned(),
-                attachments: run["chatExecution"]["attachments"].clone(),
+                attachments: serde_json::from_value(run["chatExecution"]["attachments"].clone())?,
                 recovery: true,
                 context: Some(handoff_context(db, run_id)?),
                 operation: None,
                 previous: None,
             };
-            continue_run(db, &chat, &run, &snapshot, execution)?;
+            continue_run(
+                db,
+                &serde_json::from_value(chat.clone())?,
+                &run,
+                &snapshot,
+                execution,
+            )?;
             db.change_run(
                 run_id,
                 crate::runs::RunChanges {
@@ -467,9 +491,10 @@ async fn advance(s: &Service, id: &str, pending: &Value) -> Result<()> {
                     ..Default::default()
                 },
             )?;
-            current["pending"] = false.into();
-            current["error"] = Value::Null;
-            db.set(&key(&id), &current, Some(now() + RECEIPT_TTL_MS))?;
+            current.pending = false;
+            current.error = None;
+            current.current_expires_at = Some(now() + RECEIPT_TTL_MS);
+            db.save_engine_switch(&current)?;
             db.event(run_id, &EventKind::Status, "queued", None)?;
             Ok(())
         })
@@ -477,22 +502,22 @@ async fn advance(s: &Service, id: &str, pending: &Value) -> Result<()> {
 }
 
 pub(crate) fn pending_for_run(db: &Db<'_>, run: &str) -> Result<bool> {
-    let Some(chat) = super::chat_for_run(db, run)? else {
+    let Some(chat) = db.conversation_for_run(run)? else {
         return Ok(false);
     };
     Ok(db
-        .kv(&key(text(&chat, "id")))?
-        .is_some_and(|value| value["pending"] == true))
+        .engine_switch(&chat.id)?
+        .is_some_and(|state| state.pending))
 }
 
 pub(crate) fn cancel_in(db: &Db<'_>, run: &str) -> Result<()> {
-    if let Some(chat) = super::chat_for_run(db, run)? {
-        let key = key(text(&chat, "id"));
-        if let Some(mut receipt) = db.kv(&key)? {
-            receipt["pending"] = false.into();
-            receipt["error"] = Value::Null;
-            db.set(&key, &receipt, Some(now() + RECEIPT_TTL_MS))?;
-        }
+    if let Some(chat) = db.conversation_for_run(run)?
+        && let Some(mut state) = db.engine_switch(&chat.id)?
+    {
+        state.pending = false;
+        state.error = None;
+        state.current_expires_at = Some(now() + RECEIPT_TTL_MS);
+        db.save_engine_switch(&state)?;
     }
     Ok(())
 }

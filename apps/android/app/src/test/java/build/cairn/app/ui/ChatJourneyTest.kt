@@ -176,7 +176,7 @@ class ChatJourneyTest {
                         }
                         val chat =
                             Chat(
-                                chatId,
+                                id = chatId,
                                 title = "Revue du projet",
                                 agentName = "Cairn",
                                 status = "running",
@@ -194,8 +194,8 @@ class ChatJourneyTest {
                                     else
                                         listOf(
                                             ChatMessage(
-                                                "queued",
-                                                chatId,
+                                                id = "00000000-0000-4000-8000-000000000089",
+                                                chatId = chatId,
                                                 text = "Vérifier les tests",
                                                 status = "queued",
                                             )
@@ -341,14 +341,19 @@ class ChatJourneyTest {
                                             event.copy(id = 13),
                                         ),
                                     )
-                                "/api/installations/fixture/api/chats/$chatId/messages" -> "{}"
+                                "/api/installations/fixture/api/chats/$chatId/messages" ->
+                                    wireJson.encodeToString(
+                                        ChatMessage(id = "00000000-0000-4000-8000-000000000089")
+                                    )
                                 "/api/installations/fixture/api/chats/$chatId/questions/question/answer" -> {
                                     answered = true
                                     "{}"
                                 }
-                                "/api/installations/fixture/api/chats/$chatId/messages/queued" -> {
+                                "/api/installations/fixture/api/chats/$chatId/messages/00000000-0000-4000-8000-000000000089" -> {
                                     edited = true
-                                    "{}"
+                                    wireJson.encodeToString(
+                                        ChatMessage(id = "00000000-0000-4000-8000-000000000089")
+                                    )
                                 }
                                 "/api/installations/fixture/api/runs/run/artifacts/image" ->
                                     return MockResponse()
@@ -495,7 +500,10 @@ class ChatJourneyTest {
                 .performTextReplacement("Vérifier aussi les fichiers")
             compose.onNodeWithContentDescription("Modifier").performClick()
             compose.waitUntil(10000) {
-                calls.any { it.first == "PUT" && it.second.endsWith("/messages/queued") }
+                calls.any {
+                    it.first == "PUT" &&
+                        it.second.endsWith("/messages/00000000-0000-4000-8000-000000000089")
+                }
             }
             compose.onNodeWithContentDescription("Fichiers · 3").performClick()
             waitText("Compte rendu")

@@ -279,7 +279,7 @@ internal fun Subagent.followed(chat: Chat?): Subagent {
         when {
             state == SubagentState.RUNNING && chat.pendingQuestions > 1 ->
                 "${chat.pendingQuestions} questions attendent une réponse"
-            state == SubagentState.RUNNING && chat.pendingQuestions == 1 -> "Pose une question"
+            state == SubagentState.RUNNING && chat.pendingQuestions == 1L -> "Pose une question"
             state == SubagentState.RUNNING ->
                 if (chat.status in listOf("queued", "idle")) "En attente d’un runner"
                 else if (chat.wakeup != null) "En attente" else "En cours"

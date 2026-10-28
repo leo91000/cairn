@@ -62,12 +62,21 @@ abstract class ImagePasteCases {
                     taskId = "",
                 )
             val chat =
-                Chat("chat", title = "Capture", runId = "run", agentName = agent.name, run = run)
+                Chat(
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                    title = "Capture",
+                    runId = "run",
+                    agentName = agent.name,
+                    run = run,
+                )
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
+                        if (
+                            path ==
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream"
+                        ) {
                             val frame =
                                 "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(chat = chat, run = run), true, false))}\n\n"
                             return MockResponse()
@@ -82,7 +91,7 @@ abstract class ImagePasteCases {
                         if (
                             request.method == "PUT" &&
                                 path.startsWith(
-                                    "/api/installations/fixture/api/chats/chat/attachments/"
+                                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/attachments/"
                                 )
                         ) {
                             val id = path.substringAfterLast('/')
@@ -92,12 +101,12 @@ abstract class ImagePasteCases {
                                 .setBody(
                                     wireJson.encodeToString(
                                         ChatAttachment(
-                                            id,
-                                            "chat",
-                                            name,
-                                            request.bodySize,
-                                            "image/png",
-                                            "image",
+                                            id = id,
+                                            chatId = "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                                            name = name,
+                                            size = request.bodySize.toInt(),
+                                            mediaType = "image/png",
+                                            kind = "image",
                                         )
                                     )
                                 )
@@ -110,12 +119,16 @@ abstract class ImagePasteCases {
                                     wireJson.encodeToString(
                                         build.cairn.contracts.ListAgentsOutput(listOf(agent))
                                     )
-                                "/api/installations/fixture/api/chats/chat/messages" -> {
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/messages" -> {
                                     sent +=
                                         wireJson
                                             .parseToJsonElement(request.body.readUtf8())
                                             .jsonObject
-                                    "{}"
+                                    wireJson.encodeToString(
+                                        ChatMessage(
+                                            id = sent.last().getValue("id").jsonPrimitive.content
+                                        )
+                                    )
                                 }
                                 "/api/installations/fixture/api/codex/models" -> """{"models":[]}"""
                                 "/api/installations/fixture/api/overview" -> "{}"
@@ -157,7 +170,13 @@ abstract class ImagePasteCases {
                 }
                 CairnTheme {
                     if (state.session.authenticated)
-                        ChatScreen(vm, state, "chat", openChat = {}, openRun = {})
+                        ChatScreen(
+                            vm,
+                            state,
+                            "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                            openChat = {},
+                            openRun = {},
+                        )
                 }
             }
             compose.waitUntil(20000) {

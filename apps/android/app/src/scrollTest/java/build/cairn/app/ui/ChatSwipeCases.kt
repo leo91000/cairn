@@ -128,8 +128,14 @@ abstract class ChatSwipeCases {
             moveTo(Offset(this.width * .48f, height * .4f), 350)
         }
         compose.waitForIdle()
-        val current = compose.onNodeWithTag("chat-page:recent").getUnclippedBoundsInRoot()
-        val next = compose.onNodeWithTag("chat-page:middle").getUnclippedBoundsInRoot()
+        val current =
+            compose
+                .onNodeWithTag("chat-page:35bcbcf2-6d5f-5c5e-955f-b5256afbdffc")
+                .getUnclippedBoundsInRoot()
+        val next =
+            compose
+                .onNodeWithTag("chat-page:bd8d3a56-d149-50fb-add8-e245382bdd5b")
+                .getUnclippedBoundsInRoot()
         Assert.assertTrue(
             "The current screen follows the finger",
             current.left.value < -width * .25f,
@@ -150,7 +156,11 @@ abstract class ChatSwipeCases {
         waitForChat("Chat récent")
         Assert.assertEquals(
             0f,
-            compose.onNodeWithTag("chat-page:recent").getUnclippedBoundsInRoot().left.value,
+            compose
+                .onNodeWithTag("chat-page:35bcbcf2-6d5f-5c5e-955f-b5256afbdffc")
+                .getUnclippedBoundsInRoot()
+                .left
+                .value,
             1f,
         )
         history.performTouchInput { swipeLeft() }
@@ -160,8 +170,14 @@ abstract class ChatSwipeCases {
             moveTo(Offset(this.width * .52f, height * .4f), 350)
         }
         compose.waitForIdle()
-        val previous = compose.onNodeWithTag("chat-page:recent").getUnclippedBoundsInRoot()
-        val middle = compose.onNodeWithTag("chat-page:middle").getUnclippedBoundsInRoot()
+        val previous =
+            compose
+                .onNodeWithTag("chat-page:35bcbcf2-6d5f-5c5e-955f-b5256afbdffc")
+                .getUnclippedBoundsInRoot()
+        val middle =
+            compose
+                .onNodeWithTag("chat-page:bd8d3a56-d149-50fb-add8-e245382bdd5b")
+                .getUnclippedBoundsInRoot()
         Assert.assertTrue(
             "The previous screen is visible while swiping right",
             previous.right.value in 1f..width * .85f,
@@ -208,13 +224,13 @@ abstract class ChatSwipeCases {
     fun onlyTheSelectedChatKeepsALiveStreamWhileNeighborsStayPreviewed() = withChats {
         open("Chat récent")
         compose.waitUntil(10000) { hasReply("Chat intermédiaire", visible = false) }
-        waitForChatStreams("recent")
+        waitForChatStreams("35bcbcf2-6d5f-5c5e-955f-b5256afbdffc")
         history.performTouchInput { swipeLeft() }
         waitForChat("Chat intermédiaire")
         compose.waitUntil(10000) {
             hasReply("Chat ancien", visible = false) && hasReply("Chat récent", visible = false)
         }
-        waitForChatStreams("middle")
+        waitForChatStreams("bd8d3a56-d149-50fb-add8-e245382bdd5b")
     }
 
     @Test
@@ -223,16 +239,18 @@ abstract class ChatSwipeCases {
             open("Chat récent")
             compose.waitUntil(10000) {
                 hasReply("Chat intermédiaire", visible = false) &&
-                    historyRequests.contains("recent")
+                    historyRequests.contains("35bcbcf2-6d5f-5c5e-955f-b5256afbdffc")
             }
             compose.waitForIdle()
             Assert.assertFalse(
                 "A hidden preview must not page through history",
-                historyRequests.contains("middle"),
+                historyRequests.contains("bd8d3a56-d149-50fb-add8-e245382bdd5b"),
             )
             history.performTouchInput { swipeLeft() }
             waitForChat("Chat intermédiaire")
-            compose.waitUntil(10000) { historyRequests.contains("middle") }
+            compose.waitUntil(10000) {
+                historyRequests.contains("bd8d3a56-d149-50fb-add8-e245382bdd5b")
+            }
         }
 
     /** Previews release their catch-up stream; only the settled page may stay connected. */
@@ -266,7 +284,7 @@ abstract class ChatSwipeCases {
             open("Chat récent")
             history.performTouchInput { swipeLeft() }
             waitForChat("Chat intermédiaire")
-            compose.runOnIdle { incomingChat = "recent" }
+            compose.runOnIdle { incomingChat = "35bcbcf2-6d5f-5c5e-955f-b5256afbdffc" }
             waitForChat("Chat récent")
             compose.onNodeWithContentDescription("Retour").performClick()
             compose.onNodeWithTag("fil").assertExists()
@@ -352,12 +370,31 @@ abstract class ChatSwipeCases {
                     name = "Agent principal",
                 )
             val chats =
-                if (single) listOf(Chat("recent", "Chat récent", updatedAt = 300))
+                if (single)
+                    listOf(
+                        Chat(
+                            id = "35bcbcf2-6d5f-5c5e-955f-b5256afbdffc",
+                            title = "Chat récent",
+                            updatedAt = 300,
+                        )
+                    )
                 else
                     listOf(
-                        Chat("old", "Chat ancien", updatedAt = 100),
-                        Chat("recent", "Chat récent", updatedAt = 300),
-                        Chat("middle", "Chat intermédiaire", updatedAt = 200),
+                        Chat(
+                            id = "7e0552ad-fde3-5785-a37c-8bc7e408e409",
+                            title = "Chat ancien",
+                            updatedAt = 100,
+                        ),
+                        Chat(
+                            id = "35bcbcf2-6d5f-5c5e-955f-b5256afbdffc",
+                            title = "Chat récent",
+                            updatedAt = 300,
+                        ),
+                        Chat(
+                            id = "bd8d3a56-d149-50fb-add8-e245382bdd5b",
+                            title = "Chat intermédiaire",
+                            updatedAt = 200,
+                        ),
                     )
             expectedPages = chats.size
             server.dispatcher =

@@ -235,7 +235,11 @@ async fn cached_resume_drains_backlog_without_waiting_between_live_batches() {
     let mut chat = f.service.chat_create(json!({})).await.unwrap();
     chat["runId"] = f.run.clone().into();
     let path = format!("/api/chats/{}/stream", text(&chat, "id"));
-    f.service.store.put("chats", chat).await.unwrap();
+    f.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
     let mut initial = f.open_path(&format!("{path}?window=1"), None).await;
     let (cursor, batch) = initial.batch().await;
     let history = batch["history"].as_str().unwrap();
@@ -311,7 +315,11 @@ async fn following_viewer_resumes_a_long_backlog_on_the_recent_window() {
     chat["runId"] = f.run.clone().into();
     let chat_id = text(&chat, "id").to_owned();
     let path = format!("/api/chats/{chat_id}/stream");
-    f.service.store.put("chats", chat).await.unwrap();
+    f.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
     let mut initial = f.open_path(&format!("{path}?window=1"), None).await;
     let (cursor, batch) = initial.batch().await;
     let history = batch["history"].as_str().unwrap().to_owned();
@@ -413,7 +421,11 @@ async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
     let mut chat = f.service.chat_create(json!({})).await.unwrap();
     chat["runId"] = f.run.clone().into();
     let path = format!("/api/chats/{}/stream", text(&chat, "id"));
-    f.service.store.put("chats", chat).await.unwrap();
+    f.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
     let mut initial = f.open_path(&format!("{path}?window=1"), None).await;
     let (cursor, batch) = initial.batch().await;
     let history = batch["history"].as_str().unwrap().to_owned();
@@ -504,11 +516,7 @@ async fn idle_streams_refresh_lists_after_external_database_writes() {
     }
 
     let f = Fixture::new().await;
-    let chat = f
-        .service
-        .chat_create(json!({ "title": "Before maintenance" }))
-        .await
-        .unwrap();
+    let chat = f.service.chat_create(json!({})).await.unwrap();
     let chat_id = text(&chat, "id");
     let mut conversation = f
         .open_path(
@@ -526,8 +534,12 @@ async fn idle_streams_refresh_lists_after_external_database_writes() {
         rusqlite::Connection::open(f.service.config.data_dir.join("manager.db")).unwrap();
     external
         .execute(
-            "UPDATE records SET data=json_set(data,'$.title',?) WHERE kind='chats' AND id=?",
-            ["After maintenance", chat_id],
+            "UPDATE conversations SET title=?,revision=? WHERE id=?",
+            rusqlite::params![
+                "After maintenance",
+                cairn_installation::config::id(),
+                chat_id
+            ],
         )
         .unwrap();
     drop(external);
@@ -738,7 +750,11 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
     assert!(first["state"]["run"].is_null());
     let mut attached = chat.clone();
     attached["runId"] = f.run.clone().into();
-    f.service.store.put("chats", attached).await.unwrap();
+    f.service
+        .store
+        .save_conversation_boundary(attached)
+        .await
+        .unwrap();
     let (_, batch) = stream.batch().await;
     assert_eq!(batch["state"]["run"]["id"], f.run);
     assert_eq!(batch["reset"], true);
@@ -985,7 +1001,11 @@ async fn paginated_chat_metadata_keeps_pending_messages_without_replaying_delive
     let mut chat = f.service.chat_create(json!({})).await.unwrap();
     chat["runId"] = f.run.clone().into();
     let id = text(&chat, "id").to_owned();
-    f.service.store.put("chats", chat).await.unwrap();
+    f.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
     let chat_id = id.clone();
     f.service
         .store
@@ -1205,9 +1225,9 @@ async fn profile_conversation_opening() {
                 chat["runId"] = run_id.into();
                 if n > 80 {
                     chat["lifecycle"] = "trash".into();
-                    chat["purgeAt"] = i64::MAX.into();
+                    chat["purgeAt"] = 9_007_199_254_740_991_i64.into();
                 }
-                db.put("chats", &chat)?;
+                db.save_conversation_boundary(&chat)?;
             }
             let output = "test output line\n".repeat(90);
             for turn in 0..40 {
@@ -1421,4 +1441,67 @@ async fn typed_history_get_keeps_native_history_readable_to_members_after_agent_
     let page: Value = response.json().await.unwrap();
     assert_eq!(status, StatusCode::OK, "{page}");
     assert_eq!(page["events"][0]["id"], first);
+}
+
+#[tokio::test]
+async fn conversation_streams_mask_queued_and_sending_private_answers() {
+    use cairn_installation::chats::MessageStatus;
+    let f = Fixture::new().await;
+    let mut chat = f.service.chat_create(json!({})).await.unwrap();
+    let chat_id = text(&chat, "id").to_owned();
+    chat["runId"] = f.run.clone().into();
+    f.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
+    let question_id = "a".repeat(64);
+    f.service
+        .question_receive(
+            &f.run,
+            json!({
+                "id": question_id, "blocking": false,
+                "fields": [{ "id": "secret", "title": "Private credential", "secret": true }],
+            }),
+        )
+        .await
+        .unwrap();
+    let message_id = id();
+    f.service.question_answer(&chat_id, &question_id, json!({
+        "id": message_id,
+        "answers": { "secret": { "selected": [], "comment": "private-answer-must-never-cross-sse" } },
+    })).await.unwrap();
+
+    for status in [MessageStatus::Queued, MessageStatus::Sending] {
+        let (stored_chat, stored_message) = (chat_id.clone(), message_id.clone());
+        f.service
+            .store
+            .transaction(move |db| {
+                let mut message = db
+                    .conversation_message(&stored_chat, &stored_message)?
+                    .unwrap();
+                assert!(
+                    serde_json::to_string(&message.answers)?
+                        .contains("private-answer-must-never-cross-sse")
+                );
+                message.status = status;
+                db.save_message(&message)
+            })
+            .await
+            .unwrap();
+        for window in [false, true] {
+            let path = format!("/api/chats/{chat_id}/stream?window={}", u8::from(window));
+            let (_, batch) = f.open_path(&path, None).await.batch().await;
+            assert!(
+                !batch
+                    .to_string()
+                    .contains("private-answer-must-never-cross-sse"),
+                "{batch}"
+            );
+            let messages = batch["state"]["chat"]["messages"].as_array().unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0]["text"], "Private answer");
+            assert!(messages[0].get("answers").is_none());
+        }
+    }
 }

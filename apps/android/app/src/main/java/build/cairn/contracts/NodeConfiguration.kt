@@ -17,6 +17,8 @@ data class NodeConfiguration(
     val tags: List<String>,
 ) {
     init {
+        nativeAccounts?.let { require(it.size <= 100) }
         slots?.let { require(it in 1..4096) }
+        require(tags.size <= 32)
     }
 }

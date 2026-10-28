@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "attachmentIds": {
+      "default": [],
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "maxItems": 8,
+      "type": "array"
+    },
+    "id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "mode": {
+      "default": "queue",
+      "pattern": "^(queue|steer)$",
+      "type": "string"
+    },
+    "model": {
+      "default": "",
+      "maxLength": 120,
+      "pattern": "^[\\w./:\\[\\]-]*$",
+      "type": "string"
+    },
+    "provider": {
+      "default": "",
+      "pattern": "^(|codex|claude|opencode)$",
+      "type": "string"
+    },
+    "reasoning": {
+      "default": "",
+      "maxLength": 40,
+      "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+      "type": "string"
+    },
+    "speed": {
+      "default": "",
+      "maxLength": 40,
+      "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+      "type": "string"
+    },
+    "text": {
+      "default": "",
+      "maxLength": 50000,
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "title": "ChatMessageInput",
+  "type": "object"
+}

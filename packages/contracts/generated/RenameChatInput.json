@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "chatId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "revision": {
+      "type": "string"
+    },
+    "title": {
+      "maxLength": 90,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "chatId",
+    "revision",
+    "title"
+  ],
+  "title": "RenameChatInput",
+  "type": "object"
+}
