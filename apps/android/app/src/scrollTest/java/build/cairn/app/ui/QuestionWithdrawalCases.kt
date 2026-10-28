@@ -1,6 +1,7 @@
 package build.cairn.app.ui
 
 import android.app.Application
+import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.test.*
@@ -224,7 +225,27 @@ abstract class QuestionWithdrawalCases {
                 }
                 CairnTheme {
                     if (state.installation != null) {
-                        if (closed) Text("Réponse envoyée")
+                        if (closed)
+                            Column {
+                                Text("Réponse envoyée")
+                                val reply =
+                                    "My answers to your questions:\n\n" +
+                                        """[{"questionId":"platforms","question":"Quelles plateformes ?","selected":[{"id":"android","label":"Android"},{"id":"web","label":"Web"}],"comment":"Android en priorité"}]"""
+                                EventRow(
+                                    vm,
+                                    RunEvent(
+                                        id = 1,
+                                        createdAt = 1,
+                                        type = "chat.user",
+                                        text = reply,
+                                        payload =
+                                            buildJsonObject {
+                                                put("text", reply)
+                                                put("questionId", "question")
+                                            },
+                                    ),
+                                )
+                            }
                         else
                             QuestionDialog(vm, state, question, listOf(question), {}) {
                                 closed = true
@@ -280,6 +301,12 @@ abstract class QuestionWithdrawalCases {
                     answer["selected"]!!.jsonArray.map { it.jsonPrimitive.content },
                 )
                 assertEquals("Android en priorité", answer["comment"]!!.jsonPrimitive.content)
+                compose.onNodeWithText("Choix : Android, Web", substring = true).assertExists()
+                compose
+                    .onNodeWithText("Commentaire : Android en priorité", substring = true)
+                    .assertExists()
+                compose.onNodeWithText("questionId", substring = true).assertDoesNotExist()
+                screenshot("questionnaire-history")
             } finally {
                 models.clear()
             }

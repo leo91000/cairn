@@ -1327,7 +1327,11 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
     val user = event.type == "chat.user"
     if (event.isMessage()) {
         val content =
-            if (user) (event.payload?.get("text") as? JsonPrimitive)?.contentOrNull ?: event.text
+            if (user)
+                questionAnswerText(
+                    (event.payload?.get("text") as? JsonPrimitive)?.contentOrNull ?: event.text,
+                    (event.payload?.get("questionId") as? JsonPrimitive)?.contentOrNull,
+                )
             else item.string("text").ifEmpty { event.text }
         val attachments =
             if (!user) emptyList()

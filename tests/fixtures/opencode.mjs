@@ -358,7 +358,7 @@ async function main() {
       json(200, true)
       const rejected = question[2] === 'reject'
       emit(rejected ? 'question.rejected' : 'question.replied', { sessionID: pending.session.id, requestID: question[1] })
-      await finish(pending.session, pending.parent, rejected ? 'Question withdrawn without an answer.' : `I will use the ${body.answers[0].join(', ')} layout.`)
+      await finish(pending.session, rejected ? pending.session.questionRefusalParent : pending.parent, rejected ? pending.session.questionRefusal : `I will use the ${body.answers[0].join(', ')} layout.`)
       return
     }
 
@@ -371,6 +371,22 @@ async function main() {
 
     if (request.method === 'GET') {
       json(200, route[2] === '/message' ? session.messages : { id: session.id, directory: session.directory })
+      return
+    }
+
+    if (route[2] === '/message' && request.method === 'POST' && body.noReply === true) {
+      session.questionRefusal = body.parts.map(part => part.text).join('\n')
+      session.questionRefusalParent = body.messageID
+      const info = {
+        id: body.messageID,
+        sessionID: session.id,
+        role: 'user',
+        time: { created: Date.now() },
+      }
+      session.messages.push({ info, parts: body.parts })
+      await persist()
+      emit('message.updated', { info })
+      json(200, { info, parts: body.parts })
       return
     }
 

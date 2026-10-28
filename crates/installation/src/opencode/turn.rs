@@ -28,6 +28,8 @@ struct Receipt {
     delivered: HashSet<String>,
     previously_delivered: HashSet<String>,
     operational_notices: HashSet<String>,
+    #[serde(default)]
+    context_messages: HashSet<String>,
     complete: bool,
     answer: String,
     items: Vec<Value>,
@@ -43,7 +45,8 @@ async fn emit(events: &mpsc::Sender<Value>, value: Value) -> Result<()> {
 impl Receipt {
     fn unexpected_user(&self, info: &Value) -> bool {
         let id = text(info, "id");
-        if self.submissions.iter().any(|(_, wire)| wire == id) {
+        if self.context_messages.contains(id) || self.submissions.iter().any(|(_, wire)| wire == id)
+        {
             return false;
         }
         // Native IDs retain only 48 timestamp bits. Creation times distinguish
@@ -461,6 +464,35 @@ impl Turn<'_> {
                 {
                     return Err(Error::bad_gateway("OpenCode returned an invalid question."));
                 }
+                // The reject endpoint has no feedback field. Add context without
+                // starting another inference, before releasing the native tool.
+                self.wire_counter += 1;
+                let note_id = wire_id(crate::config::now(), self.wire_counter);
+                self.receipt.context_messages.insert(note_id.clone());
+                if text(props, "sessionID") == self.session {
+                    let (message_id, _) = self.receipt.submissions.last().ok_or_else(|| {
+                        Error::bad_gateway("OpenCode refused a question before receiving input.")
+                    })?;
+                    // The next assistant response is parented to this new user
+                    // context. It still completes the same Cairn submission.
+                    self.receipt
+                        .submissions
+                        .push((message_id.clone(), note_id.clone()));
+                }
+                self.receipt.save(&self.receipt_path).await?;
+                self.server
+                    .post(
+                        &format!("/session/{}/message", text(props, "sessionID")),
+                        &json!({
+                            "messageID": note_id,
+                            "noReply": true,
+                            "parts": [{
+                                "type": "text",
+                                "text": crate::chats::questions::NATIVE_DENIED,
+                            }],
+                        }),
+                    )
+                    .await?;
                 self.server
                     .post(&format!("/question/{id}/reject"), &json!({}))
                     .await?;

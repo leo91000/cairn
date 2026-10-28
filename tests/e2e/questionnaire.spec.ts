@@ -82,3 +82,19 @@ test('single choice supports a comment and can be cleared for a text-only altern
   await expect(page.getByRole('textbox')).toHaveValue('A different plan')
   await expect(page.getByRole('button', { name: 'Send answer', exact: true })).toBeEnabled()
 })
+
+test('submitted answers have a readable conversation summary', async ({ page }) => {
+  await page.goto(`${address}scripts/fixtures/questionnaire.html`)
+  await page.waitForFunction(() => window.questionnaireHistory)
+  await page.evaluate(() => window.questionnaireHistory(`My answers to your questions:\n\n${JSON.stringify([{
+    questionId: 'platforms',
+    question: 'Which platforms?',
+    selected: [{ id: 'android', label: 'Android' }, { id: 'web', label: 'Web' }],
+    comment: 'Android first\nWeb next',
+  }])}`))
+  const bubble = page.locator('.user-bubble')
+  await expect(bubble).toContainText('Choices: Android, Web')
+  await expect(bubble).toContainText('Comment: Android first\nWeb next')
+  await expect(bubble).not.toContainText('questionId')
+  await expect(bubble).not.toContainText('selected')
+})

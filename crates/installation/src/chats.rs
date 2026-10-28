@@ -126,6 +126,8 @@ pub(crate) fn keep_reply_after_compaction(
 #[serde(rename_all = "camelCase")]
 struct UserMessageEvent<'a> {
     message_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    question_id: Option<&'a str>,
     text: &'a str,
     attachments: &'a Value,
     created_at: &'a Value,
@@ -711,6 +713,7 @@ fn acknowledge(db: &Db<'_>, run_id: &str, message_id: &str) -> Result<()> {
     };
     let payload = serde_json::to_value(UserMessageEvent {
         message_id,
+        question_id: message["questionId"].as_str(),
         text,
         attachments: &message["attachments"],
         created_at: &message["createdAt"],
@@ -755,6 +758,7 @@ fn claim_steering(
 
 /// Requeues messages left sending by an interrupted turn and returns the next one.
 fn next_queued(db: &Db<'_>, chat_id: &str) -> Result<Option<Value>> {
+    let paused = chat(db, chat_id)?["paused"] == true;
     let mut messages = db.messages(chat_id)?;
     for message in &mut messages {
         if message["status"] == MessageStatus::Sending {
@@ -762,9 +766,9 @@ fn next_queued(db: &Db<'_>, chat_id: &str) -> Result<Option<Value>> {
             db.put_message(message)?;
         }
     }
-    Ok(messages
-        .into_iter()
-        .find(|message| message["status"] == MessageStatus::Queued))
+    Ok(messages.into_iter().find(|message| {
+        message["status"] == MessageStatus::Queued && (!paused || message["questionId"].is_string())
+    }))
 }
 
 /// A chat whose last turn did not succeed waits for the user, unless a deletion
@@ -987,7 +991,8 @@ fn launch_turn(
             current["status"] == MessageStatus::Queued && same_content(&current, &message)
         })
     };
-    if !is_active(&chat) || chat["paused"] == true || !unchanged {
+    let held_by_pause = chat["paused"] == true && !message["questionId"].is_string();
+    if !is_active(&chat) || held_by_pause || !unchanged {
         return Ok(());
     }
     let execution = ChatExecution {
@@ -1385,9 +1390,6 @@ impl Service {
                 self.chat_pause(&id, true).await?;
                 continue;
             }
-            if chat["paused"] == true {
-                continue;
-            }
             // A scheduled wait continues the current task before queued follow-ups.
             let (waiting_chat, waiting_run) = (chat.clone(), run.clone());
             let waiting = self
@@ -1405,6 +1407,9 @@ impl Service {
             let message = match message {
                 Some(message) => message,
                 None => {
+                    if chat["paused"] == true {
+                        continue;
+                    }
                     let chat = chat.clone();
                     let run = run.clone();
                     let Some(message) = self

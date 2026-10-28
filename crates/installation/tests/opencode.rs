@@ -749,7 +749,7 @@ async fn native_questions_are_rejected_without_creating_a_cairn_question() {
         tokio::fs::read_to_string(root.path().join("result.md"))
             .await
             .unwrap(),
-        "Question withdrawn without an answer."
+        "Native question tools are disabled. Use cairn_workspace.ask_questions to ask the user."
     );
 }
 

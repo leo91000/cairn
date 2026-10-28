@@ -1385,7 +1385,11 @@ internal fun ChatPage(
                                                             mapOf(
                                                                 "text" to
                                                                     JsonPrimitive(
-                                                                        sending.message.text
+                                                                        questionAnswerText(
+                                                                            sending.message.text,
+                                                                            sending.message
+                                                                                .questionId,
+                                                                        )
                                                                     ),
                                                                 "attachments" to
                                                                     wireJson.encodeToJsonElement(
