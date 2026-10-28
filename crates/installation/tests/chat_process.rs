@@ -455,6 +455,7 @@ async fn oversized_inbox_fails_before_submitting_messages() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);
     let config = config(&root);
+    std::fs::write(home.join("fixture-lifecycle.jsonl"), "").unwrap();
     std::fs::write(
         root.path().join("inbox/messages.json"),
         vec![b' '; 2_000_001],
@@ -482,6 +483,48 @@ async fn oversized_inbox_fails_before_submitting_messages() {
     events.await.unwrap();
     assert_eq!(error.status, 400);
     assert_eq!(error.message, "Chat inbox is too large.");
+    assert!(
+        lifecycle(&home)
+            .iter()
+            .all(|entry| { entry["method"] != "turn/start" && entry["method"] != "turn/steer" })
+    );
+}
+
+#[tokio::test]
+async fn resident_rejects_an_oversized_inbox_before_submitting_messages() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let service = Resident::start(config(&root), home.clone(), &root).await;
+    std::fs::write(
+        root.path().join("inbox/messages.json"),
+        vec![b' '; 2_000_001],
+    )
+    .unwrap();
+    let mut plan = plan(&root, "Continue the request");
+    plan["codexConfig"] = json!({ "mcp_servers": {} });
+    let (events, mut received) = mpsc::channel::<Value>(64);
+    let output = tokio::spawn(async move {
+        while let Some(event) = received.recv().await {
+            assert_ne!(event["type"], "turn.completed");
+        }
+    });
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        chat_process::resident::run(&service.socket, plan, events, CancellationToken::new()),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    output.await.unwrap();
+    assert_eq!(error.status, 400);
+    assert_eq!(error.message, "Chat inbox is too large.");
+    let error = service.task.await.unwrap().unwrap_err();
+    assert_eq!(error.status, 400);
+    assert!(
+        lifecycle(&home)
+            .iter()
+            .all(|entry| { entry["method"] != "turn/start" && entry["method"] != "turn/steer" })
+    );
 }
 
 #[tokio::test]
