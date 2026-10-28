@@ -2430,12 +2430,9 @@ mod tests {
                 { "source": stage.join("home"), "target": "/home/node" }
             ],
         });
-        controller
-            .leases
-            .lock()
-            .await
-            .insert(id.clone(), crate::nodes::boot_ms() + 10_000);
-        plan["expires"] = (crate::config::now() + 1000).into();
+        let now = Arc::new(std::sync::atomic::AtomicI64::new(crate::config::now()));
+        let expires = now.load(std::sync::atomic::Ordering::SeqCst) + 1000;
+        plan["expires"] = expires.into();
         atomic_write(
             &controller
                 .data
@@ -2445,12 +2442,42 @@ mod tests {
         )
         .await
         .unwrap();
-        let held = disk::lock(&controller.state).await.unwrap();
-        let error = tokio::time::timeout(Duration::from_secs(5), controller.start(&id))
+        // Hold storage without foreground intent, so a foreground lock proves
+        // start has validated the plan and reached its disk admission wait.
+        let held =
+            crate::file_lock::exclusive(&controller.state.join("storage.lock"), "fixture owner")
+                .unwrap();
+        controller
+            .leases
+            .lock()
             .await
-            .unwrap()
-            .unwrap_err();
-        assert_eq!(error.status, 408);
+            .insert(id.clone(), crate::nodes::boot_ms() + 10_000);
+        let error = tokio::time::timeout(Duration::from_secs(5), async {
+            let starting = crate::config::TEST_NOW.scope(now.clone(), controller.start(&id));
+            tokio::pin!(starting);
+            tokio::select! {
+                result = &mut starting => result,
+                () = async {
+                    while crate::file_lock::exclusive(
+                        &controller.state.join("storage-foreground.lock"),
+                        "fixture admission probe",
+                    )
+                    .is_ok()
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                } => {
+                    // Fixture fsyncs cannot consume the execution deadline.
+                    // Advance only start's wall clock once it waits on disk.
+                    now.store(expires, std::sync::atomic::Ordering::SeqCst);
+                    starting.await
+                }
+            }
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(error.status, 408, "{}", error.message);
         let saved: Value = serde_json::from_slice(
             &tokio::fs::read(controller.file(&id, "stop-reason.json"))
                 .await
@@ -2463,11 +2490,6 @@ mod tests {
         let id = crate::config::id();
         plan["id"] = id.clone().into();
         plan["expires"] = Value::Null;
-        controller
-            .leases
-            .lock()
-            .await
-            .insert(id.clone(), crate::nodes::boot_ms() + 10_000);
         atomic_write(
             &controller
                 .data
@@ -2477,6 +2499,11 @@ mod tests {
         )
         .await
         .unwrap();
+        controller
+            .leases
+            .lock()
+            .await
+            .insert(id.clone(), crate::nodes::boot_ms() + 10_000);
         let starting = tokio::spawn({
             let controller = controller.clone();
             let id = id.clone();

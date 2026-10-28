@@ -82,7 +82,18 @@ impl Config {
     }
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    /// Override wall time only in an explicitly scoped test future.
+    pub(crate) static TEST_NOW: std::sync::Arc<std::sync::atomic::AtomicI64>;
+}
+
 pub fn now() -> i64 {
+    #[cfg(test)]
+    if let Ok(now) = TEST_NOW.try_with(|now| now.load(std::sync::atomic::Ordering::SeqCst)) {
+        return now;
+    }
+
     chrono::Utc::now().timestamp_millis()
 }
 
