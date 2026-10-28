@@ -416,7 +416,7 @@ mod tests {
         let other = "00000000-0000-4000-8000-000000000003";
         for backend in ["native", "firecracker", "auto"] {
             let mut settings: AgentSettings = serde_json::from_value(serde_json::json!({
-                "name": "Reserved", "access": { "backend": backend, "nodes": [allowed] },
+                "name": "Reserved", "access": { "backend": backend, "nodes": [allowed], "mcpTools": {} },
                 "exclusiveNodes": [allowed, other, allowed], "plugins": [],
             }))
             .unwrap();

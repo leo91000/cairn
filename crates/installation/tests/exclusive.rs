@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
+const NATIVE_NODE_ID: &str = "e160ec69-e129-464c-846c-42b99ec69484";
+
 struct Fixture {
     root: tempfile::TempDir,
     s: Arc<Service>,
@@ -44,9 +46,14 @@ impl Fixture {
                 state["highestEpoch"] = body["epoch"].clone();
                 Json(state.clone())
             })).with_state(remote.clone());
+        // Model the manager's controller URL for an enrolled remote identity.
+        let app = app
+            .clone()
+            .nest(&format!("/internal/execution/{NATIVE_NODE_ID}"), app);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let runner_url = format!("http://{}", listener.local_addr().unwrap());
         let s = Service::new(cairn_installation::config::Config {
+            public_url: runner_url.clone(),
             runner_url,
             ..common::config(root.path())
         })
@@ -355,24 +362,28 @@ async fn nonblocking_requests_remain_queued_until_their_independent_acquisition_
 #[tokio::test]
 async fn native_reservations_use_the_same_authorization_queue_and_revocation() {
     let f = Fixture::new().await;
-    let agent =
-        f.s.agent_fixture(
-            json!({
-                "access": { "backend": "native", "nodes": [LOCAL_NODE_ID] },
-                "exclusiveNodes": [LOCAL_NODE_ID],
-            }),
-            Some(MAIN_AGENT_ID),
-        )
-        .await
-        .unwrap();
     let mut node =
         f.s.store
             .get("nodes", LOCAL_NODE_ID)
             .await
             .unwrap()
             .unwrap();
+    let mut local = node.clone();
+    local["exclusiveReservations"] = false.into();
+    f.s.store.put("nodes", local).await.unwrap();
+    node["id"] = NATIVE_NODE_ID.into();
     node["capabilities"] = json!({ "backend": "native" });
     f.s.store.put("nodes", node).await.unwrap();
+    let agent =
+        f.s.agent_fixture(
+            json!({
+                "access": { "backend": "native", "nodes": [NATIVE_NODE_ID] },
+                "exclusiveNodes": [NATIVE_NODE_ID],
+            }),
+            Some(MAIN_AGENT_ID),
+        )
+        .await
+        .unwrap();
     f.s.store
         .transaction({
             let run = f.run.clone();
@@ -381,7 +392,7 @@ async fn native_reservations_use_the_same_authorization_queue_and_revocation() {
                     db,
                     &run,
                     &json!({
-                        "executionBackend": "native", "snapshot": { "agent": agent },
+                        "executionBackend": "native", "nodeId": NATIVE_NODE_ID, "snapshot": { "agent": agent },
                     }),
                 )
             }
@@ -394,6 +405,7 @@ async fn native_reservations_use_the_same_authorization_queue_and_revocation() {
             .await
             .unwrap()
             .unwrap();
+    checkpoint["nodeId"] = NATIVE_NODE_ID.into();
     checkpoint["prepared"]["backend"] = "native".into();
     f.s.store
         .save_checkpoint_boundary(&f.run, checkpoint)
