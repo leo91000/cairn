@@ -18,6 +18,9 @@ let existingChatIds: Set<string>
 let existingRunIds: Set<string>
 
 test.beforeEach(async ({ workspace }) => {
+  // Independent scenarios share durable data, not an HTTP request budget.
+  await workspace.restart()
+
   existingAccountIds = new Set((await workspace.api('/api/accounts')).accounts.map((account: { id: string }) => account.id))
   existingChatIds = new Set(workspace.service.store.list('chats').map(chat => chat.id))
   existingRunIds = new Set(workspace.service.store.runs().map(run => run.id))

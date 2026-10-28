@@ -19,7 +19,6 @@ import build.cairn.app.diagnostics.Performance
 import build.cairn.app.diagnostics.UploadCadence
 import java.io.File
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.flow.first
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
@@ -494,7 +493,7 @@ abstract class ChatSwipeCases {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     vault,
-                    beaconOrigin = "",
+                    beaconOrigin = server.url("/").toString(),
                 )
             this.vm = vm
             val models = ViewModelStore().apply { put("fixture", vm) }
@@ -504,10 +503,6 @@ abstract class ChatSwipeCases {
                 restoration.setContent {
                     if (mounted) {
                         val state by vm.state.collectAsStateWithLifecycle()
-                        LaunchedEffect(Unit) {
-                            vm.state.first { it.ready }
-                            vm.connect(server.url("/").toString())
-                        }
                         CompositionLocalProvider(
                             LocalPerformanceUploadCadence provides uploadCadence
                         ) {
