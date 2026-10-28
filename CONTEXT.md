@@ -15,7 +15,7 @@ Le service hébergé par Cairn qui fournit l’interface web et mobile, les comp
 Il peut conserver les diagnostics techniques de l’application, sans contenu des conversations, pour améliorer ses performances.
 
 **Compte Cairn** :
-L’identité d’une personne sur Beacon, définie par une adresse e-mail vérifiée. Le code par e-mail, Google, GitHub et les passkeys ne sont que des moyens de s’y connecter. Cette identité est requise pour accéder à l’interface et à l’API d’une installation. Une délégation externe d’un plugin autorise seulement les opérations explicitement accordées.
+L’identité d’une personne sur Beacon, définie par une adresse e-mail vérifiée. Le code par e-mail, Google, GitHub et les passkeys ne sont que des moyens de s’y connecter. Cette identité est requise pour accéder à l’interface et à l’API d’une installation. Une personne externe, par exemple l’auteur d’un message Discord, n’a aucun droit : elle n’est qu’une donnée d’un hook.
 _Avoid_ : utilisateur GitHub, compte d’agent de code
 
 **Installation** :
@@ -175,25 +175,12 @@ _Avoid_ : prompt, plugin
 **Source d’une skill** :
 L’emplacement d’où une skill a été importée par la source de skills d’un plugin (par exemple un dossier d’un dépôt GitHub), avec la version importée. La source permet de comparer la skill à une version plus récente et de la remplacer par celle-ci ; les modifications faites dans Cairn depuis l’import sont alors perdues.
 
-**Délégation externe d’un plugin** :
-L’accès précis que le propriétaire accorde à des identités externes, par exemple
-à des utilisateurs Discord dans un canal, pour faire travailler l’agent choisi et
-recevoir ses réponses. Ces identités ne deviennent pas membres de l’installation
-et n’obtiennent aucun accès général à son interface, ses conversations ou sa gestion.
-Les conversations créées restent partagées dans Cairn ; les réponses du bot sont
-visibles dans le canal externe autorisé. La délégation reste liée à l’accès courant
-du propriétaire et aux permissions d’agent qu’il a approuvées.
-Pour un agent natif, ce choix conserve l’autorité native du demandeur authentifié ;
-les messages admis agissent par cette délégation révocable, sans devenir des
-identités Cairn.
-
 **Instance de plugin** :
 Une configuration d’un plugin par le propriétaire, par exemple un bot Discord, un
-compte de service 1Password ou un compte GitHub : ses réglages, ses secrets chiffrés
-et, s’il répond à des personnes, sa délégation externe. Les agents autorisés à
-utiliser ce que le plugin leur apporte se choisissent sur la page de chaque agent,
-ou à la dernière étape de sa création, qui ne fait qu’ajouter des droits.
-Aucun agent n’est autorisé par défaut.
+compte de service 1Password ou un compte GitHub : ses réglages et ses secrets
+chiffrés. Les droits des agents sur l’instance, complets ou outil par outil, se
+choisissent sur la page de chaque agent, ou à la dernière étape de sa création, qui
+ne fait qu’ajouter des droits. Aucun agent n’est autorisé par défaut.
 _Avoid_ : connexion (réservé aux comptes des agents de code)
 
 **Assistant de configuration d’un plugin** :
@@ -238,9 +225,37 @@ conversation ; le plugin dit seulement si la condition est remplie.
 **Transport d’un plugin** :
 La connexion qu’un package entretient lui-même avec un service externe, par exemple la
 Gateway de Discord : un worker dédié par instance pilote un socket que Cairn ouvre vers
-les hôtes déclarés, et remet à Cairn ce que les personnes écrivent. Cairn applique les
-règles d’admission de l’instance avant de garder quoi que ce soit.
+les hôtes déclarés, tient les obligations du protocole du service et émet les hooks du
+plugin.
 _Avoid_ : transport natif
+
+**Hook d’un plugin** :
+Un événement qu’un plugin, ou Cairn pour ses conversations, déclare pouvoir émettre,
+avec ce qu’il transporte : par exemple un message écrit dans un salon Discord, avec son
+auteur et son fil. Un hook ne fait rien seul ; ce sont les règles de hook qui y réagissent.
+_Avoid_ : webhook (le mécanisme HTTP), trigger
+
+**Règle de hook** :
+Ce que le propriétaire décide, sans code, de faire quand un hook se produit : des
+filtres puis une suite d’actions (déclencher un agent, orienter une conversation,
+appeler un outil). Elle agit avec l’autorité de son créateur, seul à pouvoir la
+modifier. Un plugin peut proposer des modèles de règles prêts à l’emploi.
+_Avoid_ : hook (l’événement auquel elle réagit), automation, workflow, réponse
+
+**Agent d’exécution d’une règle** :
+L’agent dont les droits encadrent les outils qu’une règle de hook appelle elle-même.
+Le créateur de la règle doit y avoir accès.
+
+**Ressource d’un plugin** :
+Ce sur quoi portent les hooks et les outils d’un plugin, et que le plugin sait lister :
+un serveur ou un salon Discord, une personne, un dépôt GitHub. Le droit d’un agent sur
+un outil peut être limité à certaines ressources.
+_Avoid_ : scope, portée
+
+**Clé de conversation** :
+L’identifiant externe, tiré d’un hook, auquel une règle rattache une conversation, par
+exemple un fil Discord, pour la retrouver et l’orienter lors des hooks suivants.
+_Avoid_ : thread, binding
 
 **Programme déclaré** :
 Un exécutable du serveur qu’un package liste dans son manifeste et que le propriétaire
