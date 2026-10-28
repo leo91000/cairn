@@ -407,6 +407,13 @@ export function ownerPage(path: string) {
   return ['/plugins', '/mcps', '/connections', '/nodes', '/authorize'].includes(path) || path.startsWith('/plugins/') || path.startsWith('/agents/')
 }
 
+export async function refreshSkills() {
+  const scope = connectionScope()
+  const skills = await api<Skill[]>('/skills')
+  if (connectionScope() === scope && state.authenticated && !state.signingOut)
+    state.skills = skills
+}
+
 export async function refresh() {
   const scope = connectionScope()
   let lists: [Agent[], Project[], Task[], Skill[], McpView[]]

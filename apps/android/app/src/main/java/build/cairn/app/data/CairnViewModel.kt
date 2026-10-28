@@ -823,6 +823,13 @@ constructor(
             }
     }
 
+    suspend fun refreshSkills() {
+        val target = api
+        val skills = target.get<List<Skill>>("/skills")
+        if (connection === target && state.value.session.authenticated)
+            mutable.update { it.copy(skills = skills) }
+    }
+
     suspend fun refreshAgentPortraits() {
         val target = api
         val before = state.value.agents.associate { it.id to it.avatar }
