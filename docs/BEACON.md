@@ -431,8 +431,9 @@ other device. Revoking the current session also clears its cookie. Mutations
 require the exact origin and CSRF, are limited to 30 per minute per account,
 and close that session's relay bodies before returning. Other sessions and
 already admitted agent work continue. Session creation and expiry remain the
-same for email, OAuth and passkeys. The database recreation required for this
-release ends all existing Beacon sessions; users must sign in again.
+same for email, OAuth and passkeys. Routine upgrades preserve the database and
+existing sessions. A separately authorized destructive database reset ends all
+existing Beacon sessions; users must sign in again after that reset.
 
 Deletion requires typing the verified account email and confirmation in the
 web. `POST /api/account/delete` accepts `{ "email": "…" }`, uses the caller's
@@ -514,8 +515,8 @@ The journal is **not append-only at database level**: account deletion updates
 its audience IDs to NULL and maintenance deletes expired records. Application
 mutations use a closed action enum and named event fields; operators with write
 access can still alter the database. The initial schema includes the actor index
-and proof column. The release recreation procedure above removes the previous
-Beacon database and its audit history.
+and proof column. Only a separately authorized destructive database reset removes
+the Beacon database and its audit history; routine releases preserve them.
 Reads enforce retention immediately; hourly maintenance removes expired rows.
 
 Operators investigate the full retained history using their protected Postgres
@@ -660,8 +661,9 @@ requires the original Cairn session's recent independent email/passkey proof.
 The app session is checked before the provider callback and again under the
 account lock at consent, then at the final exchange. Browser consent does not
 replace this proof. Google native linking applies the same checks before its
-quota, before JWT/JWKS verification and after the account lock. Recreating Beacon
-ends all in-flight handovers; users must restart sign-in. Never log handover URLs,
+quota, before JWT/JWKS verification and after the account lock. A separately
+authorized database reset ends all in-flight handovers; users must restart sign-in.
+Never log handover URLs,
 confirmation proofs or secrets.
 
 Set `CAIRN_BEACON_ANDROID_CERTIFICATES` to comma-separated SHA-256 fingerprints

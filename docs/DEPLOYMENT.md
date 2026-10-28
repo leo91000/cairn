@@ -295,8 +295,9 @@ guests deploy at the same version.
 
 ## Persisted data
 
-The release system does not create or retain backups. The next installation
-release requires the [complete reinstallation](PRODUCTION-CAIRN.md#réinstallation-complète).
+The release system does not create or retain backups. Version-11 installations
+support the [data-preserving upgrade](PRODUCTION-CAIRN.md#data-preserving-upgrades);
+retain a consistent database/WAL backup and all installation state before rollout.
 Subsequent update failures retain the pending candidate for repair and retry;
 recover with a reviewed forward fix.
 
