@@ -29,13 +29,20 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
 
   // The rail (desktop) or the dock (phone) leads to the Fil, Missions and the Atelier.
   async function navigate(url: string) {
+    const documentStarted = await page.evaluate(() => performance.timeOrigin)
     const destination = url.startsWith('/runs/') ? '/runs' : url === '/settings/installation' ? '/settings' : url
     const place = destination === '/' ? 'Fil' : destination === '/tasks' ? 'Missions' : 'Atelier'
     const navigation = page.getByRole('navigation', { name: /^(Workspace|Quick) navigation$/ }).filter({ visible: true })
-    if (await navigation.count())
-      await navigation.getByRole('link', { name: place, exact: true }).click()
-    else
-      await page.goto(workspacePath(place === 'Atelier' ? '/atelier' : destination))
+    if (!await navigation.count()) {
+      // Phone reading screens hide the dock. Return through their SPA controls:
+      // reloading here can race a poll and make WebKit report an access-control error.
+      const back = page.getByRole('link', { name: /^Back to (?:runs|agents)$/ }).or(
+        page.getByRole('button', { name: 'Back to settings', exact: true }),
+      )
+      await back.click()
+    }
+
+    await navigation.getByRole('link', { name: place, exact: true }).click()
     const sections: Record<string, string> = {
       '/runs': 'Runs',
       '/agents': 'Agents',
@@ -69,6 +76,8 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
       await page.locator(`.run-table a[href="${workspacePath(url)}"]`).first().click()
       await expect(page.locator('.run-title-meta')).toBeVisible()
     }
+
+    expect(await page.evaluate(() => performance.timeOrigin), 'Workspace navigation keeps the current document and its background polls').toBe(documentStarted)
   }
 
   async function fits() {
@@ -305,7 +314,8 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
       sandbox: 'yolo',
     },
   }))
-  await page.goto(workspacePath('/tasks'))
+  await navigate('/atelier')
+  await navigate('/tasks')
   await page.getByRole('button', { name: 'New mission', exact: true }).click()
   const agentSelect = page.getByRole('combobox', { name: 'Agent', exact: true })
   await agentSelect.click()
@@ -418,7 +428,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   ]
   for (const event of outcomeEvents)
     workspace.service.store.event(outcomeRun.id, event.type, event.text, event.payload)
-  await page.goto(workspacePath(`/runs/${outcomeRun.id}`))
+  await navigate(`/runs/${outcomeRun.id}`)
   // Expected outcomes and a recovered connection are not failures: only the test run counts.
   await expect(page.getByTestId('agent-actions')).toContainText('1 failure')
   for (const [step, label] of [['Connection restored', 'Recovered'], ['rg needle src', 'No matches'], ['diff before after', 'Differences found']]) {
