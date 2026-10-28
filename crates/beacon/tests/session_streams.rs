@@ -218,6 +218,7 @@ async fn session_expiry_is_not_delayed_by_a_database_revocation_check() {
             }
         }),
     );
+    let tunnel_setup_started = Instant::now();
     let relay = RelayedInstallation::with_pool_size(routes, 1).await;
 
     // Age the established tunnel's revocation timer, without a wall-clock wait,
@@ -298,7 +299,12 @@ async fn session_expiry_is_not_delayed_by_a_database_revocation_check() {
         }
     });
     let assertions = async {
-        advance(Duration::from_secs(28)).await;
+        // The first check cannot precede tunnel setup plus 30 seconds. Use an
+        // earlier bound and subtract setup time, including any host suspension.
+        let before_check = tunnel_setup_started + Duration::from_secs(28);
+        if Instant::now() < before_check {
+            advance(before_check - Instant::now()).await;
+        }
         let pending_since = loop {
             if let Some(query_start) = blocked_query_start().await {
                 break query_start;
