@@ -22,11 +22,11 @@
   person's Cairn account, whose authority an installation grant does not confer.
   Account access to agents is owner-only on web/Android and excluded from public MCP
   and `cairn_installation`. Through `cairn_installation`, agents may read and reduce
-  agent grants but never widen them; they write hook rules only in a conversation
-  whose every input since its creation came from one person (edits count as the
-  editor's input), never in tasks or missions, and only that person's rules; they
-  never touch another account's rule, lift an owner's emergency pause, or reduce a
-  grant another account's rule uses
+  agent grants but never widen them; they write hook rules only for one person, in a
+  conversation that meets every provenance condition of ADR-0075 (every input from
+  that person, no rule or agent input, no instructions or skills written by an agent),
+  never in tasks or missions; they never touch another account's rule, lift an owner's
+  emergency pause, or reduce a grant another account's rule uses
   ([ADR-0075](docs/adr/0075-plugin-hooks-rules-and-scoped-grants.md)).
 - Separate logical steps with blank lines. Give complex expressions descriptive
   intermediate names when that makes the flow easier to follow. Avoid arbitrary

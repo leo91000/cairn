@@ -107,18 +107,19 @@ la tâche déléguée exige l’accès à son propre agent.
 Un membre ne démarre, ne poursuit, n’oriente, ne lance à la main, ne répond aux
 questions et n’utilise comme agent d’exécution d’une règle que les agents auxquels il
 a accès, ni ne crée ou ne modifie de tâche sur un autre agent ; mettre en pause,
-archiver ou arrêter un travail reste permis à tous ; il continue de voir toutes les
-conversations ([ADR-0029](0029-sharing-whole-installations.md)). Ses tâches planifiées
-sur un agent auquel il perd l’accès sont suspendues comme ses règles. L’agent agit
-comme un rôle : y avoir accès, c’est pouvoir obtenir tout ce qu’il peut faire. Pour
-une tâche déléguée, l’accès à l’agent de sa conversation demandeuse suffit à la
-poursuivre ou à répondre à ses questions : la couverture par ce demandeur borne ses
-droits. Un agent qui a l’accès à l’installation la gère entière, avec l’autorité de
-gestion du propriétaire ([ADR-0064](0064-opt-in-installation-tools-for-agents.md)) :
-avoir accès à cet agent revient, par ce qu’il peut faire, à avoir accès à tous les
-agents (les vérifications d’accès restent celles des accès accordés), et ce qu’un
-membre lui fait créer, hors ses règles, survit à son départ (une mission a le
-propriétaire pour auteur).
+archiver ou arrêter un travail reste permis à tous, mais pas supprimer une
+conversation ; il continue de voir toutes les conversations
+([ADR-0029](0029-sharing-whole-installations.md)). Ses tâches planifiées sur un agent
+auquel il n’a pas ou plus accès, y compris après une modification par le propriétaire,
+sont suspendues comme ses règles. L’agent agit comme un rôle : y avoir accès, c’est
+pouvoir obtenir tout ce qu’il peut faire. Pour une tâche déléguée, l’accès à l’agent
+de sa conversation demandeuse suffit à la poursuivre ou à répondre à ses questions :
+la couverture par ce demandeur borne ses droits. Un agent qui a l’accès à
+l’installation la gère entière, avec l’autorité de gestion du propriétaire
+([ADR-0064](0064-opt-in-installation-tools-for-agents.md)) : avoir accès à cet agent
+revient, par ce qu’il peut faire, à avoir accès à tous les agents (les vérifications
+d’accès restent celles des accès accordés), et ce qu’un membre lui fait créer, hors
+ses règles, survit à son départ (une mission a le propriétaire pour auteur).
 
 Seul le propriétaire donne ou retire ces accès, et seulement depuis le web et
 Android : comme la gestion des membres, ils sont exclus du MCP public et de
@@ -228,14 +229,16 @@ modifie. Une conversation qu’une règle, un agent, `cairn_installation` ou une
 personne a atteinte, une tâche (planifiée, lancée à la main ou déléguée) et une
 mission ne le permettent jamais, même plus tard ; pas plus qu’une conversation dont
 l’agent a vu ses instructions ou ses skills modifiées, depuis sa création, par un
-autre que cette personne. Il écrit au nom de cette personne : il crée des règles à son
-nom, et ne modifie, désactive, réactive ou supprime que les règles de ce compte. Il ne
-peut accorder de droits à aucun agent ni à aucun compte, ni toucher à la règle d’un
-autre compte, ni lever une pause d’urgence, ni réduire, sur l’agent d’exécution d’une
-règle d’un autre compte (le propriétaire, ou un membre dont l’adhésion dure), un droit
-sur un hook ou un outil que cette règle utilise, ressources comprises, quel que soit
-l’état de la règle. Une règle créée par le MCP public a pour créateur le propriétaire
-qui a autorisé ce client.
+autre que cette personne, ou dont l’agent suit des instructions ou des skills qu’un
+agent a écrites, à quelque moment que ce soit (les instructions d’un plugin comptent
+comme écrites par le propriétaire qui l’a accordé). Il écrit au nom de cette
+personne : il crée des règles à son nom, et ne modifie, désactive, réactive ou
+supprime que les règles de ce compte. Il ne peut accorder de droits à aucun agent ni à
+aucun compte, ni toucher à la règle d’un autre compte, ni lever une pause d’urgence,
+ni réduire, sur l’agent d’exécution d’une règle d’un autre compte (le propriétaire, ou
+un membre dont l’adhésion dure), un droit sur un hook ou un outil que cette règle
+utilise, ressources comprises, quel que soit l’état de la règle. Une règle créée par
+le MCP public a pour créateur le propriétaire qui a autorisé ce client.
 
 Une règle n’atteint un agent dont la politique autorise l’exécution native, ou une
 conversation qui s’exécute en natif, que si son créateur détenait l’autorité native
@@ -307,9 +310,10 @@ Les restrictions de ressource reposent sur ce que le package déclare : les cha
 désignent des ressources et la liste qui fournit leur hiérarchie. Un package approuvé
 reste donc de confiance pour ces déclarations, comme il l’était pour l’admission.
 
-Une règle qui ne teste pas l’auteur ouvre son agent à n’importe qui : l’éditeur
-prévient son créateur quand l’agent démarré a des droits de plugin ou l’accès à
-l’installation, comme le faisait l’assistant des bots
+Une règle qui ne teste pas l’auteur ouvre son agent à n’importe qui : l’éditeur, le
+MCP public, `cairn_installation` et l’installation d’un modèle préviennent son
+créateur quand l’agent démarré a des droits de plugin ou l’accès à l’installation,
+comme le faisait l’assistant des bots
 ([ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md)).
 
 Les risques d’un droit trop large relèvent du propriétaire ; Cairn doit en revanche
