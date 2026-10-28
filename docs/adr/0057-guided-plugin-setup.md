@@ -1,4 +1,4 @@
-> Statut : l’étape `people` (la délégation externe) est retirée par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md).
+> Statut : l’étape `people` (la délégation externe) est retirée par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md), et une instance compte comme accordée à un agent de gestion, pour réutiliser une étape partagée, dès qu’une de ses contributions lui est accordée.
 
 # Guided plugin setup and shared provider apps
 

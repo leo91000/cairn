@@ -249,6 +249,12 @@ appeler un outil…). Elle agit avec l’autorité de son créateur, seul à pou
 modifier. Un plugin peut proposer des modèles de règles prêts à l’emploi.
 _Avoid_ : hook (l’événement auquel elle réagit), automation, workflow
 
+**Modèle de règles** :
+Un ensemble de règles de hook prêtes à l’emploi qu’un plugin propose, avec les
+paramètres à choisir à l’installation (agent, salon…). L’installer crée des règles
+ordinaires, sans lien avec le modèle.
+_Avoid_ : template, recette
+
 **Déclenchement d’une règle** :
 Le traitement d’un événement par une règle de hook, de sa première condition à sa
 dernière action, avec la version de la règle en vigueur à son début.

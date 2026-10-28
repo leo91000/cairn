@@ -23,8 +23,10 @@
   Account access to agents is owner-only on web/Android and excluded from public
   MCP and `cairn_installation`. Through `cairn_installation`, agents may read and
   reduce agent grants but never widen them; they write hook rules only for the author
-  of the turn's latest human input (none in turns without one), and never pause,
-  delete or unpause another account's rule
+  of the turn's latest human input (none in turns without one or in conversations
+  bound to a conversation key), never pause, delete or unpause another account's
+  rule, never lift the owner's emergency pause, and never reduce a grant another
+  account's active rule depends on
   ([ADR-0075](docs/adr/0075-plugin-hooks-rules-and-scoped-grants.md)).
 - Separate logical steps with blank lines. Give complex expressions descriptive
   intermediate names when that makes the flow easier to follow. Avoid arbitrary

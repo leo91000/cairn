@@ -2,7 +2,7 @@
 
 Date : 2026-10-28.
 
-Cette décision remplace la délégation externe d’[ADR-0038](0038-luau-installation-plugins-and-external-bot-delegation.md), d’[ADR-0045](0045-declarative-plugin-contributions.md), d’[ADR-0046](0046-plugin-transports-and-forms-in-luau.md), d’[ADR-0057](0057-guided-plugin-setup.md), d’[ADR-0059](0059-delegated-tasks.md) et d’[ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) ; remplace en partie les droits par instance d’[ADR-0045](0045-declarative-plugin-contributions.md), d’[ADR-0051](0051-agent-centric-permissions.md) et d’[ADR-0056](0056-plugin-oauth-file-transfers-and-gmail.md), la couverture des tâches déléguées d’[ADR-0059](0059-delegated-tasks.md) et le rôle de membre d’[ADR-0029](0029-sharing-whole-installations.md) ; précise [ADR-0050](0050-trusted-native-execution.md) et [ADR-0064](0064-opt-in-installation-tools-for-agents.md).
+Cette décision remplace la délégation externe d’[ADR-0038](0038-luau-installation-plugins-and-external-bot-delegation.md), d’[ADR-0045](0045-declarative-plugin-contributions.md), d’[ADR-0046](0046-plugin-transports-and-forms-in-luau.md), d’[ADR-0057](0057-guided-plugin-setup.md), d’[ADR-0059](0059-delegated-tasks.md) et d’[ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) ; remplace en partie les droits par instance d’[ADR-0045](0045-declarative-plugin-contributions.md), d’[ADR-0051](0051-agent-centric-permissions.md) et d’[ADR-0056](0056-plugin-oauth-file-transfers-and-gmail.md), la couverture des tâches déléguées d’[ADR-0059](0059-delegated-tasks.md), la règle d’une instance par package d’[ADR-0053](0053-github-as-a-bundled-plugin.md), la réutilisation des étapes partagées d’[ADR-0057](0057-guided-plugin-setup.md) et le rôle de membre d’[ADR-0029](0029-sharing-whole-installations.md) ; précise [ADR-0050](0050-trusted-native-execution.md) et [ADR-0064](0064-opt-in-installation-tools-for-agents.md).
 
 ## Constat
 
@@ -59,11 +59,13 @@ qui ne désigne aucune ressource identifiable d’un type restreint, ou des ress
 contradictoires, est refusée.
 Les identifiants de run, les instructions ajoutées au prompt et les conditions
 d’attente s’accordent aussi un par un, sans restriction de ressource ; les conditions
-restent bornées par l’accès aux projets. Des identifiants de run donnent au service
+restent bornées par l’accès aux projets, et les sources de projets et de skills
+s’accordent de même. Des identifiants de run permettent à l’agent, chez le service,
 tout ce que permet le compte de l’instance : les accorder rend vaines les restrictions
-de ressource de ses outils. La règle d’une seule instance par package pour les
-identifiants de run ([ADR-0053](0053-github-as-a-bundled-plugin.md)) ne vaut que pour
-eux, et une contribution accordée compte comme une instance accordée pour les étapes
+de ressource de ses outils. Un agent détient toujours au plus une instance par package
+qui déclare des identifiants de run, qu’il les reçoive seuls ou par un accès complet
+([ADR-0053](0053-github-as-a-bundled-plugin.md)) ; ses autres contributions peuvent
+venir de plusieurs instances, et une contribution accordée compte comme une instance accordée pour les étapes
 partagées de configuration ([ADR-0057](0057-guided-plugin-setup.md)). Rien n’est accordé par défaut. `cairn_installation` peut lire et réduire ces
 droits, jamais les accorder. Un agent délégué
 ([ADR-0059](0059-delegated-tasks.md)) doit être couvert par son demandeur contribution
@@ -146,9 +148,12 @@ une règle qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l�
 - **Historique** : chacun voit l’état des déclenchements des règles qu’il voit ; leur
   détail (payload et résultats des actions) n’est visible que du créateur, du
   propriétaire et des membres qui ont accès à l’agent d’exécution.
-- **Échecs** : une erreur passagère (limite de débit, service indisponible) fait
-  réessayer l’action en échec seule, avec un délai croissant qui respecte celui que
-  demande le service ; les actions déjà faites ne sont pas rejouées. Une erreur
+- **Échecs** : une erreur dont le service confirme que rien n’a été fait (limite de
+  débit, refus avant traitement) fait réessayer l’action en échec seule, avec un délai croissant qui respecte celui que
+  demande le service ; les actions déjà faites ne sont pas rejouées. Une mutation
+  interrompue ou sans réponse reste ambiguë et n’est jamais rejouée
+  ([ADR-0056](0056-plugin-oauth-file-transfers-and-gmail.md)) : elle arrête le
+  déclenchement. Une erreur
   définitive, ou des essais épuisés, arrête le déclenchement, avec le détail de
   l’erreur dans l’historique.
 
@@ -179,14 +184,17 @@ pas l’être, il attend.
 
 Un agent qui a l’accès à l’installation n’écrit des règles que pour la personne qui
 lui donne ses instructions : l’auteur de la dernière intervention humaine du tour
-(message, orientation ou réponse à une question ; pour une tâche déléguée, celle du
-tour demandeur). Il crée des règles à son nom, et ne modifie, met en pause, relance ou
+(message, orientation ou réponse à une question écrits par une personne sur le web,
+Android ou le MCP public ; pour une tâche déléguée, celle de son propre tour, ou à
+défaut du tour demandeur). Il crée des règles à son nom, et ne modifie, met en pause, relance ou
 supprime que les règles de cette personne. Un tour sans intervention humaine (tâche
-planifiée, mission créée par un agent, tour lancé par une règle, réveil sans message)
-ne peut écrire aucune règle : ni une injection dans un contenu externe ni une mission
-ne peut agir au nom d’un autre compte. Il ne peut accorder de droits à aucun agent ni
-à aucun compte, ni mettre en pause ou supprimer la règle d’un autre compte, ni lever
-la pause d’urgence du propriétaire. Une règle créée par le MCP public a pour créateur
+planifiée, mission créée par un agent, tour lancé par une règle, réveil sans message),
+et tout tour d’une conversation rattachée à une clé, ne peut écrire aucune règle : ni
+un contenu externe qu’une règle y fait entrer ni une mission ne peut agir au nom d’un
+compte. Il ne peut accorder de droits à aucun agent ni
+à aucun compte, ni mettre en pause ou supprimer la règle d’un autre compte, ni lever la pause
+d’urgence du propriétaire, ni réduire un droit dont dépend la règle active d’un autre
+compte. Une règle créée par le MCP public a pour créateur
 le propriétaire qui a autorisé ce client.
 
 Une règle n’atteint un agent dont la politique autorise l’exécution native, ou une
@@ -257,10 +265,10 @@ rendre ces droits lisibles et n’en accorder aucun par défaut. Les capacités 
 plugin qui ne passent pas par des entrées d’outil ne peuvent pas être restreintes :
 un outil doit recevoir en entrée ce qu’il touche.
 
-Un agent déclenché par une règle agit pour son créateur, à partir d’un contenu écrit
-par des inconnus. S’il a l’accès à l’installation, un auteur externe peut tenter de
-lui faire créer des règles au nom du créateur : un agent qui répond à un salon public
-ne devrait pas avoir cet accès.
+Un agent démarré par une règle agit pour son créateur, à partir d’un contenu écrit
+par des inconnus. Il ne peut pas écrire de règles, mais s’il a l’accès à
+l’installation, un auteur externe peut tenter de lui faire faire tout le reste de ce
+que permet cet accès : un agent qui répond à un salon public ne devrait pas l’avoir.
 
 Comme toute capacité de l’interface, les règles (éditeur compris) et les droits par
 ressource arrivent sur le web, Android, le MCP public et `cairn_installation` en même
