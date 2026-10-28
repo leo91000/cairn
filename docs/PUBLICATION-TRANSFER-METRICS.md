@@ -44,6 +44,11 @@ observation, not proof of completion or a final byte total.
 
 - `wallUs`: elapsed transfer phase (node: since first request in this segment,
   including gaps between batches).
+  On the manager this diagnostic clock starts at collector construction and is
+  snapshotted before encoding/emitting the summary. The existing enclosing
+  `disk_publication` / `phase_ms` clock also includes diagnostic setup/emission;
+  the two clocks therefore need not match exactly. Their difference is not an
+  additional measured storage sub-phase.
 - `observedUnionUs`: union of all measured intervals on that side.
 - `unattributedUs`: `wallUs - observedUnionUs`; unmeasured coordination, allocation,
   iteration, scheduling gaps, and on the node gaps between requests/stream polls.
