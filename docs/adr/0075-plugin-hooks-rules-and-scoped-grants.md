@@ -112,13 +112,13 @@ une règle qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l�
   en [CEL](https://cel.dev) (Common Expression Language), complétée par des fonctions
   de Cairn (tronquer, découper en morceaux, formater une date…). Une formule est pure,
   sans effet de bord ni boucle, et son coût d’évaluation est borné.
-- **Actions** : déclencher un agent, orienter une conversation, appeler un outil,
+- **Actions** : démarrer un agent, orienter une conversation, appeler un outil,
   annuler la conversation d’une clé, répondre à la question d’un agent, mémoriser une
   valeur, attendre puis reprendre. Chaque action peut utiliser la payload et le
   résultat des actions précédentes (`{{steps.post.messageId}}`) et ne fait qu’une
-  chose : déclencher un agent avec une clé déjà liée échoue, et c’est l’arbre qui
+  chose : démarrer un agent avec une clé déjà liée échoue, et c’est l’arbre qui
   choisit d’orienter la conversation existante.
-- **Clé de conversation** : déclencher un agent peut rattacher la conversation à une
+- **Clé de conversation** : démarrer un agent peut rattacher la conversation à une
   clé tirée de la payload (`discord:{{threadId}}`). Les clés appartiennent au créateur
   de la règle : deux membres qui utilisent la même clé désignent deux conversations
   différentes, et une règle n’atteint que les clés de son créateur. Orienter, annuler,
