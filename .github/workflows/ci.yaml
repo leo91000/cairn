@@ -342,7 +342,7 @@ jobs:
       - name: Prepare disposable host block storage and synthetic S3
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends e2fsprogs python3-venv sudo uidmap iproute2 iptables libcap2-bin
+          sudo apt-get install -y --no-install-recommends e2fsprogs python3-venv sudo uidmap iproute2 iptables libcap2-bin strace
           sudo modprobe tun
           sudo modprobe ip_tables
           sudo modprobe iptable_nat
@@ -362,7 +362,7 @@ jobs:
         env:
           EVENT_REFERENCE_SHA: ${{ github.event.pull_request.base.sha || (github.ref == 'refs/heads/main' && github.event.before) || '' }}
         run: |
-          native_reference_sha="$(python3 scripts/native_reference.py)"
+          native_reference_sha="19ce58bcbf2dfa56a0a4b5c4ce54122c0ecdfffd"
           echo "sha=$native_reference_sha" >> "$GITHUB_OUTPUT"
           echo "key=native-reference-v2-$native_reference_sha-$ImageOS-$ImageVersion-rust1.97.1-dev0-default" >> "$GITHUB_OUTPUT"
           echo "artifact=native-reference-v2-$native_reference_sha-$ImageOS-$ImageVersion-rust1.97.1-dev0-default" >> "$GITHUB_OUTPUT"
@@ -448,6 +448,21 @@ jobs:
           reference_fixture="$RUNNER_TEMP/cairn-native-reference-fixture"
           mkdir -p "$reference_fixture"
           git archive "$REFERENCE_SHA" scripts/tests deploy/nodes/native-host.py | tar -x -C "$reference_fixture"
+          python3 - "$reference_fixture/scripts/tests/native_runtime_test.py" <<'PYDIAG'
+          from pathlib import Path
+          import sys
+          path = Path(sys.argv[1])
+          source = path.read_text()
+          needle = "            assert Path('/proc/' + pid + '/ns/mnt').stat().st_ino"
+          assert source.count(needle) == 1
+          probe = """            trace = Path(os.environ['NATIVE_STORAGE_EVIDENCE_DIR']) / ('controller-strace-' + pid)
+                      trace.parent.mkdir(parents=True, exist_ok=True)
+                      subprocess.Popen(['strace', '-f', '-ttt', '-s', '180', '-o', str(trace), '-e', 'trace=openat,newfstatat,statx,readlink,mount,umount2,mknodat,unlink,unlinkat,unshare', '-p', pid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                      time.sleep(0.3)
+          """
+          source = source.replace(needle, probe + needle)
+          path.write_text(source)
+          PYDIAG
           chmod +x reference-native/cairn reference-native/examples/native_storage_qualifier
           sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
       - name: Qualify real ublk, S3, eviction, systemd ownership and crash recovery
