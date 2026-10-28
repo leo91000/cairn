@@ -1,12 +1,11 @@
 //! Adapter for conversations on the Codex app-server.
 use crate::{
-    auth::hex_digest,
     config::Config,
     context_usage::ContextUsage,
     error::{Error, Result},
     rpc::{Incoming, Session},
     skills::atomic_write,
-    validation::{parse, text},
+    validation::text,
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -181,11 +180,6 @@ impl Cursors {
     }
 }
 
-struct Question {
-    request_id: Value,
-    message_id: Option<String>,
-}
-
 // Codex persists client IDs in history. A reserved wire namespace preserves
 // operational identity across turns without changing provider message UUIDs.
 const OPERATIONAL_ID: &str = "cairn-runtime-disk:";
@@ -204,7 +198,6 @@ struct Chat<'a> {
     attempted: HashSet<String>,
     turn_submitted: bool,
     texts: HashMap<String, String>,
-    questions: HashMap<String, Question>,
     /// Subagents this conversation started, by the ID of the item that started them.
     subagents: HashMap<String, Value>,
     /// The subagent each spawned thread works for.
@@ -273,13 +266,8 @@ impl Chat<'_> {
             }
             return Ok(());
         }
-        if item["type"] == "agentMessage" {
-            if !text(&item, "text").is_empty() {
-                self.last_message = text(&item, "text").to_owned();
-            }
-            if kind == "item.completed" {
-                self.ask_in_message(&item).await?;
-            }
+        if item["type"] == "agentMessage" && !text(&item, "text").is_empty() {
+            self.last_message = text(&item, "text").to_owned();
         }
         let mut item = chat_item(item);
         if item["type"] == "context_compaction" {
@@ -562,97 +550,6 @@ impl Chat<'_> {
         }
     }
 
-    /// Questions an agent message asks, shown without blocking the conversation.
-    async fn ask_in_message(&self, item: &Value) -> Result<()> {
-        let Some(questions) = item["questions"].as_array() else {
-            return Ok(());
-        };
-        let fields = questions
-            .iter()
-            .enumerate()
-            .map(|(index, question)| {
-                let options = question["options"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|label| json!({ "label": label }))
-                    .collect::<Vec<_>>();
-                json!({ "id": index.to_string(), "title": question["title"], "options": options })
-            })
-            .collect::<Vec<_>>();
-        let Ok(fields) = parse("questions", fields.into()) else {
-            return Ok(());
-        };
-        let id = hex_digest(&format!("{}:{}", self.thread, text(item, "id")));
-        self.emit(json!({
-            "type": "chat.question",
-            "question": { "id": id, "blocking": false, "fields": fields },
-        }))
-        .await
-    }
-
-    /// `item/tool/requestUserInput`: a question the user answers through the inbox.
-    async fn request_user_input(&mut self, request_id: Value, params: &Value) -> Result<()> {
-        let ours = !text(params, "itemId").is_empty()
-            && (self.thread.is_empty() || params["threadId"] == self.thread.as_str());
-        if !ours {
-            return self.session.rpc.reject(request_id).await;
-        }
-        let fields = params["questions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|question| {
-                json!({
-                    "id": question["id"],
-                    "title": question["question"],
-                    "secret": question["isSecret"].as_bool().unwrap_or(false),
-                    "options": question["options"].as_array().cloned().unwrap_or_default(),
-                })
-            })
-            .collect::<Vec<_>>();
-        let Ok(fields) = parse("questions", fields.into()) else {
-            return self.session.rpc.reject(request_id).await;
-        };
-        let thread = if self.thread.is_empty() {
-            text(params, "threadId")
-        } else {
-            &self.thread
-        };
-        let id = hex_digest(&format!("{thread}:{}", text(params, "itemId")));
-        self.questions.insert(
-            id.clone(),
-            Question {
-                request_id,
-                message_id: None,
-            },
-        );
-        self.emit(json!({
-            "type": "chat.question",
-            "question": { "id": id, "blocking": params["isBlocking"] != false, "fields": fields },
-        }))
-        .await
-    }
-
-    /// `serverRequest/resolved`: closes the questions of a request that no longer waits.
-    async fn resolved(&mut self, params: &Value) -> Result<()> {
-        let ids = self
-            .questions
-            .iter()
-            .filter(|(_, q)| q.request_id == params["requestId"])
-            .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>();
-        for id in ids {
-            let question = self.questions.remove(&id).unwrap();
-            if let Some(message) = question.message_id {
-                self.acknowledge(&message).await?;
-            }
-            self.emit(json!({ "type": "chat.question.closed", "questionId": id }))
-                .await?;
-        }
-        Ok(())
-    }
-
     async fn message_delta(&mut self, params: &Value) -> Result<()> {
         let delta = text(params, "delta");
         let value = self
@@ -677,7 +574,11 @@ impl Chat<'_> {
         let params = incoming.params;
         if let Some(request_id) = incoming.id {
             if incoming.method == "item/tool/requestUserInput" {
-                return self.request_user_input(request_id, &params).await;
+                return self
+                    .session
+                    .rpc
+                    .reject_with_message(request_id, crate::chats::questions::NATIVE_DENIED)
+                    .await;
             }
             return self.session.rpc.reject(request_id).await;
         }
@@ -694,7 +595,7 @@ impl Chat<'_> {
                 .await;
         }
         match incoming.method.as_str() {
-            "serverRequest/resolved" => self.resolved(&params).await?,
+            "serverRequest/resolved" => {}
             "turn/started" => {
                 self.turn = text(&params["turn"], "id").to_owned();
                 self.emit(json!({ "type": "turn.started" })).await?;
@@ -782,7 +683,7 @@ impl Chat<'_> {
             developer_instructions: &plan["instructions"],
             config: ThreadConfig {
                 overrides: plan["codexConfig"].as_object().unwrap_or(&empty),
-                request_user_input: true,
+                request_user_input: false,
                 sandbox_workspace_write: WorkspaceWrite {
                     network_access: true,
                     writable_roots: &plan["writableRoots"],
@@ -1158,32 +1059,6 @@ impl Chat<'_> {
                 continue;
             }
             if message["questionCancelled"] == true {
-                if let Some(question) = self.questions.remove(text(&message, "questionId")) {
-                    self.session
-                        .rpc
-                        .reply(question.request_id, json!({ "answers": {} }))
-                        .await?;
-                    self.emit(json!({
-                        "type": "chat.question.closed",
-                        "questionId": message["questionId"],
-                    }))
-                    .await?;
-                }
-                continue;
-            }
-            if let Some(question) = self.questions.get_mut(text(&message, "questionId"))
-                && let Some(answers) = message["answers"].as_object()
-            {
-                question.message_id = Some(id.to_owned());
-                let answers = answers
-                    .iter()
-                    .map(|(id, answers)| (id.clone(), json!({ "answers": answers })))
-                    .collect::<Map<_, _>>();
-                let request_id = question.request_id.clone();
-                self.session
-                    .rpc
-                    .reply(request_id, json!({ "answers": answers }))
-                    .await?;
                 continue;
             }
             let input = crate::attachments::input(
@@ -1304,7 +1179,6 @@ async fn run_session(
         texts: HashMap::new(),
         subagents: HashMap::new(),
         children: HashMap::new(),
-        questions: HashMap::new(),
         context: None,
         compacted: false,
     };

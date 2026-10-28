@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { ChatQuestion } from '../../../../packages/contracts/chats'
 import { computed, ref, watch } from 'vue'
+import { validQuestionAnswer } from '../../../../packages/contracts/chats'
 import { api, state } from '../api'
 import { ChevronDown, MessageCircleQuestion, Send } from '../icons'
 import { exclusiveSuspensionLabel } from '../run-status'
@@ -20,7 +21,7 @@ const pending = computed(() => props.questions.filter(question => question.statu
 const open = ref(false)
 const selected = ref('')
 const question = computed(() => pending.value.find(question => question.id === selected.value) ?? pending.value[0])
-const answers = ref<Record<string, Record<string, string>>>({})
+const answers = ref<Record<string, Record<string, string[]>>>({})
 const custom = ref<Record<string, Record<string, string>>>({})
 const busy = ref(false)
 const error = ref('')
@@ -40,7 +41,21 @@ watch(() => [props.highlighted, pending.value.length], () => {
     open.value = true
   }
 }, { immediate: true })
-const ready = computed(() => question.value?.fields.every(field => (answers.value[question.value!.id]?.[field.id] || custom.value[question.value!.id]?.[field.id])?.trim()))
+const ready = computed(() => question.value?.fields.every(field => validQuestionAnswer(field, {
+  selected: answers.value[question.value!.id]?.[field.id] ?? [],
+  comment: custom.value[question.value!.id]?.[field.id] ?? '',
+})))
+
+function toggle(field: ChatQuestion['fields'][number], id: string) {
+  const current = question.value
+  if (!current)
+    return
+
+  const selected = answers.value[current.id]![field.id] ?? []
+  answers.value[current.id]![field.id] = field.mode === 'single'
+    ? [id]
+    : selected.includes(id) ? selected.filter(value => value !== id) : [...selected, id]
+}
 
 async function send() {
   const current = question.value
@@ -49,7 +64,10 @@ async function send() {
   busy.value = true
   error.value = ''
   try {
-    const values = Object.fromEntries(current.fields.map(field => [field.id, [answers.value[current.id]?.[field.id] || custom.value[current.id]?.[field.id]]]))
+    const values = Object.fromEntries(current.fields.map(field => [field.id, {
+      selected: field.options.filter(option => answers.value[current.id]?.[field.id]?.includes(option.id)).map(option => option.id),
+      comment: custom.value[current.id]?.[field.id]?.trim() ?? '',
+    }]))
     const serialized = JSON.stringify({ questionId: current.id, answers: values })
     if (submission?.serialized !== serialized)
       submission = { id: crypto.randomUUID(), serialized }
@@ -128,20 +146,31 @@ async function withdraw() {
           v-for="(option, index) in field.options"
           :key="index"
           class="flex! flex-row! cursor-pointer items-start gap-3 rounded-xl border p-3.5 transition-colors hover:border-accent/50"
-          :class="answers[question.id]?.[field.id] === option.label ? 'border-accent bg-accent/8' : 'border-line bg-surface'"
+          :class="answers[question.id]?.[field.id]?.includes(option.id) ? 'border-accent bg-accent/8' : 'border-line bg-surface'"
         >
           <input
-            v-model="answers[question.id]![field.id]"
-            type="radio"
+            :checked="answers[question.id]?.[field.id]?.includes(option.id) ?? false"
+            :type="field.mode === 'multiple' ? 'checkbox' : 'radio'"
             :name="`${question.id}:${field.id}`"
-            :value="option.label"
+            :value="option.id"
             class="mt-1! size-4! shrink-0 p-0! accent-accent"
-            @change="custom[question.id]![field.id] = ''"
+            @change="toggle(field, option.id)"
           >
-          <span class="min-w-0 break-words"><span class="block text-sm font-medium">{{ option.label }}</span><span v-if="option.description" class="mt-1 block text-xs leading-relaxed text-muted">{{ option.description }}</span></span>
+          <span class="min-w-0 break-words"><span class="block text-sm font-medium">{{ option.label }} <span v-if="option.recommended" class="text-xs text-accent">Recommended</span></span><span v-if="option.description" class="mt-1 block text-xs leading-relaxed text-muted">{{ option.description }}</span></span>
         </label>
+        <div v-if="field.options.length" class="flex items-center justify-between gap-2 text-xs text-muted">
+          <span>{{ field.mode === 'multiple' ? `Select ${field.minChoices ?? 1}–${field.maxChoices ?? field.options.length} choices, or answer using text only` : 'Select one choice, or answer using text only' }}</span>
+          <button
+            v-if="answers[question.id]?.[field.id]?.length"
+            type="button"
+            class="shrink-0 underline"
+            @click="answers[question.id]![field.id] = []"
+          >
+            Clear choices
+          </button>
+        </div>
         <label class="block text-xs text-muted">
-          {{ field.options.length ? 'Or write your own answer' : 'Your answer' }}
+          {{ field.options.length ? 'Comment or your own answer (optional with choices)' : 'Your answer' }}
           <input
             v-if="field.secret"
             v-model="custom[question.id]![field.id]"
@@ -149,7 +178,6 @@ async function withdraw() {
             autocomplete="off"
             class="mt-2!"
             maxlength="10000"
-            @input="answers[question.id]![field.id] = ''"
           >
           <textarea
             v-else
@@ -158,7 +186,6 @@ async function withdraw() {
             maxlength="10000"
             class="mt-2! max-h-40 resize-y"
             placeholder="What do you have in mind?"
-            @input="answers[question.id]![field.id] = ''"
           />
         </label>
       </fieldset>

@@ -82,6 +82,7 @@ for current behavior.
 | 0071 | [Managed plugin program caches](0071-managed-plugin-program-caches.md) |
 | 0072 | [Fast journal recovery and receipt reconciliation](0072-fast-journal-recovery-and-receipt-reconciliation.md) |
 | 0073 | [Automatic placement with per-agent node priorities](0073-automatic-agent-placement.md) |
+| 0074 | [Un outil Cairn commun pour les questions des agents](0074-common-agent-question-tool.md) |
 
 ## Renumbered collisions
 

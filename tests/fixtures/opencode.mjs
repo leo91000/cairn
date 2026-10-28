@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import path from 'node:path'
 import process from 'node:process'
+import { askCairn } from './cairn-questions.mjs'
 
 if (process.argv.includes('--version')) {
   process.stdout.write('1.19.0\n')
@@ -231,6 +232,13 @@ async function main() {
 
     if (body.includes('fixture:opencode-hang')) {
       hanging.add(session.id)
+      return
+    }
+
+    if (body.includes('fixture:cairn-question')) {
+      const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT)
+      await askCairn(config.mcp.cairn_workspace, [{ id: 'layout', title: 'Which layout?', options: [{ id: 'compact', label: 'Compact' }] }])
+      await finish(session, input.messageID, 'Awaiting input')
       return
     }
 

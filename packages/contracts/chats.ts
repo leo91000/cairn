@@ -110,7 +110,7 @@ export interface Chat {
 export interface ChatMessage {
   attachments?: ChatAttachment[]
   questionId?: string
-  answers?: Record<string, string[]>
+  answers?: Record<string, QuestionAnswer>
   id: string
   chatId: string
   text: string
@@ -174,7 +174,15 @@ export const questionFields = z.array(z.object({
   id: z.string().min(1).max(200),
   title: z.string().min(1).max(10000),
   secret: z.boolean().default(false),
-  options: z.array(z.object({ label: z.string().max(2000), description: z.string().max(4000).default('') })).max(30).default([]),
+  mode: z.enum(['single', 'multiple']).default('single'),
+  minChoices: z.number().int().min(1).max(30).optional(),
+  maxChoices: z.number().int().min(1).max(30).optional(),
+  options: z.array(z.object({
+    id: z.string().min(1).max(200),
+    label: z.string().min(1).max(2000),
+    description: z.string().max(4000).default(''),
+    recommended: z.boolean().default(false),
+  })).max(30).default([]),
 })).min(1).max(20).refine(fields => new Set(fields.map(field => field.id)).size === fields.length, 'Question identifiers must be unique')
 export interface ChatQuestion {
   id: string
@@ -188,8 +196,28 @@ export interface ChatQuestion {
 }
 export const questionAnswerInput = z.object({
   id: z.string().uuid(),
-  answers: z.record(z.string(), z.array(z.string().trim().min(1).max(10000)).min(1).max(1)),
+  answers: z.record(z.string(), z.object({
+    selected: z.array(z.string().min(1).max(200)).max(30).default([]),
+    comment: z.string().trim().max(10000).default(''),
+  })),
 })
+export const askQuestionsInput = z.object({
+  requestId: z.string().uuid(),
+  questions: questionFields,
+}).describe('Create a questionnaire of at most 64 KiB of encoded JSON. Replies arrive asynchronously.')
+export type QuestionAnswer = z.infer<typeof questionAnswerInput>['answers'][string]
+
+export function validQuestionAnswer(field: ChatQuestion['fields'][number], answer: QuestionAnswer): boolean {
+  if (!answer.selected.length)
+    return !!answer.comment.trim()
+
+  const maximum = field.mode === 'single' ? 1 : (field.maxChoices ?? field.options.length)
+  return answer.selected.length >= (field.minChoices ?? 1)
+    && answer.selected.length <= maximum
+    && new Set(answer.selected).size === answer.selected.length
+    && answer.selected.every(id => field.options.some(option => option.id === id))
+}
+
 export interface ChatExecution {
   attachments?: ChatAttachment[]
   messageId: string

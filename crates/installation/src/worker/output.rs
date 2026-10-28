@@ -382,7 +382,8 @@ async fn record_raw(
 /// Handles chat protocol messages, which are not run output.
 async fn handle_chat_control(s: &Service, id: &str, event: &Value) -> Result<bool> {
     match text(event, "type") {
-        "chat.question" => s.question_receive(id, event["question"].clone()).await?,
+        // Only the authenticated workspace tool can create a questionnaire.
+        "chat.question" => {}
         "chat.question.closed" => {
             s.question_release(id, event["questionId"].as_str()).await?;
         }
@@ -462,7 +463,7 @@ async fn apply_event(
             && outcome["messageId"].is_string()
             && outcome["messageId"] == *crate::waits::execution_id(&run)
         {
-            s.question_release(&checkpoint.id, None).await?;
+            s.question_complete(&checkpoint.id).await?;
         }
     }
     Ok(())

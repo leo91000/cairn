@@ -604,14 +604,12 @@ pub(crate) fn send(
     db.put_message(&values)
 }
 
-/// Deletes a queued message; an answer message reopens its question.
+/// Deletes a queued ordinary message. Submitted questionnaire answers are immutable.
 fn withdraw(db: &Db<'_>, chat_id: &str, message: &Value) -> Result<Value> {
-    if let Some(question_id) = message["questionId"].as_str()
-        && let Some(mut question) = find_question(db, chat_id, question_id)?
-    {
-        question.status = QuestionStatus::Pending;
-        question.message_id = None;
-        save_question(db, &question)?;
+    if message["questionId"].is_string() {
+        return Err(Error::conflict(
+            "A submitted answer cannot be removed. Send a new message to correct it.",
+        ));
     }
     db.0.execute(
         "DELETE FROM chat_messages WHERE chat_id=? AND id=?",
@@ -729,7 +727,6 @@ fn claim_steering(
     chat_id: &str,
     paused: bool,
     delivering: &Value,
-    run_id: &str,
 ) -> Result<Vec<Value>> {
     if chat(db, chat_id).is_ok_and(|chat| !is_active(&chat)) {
         return Ok(Vec::new());
@@ -747,18 +744,10 @@ fn claim_steering(
         {
             message["status"] = MessageStatus::Sending.into();
             db.put_message(&message)?;
+            // Common questionnaire replies are delivered as structured text;
+            // the persisted answer map is not needed by any native adapter.
+            message.as_object_mut().unwrap().remove("answers");
             steering.push(message);
-        }
-    }
-    // Withdrawal commands are not user answers or queued chat messages. Replaying
-    // one is harmless: each provider only rejects a request it still holds.
-    for question in questions(db, chat_id)? {
-        if question.run_id == run_id && question.status == QuestionStatus::Cancelled {
-            steering.push(json!({
-                "id": format!("withdraw-question:{}", question.id),
-                "questionId": question.id,
-                "questionCancelled": true,
-            }));
         }
     }
     Ok(steering)
@@ -1442,16 +1431,25 @@ impl Service {
         let chat_id = text(chat, "id").to_owned();
         let paused = chat["paused"] == true;
         let delivering = run["chatExecution"]["messageId"].clone();
-        let run_id = text(run, "id").to_owned();
         let mut steering = self
             .store
-            .transaction(move |db| claim_steering(db, &chat_id, paused, &delivering, &run_id))
+            .transaction(move |db| claim_steering(db, &chat_id, paused, &delivering))
             .await?;
         let skills = &run["snapshot"]["skills"];
         for message in &mut steering {
             self.prepare_chat_files(text(run, "id"), &message["attachments"])
                 .await?;
             message["text"] = with_invoked_skills(text(message, "text"), skills).into();
+        }
+        // Publish a bounded prefix. Unacknowledged messages remain pending and
+        // join a later batch once the adapter has received this one.
+        let mut encoded_bytes = 2;
+        for (index, message) in steering.iter().enumerate() {
+            encoded_bytes += serde_json::to_vec(message)?.len() + usize::from(index != 0);
+            if encoded_bytes > crate::chat_inbox::ADAPTER_LIMIT {
+                steering.truncate(index);
+                break;
+            }
         }
         let directory = self
             .config
@@ -1468,7 +1466,11 @@ impl Service {
     }
 
     async fn chat_prepare(&self, chat: Value, run: Option<Value>, message: Value) -> Result<()> {
-        let prompt = if text(&message, "text").is_empty() {
+        let prompt = if message["questionId"].is_string() {
+            // The structured response is carried by chatExecution, not by a
+            // mission prompt constrained to the ordinary composer budget.
+            "Continue from the questionnaire response."
+        } else if text(&message, "text").is_empty() {
             "Review the attached files."
         } else {
             text(&message, "text")

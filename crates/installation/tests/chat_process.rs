@@ -1,6 +1,6 @@
 mod common;
 
-use cairn_installation::{chat_process, config::Config, skills::atomic_write};
+use cairn_installation::{chat_process, config::Config, skills::atomic_write, validation::text};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -638,7 +638,7 @@ async fn disk_notice_reaches_codex_without_a_user_delivery_receipt() {
     let config = config(&root);
     let next_config = config.clone();
     let next_home = home.clone();
-    let input = plan(&root, "fixture:question");
+    let input = plan(&root, "fixture:chat-hang");
     std::fs::write(
         root.path().join("inbox/disk-notice.json"),
         json!({ "id": "disk-notice", "operationalNotice": true,
@@ -653,13 +653,9 @@ async fn disk_notice_reaches_codex_without_a_user_delivery_receipt() {
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(event) = rx.recv().await {
             assert!(!(event["type"] == "chat.delivered" && event["messageId"] == "disk-notice"));
-            if event["type"] == "chat.question" {
-                deliver(
-                    &root,
-                    &json!([{ "id": "answer", "questionId": event["question"]["id"],
-                    "answers": { "direction": ["Gradual rollout"] }, "text": "Continue" }]),
-                )
-                .await;
+            if event["type"] == "thread.started" {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                deliver(&root, &json!([{ "id": "finish", "text": "finish now" }])).await;
             }
         }
     })
@@ -694,55 +690,13 @@ async fn disk_notice_reaches_codex_without_a_user_delivery_receipt() {
 }
 
 #[tokio::test]
-async fn native_in_flight_question_accepts_answer_and_preserves_receipt() {
-    let root = TempDir::new().unwrap();
-    let home = prepare(&root);
-    let config = config(&root);
-    let plan = plan(&root, "fixture:question");
-    let (tx, mut rx) = mpsc::channel(64);
-    let task = tokio::spawn(async move {
-        chat_process::run(&config, &home, plan, tx, CancellationToken::new()).await
-    });
-    let mut answer_receipts = 0;
-    let mut completed = false;
-    let mut question_id = String::new();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(event) = rx.recv().await {
-            match event["type"].as_str().unwrap_or("") {
-                "chat.question" => {
-                    question_id = event["question"]["id"].as_str().unwrap().to_owned();
-                    assert_eq!(event["question"]["blocking"], false);
-                    let answer = json!([{
-                        "id": "answer-message",
-                        "questionId": question_id,
-                        "answers": { "direction": ["Gradual rollout"] },
-                        "text": "My answer",
-                    }]);
-                    deliver(&root, &answer).await;
-                }
-                "chat.delivered" if event["messageId"] == "answer-message" => answer_receipts += 1,
-                "turn.completed" => completed = true,
-                _ => {}
-            }
-        }
-    })
-    .await
-    .unwrap();
-    task.await.unwrap().unwrap();
-    assert_eq!(answer_receipts, 1);
-    assert!(completed);
-    assert_eq!(question_id.len(), 64);
-    assert!(root.path().join("result.md").exists());
-}
-
-#[tokio::test]
-async fn withdrawn_native_questions_resume_without_an_answer_or_user_receipt() {
+async fn native_question_requests_are_refused_in_favor_of_the_common_tool() {
     for blocking in [false, true] {
         let root = TempDir::new().unwrap();
         let home = prepare(&root);
         let observed = home.clone();
         let config = config(&root);
-        let plan = plan(
+        let input = plan(
             &root,
             if blocking {
                 "fixture:question blocking"
@@ -752,30 +706,32 @@ async fn withdrawn_native_questions_resume_without_an_answer_or_user_receipt() {
         );
         let (tx, mut rx) = mpsc::channel(64);
         let task = tokio::spawn(async move {
-            chat_process::run(&config, &home, plan, tx, CancellationToken::new()).await
+            chat_process::run(&config, &home, input, tx, CancellationToken::new()).await
         });
         let mut completed = false;
         tokio::time::timeout(Duration::from_secs(10), async {
             while let Some(event) = rx.recv().await {
-                if event["type"] == "chat.question" {
-                    deliver(&root, &json!([{
-                        "id": "withdrawal", "questionId": event["question"]["id"], "questionCancelled": true,
-                    }])).await;
-                }
-                assert!(!(event["type"] == "chat.delivered" && event["messageId"] == "withdrawal"));
+                assert_ne!(event["type"], "chat.question");
                 completed |= event["type"] == "turn.completed";
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         task.await.unwrap().unwrap();
         assert!(completed);
         let thread = conversation(&observed);
-        let answer = thread["turns"][0]["items"]
+        let rejected = thread["turns"][0]["items"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|i| i["type"] == "fixtureAnswer")
+            .find(|item| item["type"] == "fixtureAnswer")
             .unwrap();
-        assert_eq!(answer["answers"], json!({}));
+        assert!(text(&rejected["error"], "message").contains("cairn_workspace.ask_questions"));
+        assert!(rejected["answers"].is_null());
+        assert_eq!(
+            thread["fixtureConfig"]["features.default_mode_request_user_input"],
+            false
+        );
     }
 }
 

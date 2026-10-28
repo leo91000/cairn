@@ -558,12 +558,12 @@ async fn delay_rejects_invalid_inputs_and_pending_steering_but_accepts_missions(
 }
 
 #[tokio::test]
-async fn replacing_a_native_session_retires_its_pending_questions_before_startup() {
+async fn common_questionnaires_survive_replacing_the_native_session() {
     for (provider, fresh_session, expected_pending) in [
         ("codex", false, 1),
-        ("opencode", false, 0),
-        ("claude", false, 0),
-        ("codex", true, 0),
+        ("opencode", false, 1),
+        ("claude", false, 1),
+        ("codex", true, 1),
     ] {
         let f = Fixture::new().await;
         let question = "a".repeat(64);
@@ -623,20 +623,17 @@ async fn replacing_a_native_session_retires_its_pending_questions_before_startup
             detail["pendingQuestions"], expected_pending,
             "provider={provider}, fresh_session={fresh_session}"
         );
-        if expected_pending == 0 {
-            assert_eq!(detail["questions"][0]["status"], "cancelled");
-            assert!(detail["run"]["sessionId"].is_null());
-            assert!(
-                f.service
-                    .question_answer(
-                        &f.chat,
-                        &question,
-                        json!({ "id": id(), "answers": { "scope": ["Obsolete answer"] } }),
-                    )
-                    .await
-                    .is_err()
-            );
-        }
+        assert_eq!(detail["questions"][0]["status"], "pending");
+        f.service
+            .question_answer(
+                &f.chat,
+                &question,
+                json!({
+                    "id": id(), "answers": { "scope": { "comment": "Continue after the switch" } },
+                }),
+            )
+            .await
+            .unwrap();
     }
 }
 

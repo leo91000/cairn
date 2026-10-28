@@ -4,7 +4,7 @@ use crate::{
     config::Config,
     error::{Error, Result},
     skills::atomic_write,
-    validation::{parse, text},
+    validation::text,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
@@ -250,7 +250,6 @@ struct Turn<'a> {
     receipt_path: PathBuf,
     submitted: HashSet<String>,
     pending: HashSet<String>,
-    questions: HashMap<String, (String, usize)>,
     user_messages: HashSet<String>,
     items: HashMap<String, Value>,
     finished_items: HashSet<String>,
@@ -328,51 +327,12 @@ impl Turn<'_> {
             {
                 continue;
             }
-            let question_id = text(&message, "questionId");
             if message["questionCancelled"] == true {
-                if let Some((native_id, _)) = self.questions.get(question_id) {
-                    self.server
-                        .post(&format!("/question/{native_id}/reject"), &json!({}))
-                        .await?;
-                    self.questions.remove(question_id);
-                }
                 self.submitted.insert(id.into());
                 continue;
             }
-            if let Some((native_id, count)) = self.questions.get(question_id).cloned() {
-                let answers = (0..count)
-                    .map(|index| {
-                        message["answers"][index.to_string()]
-                            .as_array()
-                            .cloned()
-                            .unwrap_or_default()
-                    })
-                    .collect::<Vec<_>>();
-                self.server
-                    .post(
-                        &format!("/question/{native_id}/reply"),
-                        &json!({ "answers": answers }),
-                    )
-                    .await?;
-                self.questions.remove(question_id);
-                self.submitted.insert(id.into());
-                self.deliver(id).await?;
-                emit(
-                    &self.events,
-                    json!({
-                        "type": "chat.question.closed",
-                        "questionId": question_id,
-                    }),
-                )
+            self.submit(id, text(&message, "text"), &message["attachments"])
                 .await?;
-            } else if question_id.is_empty() {
-                self.submit(id, text(&message, "text"), &message["attachments"])
-                    .await?;
-            } else {
-                return Err(Error::conflict(
-                    "This OpenCode question has expired. Send a new message to continue; working files were preserved.",
-                ));
-            }
         }
         Ok(())
     }
@@ -501,58 +461,9 @@ impl Turn<'_> {
                 {
                     return Err(Error::bad_gateway("OpenCode returned an invalid question."));
                 }
-                let fields = props["questions"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .enumerate()
-                    .map(|(index, question)| {
-                        let options = question["options"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .map(|option| {
-                                json!({
-                                    "label": option["label"],
-                                    "description": option["description"].as_str().unwrap_or(""),
-                                })
-                            })
-                            .collect::<Vec<_>>();
-                        json!({
-                            "id": index.to_string(),
-                            "title": question["question"],
-                            "options": options,
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                let fields = parse("questions", fields.into())?;
-                let public_id = question_id(text(props, "sessionID"), id);
-                self.questions.insert(
-                    public_id.clone(),
-                    (id.into(), fields.as_array().unwrap().len()),
-                );
-                emit(
-                    &self.events,
-                    json!({
-                        "type": "chat.question",
-                        "question": { "id": public_id, "blocking": true, "fields": fields },
-                    }),
-                )
-                .await?;
-            }
-            "question.replied" | "question.rejected"
-                if self.sessions.contains(text(props, "sessionID")) =>
-            {
-                let id = question_id(text(props, "sessionID"), text(props, "requestID"));
-                self.questions.remove(&id);
-                emit(
-                    &self.events,
-                    json!({
-                        "type": "chat.question.closed",
-                        "questionId": id,
-                    }),
-                )
-                .await?;
+                self.server
+                    .post(&format!("/question/{id}/reject"), &json!({}))
+                    .await?;
             }
             "permission.asked" if self.sessions.contains(text(props, "sessionID")) => {
                 let id = text(props, "id");
@@ -679,7 +590,7 @@ impl Turn<'_> {
                 self.pending.remove(&id);
             }
         }
-        if !self.pending.is_empty() || !self.questions.is_empty() {
+        if !self.pending.is_empty() {
             return Ok(false);
         }
         let answer = response["parts"]
@@ -818,7 +729,6 @@ async fn execute(
         receipt_path,
         submitted: HashSet::new(),
         pending: HashSet::new(),
-        questions: HashMap::new(),
         user_messages: HashSet::new(),
         items: HashMap::new(),
         finished_items: HashSet::new(),
@@ -875,15 +785,11 @@ async fn execute(
                 let event = event.ok_or_else(|| Error::bad_gateway("OpenCode event stream closed."))??;
                 if turn.on_event(&event).await? {
                     turn.poll_inbox().await?;
-                    if turn.pending.is_empty() && turn.questions.is_empty() { return turn.complete().await; }
+                    if turn.pending.is_empty() { return turn.complete().await; }
                 }
             }
         }
     }
-}
-
-fn question_id(session: &str, native: &str) -> String {
-    crate::auth::hex_digest(&format!("opencode:{session}:{native}"))
 }
 
 #[cfg(test)]

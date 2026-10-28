@@ -183,7 +183,7 @@ A message starts work with the target agent's permissions.
 | --- | --- |
 | `read` | `list_chats`, `get_chat`, `read_chat_content`, `list_chat_questions`, `list_chat_artifacts`, `read_chat_artifact`, `list_chat_attachments`, `read_chat_attachment` |
 | `manage` | `create_chat`, `rename_chat`, `delete_chat`, `restore_chat`, `upload_chat_attachment`, `set_chat_artifact_visibility` |
-| `run` | `send_chat_message`, `edit_chat_message`, `delete_chat_message`, `set_chat_paused`, `stop_chat`, `resume_chat`, `restart_chat_session`, `compact_chat`, `answer_chat_question` |
+| `run` | `send_chat_message`, `edit_chat_message`, `delete_chat_message`, `set_chat_paused`, `stop_chat`, `resume_chat`, `restart_chat_session`, `compact_chat`, `answer_chat_question`, `withdraw_chat_question` |
 
 `list_chats` supports agent/project filters and active/trash views. Lists and
 `get_chat` take `offset` and `limit` (default 50, maximum 100); follow `nextOffset`
@@ -213,7 +213,23 @@ its own execution, without a user message or rewritten history; see
 the first message or later automatic title evaluation can update it.
 `list_chat_questions` exposes fields and status; `answer_chat_question` accepts
 an idempotent UUID in `answer.id` and one answer per field in `answer.answers`.
-Suggested options are never submitted automatically.
+Each field answer is `{ "selected": ["option-id"], "comment": "Optional precision" }`;
+an empty selection with nonempty text is accepted, and selection bounds do not
+count the comment as a choice. `withdraw_chat_question` retires a pending
+questionnaire without supplying any answer or authorization. These operations
+share their contract with `cairn_installation`. Suggested options are never
+preselected or submitted automatically.
+
+Agents create questionnaires in their current conversation with
+`cairn_workspace.ask_questions({ requestId, questions })`: a stable UUID
+`requestId` makes retries safe, question and option IDs are unique, `mode` defaults
+to `single` or can be `multiple`, and optional `minChoices`/`maxChoices` constrain
+selections. Options carry a label, optional description and `recommended` flag.
+Keep each complete questionnaire within 64 KiB of encoded JSON so its reply fits
+the adapter delivery budget.
+The call returns immediately with `questionId`; answers arrive later as a user
+message. The private workspace grant is checked transactionally, independently
+of installation-management access. Native question tools are not used.
 
 `delete_chat` uses the apps' deletion lifecycle. Busy chats require `confirm: true`
 to stop execution and cancel messages/questions. Existing cleanup rules may

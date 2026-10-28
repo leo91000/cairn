@@ -63,6 +63,7 @@ impl ExecutionAdapter for Opencode {
         let mut native_names = std::collections::HashSet::new();
         let mut permissions = Map::new();
         permissions.insert("*".into(), "allow".into());
+        permissions.insert("question".into(), "deny".into());
         for (name, server) in &configuration.servers {
             if !native_names.insert(native_tool_name(name)) {
                 return Err(Error::bad(

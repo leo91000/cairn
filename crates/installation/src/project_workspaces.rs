@@ -248,6 +248,10 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
             let result = crate::nodes::moves::request_by_agent(s, &run, args).await;
             ToolResult::from_result(result, summary)
         }
+        "ask_questions" => ToolResult::from_result(
+            crate::chats::questions::ask(s, bearer, args.clone()).await,
+            summary,
+        ),
         "pending_questions" | "withdraw_question" => ToolResult::from_result(
             crate::chats::questions::for_agent(
                 s,
@@ -352,6 +356,7 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         crate::nodes::moves::tool(),
         crate::artifacts::sharing::tool(),
         crate::outcome::tool(),
+        crate::chats::questions::ask_tool(),
         crate::chats::questions::list_tool(),
         crate::chats::questions::cancel_tool(),
         crate::waits::tool(&conditions, delegates),

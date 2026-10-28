@@ -182,6 +182,8 @@ test('a saved quota failure really resumes its session from the inline card', as
 })
 
 test('Claude agents, chats, questions and scheduled work run on a connected Claude account', async ({ page, workspace }, testInfo) => {
+  // Start this independent questionnaire journey with a fresh request budget.
+  await workspace.restart()
   test.setTimeout(120000)
   expect((await connectClaude(workspace)).state).toBe('complete')
   await page.goto(workspacePath('/agents'))
@@ -211,10 +213,16 @@ test('Claude agents, chats, questions and scheduled work run on a connected Clau
   await expect(page.getByText('Claude fixture completed', { exact: true })).toHaveCount(2)
   await expectSingleScroll(page)
   await page.screenshot({ path: testInfo.outputPath('claude-chat-mobile.png') })
-  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'fixture:question' })
-  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).questions?.filter((q: { status: string }) => q.status === 'pending').length, { timeout: 20000 }).toBe(1)
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'fixture:cairn-question' })
+  await expect.poll(async () => {
+    const detail = await workspace.api(`/api/chats/${chat.id}`)
+    if (detail.run?.error)
+      throw new Error(detail.run.error)
+    return detail.questions?.filter((q: { status: string }) => q.status === 'pending').length
+  }, { timeout: 20000 }).toBe(1)
   const question = (await workspace.api(`/api/chats/${chat.id}`)).questions.find((q: { status: string }) => q.status === 'pending')
-  await workspace.api(`/api/chats/${chat.id}/questions/${question.id}/answer`, 'POST', { id: crypto.randomUUID(), answers: { 0: ['Small change'] } })
+  await workspace.api(`/api/chats/${chat.id}/questions/${question.id}/answer`, 'POST', { id: crypto.randomUUID(), answers: { approach: { selected: ['small'], comment: 'Keep it focused' } } })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).questions.find((q: { id: string }) => q.id === question.id)?.status).toBe('answered')
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
   const task = await workspace.api('/api/tasks', 'POST', { settings: { name: 'Claude scheduled work', prompt: 'Review the workspace', agentId: agent.id } })
   const run = await workspace.api(`/api/tasks/${task.id}/run`, 'POST')

@@ -267,6 +267,15 @@ pub(super) async fn invoke(
             .resume_authorized(s, &run_id, commit_authority)
             .await;
     }
+    if name == "withdraw_chat_question" {
+        return s
+            .question_cancel_authorized(
+                text(&args, "chatId"),
+                text(&args, "questionId"),
+                commit_authority,
+            )
+            .await;
+    }
     if name == "answer_chat_question" {
         return s
             .question_answer_authorized(

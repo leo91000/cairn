@@ -140,6 +140,15 @@ Une remise à zéro de fenêtre d’usage offerte par Codex, utilisée automatiq
 Le niveau de service Codex demandé pour un tour (Standard, Fast, Ultrafast…), choisi indépendamment du modèle et du raisonnement pour le prochain message ou par défaut sur un agent. Seuls les niveaux que le catalogue Codex d’un compte annonce pour le modèle sont proposés ; une vitesse plus rapide consomme plus vite l’usage du compte. Claude Code et OpenCode n’en proposent pas.
 _À éviter_ : tier, mode rapide (sauf pour nommer le niveau Fast de Codex).
 
+**Question d’un agent** :
+Une demande de réponse adressée à une personne par un agent dans une conversation Cairn. Elle peut proposer des choix ou laisser la personne s’exprimer librement.
+
+**Questionnaire d’un agent** :
+Un ensemble d’une ou plusieurs questions d’un agent auxquelles une personne répond en un seul envoi. Il reste disponible dans la conversation pendant l’attente des réponses.
+
+**Commentaire de réponse** :
+Le texte libre qu’une personne ajoute aux choix retenus pour une question d’un agent, afin de préciser sa réponse.
+
 **Demandeur d’une mission** :
 La conversation ou la mission dont l’agent a lancé l’exécution d’une mission. Une mission bloquée qui attend son demandeur lui revient plutôt qu’à l’utilisateur, tant que ce demandeur existe.
 _Avoid_ : parent, orchestrateur

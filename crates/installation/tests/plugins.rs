@@ -731,7 +731,7 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
             "id": question,
             "blocking": true,
             "fields": [{ "id": "0", "title": "Retry the deploy?", "secret": false, "options": [
-                { "label": "Yes", "description": "" }, { "label": "No", "description": "Leave it" }
+                { "id": "Yes", "label": "Yes", "description": "" }, { "id": "No", "label": "No", "description": "Leave it" }
             ] }],
         }),
     )
@@ -2169,7 +2169,7 @@ async fn public_question_partial_answers_require_the_starters_authority() {
         "id": question,
         "blocking": true,
         "fields": [
-            { "id": "first", "title": "First?", "secret": false, "options": [{ "label": "Safe", "description": "" }, { "label": "Attacker", "description": "" }] },
+            { "id": "first", "title": "First?", "secret": false, "options": [{ "id": "Safe", "label": "Safe", "description": "" }, { "id": "Attacker", "label": "Attacker", "description": "" }] },
             { "id": "second", "title": "Second?", "secret": false, "options": [] },
         ],
     })).await.unwrap();
@@ -2223,7 +2223,7 @@ async fn public_question_partial_answers_require_the_starters_authority() {
         queued
             .iter()
             .any(|message| message["answers"]
-                == json!({ "first": ["Safe"], "second": ["Continue"] }))
+                == json!({ "first": { "selected": [], "comment": "Safe" }, "second": { "selected": [], "comment": "Continue" } }))
     );
     session.stop().await;
     server.abort();
@@ -2321,7 +2321,7 @@ async fn channel_fallback_questions_retry_and_controls_route_to_the_right_conver
     let question = "c".repeat(64);
     s.question_receive(run, json!({
         "id": question, "blocking": true,
-        "fields": [{ "id": "x".repeat(101), "title": "Choose?", "secret": false, "options": [{ "label": format!("a{}", "é".repeat(40)), "description": "" }] }],
+        "fields": [{ "id": "x".repeat(101), "title": "Choose?", "secret": false, "options": [{ "id": "choice", "label": format!("a{}", "é".repeat(40)), "description": "" }] }],
     })).await.unwrap();
     // Another queued message in this conversation must not republish its question.
     let mut second = message("541", "300", "<@400> also this");
@@ -2467,7 +2467,9 @@ async fn optional_questions_are_not_republished_on_later_turns() {
     .await
     .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    s.question_release(run, Some(&question)).await.unwrap();
+    s.question_cancel(text(&chat, "id"), &question)
+        .await
+        .unwrap();
     s.store
         .event(
             run,
