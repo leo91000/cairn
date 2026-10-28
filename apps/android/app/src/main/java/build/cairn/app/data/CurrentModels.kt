@@ -136,6 +136,9 @@ data class Chat(
     val sessionRestartRequested: Boolean = false,
     val canRequestNewSession: Boolean = false,
     val lifecycleError: String? = null,
+    val environmentState: String? = null,
+    val environmentExpiredAt: Long? = null,
+    val environmentError: String? = null,
     val wakeup: ChatWakeup? = null,
     val suspendedByExclusive: ExclusiveReservation? = null,
     /** The conversation that delegated this one, while it still exists. */

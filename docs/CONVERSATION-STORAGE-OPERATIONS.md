@@ -37,7 +37,9 @@ to initialize, with the existing 120-second idle deadline for every streamed blo
 dedicated bucket without public domains, locks or enabled lifecycle rules, with
 `STORAGE_S3_PRIVATE_BUCKET_CONFIRMED=true` after those provider controls are checked.
 
-## Deletion
+## Environment expiration and deletion
+
+After the configured inactivity delay (7 days by default), only the working environment expires. History, uploaded attachments, published artifacts and shared artifact links remain available. A new message recreates an environment and warns the agent about the lost working files. See [conversation retention](CONVERSATION-RETENTION.md).
 
 Conversation archival, archive restoration and cold transitions have been removed. Before deploying this change, finish the owner-authorized deletion of existing archived conversations and their objects using the prior release or an explicitly scoped maintenance procedure. Never empty a bucket referenced by active on-demand disks.
 

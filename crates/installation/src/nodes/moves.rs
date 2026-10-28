@@ -173,6 +173,11 @@ fn validate_destination(args: &Value) -> Result<()> {
 }
 
 async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Result<Value> {
+    if run["environmentState"].is_string() {
+        return Err(Error::conflict(
+            "The working environment expired. Send a new message before moving it.",
+        ));
+    }
     if ["cpu", "memoryMiB", "diskMiB"]
         .iter()
         .any(|key| args.get(key).is_some())
@@ -342,7 +347,8 @@ async fn record_request(
                     "Finish the mission wait before requesting a node move.",
                 ));
             }
-            if current["moveRequest"].is_object()
+            if current["environmentState"].is_string()
+                || current["moveRequest"].is_object()
                 || !current["cancelRequestedAt"].is_null()
                 || current["status"] != expected
                 || (expected == RunStatus::Queued && current["pinnedNodeId"].is_string())

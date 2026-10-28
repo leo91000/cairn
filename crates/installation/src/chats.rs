@@ -269,6 +269,11 @@ fn compaction_blocker(db: &Db<'_>, chat: &Value, run: Option<&Value>) -> Result<
     if !is_active(chat) {
         return Ok(Some("This conversation has been deleted.".into()));
     }
+    if chat["environmentState"].is_string() {
+        return Ok(Some(
+            "The working environment expired. Send a new message to start a fresh session.".into(),
+        ));
+    }
     let Some(run) = run else {
         return Ok(Some("Send a first message before compacting.".into()));
     };
@@ -525,6 +530,7 @@ fn message_id_used(db: &Db<'_>, id: &str) -> Result<bool> {
 }
 
 fn require_sendable(db: &Db<'_>, chat: &Value, messages: &[Value], id: &str) -> Result<()> {
+    crate::conversation_lifecycle::require_environment_ready(chat)?;
     let undelivered = messages
         .iter()
         .filter(|message| message["status"] != MessageStatus::Delivered)
@@ -780,6 +786,7 @@ fn needs_attention(chat: &Value, run: Option<&Value>) -> bool {
     run.is_some_and(|run| run["status"] != RunStatus::Succeeded)
         && chat["cancelledByDeletion"] != true
         && chat["sessionRestartRequested"] != true
+        && chat["environmentState"] != "expired"
 }
 
 /// Applies the provider, model, reasoning and speed chosen for this message. The speed is
@@ -897,10 +904,13 @@ fn continue_run(
         None => return Err(Error::conflict("Run checkpoint not found")),
     };
     let provider = Provider::of_run(snapshot)?;
-    let restart_requested =
-        chat["sessionRestartRequested"] == true || checkpoint.fresh_session == Some(true);
+    crate::conversation_lifecycle::require_environment_ready(chat)?;
+    let expired = chat["environmentState"] == "expired";
+    let restart_requested = expired
+        || chat["sessionRestartRequested"] == true
+        || checkpoint.fresh_session == Some(true);
     if provider != Provider::of_run(run)? || restart_requested {
-        if run["sessionId"].is_string() {
+        if !expired && run["sessionId"].is_string() {
             checkpoint.workspace_initialized = Some(true);
         }
         // The next provider cannot resolve requests from the session being replaced.
@@ -919,10 +929,14 @@ fn continue_run(
                 ..Default::default()
             },
         )?;
-        let status = format!(
-            "Continuing with {} · conversation context and workspace preserved",
-            provider.label()
-        );
+        let status = if expired {
+            "Starting a fresh environment using the preserved conversation history".to_owned()
+        } else {
+            format!(
+                "Continuing with {} · conversation context and workspace preserved",
+                provider.label()
+            )
+        };
         db.event(run_id, &EventKind::Status, &status, None)?;
     } else if provider == Provider::Codex && resumes_mission_thread(run) {
         // Codex keeps the developer instructions a thread started with, so the
@@ -947,7 +961,10 @@ fn continue_run(
         finished_at: Some(None),
         cancel_requested_at: Some(None),
         recovery_pending: Some(true),
-        boundary: Some(json!({ "chatExecution": serde_json::to_value(execution)? })),
+        boundary: Some(json!({
+            "chatExecution": serde_json::to_value(execution)?,
+            "environmentState": null,
+        })),
         ..Default::default()
     };
     // A compaction answers no message: the last reply and its outcome stay current.
@@ -998,6 +1015,7 @@ fn launch_turn(
     if !is_active(&chat) || held_by_pause || !unchanged {
         return Ok(());
     }
+    crate::conversation_lifecycle::require_environment_ready(&chat)?;
     let execution = ChatExecution {
         message_id: message["id"].clone(),
         text: with_invoked_skills(text(&message, "text"), &snapshot["snapshot"]["skills"]),
@@ -1017,6 +1035,7 @@ fn launch_turn(
     }
     chat["cancelledByDeletion"] = false.into();
     chat["sessionRestartRequested"] = false.into();
+    chat["environmentState"] = Value::Null;
     chat["wakeup"] = Value::Null;
     db.put("chats", &chat)?;
     if waking {
@@ -1352,7 +1371,7 @@ impl Service {
 
     pub async fn chat_tick(&self, active: &HashSet<String>) -> Result<()> {
         for chat in self.store.list("chats").await? {
-            if !is_active(&chat) {
+            if !is_active(&chat) || chat["environmentState"] == "cleaning" {
                 continue;
             }
             if self

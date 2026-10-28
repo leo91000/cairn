@@ -39,6 +39,9 @@ fn summary(chat: &Value) -> Value {
         "requester",
         "contextUsage",
         "compaction",
+        "environmentState",
+        "environmentExpiredAt",
+        "environmentError",
     ] {
         result[key] = chat[key].clone();
     }
