@@ -5,6 +5,7 @@ import type { ChatMessage } from './ChatMessage'
 import type { ChatRequester } from './ChatRequester'
 import type { CodingAgentSwitch } from './CodingAgentSwitch'
 import type { ContextUsage } from './ContextUsage'
+import type { ConversationEnvironmentState } from './ConversationEnvironmentState'
 import type { ConversationLifecycle } from './ConversationLifecycle'
 import type { ConversationRequester } from './ConversationRequester'
 import type { ConversationStatus } from './ConversationStatus'
@@ -30,6 +31,9 @@ export interface Chat {
   canRequestNewSession: boolean
   unread: boolean
   lifecycleError?: string | null
+  environmentState?: ConversationEnvironmentState | null
+  environmentExpiredAt?: number | null
+  environmentError?: string | null
   requestedBy?: ConversationRequester | null
   requester?: ChatRequester | null
   provider?: AgentProvider | null

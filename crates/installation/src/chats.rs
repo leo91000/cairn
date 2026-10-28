@@ -614,7 +614,7 @@ pub(crate) fn send(
         chat.title = if private_answer {
             PRIVATE_ANSWER_TEXT.into()
         } else {
-            title(&values).into()
+            title(&values)
         };
     }
     touch(&mut chat);

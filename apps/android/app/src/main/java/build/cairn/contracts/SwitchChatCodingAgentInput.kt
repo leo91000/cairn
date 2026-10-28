@@ -17,5 +17,6 @@ data class SwitchChatCodingAgentInput(
         require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
         java.util.UUID.fromString(requestId)
         java.util.UUID.fromString(runId)
+        require(turnId.codePointCount(0, turnId.length) in 1..200)
     }
 }

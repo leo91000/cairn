@@ -20,6 +20,12 @@ data class MissionSettings(
 ) {
     init {
         java.util.UUID.fromString(agentId)
+        cron?.let { require(it.codePointCount(0, it.length) <= 100) }
+        require(name.codePointCount(0, name.length) in 1..100)
         projectId?.let { java.util.UUID.fromString(it) }
+        require(prompt.codePointCount(0, prompt.length) in 1..50000)
+        skills?.let { require(it.size <= 100) }
+        require(tags.size <= 10)
+        require(timezone.codePointCount(0, timezone.length) in 1..100)
     }
 }

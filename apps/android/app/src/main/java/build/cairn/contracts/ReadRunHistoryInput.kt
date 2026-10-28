@@ -12,6 +12,7 @@ data class ReadRunHistoryInput(
 ) {
     init {
         require(before in 1L..9007199254740991L)
+        require(history.codePointCount(0, history.length) in 1..200)
         java.util.UUID.fromString(runId)
     }
 }

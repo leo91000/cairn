@@ -539,7 +539,7 @@ pub(crate) fn operations() -> Vec<Value> {
     operations.extend(
         crate::capabilities::CHAT_OPERATIONS
             .iter()
-            .map(|op| op.descriptor()),
+            .map(crate::capabilities::conversations::ChatOperation::descriptor),
     );
     operations.extend(
         crate::capabilities::PROJECT_OPERATIONS

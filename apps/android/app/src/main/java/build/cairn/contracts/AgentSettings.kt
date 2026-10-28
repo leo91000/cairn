@@ -20,8 +20,17 @@ data class AgentSettings(
     val timeoutMinutes: Int = 0,
 ) {
     init {
+        require(description.codePointCount(0, description.length) <= 500)
+        require(exclusiveNodes.size <= 100)
+        require(instructions.codePointCount(0, instructions.length) <= 20000)
+        require(model.codePointCount(0, model.length) <= 100)
+        require(name.codePointCount(0, name.length) in 1..100)
+        require(nodePriorities.size <= 100)
+        require(plugins.size <= 100)
         require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
+        require(reasoning.codePointCount(0, reasoning.length) <= 40)
         require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(reasoning))
+        require(speed.codePointCount(0, speed.length) <= 40)
         require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(speed))
         require(timeoutMinutes in 0..720)
     }

@@ -92,10 +92,10 @@ pub fn require_active(chat: &Value) -> Result<()> {
 }
 
 pub fn require_active_run(db: &Db<'_>, run: &str) -> Result<()> {
-    if let Some(chat) = db.conversation_for_run(run)? {
-        if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active {
-            return Err(Error::conflict("This conversation has been deleted."));
-        }
+    if let Some(chat) = db.conversation_for_run(run)?
+        && chat.lifecycle != cairn_contracts::ConversationLifecycle::Active
+    {
+        return Err(Error::conflict("This conversation has been deleted."));
     }
     Ok(())
 }

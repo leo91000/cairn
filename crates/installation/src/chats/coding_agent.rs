@@ -499,13 +499,13 @@ pub(crate) fn pending_for_run(db: &Db<'_>, run: &str) -> Result<bool> {
 }
 
 pub(crate) fn cancel_in(db: &Db<'_>, run: &str) -> Result<()> {
-    if let Some(chat) = db.conversation_for_run(run)? {
-        if let Some(mut state) = db.engine_switch(&chat.id)? {
-            state.pending = false;
-            state.error = None;
-            state.current_expires_at = Some(now() + RECEIPT_TTL_MS);
-            db.save_engine_switch(&state)?;
-        }
+    if let Some(chat) = db.conversation_for_run(run)?
+        && let Some(mut state) = db.engine_switch(&chat.id)?
+    {
+        state.pending = false;
+        state.error = None;
+        state.current_expires_at = Some(now() + RECEIPT_TTL_MS);
+        db.save_engine_switch(&state)?;
     }
     Ok(())
 }

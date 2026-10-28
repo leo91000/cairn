@@ -18,7 +18,11 @@ data class AccessPolicy(
 ) {
     init {
         require(Regex("^(auto|firecracker|native)\$").containsMatchIn(backend))
+        mcps?.let { require(it.size <= 100) }
+        nodes?.let { require(it.size <= 100) }
+        projects?.let { require(it.size <= 100) }
         require(Regex("^(yolo|workspace-write|read-only)\$").containsMatchIn(sandbox))
+        skills?.let { require(it.size <= 100) }
     }
 }
 

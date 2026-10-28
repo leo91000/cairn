@@ -11,5 +11,7 @@ data class PluginActionInput(
     val payload: kotlinx.serialization.json.JsonElement? = null,
     val values: JsonObject,
 ) {
-    init {}
+    init {
+        require(action.codePointCount(0, action.length) in 1..40)
+    }
 }

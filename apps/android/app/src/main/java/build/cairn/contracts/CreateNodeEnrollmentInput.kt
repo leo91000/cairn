@@ -12,5 +12,6 @@ data class CreateNodeEnrollmentInput(
 ) {
     init {
         require(Regex("^(firecracker|native)\$").containsMatchIn(backend))
+        require(name.codePointCount(0, name.length) in 1..100)
     }
 }
