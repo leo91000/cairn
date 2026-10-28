@@ -136,6 +136,56 @@ fn manager_chat_plans_keep_mcp_configuration_out_of_process_arguments() {
 }
 
 #[tokio::test]
+async fn resident_shell_commands_receive_only_the_current_runs_plugin_channel() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let service = Resident::start(config(&root), home.clone(), &root).await;
+    let run = json!({ "snapshot": { "agent": { "provider": "codex" } } });
+    let prepared = json!({
+        "output": root.path().join("result.md"),
+        "cwd": root.path(),
+    });
+
+    for (index, token) in [Some("first-lease"), Some("second-lease"), None]
+        .into_iter()
+        .enumerate()
+    {
+        let mut env = json!({ "UNRELATED_SECRET": "must-not-reach-shell" });
+        if let Some(token) = token {
+            env["CAIRN_MCP_RUN_TOKEN"] = token.into();
+        }
+        let origin = if index == 1 {
+            env["CAIRN_MCP_ORIGIN"] = "http://127.0.0.1:5523".into();
+            "http://127.0.0.1:5523"
+        } else {
+            "http://127.0.0.1:5202"
+        };
+        let mcp = json!({ "codexConfig": {}, "env": env });
+        let generated =
+            cairn_installation::run_output::chat_plan(&run, &prepared, root.path(), &mcp, None)
+                .unwrap();
+        let mut plan = plan(&root, &format!("message {index}"));
+        plan["execution"]["messageId"] = format!("message-{index}").into();
+        plan["codexConfig"] = generated["codexConfig"].clone();
+        if index > 0 {
+            plan["sessionId"] = "fixture-chat".into();
+        }
+
+        service.run(plan).await;
+        assert_eq!(
+            conversation(&home)["fixtureConfig"]["shell_environment_policy"]["set"],
+            json!({
+                "CAIRN_MCP_RUN_TOKEN": token.unwrap_or(""),
+                "CAIRN_MCP_ORIGIN": origin,
+            }),
+            "A retained process must replace the plugin channel on every attempt, including removal",
+        );
+    }
+
+    service.stop().await;
+}
+
+#[tokio::test]
 async fn native_reconnect_notices_are_scoped_to_the_active_turn_without_failing_it() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);
