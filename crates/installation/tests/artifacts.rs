@@ -450,7 +450,7 @@ async fn guest_export_rejects_symlinks_devices_and_parent_paths_and_snapshots_or
         Path::new("/dev/zero").to_owned(),
     ] {
         assert!(
-            file::open_export(&path, root.path()).is_err(),
+            file::open_export(&path, root.path()).await.is_err(),
             "{}",
             path.display()
         );
