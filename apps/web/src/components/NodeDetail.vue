@@ -55,7 +55,7 @@ async function reviewRequest() {
 }
 
 // A control that did its job disappears (old disks freed, reservation released): keep focus in the panel.
-watch(() => [props.node.staleDisks?.count, props.node.exclusiveReservation?.id], async () => {
+watch([() => props.node.staleDisks?.count, () => props.node.exclusiveReservation?.id], async () => {
   await nextTick()
   if (!content.value?.contains(document.activeElement) && (document.activeElement === document.body || !document.activeElement?.isConnected))
     content.value?.focus()
@@ -382,7 +382,7 @@ const reserve = computed(() => {
                 {{ formatBytes(node.diskAccounting.poolReserveBytes) }}
               </dd>
               <dt class="text-muted">
-                Reclaimable
+                Reclaimable, at least
               </dt>
               <dd class="text-right tabular-nums">
                 {{ formatBytes(node.diskAccounting.reclaimableBytes) }}

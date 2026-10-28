@@ -68,7 +68,7 @@ describe('node health', () => {
     expect(nodeHealth(node({ executionReady: false, budgetError: 'cgroup' }))).toMatchObject({ state: 'attention', detail: 'The shared budget could not be applied' })
     expect(nodeHealth(node({ executionReady: false, updateError: 'image mismatch' }))).toMatchObject({ state: 'attention', detail: 'The runtime reported an error' })
     // A saved budget turns readiness off until the next heartbeat applies it: not a fault.
-    expect(nodeHealth(node({ executionReady: false }))).toEqual({ state: 'updating', label: 'Getting ready', detail: 'The runtime is applying its configuration' })
+    expect(nodeHealth(node({ executionReady: false }))).toEqual({ state: 'updating', label: 'Not ready', detail: 'The runtime is not ready yet' })
     const unreported = node()
     delete (unreported as Partial<ExecutionNode>).executionReady
     expect(nodeHealth(unreported).state).toBe('updating')
@@ -76,6 +76,11 @@ describe('node health', () => {
     expect(nodeHealth(node({ agents: [], accepting: false }))).toMatchObject({ state: 'setup', detail: 'No agent can use this machine yet' })
     expect(nodeHealth(node({ accepting: false, pressure: 'memory' })).state).toBe('paused')
     expect(nodeHealth(node({ pressure: 'disk' }))).toMatchObject({ state: 'busy', detail: 'Shared disk space is low' })
+    expect(nodeHealth(node({ pressure: 'memory' })).detail).toBe('Shared RAM is under pressure')
+    const reservation = { reason: 'GPU benchmark' } as ExecutionNode['exclusiveReservation']
+    expect(nodeHealth(node({ exclusiveReservation: reservation, pressure: 'memory' }))).toEqual({ state: 'reserved', label: 'Reserved', detail: 'GPU benchmark' })
+    // Present but empty errors still count, as in the Kotlin contract.
+    expect(nodeHealth(node({ executionReady: false, budgetError: '' })).state).toBe('attention')
   })
 
   it('raises privilege changes and failed updates for the owner', () => {

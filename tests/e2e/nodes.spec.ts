@@ -152,7 +152,7 @@ test('shows disk accounting and keeps the storage draft revision through invento
   await expect(panel).toBeVisible()
   const details = panel.getByRole('region', { name: 'Disk capacity details' })
   await expect(figure(details, 'Stored locally')).toHaveText('80 GiB')
-  await expect(figure(details, 'Reclaimable')).toHaveText('16 GiB')
+  await expect(figure(details, 'Reclaimable, at least')).toHaveText('16 GiB')
   await expect(figure(details, 'Not yet synchronized')).toHaveText('8 GiB')
   await expect(details).toContainText('without the one-hour delay')
   await page.setViewportSize({ width: 390, height: 844 })

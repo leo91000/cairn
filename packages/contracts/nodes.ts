@@ -114,18 +114,20 @@ export function nodeHealth(node: ExecutionNode, now = Date.now()): NodeHealth {
     return { state: 'attention', label: 'Needs attention', detail: 'Update the supervisor to confirm privileges' }
   if (native && node.nativeModeStatus === 'pending')
     return { state: 'updating', label: 'Updating', detail: 'Privilege change in progress' }
-  if (node.maintenance && node.maintenanceError)
+  // Optional fields are tested for presence, as in the Kotlin contract.
+  if (node.maintenance != null && node.maintenanceError != null)
     return { state: 'attention', label: 'Needs attention', detail: 'The update failed' }
-  if (node.maintenance)
+  if (node.maintenance != null)
     return { state: 'updating', label: 'Updating', detail: 'New work waits for the update' }
-  // Without a reported error the runtime is getting ready, as after a budget change until the next heartbeat.
+  // Without a reported error, readiness is usually on its way, as after a budget change until the
+  // next heartbeat: it waits rather than alarms. The diagnostics list the possible causes.
   // A missing flag reads as not ready, like the generated Kotlin contract.
   if (!node.executionReady) {
-    if (node.budgetError)
+    if (node.budgetError != null)
       return { state: 'attention', label: 'Needs attention', detail: 'The shared budget could not be applied' }
-    if (node.updateError)
+    if (node.updateError != null)
       return { state: 'attention', label: 'Needs attention', detail: 'The runtime reported an error' }
-    return { state: 'updating', label: 'Getting ready', detail: 'The runtime is applying its configuration' }
+    return { state: 'updating', label: 'Not ready', detail: 'The runtime is not ready yet' }
   }
 
   if (native && node.nativeModeProposal)
@@ -138,7 +140,7 @@ export function nodeHealth(node: ExecutionNode, now = Date.now()): NodeHealth {
     return { state: 'paused', label: 'Paused', detail: 'New work is paused' }
   if (node.exclusiveReservation)
     return { state: 'reserved', label: 'Reserved', detail: node.exclusiveReservation.reason }
-  if (node.pressure)
+  if (node.pressure != null)
     return { state: 'busy', label: 'Busy', detail: node.pressure === 'memory' ? 'Shared RAM is under pressure' : 'Shared disk space is low' }
 
   const slots = node.slots ?? 0

@@ -73,8 +73,8 @@ class NodesTest {
         assertEquals(
             NodeHealth(
                 NodeHealthState.UPDATING,
-                "En préparation",
-                "Le runtime applique sa configuration",
+                "Pas prête",
+                "Le runtime n’est pas encore prêt",
             ),
             nodeHealth(ready.copy(executionReady = false)),
         )
@@ -89,6 +89,28 @@ class NodesTest {
         assertEquals(
             NodeHealthState.PAUSED,
             nodeHealth(ready.copy(accepting = false, pressure = "memory")).state,
+        )
+        assertEquals(
+            NodeHealth(NodeHealthState.BUSY, "Chargée", "RAM partagée sous pression"),
+            nodeHealth(ready.copy(pressure = "memory")),
+        )
+        assertEquals(
+            NodeHealth(NodeHealthState.RESERVED, "Réservée", "Benchmark GPU"),
+            nodeHealth(
+                ready.copy(
+                    pressure = "memory",
+                    exclusiveReservation =
+                        build.cairn.boundary.ExclusiveReservation(
+                            id = "reservation",
+                            nodeId = ready.id,
+                            ownerRunId = "run",
+                            reason = "Benchmark GPU",
+                            state = "acquired",
+                            createdAt = 0,
+                            waitUntil = 0,
+                        ),
+                )
+            ),
         )
         assertEquals(
             "Espace disque partagé insuffisant",

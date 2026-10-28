@@ -208,8 +208,8 @@ fun nodeHealth(node: ExecutionNode, now: Long = System.currentTimeMillis()): Nod
             "Mise à jour",
             "Les nouveaux travaux attendent la mise à jour",
         )
-    // Without a reported error the runtime is getting ready, as after a budget change until the
-    // next heartbeat.
+    // Without a reported error, readiness is usually on its way, as after a budget change until
+    // the next heartbeat: it waits rather than alarms. The diagnostics list the possible causes.
     if (!node.executionReady)
         return when {
             node.budgetError != null ->
@@ -227,8 +227,8 @@ fun nodeHealth(node: ExecutionNode, now: Long = System.currentTimeMillis()): Nod
             else ->
                 NodeHealth(
                     NodeHealthState.UPDATING,
-                    "En préparation",
-                    "Le runtime applique sa configuration",
+                    "Pas prête",
+                    "Le runtime n’est pas encore prêt",
                 )
         }
     if (native && node.nativeModeProposal != null)
