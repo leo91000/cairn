@@ -66,14 +66,17 @@ impl Store {
         let fresh = !file.exists();
         let mut writer = Connection::open(&file)?;
         let version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !fresh && version != DATABASE_VERSION {
+        if !fresh && !matches!(version, 11 | DATABASE_VERSION) {
             return Err(Error::bad(
-                "Unsupported installation database version; a complete reinstallation is required.",
+                "Unsupported installation database version; use a compatible release or an explicit migration.",
             ));
         }
         writer.busy_timeout(std::time::Duration::from_secs(5))?;
         writer.set_prepared_statement_cache_capacity(128);
         writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        if !fresh && version == 11 {
+            crate::nodes::inventory::migration::upgrade(&mut writer)?;
+        }
         if fresh {
             let tx = writer.transaction()?;
             tx.execute_batch(
@@ -946,12 +949,12 @@ mod schema_tests {
 
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 99] {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();
             let error = Store::open(root.path()).err().unwrap();
-            assert!(error.message.contains("complete reinstallation"));
+            assert!(error.message.contains("compatible release"));
             assert_eq!(
                 db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                     .unwrap(),
