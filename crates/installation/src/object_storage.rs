@@ -1,5 +1,6 @@
 //! S3 operations stay server-side. Recovery blocks use a shared SDK client;
 //! bucket administration and purge operations use the AWS CLI.
+use crate::performance::publication::{self as diagnostic, Stage};
 use crate::{
     error::{Error, Result},
     service::Service,
@@ -600,7 +601,10 @@ impl Storage {
 
     pub async fn upload_bytes(&self, bytes: Vec<u8>, key: &str) -> Result<()> {
         let sample = self.hot.put_metrics.start();
+        let slot = diagnostic::start(Stage::PutSlot);
         let _permit = self.hot.writes.acquire().await.map_err(Error::internal)?;
+        slot.finish(0);
+        let client_sample = diagnostic::start(Stage::S3Client);
         let client = self
             .hot
             .client(
@@ -609,10 +613,14 @@ impl Storage {
                 self.credentials.as_ref(),
             )
             .await;
+        client_sample.finish(0);
         let bytes = bytes::Bytes::from(bytes);
         // MD5 detects transfer corruption; block identity and encryption retain
         // their existing cryptographic checks on recovery reads.
+        let checksum_sample = diagnostic::start(Stage::PutChecksum);
         let checksum = base64::engine::general_purpose::STANDARD.encode(Md5::digest(&bytes));
+        checksum_sample.finish(bytes.len());
+        let request_sample = diagnostic::start(Stage::PutRequest);
         client
             .put_object()
             .content_md5(checksum)
@@ -625,6 +633,7 @@ impl Storage {
             .map_err(|_| {
                 Error::unavailable("Recovery block upload failed; local data is retained.")
             })?;
+        request_sample.finish(bytes.len());
         sample.finish(bytes.len());
         Ok(())
     }
@@ -658,6 +667,7 @@ impl Storage {
                     pending
                 })
         };
+        let wait_sample = diagnostic::start(Stage::GetCoalesced);
         let result = pending
             .get_or_init(|| async { self.fetch_bytes(key, limit).await.map(bytes::Bytes::from) })
             .await
@@ -669,12 +679,18 @@ impl Storage {
         {
             reads.remove(&request);
         }
+        if let Ok(bytes) = &result {
+            wait_sample.finish(bytes.len());
+        }
         result.map(|bytes| bytes.to_vec())
     }
 
     async fn fetch_bytes(&self, key: &str, limit: u64) -> Result<Vec<u8>> {
         let sample = self.hot.get_metrics.start();
+        let slot = diagnostic::start(Stage::GetSlot);
         let _permit = self.hot.reads.acquire().await.map_err(Error::internal)?;
+        slot.finish(0);
+        let client_sample = diagnostic::start(Stage::S3Client);
         let client = self
             .hot
             .client(
@@ -683,7 +699,9 @@ impl Storage {
                 self.credentials.as_ref(),
             )
             .await;
+        client_sample.finish(0);
         let bytes = tokio::time::timeout(Duration::from_secs(60), async {
+            let headers = diagnostic::start(Stage::GetHeaders);
             let output = client
                 .get_object()
                 .bucket(&self.bucket)
@@ -691,6 +709,8 @@ impl Storage {
                 .send()
                 .await
                 .map_err(|error| read_error(&error))?;
+            headers.finish(0);
+            let body_sample = diagnostic::start(Stage::GetBody);
             if output
                 .content_length()
                 .is_some_and(|length| length < 0 || length as u64 > limit)
@@ -708,6 +728,7 @@ impl Storage {
                 }
                 bytes.extend_from_slice(&chunk);
             }
+            body_sample.finish(bytes.len());
             Ok(bytes)
         })
         .await
@@ -872,10 +893,10 @@ impl Storage {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    async fn fixture_storage(endpoint: &str, bucket: &str, hot: Arc<HotS3>) -> Storage {
+    pub(crate) async fn fixture_storage(endpoint: &str, bucket: &str, hot: Arc<HotS3>) -> Storage {
         use aws_sdk_s3::config::{Credentials, Region, retry::RetryConfig};
 
         let sdk = aws_sdk_s3::Client::from_conf(

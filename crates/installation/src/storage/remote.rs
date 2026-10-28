@@ -151,15 +151,17 @@ impl BlockSource for RemoteSource {
             .origin
             .join(&format!("internal/node-restore/{hash}"))
             .map_err(io::Error::other)?;
-        self.runtime.block_on(async {
+        let sample = crate::performance::publication::start(
+            crate::performance::publication::Stage::NodeBaseRead,
+        );
+        let result = self.runtime.block_on(async {
             let mut waiting = None;
             let mut delay = Duration::from_millis(100);
             loop {
-                let request = self
-                    .client
-                    .get(url.clone())
-                    .bearer_auth(&self.credential)
-                    .send();
+                let request = crate::performance::publication::restore_request(
+                    self.client.get(url.clone()).bearer_auth(&self.credential),
+                )
+                .send();
                 if let Ok(response) = self.unless_stopped(request).await?
                     && let Some(bytes) = self.receive(response).await?
                 {
@@ -172,7 +174,11 @@ impl BlockSource for RemoteSource {
                 self.unless_stopped(tokio::time::sleep(delay)).await?;
                 delay = (delay * 2).min(Duration::from_secs(5));
             }
-        })
+        });
+        if let Ok(bytes) = &result {
+            sample.finish(bytes.len());
+        }
+        result
     }
 }
 

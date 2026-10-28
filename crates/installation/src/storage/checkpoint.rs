@@ -383,6 +383,7 @@ impl SealedCapture {
         timing.finish();
         Ok(json!({
             "id": id,
+            "publicationDiagnostics": true,
             "manifest": manifest,
             "grantId": volume.source.grant_id()?
         }))

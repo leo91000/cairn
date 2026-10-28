@@ -1,6 +1,7 @@
 //! Publish the current disk to S3, then collect unreachable generations.
 //! Publications share immutable authenticated objects.
 use super::{shared_blocks, snapshots};
+use crate::performance::publication::{self as diagnostic, Stage};
 use crate::{
     config::{id, now},
     error::{Error, Result},
@@ -19,6 +20,7 @@ use std::{
     time::Duration,
 };
 use tokio::task::{AbortHandle, JoinSet};
+use tracing::Instrument;
 
 const MIB: u64 = 1024 * 1024;
 
@@ -185,10 +187,20 @@ pub async fn capture(s: &Service, run: &Value) -> Result<Value> {
 }
 
 async fn capture_owned(s: &Service, run: &Value) -> Result<Value> {
-    let result = Box::pin(publish(s, run)).await;
+    let publication_attempt = id();
+    let span = tracing::info_span!(
+        "disk_publication_attempt",
+        publication_attempt,
+        run_id = crate::performance::identity(text(run, "id"))
+    );
+    let result = Box::pin(publish(s, run, &publication_attempt))
+        .instrument(span)
+        .await;
     tracing::info!(
         target: "cairn_performance",
         operation = "s3_totals",
+        publication_attempt,
+        counter_scope = "process_cumulative",
         id = text(run, "id"),
         success = result.is_ok(),
         metrics = %s.hot_s3.performance()
@@ -217,6 +229,7 @@ struct Publication<'a> {
     run: &'a Value,
     run_id: &'a str,
     attempt: &'a str,
+    publication_attempt: &'a str,
     node: &'a Value,
     storage: &'a Storage,
     base: &'a str,
@@ -235,7 +248,7 @@ struct Intent {
     objects: Vec<shared_blocks::Object>,
 }
 
-async fn publish(s: &Service, run: &Value) -> Result<Value> {
+async fn publish(s: &Service, run: &Value, publication_attempt: &str) -> Result<Value> {
     let run_id = text(run, "id");
     let mut timing = Operation::new("disk_publication", run_id, "queue");
     crate::validation::uuid(run_id)?;
@@ -305,6 +318,7 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         run,
         run_id,
         attempt,
+        publication_attempt,
         node: &checkpoint["nodeId"],
         storage: &storage,
         base: &base,
@@ -503,8 +517,52 @@ impl Publication<'_> {
         manifest: &Value,
         objects: &[shared_blocks::Object],
     ) -> Result<u64> {
+        let metrics = diagnostic::Metrics::new(
+            self.publication_attempt,
+            self.run_id,
+            self.snapshot_id,
+            "manager",
+        );
+        self.transfer_observed(&metrics, manifest, objects).await
+    }
+
+    async fn transfer_observed(
+        &self,
+        metrics: &Arc<diagnostic::Metrics>,
+        manifest: &Value,
+        objects: &[shared_blocks::Object],
+    ) -> Result<u64> {
+        metrics.inventory(
+            objects.len() as u64,
+            objects.iter().filter(|object| object.ready).count() as u64,
+            objects
+                .iter()
+                .filter(|object| !object.ready)
+                .map(|object| object.size)
+                .sum(),
+        );
+        let _registration = diagnostic::register(metrics);
+        let mut summary = diagnostic::Summary {
+            metrics: metrics.clone(),
+            outcome: "cancelled",
+        };
+        let result = diagnostic::scope(
+            Some(metrics.clone()),
+            self.transfer_operations(manifest, objects),
+        )
+        .await;
+        summary.outcome = if result.is_ok() { "success" } else { "error" };
+        result
+    }
+
+    async fn transfer_operations(
+        &self,
+        manifest: &Value,
+        objects: &[shared_blocks::Object],
+    ) -> Result<u64> {
         // The common all-reused path never loads other manifests. Incremental
         // snapshots may omit old blocks, which migrate directly from S3.
+        let inventory = diagnostic::start(Stage::Inventory);
         let needs_upload = objects.iter().any(|object| !object.ready);
         let sources = if manifest["incremental"] == true && needs_upload {
             source_blocks(self.s, self.run_id).await?
@@ -521,12 +579,14 @@ impl Publication<'_> {
             format!("{}/snapshots/{}", self.base, self.snapshot_id),
             self.credential.to_owned(),
             missing,
-        );
+        )
+        .diagnostics(self.snapshot["publicationDiagnostics"] == true);
 
         if self.node == super::LOCAL_NODE_ID {
             reads = reads.direct_publication();
         }
 
+        inventory.finish(0);
         let mut uploads = JoinSet::<Result<()>>::new();
         let transfer = self
             .start_uploads(objects, &sources, &mut reads, &mut uploads)
@@ -534,17 +594,20 @@ impl Publication<'_> {
         // On failure, finish every already-started PUT before the operation lock
         // can be released and its pending references retired by another capture.
         let mut result = transfer;
+        let drain = diagnostic::start(Stage::UploadDrain);
         while let Some(upload) = uploads.join_next().await {
             if let Err(error) = upload.map_err(Error::internal).and_then(|upload| upload) {
                 result = Err(error);
             }
         }
+        drain.finish(0);
         let uploaded = result?;
 
         tracing::info!(
             target: "cairn_performance",
             operation = "disk_publication",
             id = self.run_id,
+            publication_attempt = self.publication_attempt,
             uploaded_bytes = uploaded,
             referenced_blocks = objects.len(),
             reused_blocks = objects.iter().filter(|o| o.ready).count()
@@ -566,14 +629,19 @@ impl Publication<'_> {
             let scope = shared_blocks::key(&object.hash, &object.id);
             let encoded = encrypt_block(self.s, scope.clone(), bytes).await?;
             let destination = self.storage.clone();
-            uploads.spawn(async move { destination.upload_bytes(encoded, &scope).await });
+            let metrics = diagnostic::current();
+            uploads.spawn(diagnostic::scope(metrics, async move {
+                destination.upload_bytes(encoded, &scope).await
+            }));
             uploaded += object.size;
             if uploads.len() >= crate::object_storage::HOT_WRITE_CONCURRENCY {
+                let wait = diagnostic::start(Stage::UploadBackpressure);
                 uploads
                     .join_next()
                     .await
                     .unwrap()
                     .map_err(Error::internal)??;
+                wait.finish(0);
             }
         }
         Ok(uploaded)
@@ -742,10 +810,12 @@ pub(crate) async fn converted_environment(
     let storage = Storage::configured(s)?;
     let snapshot_id = id();
     let snapshot = json!({ "manifest": manifest });
+    let publication_attempt = id();
     let publication = Publication {
         s,
         run,
         run_id,
+        publication_attempt: &publication_attempt,
         attempt: "",
         node: &node["id"],
         storage: &storage,
@@ -831,7 +901,10 @@ async fn source_block(
     reads: &mut snapshots::Fetch,
 ) -> Result<Vec<u8>> {
     let bytes = if let Some((point, block)) = sources.get(&object.hash) {
-        read_manifest_block(s, point, block).await?
+        let sample = diagnostic::start(Stage::BaseRead);
+        let bytes = read_manifest_block(s, point, block).await?;
+        sample.finish(bytes.len());
+        bytes
     } else {
         reads.block(&object.hash).await?
     };
@@ -1834,3 +1907,7 @@ mod capture_policy_tests {
         assert!(publication_due(&run, MAX_RETRY_DELAY_MS, 60_000, 30));
     }
 }
+
+#[cfg(test)]
+#[path = "publication/diagnostic_tests.rs"]
+mod diagnostic_tests;
