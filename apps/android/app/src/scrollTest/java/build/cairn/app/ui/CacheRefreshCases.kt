@@ -58,7 +58,7 @@ abstract class CacheRefreshCases {
                                 runId = "fixture",
                             )
                         ),
-                        LiveState(chat = Chat("cache-refresh")),
+                        LiveState(chat = Chat(id = "cache-refresh")),
                         false,
                         false,
                         "v1:fixture:1",

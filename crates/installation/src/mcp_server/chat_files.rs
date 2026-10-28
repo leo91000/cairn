@@ -16,7 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 const CHUNK_BYTES: u64 = 192 * 1024;
 
 fn active_chat(db: &Db<'_>, id: &str) -> Result<Value> {
-    let chat = required(db.get("chats", id)?, "Chat not found")?;
+    let chat = required(db.conversation_boundary(id)?, "Chat not found")?;
     require_active(&chat)?;
     Ok(chat)
 }

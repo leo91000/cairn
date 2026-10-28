@@ -80,7 +80,7 @@ abstract class SubagentCases {
             val now = System.currentTimeMillis()
             val chat =
                 Chat(
-                    "chat",
+                    id = "chat",
                     title = "Audit des webhooks",
                     agentId = MAIN_AGENT_ID,
                     agentName = "Agent principal",

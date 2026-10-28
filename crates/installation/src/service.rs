@@ -136,6 +136,13 @@ impl Service {
         required(self.store.agent_snapshot(id).await?, "Agent not found")
     }
 
+    pub async fn conversation_boundary(&self, id: &str) -> Result<Value> {
+        required(
+            self.store.conversation_boundary(id).await?,
+            "Chat not found",
+        )
+    }
+
     pub async fn get(&self, kind: &str, id: &str) -> Result<Value> {
         required(self.store.get(kind, id).await?, "Record not found")
     }

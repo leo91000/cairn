@@ -52,7 +52,7 @@ class ScrollResumeTest {
                 val requests = CopyOnWriteArrayList<String>()
                 val chat =
                     Chat(
-                        "diagnostic",
+                        id = "diagnostic",
                         title = "Diagnostic",
                         agentName = "Cairn",
                         status = "succeeded",

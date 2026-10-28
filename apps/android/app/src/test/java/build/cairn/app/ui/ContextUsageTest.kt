@@ -9,7 +9,15 @@ import org.junit.Test
 class ContextUsageTest {
     @Test
     fun `the latest request is shown against the reported window`() {
-        val summary = contextSummary(ContextUsage(42_202, 200_000, 40_002, false))
+        val summary =
+            contextSummary(
+                ContextUsage(
+                    contextTokens = 42_202,
+                    contextWindow = 200_000,
+                    cachedTokens = 40_002,
+                    estimated = false,
+                )
+            )
         assertEquals(21, summary.percent)
         assertEquals("42 k / 200 k · 21 %", summary.short)
         assertEquals("42 202 sur 200 000 jetons (21 %)", summary.label)
@@ -25,17 +33,28 @@ class ContextUsageTest {
 
     @Test
     fun `an unknown window and missing reports stay unavailable`() {
-        val unknown = contextSummary(ContextUsage(12_000, null, null, false))
+        val unknown =
+            contextSummary(
+                ContextUsage(
+                    contextTokens = 12_000,
+                    contextWindow = null,
+                    cachedTokens = null,
+                    estimated = false,
+                )
+            )
         assertNull(unknown.percent)
         assertEquals("12 k jetons", unknown.short)
         assertEquals("12 000 jetons · fenêtre inconnue", unknown.label)
         assertEquals("Taille de fenêtre non communiquée", unknown.details[1])
-        for (usage in listOf(null, ContextUsage(0, 200_000))) {
+        for (usage in listOf(null, ContextUsage(contextTokens = 0, contextWindow = 200_000))) {
             val missing = contextSummary(usage)
             assertNull(missing.percent)
             assertEquals("Utilisation du contexte indisponible", missing.label)
         }
-        val estimate = contextSummary(ContextUsage(6_200, 1_000_000, estimated = true))
+        val estimate =
+            contextSummary(
+                ContextUsage(contextTokens = 6_200, contextWindow = 1_000_000, estimated = true)
+            )
         assertEquals("≈ 6 k / 1 M · 1 %", estimate.short)
         assertEquals("Estimation de l’agent", estimate.details.first())
     }
@@ -49,7 +68,15 @@ class ContextUsageTest {
             wireJson.decodeFromString<Chat>(
                 "{\"id\":\"chat\",\"contextUsage\":{\"contextTokens\":5,\"contextWindow\":null,\"cachedTokens\":null,\"estimated\":true},\"compaction\":{\"supported\":true,\"running\":false,\"available\":false,\"reason\":\"Wait for the current turn to finish before compacting.\"}}"
             )
-        assertEquals(ContextUsage(5, null, null, true), current.contextUsage)
+        assertEquals(
+            ContextUsage(
+                contextTokens = 5,
+                contextWindow = null,
+                cachedTokens = null,
+                estimated = true,
+            ),
+            current.contextUsage,
+        )
         assertEquals(false, current.compaction?.available)
     }
 

@@ -62,7 +62,13 @@ abstract class ImagePasteCases {
                     taskId = "",
                 )
             val chat =
-                Chat("chat", title = "Capture", runId = "run", agentName = agent.name, run = run)
+                Chat(
+                    id = "chat",
+                    title = "Capture",
+                    runId = "run",
+                    agentName = agent.name,
+                    run = run,
+                )
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
@@ -92,12 +98,12 @@ abstract class ImagePasteCases {
                                 .setBody(
                                     wireJson.encodeToString(
                                         ChatAttachment(
-                                            id,
-                                            "chat",
-                                            name,
-                                            request.bodySize,
-                                            "image/png",
-                                            "image",
+                                            id = id,
+                                            chatId = "chat",
+                                            name = name,
+                                            size = request.bodySize.toInt(),
+                                            mediaType = "image/png",
+                                            kind = "image",
                                         )
                                     )
                                 )

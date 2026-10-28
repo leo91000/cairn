@@ -419,7 +419,11 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
     let run_id = id();
     let mut chat = chat.clone();
     chat["runId"] = run_id.clone().into();
-    service.store.put("chats", chat).await.unwrap();
+    service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
     let run = json!({
         "id": run_id,
         "taskId": chat_id,

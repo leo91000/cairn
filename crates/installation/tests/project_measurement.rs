@@ -1112,3 +1112,6 @@ async fn node_storage_layouts() {
         .collect();
     measure(&corpus);
 }
+
+#[path = "measurements/conversations.rs"]
+mod conversation_measurement;

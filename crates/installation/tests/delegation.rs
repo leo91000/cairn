@@ -204,7 +204,7 @@ async fn opencode_delegation_discovers_automatic_models_and_rejects_unconnected_
         )
         .await
         .unwrap();
-    let before = f.s.store.list("chats").await.unwrap().len();
+    let before = f.s.store.conversations_boundary().await.unwrap().len();
     for model in [
         "opencode/ling-3.1-flash-free",
         "auto/unknown-model",
@@ -222,7 +222,10 @@ async fn opencode_delegation_discovers_automatic_models_and_rejects_unconnected_
         assert_eq!(error.status, 400);
         assert!(error.message.contains("task_models"), "{}", error.message);
     }
-    assert_eq!(f.s.store.list("chats").await.unwrap().len(), before);
+    assert_eq!(
+        f.s.store.conversations_boundary().await.unwrap().len(),
+        before
+    );
 
     let response = project_workspaces::rpc(
         &f.s,

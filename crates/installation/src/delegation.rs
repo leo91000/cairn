@@ -12,7 +12,7 @@ use crate::{
     run_status::RunStatus,
     service::{Service, covers, policy},
     store::Db,
-    validation::{parse, text, uuid},
+    validation::{text, uuid},
 };
 use cairn_contracts::EventKind;
 use serde_json::{Value, json};
@@ -194,14 +194,14 @@ fn requested_by(chat: &Value, requester: &Value) -> bool {
 /// A task this conversation delegated, whatever its lifecycle.
 fn delegated(db: &Db<'_>, requester: &Value, chat_id: &str) -> Result<Value> {
     uuid(chat_id)?;
-    db.get("chats", chat_id)?
+    db.conversation_boundary(chat_id)?
         .filter(|chat| requested_by(chat, requester))
         .ok_or_else(|| Error::not_found("This conversation did not delegate that task."))
 }
 
 fn children(db: &Db<'_>, requester: &Value) -> Result<Vec<Value>> {
     Ok(db
-        .list("chats")?
+        .conversations_boundary()?
         .into_iter()
         .filter(|chat| requested_by(chat, requester))
         .collect())
@@ -275,16 +275,13 @@ fn select_engine(agent: &Value, message: &Value) -> Result<Value> {
 }
 
 fn task_message(input: &Value) -> Result<Value> {
-    parse(
-        "message",
-        json!({
-            "id": id(),
-            "text": input["task"],
-            "provider": input["provider"].as_str().unwrap_or_default(),
-            "model": input["model"].as_str().unwrap_or_default(),
-            "reasoning": input["reasoning"].as_str().unwrap_or_default(),
-        }),
-    )
+    chats::parse_message(json!({
+        "id": id(),
+        "text": input["task"],
+        "provider": input["provider"].as_str().unwrap_or_default(),
+        "model": input["model"].as_str().unwrap_or_default(),
+        "reasoning": input["reasoning"].as_str().unwrap_or_default(),
+    }))
 }
 
 fn repeated(db: &Db<'_>, requesting: &Value, input: &Value) -> Result<Option<Value>> {
@@ -339,22 +336,22 @@ fn create(db: &Db<'_>, bearer: &str, input: &Value, checked: &Value) -> Result<V
         &origin,
     )?;
     let chat_id = text(&created, "id").to_owned();
-    let mut chat = required(db.get("chats", &chat_id)?, "Chat not found")?;
+    let mut chat = required(db.conversation_boundary(&chat_id)?, "Chat not found")?;
     chat["requestedBy"] = json!({
         "runId": run["id"],
         "chatId": requesting["id"],
         "requestId": request_id,
     });
-    db.put("chats", &chat)?;
+    db.save_conversation_boundary(&chat)?;
     chats::send(db, &chat_id, message, None, &origin)?;
     if let Some(title) = input["title"].as_str() {
-        let mut chat = required(db.get("chats", &chat_id)?, "Chat not found")?;
+        let mut chat = required(db.conversation_boundary(&chat_id)?, "Chat not found")?;
         chat["title"] = title.trim().into();
-        db.put("chats", &chat)?;
+        db.save_conversation_boundary(&chat)?;
     }
     let delegated = summary(
         db,
-        &required(db.get("chats", &chat_id)?, "Chat not found")?,
+        &required(db.conversation_boundary(&chat_id)?, "Chat not found")?,
         false,
     )?;
     // The requester's history shows the task where it was delegated; clients follow its
@@ -569,7 +566,7 @@ pub(crate) fn wait_access(db: &Db<'_>, run: &Value, condition: &Value) -> Result
 pub(crate) fn wait_result(db: &Db<'_>, condition: &Value) -> Result<Option<Value>> {
     let chat_id = text(condition, "chatId");
     let chat = db
-        .get("chats", chat_id)?
+        .conversation_boundary(chat_id)?
         .ok_or_else(|| Error::not_found("The delegated task no longer exists."))?;
     let result = |status: Value, run: Option<&Value>, error: Value| {
         json!({

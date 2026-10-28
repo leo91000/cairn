@@ -606,7 +606,7 @@ abstract class BackgroundWaitCases {
             val now = System.currentTimeMillis()
             val chat =
                 Chat(
-                    "chat",
+                    id = "chat",
                     title = "Conversation de test",
                     agentId = MAIN_AGENT_ID,
                     agentName = "Agent principal",

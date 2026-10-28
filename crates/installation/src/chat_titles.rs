@@ -78,7 +78,7 @@ pub async fn enqueue(s: &Service, run_id: &str) -> Result<()> {
             }
             let chat_id = text(&run, "taskId");
             let current = db
-                .get("chats", chat_id)?
+                .conversation_boundary(chat_id)?
                 .is_some_and(|chat| chat["runId"] == run_id);
             if current {
                 let pending = Pending {
@@ -355,7 +355,7 @@ fn apply(db: &Db<'_>, chat: &Value, pending: &Value, title: &str) -> Result<bool
     if db.kv(&key)?.as_ref() != Some(pending) {
         return Ok(false);
     }
-    let Some(mut current) = db.get("chats", text(chat, "id"))? else {
+    let Some(mut current) = db.conversation_boundary(text(chat, "id"))? else {
         db.delete(&key)?;
         return Ok(false);
     };
@@ -372,10 +372,7 @@ fn apply(db: &Db<'_>, chat: &Value, pending: &Value, title: &str) -> Result<bool
     }
     current["title"] = title.into();
     // Renaming alone must not move the conversation in the recent list.
-    db.0.execute(
-        "UPDATE records SET data=? WHERE kind='chats' AND id=?",
-        rusqlite::params![current.to_string(), text(chat, "id")],
-    )?;
+    db.rename_conversation_title(text(chat, "id"), title)?;
     Ok(true)
 }
 
@@ -421,7 +418,7 @@ pub async fn tick(s: &Service) -> Result<()> {
     }
     for (key, pending) in s.store.keys(PREFIX).await? {
         let chat_id = key.trim_start_matches(PREFIX);
-        let chat = s.store.get("chats", chat_id).await?;
+        let chat = s.store.conversation_boundary(chat_id).await?;
         if !still_pending(s, &key, chat.as_ref(), &pending).await? {
             continue;
         }
@@ -522,7 +519,7 @@ mod tests {
                     "title": "Configurer GitHub",
                     "updatedAt": 1,
                 });
-                db.put("chats", &chat)?;
+                db.save_conversation_boundary(&chat)?;
                 let run = json!({
                     "id": "run",
                     "taskId": "chat",
@@ -569,11 +566,11 @@ mod tests {
         let before: i64 = s
             .store
             .read(|db| {
-                Ok(db
-                    .0
-                    .query_row("SELECT updated_at FROM records WHERE id='chat'", [], |r| {
-                        r.get(0)
-                    })?)
+                Ok(db.0.query_row(
+                    "SELECT persisted_at FROM conversations WHERE id='chat'",
+                    [],
+                    |r| r.get(0),
+                )?)
             })
             .await
             .unwrap();
@@ -581,17 +578,17 @@ mod tests {
         tick(&s).await.unwrap();
         assert!(changes.has_changed().unwrap());
         changes.borrow_and_update();
-        let chat = s.get("chats", "chat").await.unwrap();
+        let chat = s.conversation_boundary("chat").await.unwrap();
         assert_eq!(chat["title"], "Mises à jour Android");
         assert_eq!(chat["updatedAt"], 1);
         let after: i64 = s
             .store
             .read(|db| {
-                Ok(db
-                    .0
-                    .query_row("SELECT updated_at FROM records WHERE id='chat'", [], |r| {
-                        r.get(0)
-                    })?)
+                Ok(db.0.query_row(
+                    "SELECT persisted_at FROM conversations WHERE id='chat'",
+                    [],
+                    |r| r.get(0),
+                )?)
             })
             .await
             .unwrap();
@@ -623,7 +620,7 @@ mod tests {
             .unwrap();
         tick(&s).await.unwrap();
         assert_eq!(
-            s.get("chats", "chat").await.unwrap()["title"],
+            s.conversation_boundary("chat").await.unwrap()["title"],
             chat["title"]
         );
         assert!(
@@ -643,7 +640,7 @@ mod tests {
             let s = service(&root, identity).await;
             tick(&s).await.unwrap();
             assert_eq!(
-                s.get("chats", "chat").await.unwrap()["title"],
+                s.conversation_boundary("chat").await.unwrap()["title"],
                 "Configurer GitHub"
             );
             assert!(
@@ -693,7 +690,7 @@ mod tests {
         .unwrap();
         assert!(s.accounts.active(text(&account, "id")).await.is_empty());
         assert_eq!(
-            s.get("chats", "chat").await.unwrap()["title"],
+            s.conversation_boundary("chat").await.unwrap()["title"],
             "Configurer GitHub"
         );
         assert!(
@@ -712,13 +709,16 @@ mod tests {
         let s = service(&root, "ready").await;
         s.store
             .transaction(|db| {
-                let chat = db.get("chats", "chat")?.unwrap();
+                let chat = db.conversation_boundary("chat")?.unwrap();
                 let pending = db.kv("chat-title-pending:chat")?.unwrap();
                 let mut newer = chat.clone();
                 newer["updatedAt"] = 2.into();
-                db.put("chats", &newer)?;
+                db.save_conversation_boundary(&newer)?;
                 assert!(!apply(db, &chat, &pending, "Old result")?);
-                assert_eq!(db.get("chats", "chat")?.unwrap()["title"], chat["title"]);
+                assert_eq!(
+                    db.conversation_boundary("chat")?.unwrap()["title"],
+                    chat["title"]
+                );
                 db.set(
                     "chat-title-pending:chat",
                     &json!({ "revision": "new" }),
@@ -732,9 +732,12 @@ mod tests {
                 db.set("chat-title-pending:chat", &pending, None)?;
                 newer["title"] = "Custom title".into();
                 newer["updatedAt"] = chat["updatedAt"].clone();
-                db.put("chats", &newer)?;
+                db.save_conversation_boundary(&newer)?;
                 assert!(!apply(db, &chat, &pending, "Old result")?);
-                assert_eq!(db.get("chats", "chat")?.unwrap()["title"], "Custom title");
+                assert_eq!(
+                    db.conversation_boundary("chat")?.unwrap()["title"],
+                    "Custom title"
+                );
                 Ok(())
             })
             .await
@@ -791,7 +794,7 @@ mod tests {
         let restarted = Service::new(s.config.clone()).await.unwrap();
         tick(&restarted).await.unwrap();
         assert_eq!(
-            restarted.get("chats", "chat").await.unwrap()["title"],
+            restarted.conversation_boundary("chat").await.unwrap()["title"],
             "Mises à jour Android"
         );
         assert!(
@@ -915,7 +918,7 @@ mod tests {
             .unwrap();
         tick(&s).await.unwrap();
         assert_eq!(
-            s.get("chats", "chat").await.unwrap()["title"],
+            s.conversation_boundary("chat").await.unwrap()["title"],
             "Historique complet Android"
         );
         assert!(
@@ -948,7 +951,7 @@ mod tests {
                 .unwrap();
             tick(&s).await.unwrap();
             assert_eq!(
-                s.get("chats", "chat").await.unwrap()["title"],
+                s.conversation_boundary("chat").await.unwrap()["title"],
                 "Configurer GitHub"
             );
             assert!(

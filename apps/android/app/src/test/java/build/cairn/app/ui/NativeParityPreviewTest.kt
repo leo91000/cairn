@@ -117,8 +117,8 @@ class NativeParityPreviewTest {
                 )
             val chat =
                 Chat(
-                    "chat",
-                    "Simplifier l’interface mobile",
+                    id = "chat",
+                    title = "Simplifier l’interface mobile",
                     agentName = agent.name,
                     projectName = project.name,
                     runId = run.id,

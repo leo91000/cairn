@@ -97,7 +97,7 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
             task["enabled"] = false.into();
             db.save_mission(&serde_json::from_value(task.clone())?)?;
             chat["deletedAt"] = 1.into();
-            db.put("chats", &chat)?;
+            db.save_conversation_boundary(&chat)?;
             db.put_message(&json!({ "id": id(), "chatId": chat["id"], "createdAt": 1, "text": "Keep this message" }))?;
             db.event(run["id"].as_str().unwrap(), &EventKind::Status, "Keep this history", None)?;
             db.set(&format!("agent-avatar:{}", source["id"].as_str().unwrap()), &json!({ "fixture": true }), None)
@@ -123,7 +123,10 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
         .unwrap();
     assert_eq!(transferred_task["agentId"], MAIN_AGENT_ID);
     assert_eq!(transferred_task["archived"], true);
-    let transferred_chat = s.get("chats", chat["id"].as_str().unwrap()).await.unwrap();
+    let transferred_chat = s
+        .conversation_boundary(chat["id"].as_str().unwrap())
+        .await
+        .unwrap();
     assert_eq!(transferred_chat["agentId"], MAIN_AGENT_ID);
     assert_eq!(transferred_chat["deletedAt"], 1);
     let transferred = s.store.run(run["id"].as_str().unwrap()).await.unwrap();
@@ -210,7 +213,7 @@ async fn same_engine_merge_keeps_the_conversation_model_on_implicit_follow_up() 
                 db.add_run_fixture(&run, None)?;
                 db.save_checkpoint_boundary(run["id"].as_str().unwrap(), &json!({}))?;
                 chat["runId"] = run["id"].clone();
-                db.put("chats", &chat)?;
+                db.save_conversation_boundary(&chat)?;
                 Ok(())
             }
         })

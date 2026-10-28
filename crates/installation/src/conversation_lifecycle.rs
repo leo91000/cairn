@@ -1,4 +1,5 @@
 //! Conversation deletion is independent from execution status and task archival.
+use crate::chats::storage::{Conversation, Message};
 use crate::{
     chats::{MessageStatus, Question, QuestionStatus},
     config::now,
@@ -8,7 +9,7 @@ use crate::{
     store::Db,
     validation::{string_enum, text},
 };
-use serde::{Deserialize, Serialize};
+use cairn_contracts::ConversationEnvironmentState as EnvironmentState;
 use serde_json::{Value, json};
 
 pub type StorageLock = crate::file_lock::Guard;
@@ -22,43 +23,28 @@ pub fn storage_lock(directory: &std::path::Path) -> Result<StorageLock> {
 
 pub const DAY: i64 = 86_400_000;
 const PURGE_RETRY_MS: i64 = 60_000;
-const RETENTION_KEY: &str = "conversation-expiration";
 
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Retention {
-    inactivity_days: u32,
+pub use cairn_contracts::ConversationRetention as Retention;
+
+fn retention(db: &Db<'_>) -> Result<Retention> {
+    db.conversation_retention()
 }
 
-impl Default for Retention {
-    fn default() -> Self {
-        Self { inactivity_days: 7 }
-    }
-}
-
-impl Retention {
-    fn load(db: &Db<'_>) -> Result<Self> {
-        Ok(db.kv_as(RETENTION_KEY)?.unwrap_or_default())
-    }
-
-    fn cutoff(&self) -> Option<i64> {
-        (self.inactivity_days > 0).then(|| now() - i64::from(self.inactivity_days) * DAY)
-    }
+fn cutoff(policy: &Retention) -> Option<i64> {
+    (policy.inactivity_days > 0).then(|| now() - i64::from(policy.inactivity_days) * DAY)
 }
 
 /// Only work recorded by the current writer advances inactivity; reads do not count.
-fn inactive_due(chat: &Value, cutoff: Option<i64>) -> bool {
-    let activity = chat["lastActivityAt"].as_i64();
-    is_active(chat)
-        && chat["environmentState"].is_null()
+fn inactive_due(chat: &Conversation, cutoff: Option<i64>) -> bool {
+    chat.lifecycle == Lifecycle::Active
+        && chat.environment_state.is_none()
         && cutoff
-            .zip(activity)
+            .zip(chat.last_activity_at)
             .is_some_and(|(cutoff, activity)| activity <= cutoff)
 }
 
-/// Cleanup is irreversible once claimed; a new turn waits for physical retirement.
-pub(crate) fn require_environment_ready(chat: &Value) -> Result<()> {
-    if chat["environmentState"] == "cleaning" {
+pub(crate) fn require_environment_state_ready(state: Option<EnvironmentState>) -> Result<()> {
+    if state == Some(EnvironmentState::Cleaning) {
         return Err(Error::conflict(
             "The expired environment is being removed. Retry after cleanup finishes.",
         ));
@@ -66,14 +52,12 @@ pub(crate) fn require_environment_ready(chat: &Value) -> Result<()> {
     Ok(())
 }
 
-string_enum! {
-    /// Persisted in a chat's `lifecycle` field; a missing field means active.
-    pub enum Lifecycle {
-        Active => "active",
-        Trash => "trash",
-        Purging => "purging",
-    }
+/// A11's backend migration still receives the named conversation boundary.
+pub(crate) fn require_environment_ready(chat: &Value) -> Result<()> {
+    require_environment_state_ready(serde_json::from_value(chat["environmentState"].clone())?)
 }
+
+pub use cairn_contracts::ConversationLifecycle as Lifecycle;
 
 string_enum! {
     /// Conversation list filter accepted by `GET /api/chats?view=`.
@@ -108,11 +92,10 @@ pub fn require_active(chat: &Value) -> Result<()> {
 }
 
 pub fn require_active_run(db: &Db<'_>, run: &str) -> Result<()> {
-    for chat in db.json_rows(
-        "SELECT data FROM records WHERE kind='chats' AND json_extract(data,'$.runId')=?",
-        [run],
-    )? {
-        require_active(&chat)?;
+    if let Some(chat) = db.conversation_for_run(run)? {
+        if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active {
+            return Err(Error::conflict("This conversation has been deleted."));
+        }
     }
     Ok(())
 }
@@ -130,20 +113,20 @@ fn run_is_active(run: Option<&Value>) -> bool {
         .is_some_and(RunStatus::is_active)
 }
 
-fn message_is_pending(message: &Value) -> bool {
-    message["status"] == MessageStatus::Queued || message["status"] == MessageStatus::Sending
+fn message_is_pending(message: &Message) -> bool {
+    message.status == MessageStatus::Queued || message.status == MessageStatus::Sending
 }
 
 /// Cancels queued messages and open questions so nothing is delivered after deletion.
 fn cancel_pending_input(
     db: &Db<'_>,
-    messages: Vec<Value>,
+    messages: Vec<Message>,
     questions: Vec<(String, Question)>,
 ) -> Result<()> {
     for mut message in messages {
         if message_is_pending(&message) {
-            message["status"] = MessageStatus::Cancelled.into();
-            db.put_message(&message)?;
+            message.status = MessageStatus::Cancelled;
+            db.save_message(&message)?;
         }
     }
     for (key, mut question) in questions {
@@ -187,15 +170,15 @@ fn revoke_chat_access(db: &Db<'_>, chat: &Value, id: &str) -> Result<()> {
 }
 
 fn trash(db: &Db<'_>, id: &str, confirmed: bool) -> Result<Value> {
-    let mut chat = required(db.get("chats", id)?, "Chat not found")?;
-    if in_trash(&chat) {
-        return Ok(chat);
+    let mut chat = required(db.conversation(id)?, "Chat not found")?;
+    if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active {
+        return Ok(serde_json::to_value(chat)?);
     }
-    let run = db.run(text(&chat, "runId"))?;
-    let messages = db.messages(id)?;
+    let run = db.run(chat.run_id.as_deref().unwrap_or(""))?;
+    let messages = db.conversation_messages(id)?;
     let questions = db.keys_as::<Question>(&crate::chats::question_prefix(id))?;
     let busy = run_is_active(run.as_ref())
-        || chat["wakeup"].is_object()
+        || chat.wakeup.is_some()
         || messages.iter().any(message_is_pending)
         || questions.iter().any(|(_, question)| question.is_open());
     if busy && !confirmed {
@@ -204,7 +187,7 @@ fn trash(db: &Db<'_>, id: &str, confirmed: bool) -> Result<Value> {
         ));
     }
     cancel_pending_input(db, messages, questions)?;
-    unshare_artifacts(db, text(&chat, "runId"))?;
+    unshare_artifacts(db, chat.run_id.as_deref().unwrap_or(""))?;
     db.delete(&format!("chat-title-pending:{id}"))?;
     if let Some(run) = run.filter(|run| run_is_active(Some(run))) {
         db.change_run(
@@ -215,47 +198,43 @@ fn trash(db: &Db<'_>, id: &str, confirmed: bool) -> Result<Value> {
             },
         )?;
     }
-    chat["cancelledByDeletion"] = busy.into();
-    chat["wakeup"] = Value::Null;
-    revoke_chat_access(db, &chat, id)?;
-    chat["previousLifecycle"] = state(&chat).into();
-    chat["lifecycle"] = Lifecycle::Trash.into();
+    chat.cancelled_by_deletion = busy;
+    chat.wakeup = None;
+    revoke_chat_access(db, &serde_json::to_value(&chat)?, id)?;
+    chat.previous_lifecycle = Some(chat.lifecycle);
+    chat.lifecycle = cairn_contracts::ConversationLifecycle::Trash;
     let trashed_at = now();
-    chat["trashedAt"] = trashed_at.into();
-    chat["purgeAt"] = trashed_at.into();
-    chat["paused"] = true.into();
+    chat.trashed_at = Some(trashed_at);
+    chat.purge_at = Some(trashed_at);
+    chat.paused = true;
     db.set(
         "conversation-cache-revision",
         &crate::config::id().into(),
         None,
     )?;
     db.audit("chat.trashed", &json!({ "id": id }))?;
-    db.put("chats", &chat)
+    Ok(serde_json::to_value(db.save_conversation(&chat)?)?)
 }
 
 fn restore(db: &Db<'_>, id: &str) -> Result<Value> {
-    let mut chat = required(db.get("chats", id)?, "Chat not found")?;
-    if Lifecycle::parse(state(&chat)) != Some(Lifecycle::Trash) {
+    let mut chat = required(db.conversation(id)?, "Chat not found")?;
+    if chat.lifecycle != cairn_contracts::ConversationLifecycle::Trash {
         return Err(Error::conflict("This conversation is not in the trash."));
     }
-    if chat["purgeAt"].as_i64().is_none_or(|at| at <= now()) {
+    if chat.purge_at.is_none_or(|at| at <= now()) {
         return Err(Error::new(410, "This conversation has expired."));
     }
-    if run_is_active(db.run(text(&chat, "runId"))?.as_ref()) {
+    if run_is_active(db.run(chat.run_id.as_deref().unwrap_or(""))?.as_ref()) {
         return Err(Error::conflict("Wait for the agent to finish stopping."));
     }
-    chat["lifecycle"] = Lifecycle::Active.into();
-    for key in [
-        "trashedAt",
-        "purgeAt",
-        "previousLifecycle",
-        "retryAfter",
-        "lifecycleError",
-    ] {
-        chat[key] = Value::Null;
-    }
+    chat.lifecycle = cairn_contracts::ConversationLifecycle::Active;
+    chat.trashed_at = None;
+    chat.purge_at = None;
+    chat.previous_lifecycle = None;
+    chat.retry_after = None;
+    chat.lifecycle_error = None;
     db.audit("chat.recovered", &json!({ "id": id }))?;
-    db.put("chats", &chat)
+    Ok(serde_json::to_value(db.save_conversation(&chat)?)?)
 }
 
 impl Service {
@@ -270,7 +249,7 @@ impl Service {
         self.store
             .read(move |db| {
                 authorize(db)?;
-                Ok(serde_json::to_value(Retention::load(db)?)?)
+                Ok(serde_json::to_value(retention(db)?)?)
             })
             .await
     }
@@ -296,9 +275,9 @@ impl Service {
         let result = self
             .store
             .transaction(move |db| {
+                let value = serde_json::to_value(&policy)?;
                 authorize(db)?;
-                let value = serde_json::to_value(policy)?;
-                db.set(RETENTION_KEY, &value, None)?;
+                db.save_conversation_retention(&policy)?;
                 db.audit("conversation.retention.updated", &value)?;
                 Ok(value)
             })
@@ -383,48 +362,43 @@ impl Service {
     }
 }
 
-fn purge_due(chat: &Value) -> bool {
-    chat["retryAfter"].as_i64().unwrap_or(0) <= now()
-        && in_trash(chat)
-        && chat["purgeAt"].as_i64().unwrap_or(i64::MAX) <= now()
+fn purge_due(chat: &Conversation) -> bool {
+    chat.retry_after.unwrap_or(0) <= now()
+        && chat.lifecycle != Lifecycle::Active
+        && chat.purge_at.unwrap_or(i64::MAX) <= now()
 }
 
-/// Claims due trash, after checking pending work.
-fn mark_purging(db: &Db<'_>, id: &str) -> Result<Option<Value>> {
-    let Some(mut current) = db.get("chats", id)? else {
+fn mark_purging(db: &Db<'_>, id: &str) -> Result<Option<Conversation>> {
+    let Some(mut current) = db.conversation(id)? else {
         return Ok(None);
     };
-    let run = db.run(text(&current, "runId"))?;
-    if run_is_active(run.as_ref()) {
+    let run = db.run(current.run_id.as_deref().unwrap_or(""))?;
+    if run_is_active(run.as_ref()) || !purge_due(&current) {
         return Ok(None);
     }
-    if !purge_due(&current) {
-        return Ok(None);
-    }
-    current["lifecycle"] = Lifecycle::Purging.into();
-    db.put("chats", &current)?;
-    Ok(Some(current))
+    current.lifecycle = Lifecycle::Purging;
+    Ok(Some(db.save_conversation(&current)?))
 }
 
-fn environment_cleanup_due(chat: &Value) -> bool {
-    is_active(chat)
-        && chat["environmentState"] == "cleaning"
-        && chat["environmentRetryAfter"].as_i64().unwrap_or(0) <= now()
+fn environment_cleanup_due(chat: &Conversation) -> bool {
+    chat.lifecycle == Lifecycle::Active
+        && chat.environment_state == Some(EnvironmentState::Cleaning)
+        && chat.environment_retry_after.unwrap_or(0) <= now()
 }
 
-/// Rechecks activity and all pending work atomically before retiring an environment.
-fn mark_environment_expiring(db: &Db<'_>, id: &str) -> Result<Option<Value>> {
-    let Some(mut chat) = db.get("chats", id)? else {
+fn mark_environment_expiring(db: &Db<'_>, id: &str) -> Result<Option<Conversation>> {
+    let Some(mut chat) = db.conversation(id)? else {
         return Ok(None);
     };
     if environment_cleanup_due(&chat) {
         return Ok(Some(chat));
     }
-    let cutoff = Retention::load(db)?.cutoff();
+    let cutoff = cutoff(&retention(db)?);
     if !inactive_due(&chat, cutoff) {
         return Ok(None);
     }
-    let run = db.run(text(&chat, "runId"))?;
+    let run_id = chat.run_id.as_deref().unwrap_or("");
+    let run = db.run(run_id)?;
     let run_busy = run.as_ref().is_some_and(|run| {
         run_is_active(Some(run))
             || run["recoveryPending"] == true
@@ -435,18 +409,17 @@ fn mark_environment_expiring(db: &Db<'_>, id: &str) -> Result<Option<Value>> {
                 .zip(cutoff)
                 .is_some_and(|(finished, cutoff)| finished > cutoff)
     });
-    let pending = chat["wakeup"].is_object()
-        || db.messages(id)?.iter().any(message_is_pending)
+    let pending = chat.wakeup.is_some()
+        || db.conversation_messages(id)?.iter().any(message_is_pending)
         || db
             .keys_as::<Question>(&crate::chats::question_prefix(id))?
             .iter()
-            .any(|(_, question)| question.is_open());
-    if run_busy || pending || crate::chats::coding_agent::pending_for_run(db, text(&chat, "runId"))?
-    {
+            .any(|(_, q)| q.is_open());
+    if run_busy || pending || crate::chats::coding_agent::pending_for_run(db, run_id)? {
         return Ok(None);
     }
-    chat["environmentState"] = "cleaning".into();
-    chat["environmentExpiredAt"] = now().into();
+    chat.environment_state = Some(EnvironmentState::Cleaning);
+    chat.environment_expired_at = Some(now());
     if let Some(run) = run {
         db.change_run(
             text(&run, "id"),
@@ -459,8 +432,7 @@ fn mark_environment_expiring(db: &Db<'_>, id: &str) -> Result<Option<Value>> {
         db.revoke_mcp_run(text(&run, "id"))?;
     }
     db.audit("chat.environment.expired", &json!({ "id": id }))?;
-    db.put("chats", &chat)?;
-    Ok(Some(chat))
+    Ok(Some(db.save_conversation(&chat)?))
 }
 
 impl Service {
@@ -475,24 +447,26 @@ impl Service {
         };
         let (mut chats, cutoff) = self
             .store
-            .read(|db| Ok((db.list("chats")?, Retention::load(db)?.cutoff())))
+            .read(|db| Ok((db.conversations()?, cutoff(&retention(db)?))))
             .await?;
-        chats.sort_by_key(|chat| chat["retryAfter"].as_i64().unwrap_or(0));
+        chats.sort_by_key(|chat| chat.retry_after.unwrap_or(0));
         for chat in chats.iter().filter(|chat| {
             purge_due(chat) || environment_cleanup_due(chat) || inactive_due(chat, cutoff)
         }) {
             // Preparation can create run files before execution is registered as active.
-            let preparation = self.worker.run_preparation_lock(text(chat, "runId")).await;
+            let preparation = self
+                .worker
+                .run_preparation_lock(chat.run_id.as_deref().unwrap_or(""))
+                .await;
             let Ok(_preparation) = preparation.try_lock_owned() else {
                 continue;
             };
-            // Terminal status is published before checkpointing and resource release finish.
+            // Terminal status precedes final checkpoint publication and resource release.
             let active = self.worker.active.lock().await;
-            if active.contains_key(text(chat, "runId")) {
+            if active.contains_key(chat.run_id.as_deref().unwrap_or("")) {
                 continue;
             }
-
-            let id = text(chat, "id").to_owned();
+            let id = chat.id.clone();
             let claim = id.clone();
             let claim = self
                 .store
@@ -508,14 +482,15 @@ impl Service {
             };
             drop(active);
             let result = if deleting {
-                crate::conversation_deletion::purge(self, chat).await
+                crate::conversation_deletion::purge(self, serde_json::to_value(chat)?).await
             } else {
-                crate::conversation_deletion::expire_environment(self, chat).await
+                crate::conversation_deletion::expire_environment(self, serde_json::to_value(chat)?)
+                    .await
             };
             if let Err(error) = result {
                 self.record_cleanup_failure(id, error, deleting).await?;
             }
-            // One conversation per pass bounds load, including the existing backlog.
+            // One conversation per pass bounds cleanup load, including backlog.
             break;
         }
         Ok(())
@@ -524,15 +499,15 @@ impl Service {
     async fn record_cleanup_failure(&self, id: String, error: Error, deleting: bool) -> Result<()> {
         self.store
             .transaction(move |db| {
-                if let Some(mut current) = db.get("chats", &id)? {
-                    let (error_key, retry_key) = if deleting {
-                        ("lifecycleError", "retryAfter")
+                if let Some(mut current) = db.conversation(&id)? {
+                    if deleting {
+                        current.lifecycle_error = Some(error.message);
+                        current.retry_after = Some(now() + PURGE_RETRY_MS);
                     } else {
-                        ("environmentError", "environmentRetryAfter")
-                    };
-                    current[error_key] = error.message.into();
-                    current[retry_key] = (now() + PURGE_RETRY_MS).into();
-                    db.put("chats", &current)?;
+                        current.environment_error = Some(error.message);
+                        current.environment_retry_after = Some(now() + PURGE_RETRY_MS);
+                    }
+                    db.save_conversation(&current)?;
                 }
                 Ok(())
             })
@@ -556,15 +531,20 @@ pub(crate) fn can_request_new_session(chat: &Value, run: Option<&Value>) -> bool
 }
 
 pub(crate) fn request_new_session(db: &Db<'_>, id: &str) -> Result<Value> {
-    let mut chat = required(db.get("chats", id)?, "Chat not found")?;
-    require_active(&chat)?;
-    let run = required(db.run(text(&chat, "runId"))?, "Run not found")?;
+    let mut chat = required(db.conversation(id)?, "Chat not found")?;
+    if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active {
+        return Err(Error::conflict("This conversation has been deleted."));
+    }
+    let run = required(
+        db.run(chat.run_id.as_deref().unwrap_or(""))?,
+        "Run not found",
+    )?;
     // A confirmation retried after a lost response keeps the already recorded intention.
-    if chat["sessionRestartRequested"] == true {
-        return Ok(chat);
+    if chat.session_restart_requested {
+        return Ok(serde_json::to_value(chat)?);
     }
 
-    if !can_request_new_session(&chat, Some(&run)) {
+    if !can_request_new_session(&serde_json::to_value(&chat)?, Some(&run)) {
         return Err(Error::conflict(
             "A fresh session is available after a restored session fails.",
         ));
@@ -577,10 +557,10 @@ pub(crate) fn request_new_session(db: &Db<'_>, id: &str) -> Result<Value> {
             ..Default::default()
         },
     )?;
-    chat["sessionRestartRequested"] = true.into();
-    chat["wakeup"] = Value::Null;
-    chat["paused"] = true.into();
-    db.put("chats", &chat)
+    chat.session_restart_requested = true;
+    chat.wakeup = None;
+    chat.paused = true;
+    Ok(serde_json::to_value(db.save_conversation(&chat)?)?)
 }
 
 impl Service {
@@ -620,6 +600,12 @@ use crate::run_fixture::DbRunFixture;
 mod tests {
     use super::*;
 
+    fn inactive_due(value: &Value, cutoff: Option<i64>) -> bool {
+        let mut value = value.clone();
+        value["id"] = "fixture".into();
+        super::inactive_due(&serde_json::from_value(value).unwrap(), cutoff)
+    }
+
     #[tokio::test]
     async fn fresh_session_intent_survives_a_live_checkpoint_persist() {
         use crate::{
@@ -658,14 +644,11 @@ mod tests {
         let before = store.checkpoint_boundary("run").await.unwrap();
         store
             .transaction(|db| {
-                db.put(
-                    "chats",
-                    &json!({
-                        "id": "chat",
-                        "runId": "run",
-                        "wakeup": { "wakeAt": 100 },
-                    }),
-                )?;
+                db.save_conversation_boundary(&json!({
+                    "id": "chat",
+                    "runId": "run",
+                    "wakeup": { "wakeAt": 100 },
+                }))?;
                 request_new_session(db, "chat")
             })
             .await
@@ -675,7 +658,7 @@ mod tests {
         // Force the old worker's late write with the real checkpoint owner.
         // This is an isolated non-VM interleaving, not production frequency evidence.
         checkpoint.persist().await.unwrap();
-        let chat = store.get("chats", "chat").await.unwrap().unwrap();
+        let chat = store.conversation_boundary("chat").await.unwrap().unwrap();
         assert_eq!(chat["sessionRestartRequested"], true);
         assert_eq!(chat["paused"], true);
         assert!(chat["wakeup"].is_null());

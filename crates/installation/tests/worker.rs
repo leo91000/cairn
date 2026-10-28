@@ -1523,7 +1523,7 @@ async fn waiting_mission_survives_restart_and_releases_capacity_without_finishin
     .unwrap();
     assert_eq!(thread["turns"].as_array().unwrap().len(), 2);
     assert!(
-        s.store.list("chats").await.unwrap().is_empty(),
+        s.store.conversations_boundary().await.unwrap().is_empty(),
         "Mission waits never create a hidden chat"
     );
     let id = run_id.to_owned();

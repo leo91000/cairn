@@ -1,0 +1,170 @@
+{
+  "creates": [
+    {},
+    {
+      "agentId": "00000000-0000-4000-8000-000000000001",
+      "projectId": null
+    }
+  ],
+  "messages": [
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "text": "Inspect this conversation 🦊."
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "text": "",
+      "attachmentIds": [
+        "00000000-0000-4000-8000-000000000001"
+      ],
+      "mode": "steer",
+      "provider": "codex",
+      "model": "gpt-6-sol",
+      "reasoning": "high",
+      "speed": "priority"
+    }
+  ],
+  "invalidMessages": [
+    {
+      "id": "bad",
+      "text": "inspect"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "text": "inspect",
+      "mode": "replace"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "text": "inspect",
+      "provider": "unknown"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "text": "inspect",
+      "attachmentIds": [
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000001"
+      ]
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "text": "inspect",
+      "model": "with spaces"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "text": "inspect",
+      "speed": "BAD"
+    }
+  ],
+  "serverInvalidMessages": [
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "text": "   ",
+      "attachmentIds": []
+    }
+  ],
+  "views": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "title": "Chat",
+      "agentId": "00000000-0000-4000-8000-000000000001",
+      "projectId": null,
+      "runId": null,
+      "projectName": null,
+      "createdAt": 9007199254740991,
+      "updatedAt": 1,
+      "lifecycle": "active",
+      "questions": [],
+      "messages": []
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "title": "Retained trash",
+      "agentId": "00000000-0000-4000-8000-000000000001",
+      "projectId": null,
+      "runId": null,
+      "projectName": null,
+      "lifecycle": "trash",
+      "purgeAt": 9007199254740991,
+      "paused": true,
+      "questions": [],
+      "messages": []
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "environmentState": "cleaning",
+      "environmentExpiredAt": 1700000000000,
+      "environmentError": "Cleanup will retry"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "environmentState": "expired",
+      "environmentExpiredAt": 1700000000000
+    }
+  ],
+  "invalidViews": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "createdAt": 9007199254740992
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle": "removed"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "purgeAt": -1
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "environmentState": "forgotten"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "environmentExpiredAt": -1
+    }
+  ],
+  "executions": [
+    {
+      "messageId": "00000000-0000-4000-8000-000000000002",
+      "text": "Continue",
+      "attachments": [],
+      "recovery": true
+    },
+    {
+      "messageId": "00000000-0000-4000-8000-000000000002",
+      "text": "",
+      "recovery": false,
+      "operation": "compact",
+      "previous": {
+        "summary": "Last reply",
+        "finishedAt": 1,
+        "outcome": null
+      }
+    }
+  ],
+  "edits": [
+    {
+      "text": "Keep the current speed"
+    },
+    {
+      "text": "Clear the current speed",
+      "speed": ""
+    }
+  ],
+  "invalidEdits": [
+    {
+      "text": "An explicit null is not an omission",
+      "speed": null
+    }
+  ]
+}

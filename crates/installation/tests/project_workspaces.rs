@@ -364,7 +364,7 @@ async fn delivered_message_retains_its_original_submission_timestamp() {
         .unwrap();
     let mut chat = chat;
     chat["runId"] = run["id"].clone();
-    s.store.put("chats", chat).await.unwrap();
+    s.store.save_conversation_boundary(chat).await.unwrap();
     s.chat_acknowledge(text(&run, "id"), text(&message, "id"))
         .await
         .unwrap();
@@ -947,7 +947,7 @@ async fn question_tools_only_withdraw_the_authorized_conversations_pending_quest
     let mut chat = s.chat_create(json!({})).await.unwrap();
     chat["runId"] = run["id"].clone();
     let chat_id = text(&chat, "id").to_owned();
-    s.store.put("chats", chat).await.unwrap();
+    s.store.save_conversation_boundary(chat).await.unwrap();
     let question = "a".repeat(64);
     s.question_receive(text(&run, "id"), json!({
         "id": question, "blocking": true, "fields": [{ "id": "scope", "title": "Still needed?" }],
@@ -1013,7 +1013,7 @@ async fn common_questionnaires_are_idempotent_and_keep_choices_distinct_from_com
     let mut chat = s.chat_create(json!({})).await.unwrap();
     chat["runId"] = run["id"].clone();
     let chat_id = text(&chat, "id").to_owned();
-    s.store.put("chats", chat).await.unwrap();
+    s.store.save_conversation_boundary(chat).await.unwrap();
     let input = json!({
         "requestId": id(),
         "questions": [
@@ -1121,7 +1121,7 @@ async fn common_questionnaires_validate_bounds_complete_groups_and_text_only_alt
     let mut chat = s.chat_create(json!({})).await.unwrap();
     chat["runId"] = run["id"].clone();
     let chat_id = text(&chat, "id").to_owned();
-    s.store.put("chats", chat).await.unwrap();
+    s.store.save_conversation_boundary(chat).await.unwrap();
     let input = json!({
         "requestId": id(),
         "questions": [
@@ -1350,7 +1350,7 @@ async fn valid_large_choice_answers_use_the_questionnaire_delivery_budget() {
     let mut chat = s.chat_create(json!({})).await.unwrap();
     chat["runId"] = run["id"].clone();
     let chat_id = text(&chat, "id").to_owned();
-    s.store.put("chats", chat).await.unwrap();
+    s.store.save_conversation_boundary(chat).await.unwrap();
     let options = (0..30)
         .map(|i| {
             json!({
@@ -1412,7 +1412,7 @@ async fn concurrent_large_questionnaire_responses_are_delivered_in_bounded_batch
     let mut chat = s.chat_create(json!({})).await.unwrap();
     chat["runId"] = run["id"].clone();
     let chat_id = text(&chat, "id").to_owned();
-    s.store.put("chats", chat).await.unwrap();
+    s.store.save_conversation_boundary(chat).await.unwrap();
     let fields = (0..20)
         .map(|i| {
             json!({

@@ -80,8 +80,8 @@ class BlockedMissionJourneyTest {
         )
     private val parent =
         Chat(
-            "parent",
-            "Orchestrer les chantiers F8",
+            id = "parent",
+            title = "Orchestrer les chantiers F8",
             agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1",
             agentName = "Claude",
             updatedAt = now - 3_600_000,

@@ -24,6 +24,36 @@ fn main() {
     let root = Path::new(&root);
     fs::create_dir_all(root).unwrap();
     let mut generator = SchemaSettings::draft07().for_serialize().into_generator();
+    export::<ConversationRetention>(root, &mut generator, Contract::Deserialize);
+    export::<GetConversationRetentionInput>(root, &mut generator, Contract::Deserialize);
+    export::<ChatExecution>(root, &mut generator, Contract::Deserialize);
+    export::<CodingAgentOptions>(root, &mut generator, Contract::Deserialize);
+    export::<SwitchChatCodingAgentInput>(root, &mut generator, Contract::Deserialize);
+    export::<EditChatMessageInput>(root, &mut generator, Contract::Deserialize);
+    export::<ChatMessageReference>(root, &mut generator, Contract::Deserialize);
+    export::<ListChatsInput>(root, &mut generator, Contract::Deserialize);
+    export::<GetChatInput>(root, &mut generator, Contract::Deserialize);
+    export::<ReadChatContentInput>(root, &mut generator, Contract::Deserialize);
+    export::<ChatContentOutput>(root, &mut generator, Contract::Deserialize);
+    export::<GetChatOutput>(root, &mut generator, Contract::Deserialize);
+    export::<ListChatsOutput>(root, &mut generator, Contract::Deserialize);
+    export::<DeleteChatMessageOutput>(root, &mut generator, Contract::Deserialize);
+    export::<ConversationId>(root, &mut generator, Contract::Deserialize);
+    export::<CreateChatInput>(root, &mut generator, Contract::Deserialize);
+    export::<ChatInput>(root, &mut generator, Contract::Deserialize);
+    export::<ChatMessageInput>(root, &mut generator, Contract::Deserialize);
+    export::<SendChatMessageInput>(root, &mut generator, Contract::Deserialize);
+    export::<RenameChatInput>(root, &mut generator, Contract::Deserialize);
+    export::<SetChatPausedInput>(root, &mut generator, Contract::Deserialize);
+    export::<ConfirmChatInput>(root, &mut generator, Contract::Deserialize);
+    export::<ChatAttachment>(root, &mut generator, Contract::Deserialize);
+    export::<ChatMessage>(root, &mut generator, Contract::Deserialize);
+    export::<Chat>(root, &mut generator, Contract::Deserialize);
+    export::<ChatCompaction>(root, &mut generator, Contract::Deserialize);
+    export::<ChatRequester>(root, &mut generator, Contract::Deserialize);
+    export::<ConversationRequester>(root, &mut generator, Contract::Deserialize);
+    export::<CodingAgentSwitch>(root, &mut generator, Contract::Deserialize);
+    export::<ContextUsage>(root, &mut generator, Contract::Deserialize);
     export::<ExecutionNode>(root, &mut generator, Contract::Deserialize);
     export::<NodeConfiguration>(root, &mut generator, Contract::Deserialize);
     export::<NodeCapabilities>(root, &mut generator, Contract::Deserialize);
@@ -49,6 +79,115 @@ fn main() {
     export::<NodeEnrollment>(root, &mut generator, Contract::Deserialize);
     export::<ListNodesInput>(root, &mut generator, Contract::Deserialize);
     export::<NodeInput>(root, &mut generator, Contract::Deserialize);
+    let chat_clients = serde_json::json!(
+        [
+            {
+                "name": "getConversationRetention",
+                "input": "GetConversationRetentionInput",
+                "output": "ConversationRetention",
+                "method": "GET",
+                "path": "/settings/conversations"
+            },
+            {
+                "name": "setConversationRetention",
+                "input": "ConversationRetention",
+                "output": "ConversationRetention",
+                "method": "PUT",
+                "path": "/settings/conversations"
+            },
+            {
+                "name": "createChat",
+                "input": "CreateChatInput",
+                "output": "Chat",
+                "method": "POST",
+                "path": "/chats"
+            },
+            {
+                "name": "getChat",
+                "input": "ChatInput",
+                "output": "Chat",
+                "method": "GET",
+                "path": "/chats/{chatId}"
+            },
+            {
+                "name": "sendChatMessage",
+                "bodyField": "message",
+                "input": "SendChatMessageInput",
+                "output": "ChatMessage",
+                "method": "POST",
+                "path": "/chats/{chatId}/messages"
+            },
+            {
+                "name": "editChatMessage",
+                "bodyField": "message",
+                "input": "EditChatMessageInput",
+                "output": "ChatMessage",
+                "method": "PUT",
+                "path": "/chats/{chatId}/messages/{messageId}"
+            },
+            {
+                "name": "deleteChatMessage",
+                "input": "ChatMessageReference",
+                "output": "DeleteChatMessageOutput",
+                "method": "DELETE",
+                "path": "/chats/{chatId}/messages/{messageId}"
+            },
+            {
+                "name": "setChatPaused",
+                "input": "SetChatPausedInput",
+                "output": "Chat",
+                "method": "POST",
+                "path": "/chats/{chatId}/pause"
+            },
+            {
+                "name": "stopChat",
+                "input": "ChatInput",
+                "output": "Chat",
+                "method": "POST",
+                "path": "/chats/{chatId}/stop"
+            },
+            {
+                "name": "compactChat",
+                "input": "ChatInput",
+                "output": "Chat",
+                "method": "POST",
+                "path": "/chats/{chatId}/compact"
+            },
+            {
+                "name": "restartChatSession",
+                "input": "ConfirmChatInput",
+                "output": "Chat",
+                "method": "POST",
+                "path": "/chats/{chatId}/new-session"
+            },
+            {
+                "name": "restoreChat",
+                "input": "ChatInput",
+                "output": "Chat",
+                "method": "POST",
+                "path": "/chats/{chatId}/restore"
+            },
+            {
+                "name": "deleteChat",
+                "input": "ConfirmChatInput",
+                "output": "Chat",
+                "method": "DELETE",
+                "path": "/chats/{chatId}"
+            },
+            {
+                "name": "convertRunToChat",
+                "input": "RunInput",
+                "output": "Chat",
+                "method": "POST",
+                "path": "/runs/{runId}/chat"
+            }
+        ]
+    );
+    fs::write(
+        root.join("chat-clients.json"),
+        serde_json::to_string_pretty(&chat_clients).unwrap() + "\n",
+    )
+    .unwrap();
     let node_clients = serde_json::json!([
         {"name":"createNodeEnrollment", "input":"CreateNodeEnrollmentInput", "output":"NodeEnrollment", "method":"POST", "path":"/nodes/enrollments"},
         {"name":"updateNodeStorage", "input":"UpdateNodeStorageInput", "output":"ExecutionNode", "method":"PUT", "path":"/nodes/{nodeId}/storage"},
@@ -694,6 +833,23 @@ fn main() {
     // Kotlin consumes run views as well as emitting commands. Honor Rust's
     // deserialization defaults (notably absent nullable timestamps in summaries).
     // The public output schemas above still describe the serialized wire shape.
+    let mut chat_decoder = SchemaSettings::draft07().for_deserialize().into_generator();
+    chat_decoder.subschema_for::<Chat>();
+    for (name, schema) in chat_decoder.take_definitions(true) {
+        if matches!(
+            name.as_str(),
+            "Chat"
+                | "ChatMessage"
+                | "ChatAttachment"
+                | "ChatCompaction"
+                | "CodingAgentSwitch"
+                | "ChatRequester"
+                | "ConversationRequester"
+                | "ContextUsage"
+        ) {
+            definitions.insert(name, schema);
+        }
+    }
     let mut node_decoder = SchemaSettings::draft07().for_deserialize().into_generator();
     node_decoder.subschema_for::<ExecutionNode>();
     for (name, schema) in node_decoder.take_definitions(true) {

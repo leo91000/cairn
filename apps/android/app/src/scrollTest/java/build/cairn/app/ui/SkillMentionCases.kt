@@ -66,7 +66,13 @@ abstract class SkillMentionCases {
                     taskId = "",
                 )
             val chat =
-                Chat("chat", title = "Skills", runId = "run", agentName = agent.name, run = run)
+                Chat(
+                    id = "chat",
+                    title = "Skills",
+                    runId = "run",
+                    agentName = agent.name,
+                    run = run,
+                )
             val skills =
                 if (noSkills) emptyList()
                 else

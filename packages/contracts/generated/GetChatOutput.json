@@ -1,0 +1,1904 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AccessPolicy": {
+      "additionalProperties": false,
+      "description": "Relational permission view: null is the explicit wildcard, distinct from an\nempty selection. These generated wire models confer no actor authority.",
+      "properties": {
+        "backend": {
+          "default": "firecracker",
+          "pattern": "^(auto|firecracker|native)$",
+          "type": "string"
+        },
+        "delegation": {
+          "default": false,
+          "type": "boolean"
+        },
+        "installation": {
+          "default": false,
+          "type": "boolean"
+        },
+        "mcpTools": {
+          "additionalProperties": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 500,
+            "type": "array"
+          },
+          "propertyNames": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "mcps": {
+          "default": null,
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "nodes": {
+          "default": [
+            "00000000-0000-4000-8000-000000000002"
+          ],
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "projects": {
+          "default": null,
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "sandbox": {
+          "default": "yolo",
+          "pattern": "^(yolo|workspace-write|read-only)$",
+          "type": "string"
+        },
+        "skills": {
+          "default": null,
+          "items": {
+            "maxLength": 160,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mcpTools"
+      ],
+      "type": "object"
+    },
+    "Agent": {
+      "properties": {
+        "access": {
+          "$ref": "#/definitions/AccessPolicy"
+        },
+        "avatar": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AgentAvatar"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "exclusiveNodes": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "instructions": {
+          "default": "",
+          "maxLength": 20000,
+          "type": "string"
+        },
+        "model": {
+          "default": "",
+          "maxLength": 100,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "nodePriorities": {
+          "default": [],
+          "description": "Preferred placement order. This does not grant access to any node.",
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "plugins": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "provider": {
+          "default": "codex",
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        },
+        "reasoning": {
+          "default": "high",
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "speed": {
+          "default": "",
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
+        "timeoutMinutes": {
+          "default": 0,
+          "format": "uint16",
+          "maximum": 720,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "access",
+        "exclusiveNodes",
+        "plugins",
+        "revision",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "AgentAvatar": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": "string"
+        },
+        "status": {
+          "pattern": "^(generating|ready|failed)$",
+          "type": "string"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "Cause": {
+      "properties": {
+        "kind": {
+          "pattern": "^(connection|timeout|rate-limit|server)$",
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "startup": {
+          "default": false,
+          "description": "The adapter confirmed that no new agent turn was submitted.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    "Chat": {
+      "properties": {
+        "accountRequired": {
+          "default": null,
+          "pattern": "^(codex|claude|opencode)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "accountWaitReason": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agentId": {
+          "default": "",
+          "type": "string"
+        },
+        "agentName": {
+          "default": "",
+          "type": "string"
+        },
+        "canRequestNewSession": {
+          "default": false,
+          "type": "boolean"
+        },
+        "codingAgentSwitch": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CodingAgentSwitch"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "compaction": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ChatCompaction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "contextUsage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ContextUsage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finishedAt": {
+          "default": null,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "lastActivityAt": {
+          "default": null,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lifecycle": {
+          "default": "active",
+          "pattern": "^(active|trash|purging)$",
+          "type": "string"
+        },
+        "lifecycleError": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "messages": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/ChatMessage"
+          },
+          "type": "array"
+        },
+        "paused": {
+          "default": false,
+          "type": "boolean"
+        },
+        "pendingQuestions": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "preview": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projectId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projectName": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "default": null,
+          "pattern": "^(codex|claude|opencode)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "purgeAt": {
+          "default": null,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "questions": {
+          "default": [],
+          "items": {
+            "additionalProperties": true,
+            "description": "Temporary A8 questionnaire adapter, removed by that domain's conversion.",
+            "type": "object",
+            "x-kotlin-type": "ChatQuestion"
+          },
+          "type": "array"
+        },
+        "requestedBy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ConversationRequester"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "requester": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ChatRequester"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "restoredAt": {
+          "default": null,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "revision": {
+          "default": "",
+          "type": "string"
+        },
+        "run": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Run"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "runId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sessionRestartRequested": {
+          "default": false,
+          "type": "boolean"
+        },
+        "slug": {
+          "default": "",
+          "type": "string"
+        },
+        "status": {
+          "default": "idle",
+          "pattern": "^(idle|queued|running|waiting|succeeded|failed|cancelled|interrupted)$",
+          "type": "string"
+        },
+        "suspendedByExclusive": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "ExclusiveReservation"
+        },
+        "title": {
+          "default": "",
+          "type": "string"
+        },
+        "trashedAt": {
+          "default": null,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unread": {
+          "default": false,
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wakeup": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "ChatWakeup"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "ChatAttachment": {
+      "properties": {
+        "chatId": {
+          "default": "",
+          "type": "string"
+        },
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "digest": {
+          "default": "",
+          "type": "string"
+        },
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "default": "file",
+          "pattern": "^(image|file)$",
+          "type": "string"
+        },
+        "mediaType": {
+          "default": "application/octet-stream",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "size": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 41943040,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "ChatCompaction": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "supported": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "supported",
+        "running",
+        "available"
+      ],
+      "type": "object"
+    },
+    "ChatExecution": {
+      "properties": {
+        "attachments": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/ChatAttachment"
+          },
+          "type": "array"
+        },
+        "context": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "operation": {
+          "pattern": "^compact$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "previous": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CompactionReply"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery": {
+          "default": false,
+          "type": "boolean"
+        },
+        "text": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "messageId"
+      ],
+      "type": "object"
+    },
+    "ChatMessage": {
+      "properties": {
+        "attachments": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/ChatAttachment"
+          },
+          "type": "array"
+        },
+        "chatId": {
+          "default": "",
+          "type": "string"
+        },
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "mode": {
+          "default": "queue",
+          "pattern": "^(queue|steer)$",
+          "type": "string"
+        },
+        "model": {
+          "default": "",
+          "type": "string"
+        },
+        "provider": {
+          "default": "",
+          "pattern": "^(|codex|claude|opencode)$",
+          "type": "string"
+        },
+        "questionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning": {
+          "default": "",
+          "type": "string"
+        },
+        "revision": {
+          "default": "",
+          "type": "string"
+        },
+        "speed": {
+          "default": "",
+          "type": "string"
+        },
+        "status": {
+          "default": "queued",
+          "pattern": "^(queued|sending|delivered|cancelled)$",
+          "type": "string"
+        },
+        "text": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "ChatMessagePage": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "complete",
+              "type": "string"
+            },
+            "message": {
+              "$ref": "#/definitions/ChatMessage"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "truncated",
+              "type": "string"
+            },
+            "preview": {
+              "$ref": "#/definitions/ChatMessagePreview"
+            },
+            "totalBytes": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "preview",
+            "totalBytes"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ChatMessagePreview": {
+      "properties": {
+        "chatId": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "pattern": "^(queued|sending|delivered|cancelled)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "chatId",
+        "status",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "ChatRequester": {
+      "properties": {
+        "chatId": {
+          "type": "string"
+        },
+        "title": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "chatId"
+      ],
+      "type": "object"
+    },
+    "CodingAgentSwitch": {
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "type": "object"
+    },
+    "CompactionReply": {
+      "properties": {
+        "finishedAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "outcome": {
+          "additionalProperties": true,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "TaskOutcome"
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ContextUsage": {
+      "properties": {
+        "cachedTokens": {
+          "default": null,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "contextTokens": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "contextWindow": {
+          "default": null,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "estimated": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ConversationRequester": {
+      "properties": {
+        "chatId": {
+          "type": "string"
+        },
+        "requestId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "chatId"
+      ],
+      "type": "object"
+    },
+    "MissionPluginGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "authorId": {
+          "type": "string"
+        },
+        "connectionId": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "connectionId",
+        "revision",
+        "authorId"
+      ],
+      "type": "object"
+    },
+    "NativeModeRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "pattern": "^(protected|administrator)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    },
+    "NodeResources": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "format": "uint32",
+          "maximum": 4096,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "diskMiB": {
+          "format": "uint64",
+          "maximum": 1099511627776,
+          "minimum": 128,
+          "type": "integer"
+        },
+        "memoryMiB": {
+          "format": "uint64",
+          "maximum": 1073741824,
+          "minimum": 128,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpu",
+        "memoryMiB",
+        "diskMiB"
+      ],
+      "type": "object"
+    },
+    "Project": {
+      "properties": {
+        "baseBranch": {
+          "default": "main",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_/.-]*$",
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProjectSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceMode": {
+          "default": "remote",
+          "pattern": "^(remote|local)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "path",
+        "origin",
+        "revision",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "ProjectSource": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginId",
+        "source",
+        "instance",
+        "id"
+      ],
+      "type": "object"
+    },
+    "Retry": {
+      "properties": {
+        "attempt": {
+          "format": "uint64",
+          "maximum": 5,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "cause": {
+          "$ref": "#/definitions/Cause"
+        },
+        "deadlineAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint64",
+          "maximum": 5,
+          "minimum": 5,
+          "type": "integer"
+        },
+        "nextAttemptAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "startedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attempt",
+        "limit",
+        "cause"
+      ],
+      "type": "object"
+    },
+    "Run": {
+      "description": "The full wire view shares its lifecycle fields with SQL. Payloads owned by\nunconverted domains use explicit client type references at this boundary;\nthey do not define or decide run admission/transitions (A6-A13/A18).",
+      "properties": {
+        "accountId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "accountName": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "accountRequired": {
+          "default": null,
+          "pattern": "^(codex|claude|opencode)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "accountWaitReason": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agentName": {
+          "default": "",
+          "type": "string"
+        },
+        "backup": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "NodeBackup"
+        },
+        "cancelRequestedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "capacityWaitUntil": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "chatExecution": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ChatExecution"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "contextUsage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ContextUsage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        },
+        "dismissal": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "OutcomeDismissal"
+        },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "executionBackend": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finishedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "isolated": {
+          "default": false,
+          "type": "boolean"
+        },
+        "movementError": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeMode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NativeModeRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "nodeId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nodeState": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "TaskOutcome"
+        },
+        "pinnedNodeId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preferredNodeId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preview": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projectId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "default": null,
+          "pattern": "^(codex|claude|opencode)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recoveryPending": {
+          "default": false,
+          "type": "boolean"
+        },
+        "requestedBy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RunRequester"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "resources": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NodeResources"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "restoredAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "resumeAvailable": {
+          "default": false,
+          "type": "boolean"
+        },
+        "resumeCount": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Retry"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sessionId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RunSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sourceTaskId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "pattern": "^(queued|running|waiting|succeeded|failed|cancelled|interrupted)$",
+          "type": "string"
+        },
+        "storage": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "RunStorage"
+        },
+        "summary": {
+          "default": "",
+          "type": "string"
+        },
+        "suspendedByExclusive": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "ExclusiveReservation"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "taskName": {
+          "default": "",
+          "type": "string"
+        },
+        "trigger": {
+          "default": "",
+          "type": "string"
+        },
+        "unread": {
+          "default": false,
+          "type": "boolean"
+        },
+        "usage": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "RunUsage"
+        },
+        "wakeup": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "ChatWakeup"
+        },
+        "workspace": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspaceCleanedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "workspaces": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/RunWorkspace"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "taskId",
+        "status"
+      ],
+      "type": "object"
+    },
+    "RunRequester": {
+      "additionalProperties": false,
+      "properties": {
+        "chatId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "taskId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "type": "object"
+    },
+    "RunSkill": {
+      "properties": {
+        "bundle": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content": {
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "content"
+      ],
+      "type": "object"
+    },
+    "RunSnapshot": {
+      "properties": {
+        "agent": {
+          "$ref": "#/definitions/Agent"
+        },
+        "availableProjects": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/Project"
+          },
+          "type": "array"
+        },
+        "delegation": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Project"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "projects": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/Project"
+          },
+          "type": "array"
+        },
+        "skills": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/RunSkill"
+          },
+          "type": "array"
+        },
+        "task": {
+          "$ref": "#/definitions/RunTaskSnapshot"
+        }
+      },
+      "required": [
+        "task",
+        "agent"
+      ],
+      "type": "object"
+    },
+    "RunTaskSnapshot": {
+      "description": "Presentation of task settings in a run snapshot. Chats synthesize the same typed\nsettings without creating a mission or a scheduled commitment.",
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "archived": {
+          "default": false,
+          "type": "boolean"
+        },
+        "authorAccessId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authorId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authorRemoved": {
+          "default": false,
+          "type": "boolean"
+        },
+        "createdAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cron": {
+          "default": null,
+          "maxLength": 100,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "nativeAuthorityNodes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "nativeParentAccess": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeParentRunId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativePluginGrants": {
+          "default": null,
+          "items": {
+            "$ref": "#/definitions/MissionPluginGrant"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "nativePrincipals": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "nativeProvenanceUnknown": {
+          "default": false,
+          "type": "boolean"
+        },
+        "nextRun": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "projectId": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "maxLength": 50000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "revision": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scheduleFailure": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ScheduleFailure"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "scheduleWaitReason": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skills": {
+          "default": null,
+          "items": {
+            "maxLength": 160,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "maxLength": 30,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "type": "array"
+        },
+        "timezone": {
+          "default": "Europe/Paris",
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "worktree": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "prompt",
+        "agentId"
+      ],
+      "type": "object"
+    },
+    "RunWorkspace": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "projectId": {
+          "type": "string"
+        },
+        "revision": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "projectId",
+        "path",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ScheduleFailure": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "scheduledFor": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "message",
+        "scheduledFor",
+        "at"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "chat": {
+      "$ref": "#/definitions/Chat"
+    },
+    "hasMore": {
+      "type": "boolean"
+    },
+    "messages": {
+      "items": {
+        "$ref": "#/definitions/ChatMessagePage"
+      },
+      "type": "array"
+    },
+    "nextOffset": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "chat",
+    "messages",
+    "hasMore"
+  ],
+  "title": "GetChatOutput",
+  "type": "object"
+}

@@ -46,6 +46,16 @@ function wakeup(values: Partial<ChatWakeup> = {}): ChatWakeup {
 
 function chat(id: string, values: Partial<ChatView> = {}): ChatView {
   return {
+    questions: [],
+    run: null,
+    messages: [],
+    slug: '',
+    revision: '',
+    lifecycle: 'active',
+    sessionRestartRequested: false,
+    canRequestNewSession: false,
+    unread: false,
+
     id,
     title: id,
     agentId: 'main',

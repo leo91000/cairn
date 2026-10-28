@@ -61,14 +61,14 @@ abstract class ChatProviderCases {
                 )
             val chat =
                 Chat(
-                    "chat",
+                    id = "chat",
                     title = "Conversation en attente",
                     runId = "run",
                     run = run,
                     messages =
                         listOf(
                             ChatMessage(
-                                "message",
+                                id = "message",
                                 text = "Améliore cette interface",
                                 status = "sending",
                             )
@@ -214,7 +214,7 @@ abstract class ChatProviderCases {
                 )
             val chat =
                 Chat(
-                    "chat",
+                    id = "chat",
                     title = "Contexte conservé",
                     runId = "run",
                     agentName = agent.name,
@@ -505,7 +505,7 @@ abstract class ChatProviderCases {
                 )
             val chat =
                 Chat(
-                    "chat",
+                    id = "chat",
                     title = "Contexte conservé",
                     runId = run.id,
                     run = run,

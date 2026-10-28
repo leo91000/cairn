@@ -1,5 +1,5 @@
 mod chat_files;
-mod chat_tools;
+pub(crate) mod chat_tools;
 pub mod code_mode;
 
 use crate::{
@@ -537,6 +537,11 @@ pub(crate) fn operations() -> Vec<Value> {
             .map(crate::capabilities::NodeOperation::descriptor),
     );
     operations.extend(
+        crate::capabilities::CHAT_OPERATIONS
+            .iter()
+            .map(|op| op.descriptor()),
+    );
+    operations.extend(
         crate::capabilities::PROJECT_OPERATIONS
             .iter()
             .map(crate::capabilities::ProjectOperation::descriptor),
@@ -631,6 +636,18 @@ pub(crate) async fn operation(
             .await;
     }
     if let Some(op) = crate::capabilities::agent_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::chat_operation(name) {
         return op
             .invoke(
                 s,
@@ -889,11 +906,6 @@ pub(crate) async fn invoke(
 ) -> Result<Value> {
     let authorize = crate::installation_mcp::management_authorization(bearer);
     match name {
-        "get_conversation_retention" => s.conversation_retention_authorized(authorize).await,
-        "set_conversation_retention" => {
-            s.save_conversation_retention_authorized(args, authorize)
-                .await
-        }
         "get_chat_backend_migration" => {
             crate::backend_migration::preview(s, text(&args, "chatId"), authorize).await
         }
@@ -905,34 +917,13 @@ pub(crate) async fn invoke(
         | "list_chat_attachments"
         | "read_chat_attachment"
         | "upload_chat_attachment" => chat_files::invoke(s, name, args, bearer).await,
-        "read_chat_content"
-        | "get_chat_coding_agent_options"
-        | "switch_chat_coding_agent"
-        | "list_chat_questions"
-        | "answer_chat_question"
-        | "withdraw_chat_question"
-        | "restore_chat"
-        | "restart_chat_session"
-        | "resume_chat"
-        | "list_chats"
-        | "get_chat"
-        | "create_chat"
-        | "send_chat_message"
-        | "edit_chat_message"
-        | "delete_chat_message"
-        | "rename_chat"
-        | "set_chat_paused"
-        | "stop_chat"
-        | "compact_chat"
-        | "delete_chat" => chat_tools::invoke(s, name, args, bearer).await,
+        "list_chat_questions" | "answer_chat_question" | "withdraw_chat_question" => {
+            chat_tools::invoke(s, name, args, bearer).await
+        }
         "list_models" => {
             crate::provider::Provider::parse(text(&args, "provider"))?
                 .adapter()
                 .model_catalog(s)
-                .await
-        }
-        "convert_run_to_chat" => {
-            s.chat_from_run_authorized(text(&args, "runId"), authorize)
                 .await
         }
         "list_skills" | "read_skill" | "save_skill" | "edit_skill_files" => {

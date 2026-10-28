@@ -213,6 +213,14 @@ impl Owner {
         self.service.store.put_node_fixture(value).await.unwrap();
     }
 
+    async fn save_conversation_boundary(&self, document: Value) {
+        self.service
+            .store
+            .save_conversation_boundary(document)
+            .await
+            .unwrap();
+    }
+
     async fn put(&self, kind: &str, document: Value) {
         if kind == "agents" {
             self.service
@@ -230,6 +238,8 @@ impl Owner {
             self.service.store.agent_snapshot(id).await.unwrap()
         } else if kind == "nodes" {
             self.service.store.node_boundary(id).await.unwrap()
+        } else if kind == "chats" {
+            self.service.store.conversation_boundary(id).await.unwrap()
         } else {
             self.service.store.get(kind, id).await.unwrap()
         }
@@ -4660,10 +4670,7 @@ async fn node_alerts_reach_the_conversation_and_clients_without_repeating() {
     record["trigger"] = "chat".into();
     owner.add_run_fixture(&record).await;
     owner
-        .put(
-            "chats",
-            json!({ "id": chat, "runId": run, "title": "Fixture" }),
-        )
+        .save_conversation_boundary(json!({ "id": chat, "runId": run, "title": "Fixture" }))
         .await;
     for _ in 0..2 {
         alerts::raise(
@@ -5093,8 +5100,7 @@ async fn coalesced_final_publication_survives_a_new_attempt_and_preserves_later_
         .await
         .unwrap();
     owner
-        .put(
-            "chats",
+        .save_conversation_boundary(
             json!({ "id": id(), "runId": run, "lifecycle": "trash", "trashedAt": now() }),
         )
         .await;
