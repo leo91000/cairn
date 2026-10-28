@@ -41,8 +41,8 @@ fn request(owner: &str) -> Acquisition {
         epoch: 1,
         owner_attempt_id: owner.into(),
         member_attempt_ids: vec![],
-        expires_at: now() + 5000,
-        remaining_ms: Some(5000),
+        expires_at: now() + 60_000,
+        remaining_ms: Some(60_000),
         reason: "Native compilation".into(),
         minimum_available_memory_mi_b: None,
     }
@@ -145,22 +145,34 @@ async fn native_expiration_renews_only_on_extension_and_resumes_peers() {
     let (owner, _, _) = attempt(&controller, true).await;
     let (_peer, cpu, _) = attempt(&controller, true).await;
     let mut acquisition = request(&owner);
-    acquisition.expires_at = now() + 1000;
-    acquisition.remaining_ms = Some(1000);
     controller
         .acquire_exclusive(acquisition.clone())
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    let initial = serde_json::to_value(&*controller.exclusive.lock().await).unwrap();
+    let initial_deadline = initial["reservation"]["deadlineBootMs"].as_u64().unwrap();
+    // A replay must not extend the boot deadline, even if its duration would.
+    acquisition.remaining_ms = Some(120_000);
     controller
         .acquire_exclusive(acquisition.clone())
         .await
         .unwrap();
-    acquisition.expires_at += 500;
-    acquisition.remaining_ms = Some(1470);
+    let replayed = serde_json::to_value(&*controller.exclusive.lock().await).unwrap();
+    assert_eq!(replayed["reservation"]["deadlineBootMs"], initial_deadline);
+    acquisition.expires_at += 60_000;
     controller.acquire_exclusive(acquisition).await.unwrap();
+    {
+        let mut ledger = controller.exclusive.lock().await;
+        let mut renewed = serde_json::to_value(&*ledger).unwrap();
+        assert!(renewed["reservation"]["deadlineBootMs"].as_u64().unwrap() > initial_deadline);
+        // Drive the real monitor from an expired durable deadline without
+        // making fsynced acquisition race a one-second wall-clock window.
+        renewed["reservation"]["deadlineBootMs"] = json!(0);
+        *ledger = serde_json::from_value(renewed).unwrap();
+        controller.save_exclusive(&ledger).await.unwrap();
+    }
     let monitor = tokio::spawn(controller.clone().monitor_exclusive());
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         while !controller.inspect_exclusive().await.unwrap()["reservation"].is_null() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -197,15 +209,14 @@ async fn native_tombstones_survive_restart_and_expired_members_cannot_acquire() 
 #[tokio::test]
 async fn native_confirmed_pause_extends_execution_deadline_but_never_a_lease() {
     let (_root, controller) = fixture().await;
-    let (peer, _, pause) = attempt(&controller, true).await;
-    let deadline = now() + 500;
+    let (peer, cpu, pause) = attempt(&controller, true).await;
     let reason = Reason::Exclusive {
         reservation_id: id(),
         epoch: 1,
     };
     pause.set_reason(&reason, true).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(550)).await;
-    assert!(!controller.expired(&peer, Some(deadline)).await);
+    tokio::time::sleep(Duration::from_millis(15)).await;
+    assert!(controller.administrative_ms(&peer).await.unwrap() >= 15);
     controller
         .leases
         .lock()
@@ -213,7 +224,27 @@ async fn native_confirmed_pause_extends_execution_deadline_but_never_a_lease() {
         .insert(peer.clone(), crate::nodes::boot_ms());
     assert!(!controller.leased(&peer).await);
     pause.set_reason(&reason, false).await.unwrap();
+    assert_eq!(*cpu.transitions.lock().await, vec![true, false]);
+
+    let path = controller
+        .state
+        .join(format!("{peer}.native-suspension.json"));
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+    assert!(record["administrativePausedMs"].as_u64().unwrap() >= 15);
+    assert!(record["administrativeSince"].is_null());
+    // Qualify the controller's persisted budget boundary with a completed
+    // one-minute pause, rather than timing durable writes inside 500 ms.
+    record["administrativePausedMs"] = json!(60_000);
+    super::super::atomic_write(&path, &serde_json::to_vec(&record).unwrap())
+        .await
+        .unwrap();
+    let deadline = now() - 30_000;
     assert!(!controller.expired(&peer, Some(deadline)).await);
-    tokio::time::sleep(Duration::from_millis(550)).await;
+    assert!(!controller.leased(&peer).await);
+    record["administrativePausedMs"] = json!(0);
+    super::super::atomic_write(&path, &serde_json::to_vec(&record).unwrap())
+        .await
+        .unwrap();
     assert!(controller.expired(&peer, Some(deadline)).await);
 }

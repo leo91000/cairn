@@ -340,6 +340,14 @@ abstract class NodePlacementCases {
                             )
                                 enrollmentConfigured.set(true)
                         }
+
+                        if (path == "/api/installations/fixture/api/overview") {
+                            // Exercise the form while the initial workspace refresh is still busy.
+                            return MockResponse()
+                                .setBody("{}")
+                                .setHeadersDelay(2, java.util.concurrent.TimeUnit.SECONDS)
+                        }
+
                         val body =
                             when (path) {
                                 "/api/installations/fixture/api/nodes/enrollments" -> {
@@ -413,6 +421,15 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Ajouter une machine").performScrollTo().performClick()
             compose.onNodeWithText("Nom de la machine").performTextInput("Desk")
             compose.onNodeWithText("Exécution native sur l’hôte").performClick()
+
+            // The page renders before connect() finishes refreshing the workspace.
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Créer un code d’inscription") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
             compose.onNodeWithText("Créer un code d’inscription").performScrollTo().performClick()
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("native-enrollment").fetchSemanticsNodes().isNotEmpty()

@@ -1686,7 +1686,9 @@ test('context usage shows the latest request and an explicit compaction keeps th
   // Codex reports the latest request (40,900 tokens), not the thread's cumulative total.
   const indicator = page.getByTestId('context-indicator')
   await expect(indicator).toHaveText('Context 41K / 258K · 16%')
-  await expect(page.getByText('Ready for the next step.')).toBeVisible()
+  const earlierReply = page.getByRole('region', { name: 'Run conversation', exact: true })
+    .getByText('Ready for the next step.', { exact: true })
+  await expect(earlierReply).toBeVisible()
   await page.getByRole('button', { name: 'Chat details', exact: true }).click()
   const details = page.getByRole('dialog', { name: 'Chat details', exact: true })
   await expect(details.getByTestId('context-usage')).toContainText('40,900 of 258,400 tokens (16%)')
@@ -1703,7 +1705,7 @@ test('context usage shows the latest request and an explicit compaction keeps th
   await expect(divider).toContainText('Context compacted', { timeout: 15000 })
   await expect(indicator).toHaveText('Context ≈ 6K / 258K · 2%')
   // The earlier reply and request stay in the transcript; no reply or new finish is invented.
-  await expect(page.getByText('Ready for the next step.')).toBeVisible()
+  await expect(earlierReply).toBeVisible()
   await expect(page.locator('.user-bubble').filter({ hasText: 'Measure the context' })).toBeVisible()
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).compaction?.available).toBe(true)
   const after = await workspace.api(`/api/chats/${chat.id}`)
