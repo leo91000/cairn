@@ -42,6 +42,15 @@ The agent must inspect current files and verify external effects before repeatin
 actions; environment expiration does not undo commits, messages or deployments.
 Web and Android show the expiration and pending cleanup in the conversation.
 
+If the agent's execution backend changed after expiration, use the existing
+explicit backend migration confirmation in its execution-node details. It checks
+current management, destination and provenance grants, then selects the new backend
+without reading or converting the deleted disk. The next message creates an empty
+environment on that backend. History, uploads and published artifacts remain; other
+reduced resource permissions still prevent continuation under the existing policy.
+The same confirmed action is available through public MCP and `cairn_installation`;
+its preview reports `environmentExpired`. Cleanup must finish before it is allowed.
+
 `GET /api/settings/conversations` returns `{ "inactivityDays": 7 }` by default;
 `PUT` accepts the same shape and records an audit entry. Existing owner-only HTTP
 authorization is unchanged. Public MCP and `cairn_installation` expose

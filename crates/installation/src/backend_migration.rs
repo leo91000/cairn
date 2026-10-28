@@ -86,11 +86,7 @@ pub(crate) fn candidate(run: &Value) -> Value {
 fn chat_run(db: &Db<'_>, chat_id: &str) -> Result<(Value, Value, Value, bool)> {
     let chat = required(db.get("chats", chat_id)?, "Chat not found")?;
     require_active(&chat)?;
-    if chat["environmentState"].is_string() {
-        return Err(Error::conflict(
-            "The environment expired. Send a new message to recreate it before migrating.",
-        ));
-    }
+    crate::conversation_lifecycle::require_environment_ready(&chat)?;
     let run = required(db.run(text(&chat, "runId"))?, "Run not found")?;
     let mut agent = required(
         db.agent_snapshot(text(&chat, "agentId"))?,
@@ -229,6 +225,76 @@ fn allowed(db: &Db<'_>, proposed: &Value, node: &Value) -> Result<bool> {
         && (!policy::node_native(node) || policy::allows(db, proposed, node)?))
 }
 
+/// Explicitly selects the new backend after cleanup has already retired every disk.
+/// Keep the expired marker so the next message still receives the fresh-session handoff.
+fn change_expired_backend(
+    db: &Db<'_>,
+    mut chat: Value,
+    proposed: &Value,
+    node: &Value,
+) -> Result<()> {
+    let run_id = text(&chat, "runId");
+    let mut boundary = json!({
+        "nodeId": node["id"],
+        "targetNodeId": null,
+        "requiredRuntime": node["runtimeId"],
+        "pinnedNodeId": null,
+        "preferredNodeId": null,
+        "backendMigration": null,
+        "backendMigrationError": null,
+        "isolated": false,
+        "backup": null,
+        "storage": null,
+    });
+    policy::apply(&mut boundary, proposed);
+
+    db.change_run(
+        run_id,
+        crate::runs::RunChanges {
+            snapshot: Some(serde_json::from_value(proposed["snapshot"].clone())?),
+            session_id: Some(None),
+            resume_available: Some(false),
+            workspace: Some(None),
+            recovery_pending: Some(false),
+            boundary: Some(boundary),
+            ..Default::default()
+        },
+    )?;
+
+    crate::worker::checkpoint::RunCheckpoint {
+        completed: Some(true),
+        ..Default::default()
+    }
+    .store_in(db, run_id)?;
+
+    db.event(
+        run_id,
+        &EventKind::Status,
+        "Execution backend changed after environment expiration. The next message creates an empty environment; conversation history, uploads and published artifacts are retained.",
+        None,
+    )?;
+
+    policy::apply(&mut chat, proposed);
+    chat["sessionRestartRequested"] = true.into();
+    db.put("chats", &chat)?;
+
+    for action in [
+        "chat.backend-migration.requested",
+        "chat.backend-migration.completed",
+    ] {
+        db.audit(
+            action,
+            &json!({
+                "chatId": chat["id"],
+                "backend": proposed["snapshot"]["agent"]["access"]["backend"],
+                "nodeId": node["id"],
+                "environmentExpired": true,
+            }),
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn chat_id(s: &Service, run: &str) -> Result<String> {
     let run = run.to_owned();
     s.store
@@ -285,6 +351,7 @@ pub(crate) async fn preview(
             "toBackend": to,
             "required": !automatic && from != to,
             "optional": automatic && from != to,
+            "environmentExpired": chat["environmentState"] == "expired",
             "nodes": nodes,
             "reason": reason,
             "pending": run["backendMigration"]["process"] == PROCESS.as_str(),
@@ -311,7 +378,7 @@ impl Service {
         let operation = id();
         let (args, who, migration) = (input.clone(), source.clone(), operation.clone());
         let request_authorization = authorize.clone();
-        self.store.transaction(move |db| {
+        let expired = self.store.transaction(move |db| {
             request_authorization(db)?;
             let (mut chat, run, agent, _) = chat_run(db, text(&args, "chatId"))?;
             if backend(&agent) != text(&args, "backend") || backend(&agent) == backend(&run["snapshot"]["agent"]) {
@@ -324,13 +391,18 @@ impl Service {
                 return Err(Error::conflict("Finish the pending node move first."));
             }
             let checkpoint = nodes::db_checkpoint(db, text(&run, "id"))?;
-            if !checkpoint["prepared"]["projectRoot"].is_string() {
+            let expired = chat["environmentState"] == "expired";
+            if !expired && !checkpoint["prepared"]["projectRoot"].is_string() {
                 return Err(Error::conflict("This conversation has no saved isolated environment to migrate."));
             }
             let node = required(db.node_boundary(text(&args, "nodeId"))?, "Destination node not found")?;
             let proposed = prospective(db, &run, &agent, &who)?;
             if !allowed(db, &proposed, &node)? || !nodes::valid_runtime(text(&node, "runtimeId")) {
                 return Err(Error::forbidden("Destination is not authorized for this backend."));
+            }
+            if expired {
+                change_expired_backend(db, chat, &proposed, &node)?;
+                return Ok(true);
             }
             let previous = &run["backendMigration"];
             let reusable = previous["convertedBackup"].is_string()
@@ -366,8 +438,12 @@ impl Service {
                 "backend": args["backend"],
                 "nodeId": node["id"],
             }))?;
-            Ok(())
+            Ok(false)
         }).await?;
+        if expired {
+            self.worker.notify();
+            return Ok(json!({ "status": "migrated", "chatId": chat_id }));
+        }
         let s = self.clone();
         let result = json!({
             "status": "migrating",

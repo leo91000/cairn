@@ -22,6 +22,7 @@ private data class BackendMigrationState(
     val toBackend: String = "firecracker",
     val nodes: List<MigrationNode> = emptyList(),
     val pending: Boolean = false,
+    val environmentExpired: Boolean = false,
     val reason: String? = null,
     val error: String? = null,
 )
@@ -78,11 +79,16 @@ fun BackendMigration(vm: CairnViewModel, runId: String, onCompleted: () -> Unit 
                 )
             value.pending ->
                 Text(
-                    "Migration vers $target. L’exécution est arrêtée pendant la sauvegarde et le transfert. Vous pouvez quitter cet écran."
+                    if (value.environmentExpired)
+                        "Migration vers $target. Le prochain message crée un environnement vide. L’historique et les livrables restent disponibles."
+                    else
+                        "Migration vers $target. L’exécution est arrêtée pendant la sauvegarde et le transfert. Vous pouvez quitter cet écran."
                 )
             else -> {
                 Text(
-                    if (value.optional)
+                    if (value.environmentExpired)
+                        "L’environnement précédent a expiré. Confirmez $target pour continuer dans le même fil avec un environnement vide. L’historique, les pièces jointes et les livrables sont conservés."
+                    else if (value.optional)
                         "Vous pouvez choisir explicitement $target pour cette conversation. Son environnement actuel est conservé jusqu’à votre confirmation."
                     else
                         "L’agent utilise maintenant $target. Migrez cette conversation pour garder son historique et ses fichiers."
@@ -119,7 +125,10 @@ fun BackendMigration(vm: CairnViewModel, runId: String, onCompleted: () -> Unit 
         Confirm(
             title = "Migrer cette conversation ?",
             description =
-                "L’exécution s’arrête et les fichiers sont transférés vers $target. Le fil et son historique restent identiques. Le prochain message ouvre une nouvelle session du moteur avec le contexte de la conversation. Certains outils ou dépendances système peuvent nécessiter une réinstallation. L’environnement d’origine est conservé si la migration échoue. La préférence de node précédente est effacée.",
+                if (value.environmentExpired)
+                    "Les anciens fichiers de travail ont été supprimés après inactivité. Confirmez $target pour un nouvel environnement vide. Le fil, l’historique, les pièces jointes et les livrables sont conservés. Le prochain message ouvre une nouvelle session du moteur avec le contexte de la conversation. Les outils et dépendances devront être réinstallés. La préférence de node précédente est effacée."
+                else
+                    "L’exécution s’arrête et les fichiers sont transférés vers $target. Le fil et son historique restent identiques. Le prochain message ouvre une nouvelle session du moteur avec le contexte de la conversation. Certains outils ou dépendances système peuvent nécessiter une réinstallation. L’environnement d’origine est conservé si la migration échoue. La préférence de node précédente est effacée.",
             busy = busy,
             error = error,
             dismiss = { confirm = false },

@@ -3451,30 +3451,48 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
         json!({ "prepared": { "projectRoot": "/data/work" } }),
     )
     .await;
-    for (endpoint, token) in [
-        ("/mcp", owner_token.as_str()),
-        ("/mcp-installation", agent_token),
-    ] {
-        let (_, preview) = node_management_call(
-            &app,
-            endpoint,
-            token,
-            "get_chat_backend_migration",
-            json!({ "chatId": chat }),
-        )
-        .await;
-        assert_eq!(result(&preview)["required"], true);
-        assert!(result(&preview)["nodes"].as_array().unwrap().is_empty());
-        let (_, denied) = node_management_call(
-            &app,
-            endpoint,
-            token,
-            "migrate_chat_backend",
-            json!({ "chatId": chat, "nodeId": node, "backend": "native", "confirm": true }),
-        )
-        .await;
-        assert_eq!(denied["result"]["isError"], true, "{denied}");
-        assert!(s.store.run(&run).await.unwrap()["backendMigration"].is_null());
+    for expired in [false, true] {
+        s.store
+            .put(
+                "chats",
+                json!({
+                    "id": chat,
+                    "runId": run,
+                    "agentId": profile["id"],
+                    "environmentState": if expired { json!("expired") } else { Value::Null },
+                }),
+            )
+            .await
+            .unwrap();
+        if expired {
+            common::set_checkpoint(&s.store, &run, json!({ "completed": true })).await;
+        }
+        for (endpoint, token) in [
+            ("/mcp", owner_token.as_str()),
+            ("/mcp-installation", agent_token),
+        ] {
+            let (_, preview) = node_management_call(
+                &app,
+                endpoint,
+                token,
+                "get_chat_backend_migration",
+                json!({ "chatId": chat }),
+            )
+            .await;
+            assert_eq!(result(&preview)["required"], true);
+            assert_eq!(result(&preview)["environmentExpired"], expired);
+            assert!(result(&preview)["nodes"].as_array().unwrap().is_empty());
+            let (_, denied) = node_management_call(
+                &app,
+                endpoint,
+                token,
+                "migrate_chat_backend",
+                json!({ "chatId": chat, "nodeId": node, "backend": "native", "confirm": true }),
+            )
+            .await;
+            assert_eq!(denied["result"]["isError"], true, "{denied}");
+            assert!(s.store.run(&run).await.unwrap()["backendMigration"].is_null());
+        }
     }
     let read = common::relay_fixture::grant(&s, &["read"]).await;
     let (_, denied) = node_management_call(
