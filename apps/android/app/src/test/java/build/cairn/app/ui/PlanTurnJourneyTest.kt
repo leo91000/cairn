@@ -83,32 +83,39 @@ class PlanTurnJourneyTest {
             val events =
                 listOf(
                     RunEvent(
-                        1,
-                        1789315189000,
-                        "chat.user",
-                        "Planifie le nouveau composeur",
-                        mapOf(
-                            "text" to JsonPrimitive("Planifie le nouveau composeur"),
-                            "plan" to JsonPrimitive(true),
-                        ),
+                        id = 1,
+                        createdAt = 1789315189000,
+                        type = "chat.user",
+                        text = "Planifie le nouveau composeur",
+                        payload =
+                            buildJsonObject {
+                                put("text", "Planifie le nouveau composeur")
+                                put("plan", true)
+                            },
                     ),
-                    RunEvent(2, 1789315190000, "turn.started", ""),
+                    RunEvent(id = 2, createdAt = 1789315190000, type = "turn.started", text = ""),
                     RunEvent(
-                        3,
-                        1789315191000,
-                        "item.completed",
-                        "",
-                        mapOf(
-                            "item" to
-                                buildJsonObject {
-                                    put("id", "exit-plan-tool")
-                                    put("type", "proposed_plan")
-                                    put("text", "1. Lire le composeur\n2. Ajouter le bouton Plan")
-                                    put("status", "completed")
-                                }
-                        ),
+                        id = 3,
+                        createdAt = 1789315191000,
+                        type = "item.completed",
+                        text = "",
+                        payload =
+                            buildJsonObject {
+                                put(
+                                    "item",
+                                    buildJsonObject {
+                                        put("id", "exit-plan-tool")
+                                        put("type", "proposed_plan")
+                                        put(
+                                            "text",
+                                            "1. Lire le composeur\n2. Ajouter le bouton Plan",
+                                        )
+                                        put("status", "completed")
+                                    },
+                                )
+                            },
                     ),
-                    RunEvent(4, 1789315192000, "turn.completed", ""),
+                    RunEvent(id = 4, createdAt = 1789315192000, type = "turn.completed", text = ""),
                 )
             val batch =
                 wireJson.encodeToString(LiveBatch(events, LiveState(chat = chat), true, false))

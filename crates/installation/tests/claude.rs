@@ -1122,7 +1122,8 @@ fn plan_turn_arguments_use_plan_mode_a_networkless_sandbox_and_deny_workspace_ed
     let denied = a.iter().position(|arg| arg == "--disallowedTools").unwrap();
     let denied = a[denied + 1].split(',').collect::<Vec<_>>();
     let rule = format!("Edit(/{}/**)", root.path().display());
-    assert_eq!(denied, vec![rule.as_str()]);
+    // Questions use Cairn's own tool, in plan turns as elsewhere.
+    assert_eq!(denied, vec!["AskUserQuestion", rule.as_str()]);
 
     // Outside plan turns, YOLO keeps its existing arguments.
     let a = claude_process::args(&plan(&root, "test"), &root.path().join("instructions.txt"));
