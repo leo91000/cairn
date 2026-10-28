@@ -169,9 +169,12 @@ manager, producer and simulated S3 receiver in this one-process fixture.
 Compare with an unchanged production-source reference using the same test-only
 fixture. On a reference without this instrumentation, omit the
 `Publication.publication_attempt` initializer and its local UUID, and replace the
-node callback's diagnostic parsing and `served_publication_observed` call with
-`served_publication(&captured, hashes)`. No production code needs changing beyond
-the test module declaration. Keep both compiled binaries and alternate their
+node callback's diagnostic assertion/parsing and `served_publication_observed`
+call with `served_publication(&captured, hashes)`. Expose the reference's existing
+`#[cfg(test)]` module `object_storage::tests` and its unchanged `fixture_storage`
+helper as `pub(crate)`. These adaptations and the measurement module declaration
+are test-only; keep the reference's production functions unchanged.
+Keep both compiled binaries and alternate their
 execution order to limit drift; record the reference SHA, profile and host load
 with results in the PR.
 
