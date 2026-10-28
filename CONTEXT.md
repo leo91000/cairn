@@ -201,8 +201,8 @@ formulaire d’une instance (que le package peut compléter pendant la saisie), 
 connexion par appareil, les commandes et outils donnés aux agents autorisés, leurs
 instructions, les identifiants de run, les conditions d’attente, les hooks, les
 ressources et les modèles de règles, les sources de projets et de skills, le panneau
-d’une instance et son test. Le code du package ne
-fait que répondre ; il ne reçoit jamais les secrets.
+d’une instance et son test. Le code du package ne fait que répondre ; il ne reçoit
+jamais les secrets.
 
 **Connexion par appareil** :
 La connexion d’une instance à un service tiers que Cairn déroule pour le propriétaire :
