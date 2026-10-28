@@ -3,6 +3,7 @@ import type { NodeConfiguration } from '../../../../packages/contracts/generated
 import type { ExecutionNode, NodeEnrollment, NodeSyncSettings } from '../../../../packages/contracts/nodes'
 import {
   computed,
+  nextTick,
   onBeforeUnmount,
   onMounted,
   ref,
@@ -83,12 +84,12 @@ const granted = ref<string[]>([])
 const showRevoked = ref(false)
 // The machine shown in the side panel, followed through polling by its id.
 const openedId = ref<string | null>(null)
+const machinesHeading = ref<HTMLElement>()
 const opened = computed(() => nodes.value.find(node => node.id === openedId.value) ?? null)
 const active = computed(() => nodes.value.filter(node => !node.revoked))
 const revoked = computed(() => nodes.value.filter(node => node.revoked))
 const visible = computed(() => showRevoked.value ? nodes.value : active.value)
 const healths = computed(() => active.value.map(node => nodeHealth(node)))
-const connected = computed(() => active.value.filter(node => node.local || node.status === 'online').length)
 const live = computed(() => active.value.filter(node => node.local || node.status === 'online'))
 const totalSlots = computed(() => live.value.reduce((total, node) => total + (node.slots ?? 0), 0))
 const usedSlots = computed(() => live.value.reduce((total, node) => total + (node.occupiedSlots ?? 0), 0))
@@ -183,8 +184,10 @@ function switchBackend(node: ExecutionNode) {
 }
 
 // The switch continues in its own steps; the panel would show the node being replaced.
-function switchFromPanel(node: ExecutionNode) {
+// The panel closes first, so it returns focus to the row before the next dialog opens.
+async function switchFromPanel(node: ExecutionNode) {
   openedId.value = null
+  await nextTick()
   switchBackend(node)
 }
 
@@ -362,9 +365,13 @@ function revoke() {
     return
   return action(async () => {
     await revokeNode(api, { nodeId: node.id, releasePlacements: false })
-    revoking.value = null
-    if (openedId.value === node.id)
+    // The revoked row leaves the list: once the panel is gone, the dialog returns focus to the list.
+    if (openedId.value === node.id) {
       openedId.value = null
+      await nextTick()
+    }
+
+    revoking.value = null
   })
 }
 </script>
@@ -393,7 +400,7 @@ function revoke() {
           connected
         </dt>
         <dd class="font-heading text-xl font-bold tabular-nums">
-          {{ connected }}<span class="text-sm font-normal text-muted"> / {{ active.length }}</span>
+          {{ live.length }}<span class="text-sm font-normal text-muted"> / {{ active.length }}</span>
         </dd>
       </div>
       <div class="rounded-xl border border-line bg-surface flex flex-col-reverse px-4 py-3 phone:px-3">
@@ -499,7 +506,12 @@ function revoke() {
       </section>
     </Modal>
     <section class="overflow-hidden rounded-2xl border border-line bg-surface shadow-arcade" aria-labelledby="machines-heading">
-      <h2 id="machines-heading" class="sr-only">
+      <h2
+        id="machines-heading"
+        ref="machinesHeading"
+        class="sr-only"
+        tabindex="-1"
+      >
         Machines
       </h2>
       <div class="grid grid-cols-[minmax(0,1fr)_7rem_5.5rem_8.5rem_4.5rem_1rem] gap-4 bg-inset px-4.5 py-2 text-[10.5px] tracking-[.06em] text-muted uppercase tablet:grid-cols-[minmax(0,1fr)_7rem_5.5rem_1rem] phone:hidden" aria-hidden="true">
@@ -528,6 +540,7 @@ function revoke() {
       :key="opened.id"
       :node="opened"
       :busy="busy"
+      :error="error"
       @close="openedId = null"
       @changed="load"
       @configure="edit(opened)"
@@ -776,6 +789,7 @@ function revoke() {
       v-if="revoking"
       sheet
       title="Revoke node"
+      :return-focus="opened ? undefined : machinesHeading"
       @close="revoking = null"
     >
       <div class="node-form">

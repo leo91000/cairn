@@ -105,10 +105,19 @@ export function nodeHealth(node: ExecutionNode, now = Date.now()): NodeHealth {
     return { state: 'attention', label: 'Needs attention', detail: 'KVM is unavailable' }
   if (native && !node.capabilities.ublk)
     return { state: 'attention', label: 'Needs attention', detail: 'ublk is unavailable' }
+  // A privilege change blocks placements until the supervisor confirms it.
+  if (native && (node.nativeModeStatus === 'failed' || node.nativeModeObserved?.status === 'failed'))
+    return { state: 'attention', label: 'Needs attention', detail: 'The privilege change failed' }
+  if (native && node.nativeModeStatus === 'pending')
+    return { state: 'updating', label: 'Updating', detail: 'Privilege change in progress' }
+  if (node.maintenance && node.maintenanceError)
+    return { state: 'attention', label: 'Needs attention', detail: 'The update failed' }
   if (node.maintenance)
-    return { state: 'updating', label: 'Updating', detail: node.maintenanceError ? 'The update failed' : 'New work waits for the update' }
+    return { state: 'updating', label: 'Updating', detail: 'New work waits for the update' }
   if (node.executionReady === false)
     return { state: 'attention', label: 'Needs attention', detail: node.budgetError ? 'The shared budget could not be applied' : 'The runtime is not ready' }
+  if (native && node.nativeModeProposal)
+    return { state: 'attention', label: 'Needs attention', detail: `An agent requested ${nativeModeLabel(node.nativeModeProposal.mode)}` }
   if (native && (!node.nativeEnabled || !node.nativeAccounts?.length))
     return { state: 'setup', label: 'Setup needed', detail: 'Enable native execution and choose trusted people' }
   if (!node.agents?.length)
@@ -121,10 +130,10 @@ export function nodeHealth(node: ExecutionNode, now = Date.now()): NodeHealth {
     return { state: 'busy', label: 'Busy', detail: node.pressure === 'memory' ? 'Shared RAM is under pressure' : 'Shared disk space is low' }
 
   const slots = node.slots ?? 0
-  const free = node.availableSlots ?? slots
+  const running = node.occupiedSlots ?? 0
+  const free = node.availableSlots ?? Math.max(0, slots - running)
   if (slots > 0 && free <= 0)
     return { state: 'full', label: 'Full', detail: `All ${slots} slots in use` }
-  const running = node.occupiedSlots ?? 0
   return { state: 'ready', label: 'Ready', detail: running ? `${running} running · ${free} of ${slots} slots free` : `${free} of ${slots} slots free` }
 }
 

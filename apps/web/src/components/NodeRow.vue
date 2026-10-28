@@ -19,7 +19,7 @@ defineEmits<{ open: [] }>()
 const health = computed(() => nodeHealth(props.node))
 const live = computed(() => !['offline', 'revoked'].includes(health.value.state))
 const slots = computed(() => props.node.slots ?? 0)
-const free = computed(() => props.node.availableSlots ?? slots.value)
+const free = computed(() => props.node.availableSlots ?? Math.max(0, slots.value - (props.node.occupiedSlots ?? 0)))
 const runtime = computed(() => props.node.capabilities.backend === 'native' ? nodeAdministrator(props.node) ? 'Native · admin' : 'Native' : 'VM')
 const agents = computed(() => props.node.agents ?? [])
 </script>
@@ -30,6 +30,7 @@ const agents = computed(() => props.node.agents ?? [])
     class="node-row group grid w-full grid-cols-[minmax(0,1fr)_7rem_5.5rem_8.5rem_4.5rem_1rem] items-center gap-4 border-t border-line px-4.5 py-3.5 text-left transition-colors hover:bg-hover/40 focus-visible:-outline-offset-2 focus-visible:outline-2 focus-visible:outline-accent tablet:grid-cols-[minmax(0,1fr)_7rem_5.5rem_1rem] phone:grid-cols-[minmax(0,1fr)_auto] phone:gap-3 phone:px-4"
     :class="{ 'bg-soft/40': selected }"
     :aria-label="`${node.name}, ${health.label}`"
+    :data-node-id="node.id"
     @click="$emit('open')"
   >
     <span class="min-w-0">

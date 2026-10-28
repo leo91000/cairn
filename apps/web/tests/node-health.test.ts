@@ -72,6 +72,30 @@ describe('node health', () => {
     expect(nodeHealth(node({ pressure: 'disk' }))).toMatchObject({ state: 'busy', detail: 'Shared disk space is low' })
   })
 
+  it('raises privilege changes and failed updates for the owner', () => {
+    const native = node({
+      capabilities: {
+        ...node().capabilities,
+        backend: 'native',
+        kvm: false,
+        ublk: true,
+      },
+      nativeEnabled: true,
+      nativeAccounts: ['person'],
+    })
+    expect(nodeHealth({ ...native, nativeModeProposal: { mode: 'administrator' } as ExecutionNode['nativeModeProposal'] })).toMatchObject({ state: 'attention', detail: 'An agent requested Native administrator' })
+    expect(nodeHealth({ ...native, nativeModeStatus: 'pending', executionReady: false })).toMatchObject({ state: 'updating', detail: 'Privilege change in progress' })
+    expect(nodeHealth({ ...native, nativeModeStatus: 'failed', executionReady: false })).toMatchObject({ state: 'attention', detail: 'The privilege change failed' })
+    expect(nodeHealth(node({ maintenance: 'draining', maintenanceError: 'disk full' }))).toMatchObject({ state: 'attention', detail: 'The update failed' })
+  })
+
+  it('derives free slots from occupied ones when an older inventory omits them', () => {
+    const partial = node({ occupiedSlots: 2 })
+    delete (partial as Partial<ExecutionNode>).availableSlots
+    expect(nodeHealth({ ...partial, slots: 2 })).toMatchObject({ state: 'full' })
+    expect(nodeHealth({ ...partial, slots: 3 }).detail).toBe('2 running · 1 of 3 slots free')
+  })
+
   it('keeps the built-in runner online without a heartbeat status', () => {
     expect(nodeHealth(node({ local: true, status: 'local' })).state).toBe('ready')
   })

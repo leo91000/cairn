@@ -145,22 +145,23 @@ fun NodesScreen(
                         NodeHealthPill(health)
                     }
                     Text(
-                        (if (node.local) "Runner intégré · " else "") +
+                        (if (node.local) "Runner du master · " else "") +
                             if (node.capabilities.backend == "native")
                                 "Processus natif · GPU partagé · personnes de confiance"
                             else "VM Firecracker",
                         style = MaterialTheme.typography.bodySmall,
                     )
-                    Text(
-                        health.detail,
-                        color =
-                            if (
-                                health.state == NodeHealthState.OFFLINE ||
-                                    health.state == NodeHealthState.ATTENTION
-                            )
-                                signal.attention
-                            else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    if (!node.revoked)
+                        Text(
+                            health.detail,
+                            color =
+                                if (
+                                    health.state == NodeHealthState.OFFLINE ||
+                                        health.state == NodeHealthState.ATTENTION
+                                )
+                                    signal.attention
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     if (node.revoked) {
                         Text(
                             "Cette machine n’a plus accès. Réinscrivez-la avec un nouveau code pour la reconnecter."
@@ -649,7 +650,6 @@ fun NodesScreen(
     }
 }
 
-/** The last step of a guided backend switch: revoke the previous node, or keep both for now. */
 /** A node's health: green when it takes work, amber when it waits, coral when it needs you. */
 @Composable
 private fun NodeHealthPill(health: NodeHealth) {
@@ -667,6 +667,7 @@ private fun NodeHealthPill(health: NodeHealth) {
     Pill(health.label, container, content)
 }
 
+/** The last step of a guided backend switch: revoke the previous node, or keep both for now. */
 @Composable
 internal fun RetireNode(
     previous: ExecutionNode,

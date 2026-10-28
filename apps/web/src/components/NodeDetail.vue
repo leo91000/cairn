@@ -18,12 +18,13 @@ import NativeNodeMode from './NativeNodeMode.vue'
 import NodeHealthBadge from './NodeHealthBadge.vue'
 import NodeMeter from './NodeMeter.vue'
 import NodeStorage from './NodeStorage.vue'
+import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
 import UiSegments from './UiSegments.vue'
 
 // Everything about one machine, in four sections: how it is doing, who may use it, its disks, and its settings.
 // Editors and confirmations stay in their own dialogs, opened above this panel by the page.
-const props = defineProps<{ node: ExecutionNode, busy: boolean }>()
+const props = defineProps<{ node: ExecutionNode, busy: boolean, error?: string }>()
 const emit = defineEmits<{
   close: []
   changed: []
@@ -48,7 +49,7 @@ const health = computed(() => nodeHealth(props.node))
 const diagnostics = computed(() => nodeDiagnostics(props.node))
 const native = computed(() => props.node.capabilities.backend === 'native')
 const slots = computed(() => props.node.slots ?? 0)
-const free = computed(() => props.node.availableSlots ?? slots.value)
+const free = computed(() => props.node.availableSlots ?? Math.max(0, slots.value - (props.node.occupiedSlots ?? 0)))
 const runtime = computed(() => `${props.node.local ? 'Built-in runner · ' : ''}${native.value ? 'Native process · shares the host GPU' : 'Firecracker VM'}`)
 const banner = computed(() => ({
   ready: 'bg-success/10 text-success',
@@ -82,6 +83,9 @@ const reserve = computed(() => {
       </span>
     </template>
     <div class="flex flex-1 flex-col">
+      <div v-if="error" class="px-6.5 pt-3 phone:px-5">
+        <UiAlert>{{ error }}</UiAlert>
+      </div>
       <template v-if="node.revoked">
         <section class="grid gap-3 px-6.5 py-5 phone:px-5">
           <span><NodeHealthBadge :health="health" /></span>
@@ -145,53 +149,61 @@ const reserve = computed(() => {
               Shared capacity
             </h3>
             <dl class="grid gap-3 text-sm">
-              <div class="grid grid-cols-[4.5rem_minmax(0,1fr)_auto] items-center gap-3">
+              <div class="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-3">
                 <dt class="text-muted">
                   Slots
                 </dt>
-                <NodeMeter v-if="slots" :used="usedPercent(slots - free, slots)" :label="`${node.name} slots in use`" />
-                <span v-else />
-                <dd class="text-right tabular-nums">
-                  <b class="font-semibold">{{ free }}</b> <span class="text-xs text-muted">of {{ slots }} free</span>
+                <dd class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
+                  <NodeMeter v-if="slots" :used="usedPercent(slots - free, slots)" :label="`${node.name} slots in use`" />
+                  <span v-else />
+                  <span class="text-right tabular-nums">
+                    <b class="font-semibold">{{ free }}</b> <span class="text-xs text-muted">of {{ slots }} free</span>
+                  </span>
                 </dd>
               </div>
-              <div class="grid grid-cols-[4.5rem_minmax(0,1fr)_auto] items-center gap-3">
+              <div class="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-3">
                 <dt class="text-muted">
                   CPU
                 </dt>
-                <span />
-                <dd class="text-right tabular-nums">
-                  <b class="font-semibold">{{ node.limits.cpu }}</b> <span class="text-xs text-muted">cores</span>
+                <dd class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
+                  <span />
+                  <span class="text-right tabular-nums">
+                    <b class="font-semibold">{{ node.limits.cpu }}</b> <span class="text-xs text-muted">cores</span>
+                  </span>
                 </dd>
               </div>
-              <div class="grid grid-cols-[4.5rem_minmax(0,1fr)_auto] items-center gap-3">
+              <div class="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-3">
                 <dt class="text-muted">
                   Memory
                 </dt>
-                <NodeMeter v-if="node.usage" :used="usedPercent(node.usage.memoryMiB, node.limits.memoryMiB)" :label="`${node.name} RAM in use`" />
-                <span v-else />
-                <dd class="text-right tabular-nums">
-                  <template v-if="node.usage">
-                    <b class="font-semibold">{{ formatMiB(node.usage.memoryMiB) }}</b> <span class="text-xs text-muted">of {{ formatMiB(node.limits.memoryMiB) }}</span>
-                  </template>
-                  <template v-else>
-                    <b class="font-semibold">{{ formatMiB(node.limits.memoryMiB) }}</b> <span class="text-xs text-muted">· usage unavailable</span>
-                  </template>
+                <dd class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
+                  <NodeMeter v-if="node.usage" :used="usedPercent(node.usage.memoryMiB, node.limits.memoryMiB)" :label="`${node.name} RAM in use`" />
+                  <span v-else />
+                  <span class="text-right tabular-nums">
+                    <template v-if="node.usage">
+                      <b class="font-semibold">{{ formatMiB(node.usage.memoryMiB) }}</b> <span class="text-xs text-muted">of {{ formatMiB(node.limits.memoryMiB) }}</span>
+                    </template>
+                    <template v-else>
+                      <b class="font-semibold">{{ formatMiB(node.limits.memoryMiB) }}</b> <span class="text-xs text-muted">· usage unavailable</span>
+                    </template>
+                  </span>
                 </dd>
               </div>
-              <div class="grid grid-cols-[4.5rem_minmax(0,1fr)_auto] items-center gap-3">
+              <div class="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-3">
                 <dt class="text-muted">
                   Disk
                 </dt>
-                <NodeMeter v-if="node.usage" :used="usedPercent(node.usage.diskMiB, node.limits.diskMiB)" :label="`${node.name} disk in use`" />
-                <span v-else />
-                <dd class="text-right tabular-nums">
-                  <template v-if="node.usage">
-                    <b class="font-semibold">{{ formatMiB(node.usage.diskMiB) }}</b> <span class="text-xs text-muted">of {{ formatMiB(node.limits.diskMiB) }}</span>
-                  </template>
-                  <template v-else>
-                    <b class="font-semibold">{{ formatMiB(node.limits.diskMiB) }}</b> <span class="text-xs text-muted">· usage unavailable</span>
-                  </template>
+                <dd class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
+                  <NodeMeter v-if="node.usage" :used="usedPercent(node.usage.diskMiB, node.limits.diskMiB)" :label="`${node.name} disk in use`" />
+                  <span v-else />
+                  <span class="text-right tabular-nums">
+                    <template v-if="node.usage">
+                      <b class="font-semibold">{{ formatMiB(node.usage.diskMiB) }}</b> <span class="text-xs text-muted">of {{ formatMiB(node.limits.diskMiB) }}</span>
+                    </template>
+                    <template v-else>
+                      <b class="font-semibold">{{ formatMiB(node.limits.diskMiB) }}</b> <span class="text-xs text-muted">· usage unavailable</span>
+                    </template>
+                  </span>
                 </dd>
               </div>
             </dl>

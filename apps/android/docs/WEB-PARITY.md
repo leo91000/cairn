@@ -19,7 +19,8 @@ It does not assert pixel equality between a browser and Material components.
 Both apps summarize the fleet (connected machines, slots in use, machines needing
 attention) and give each node one health state with a short reason: ready, full,
 busy, reserved, paused, updating, setup needed, needs attention, offline or
-revoked. The first blocker wins, in the same order on both platforms
+revoked. Failed updates or privilege changes and an agent's pending privilege
+request count as needing attention. The first blocker wins, in the same order on both platforms
 (`nodeHealth` in `packages/contracts/nodes.ts` and `data/Nodes.kt`); the full
 diagnostics list is unchanged. Platform difference: web lists machines as compact
 rows and opens a side panel (Overview, Access, Storage, Settings) whose existing

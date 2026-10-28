@@ -179,12 +179,28 @@ fun nodeHealth(node: ExecutionNode, now: Long = System.currentTimeMillis()): Nod
         return NodeHealth(NodeHealthState.ATTENTION, "À vérifier", "KVM indisponible")
     if (native && !node.capabilities.ublk)
         return NodeHealth(NodeHealthState.ATTENTION, "À vérifier", "ublk indisponible")
+    // A privilege change blocks placements until the supervisor confirms it.
+    if (
+        native && (node.nativeModeStatus == "failed" || node.nativeModeObserved?.status == "failed")
+    )
+        return NodeHealth(
+            NodeHealthState.ATTENTION,
+            "À vérifier",
+            "Le changement de privilèges a échoué",
+        )
+    if (native && node.nativeModeStatus == "pending")
+        return NodeHealth(
+            NodeHealthState.UPDATING,
+            "Mise à jour",
+            "Changement de privilèges en cours",
+        )
+    if (node.maintenance != null && node.maintenanceError != null)
+        return NodeHealth(NodeHealthState.ATTENTION, "À vérifier", "La mise à jour a échoué")
     if (node.maintenance != null)
         return NodeHealth(
             NodeHealthState.UPDATING,
             "Mise à jour",
-            if (node.maintenanceError != null) "La mise à jour a échoué"
-            else "Les nouveaux travaux attendent la mise à jour",
+            "Les nouveaux travaux attendent la mise à jour",
         )
     if (!node.executionReady)
         return NodeHealth(
@@ -192,6 +208,12 @@ fun nodeHealth(node: ExecutionNode, now: Long = System.currentTimeMillis()): Nod
             "À vérifier",
             if (node.budgetError != null) "Le budget partagé n’a pas pu être appliqué"
             else "Le runtime n’est pas prêt",
+        )
+    if (native && node.nativeModeProposal != null)
+        return NodeHealth(
+            NodeHealthState.ATTENTION,
+            "À vérifier",
+            "Un agent demande ${nativeModeLabel(node.nativeModeProposal.mode)}",
         )
     if (native && (!node.nativeEnabled || node.nativeAccounts.isEmpty()))
         return NodeHealth(

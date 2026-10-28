@@ -72,7 +72,7 @@ test('shows disk accounting and keeps the storage draft revision through invento
     occupiedSlots: 0,
     availableSlots: 4,
     agents: [],
-    staleDisks: { count: 0, diskMiB: 0 },
+    staleDisks: { count: 2, diskMiB: 3072 },
     diskAccounting: null,
     storage: {
       cacheMiB: 102400,
@@ -118,10 +118,38 @@ test('shows disk accounting and keeps the storage draft revision through invento
     reclaimableBytes: 16 * 1024 ** 3,
     unsynchronizedBytes: 8 * 1024 ** 3,
   }
+  node.exclusiveReservation = {
+    id: 'reservation',
+    nodeId: node.id,
+    ownerRunId: randomUUID(),
+    reason: 'GPU benchmark',
+    state: 'acquired',
+    createdAt: Date.now(),
+    expiresAt: null,
+    waitUntil: Date.now(),
+    pausedRunIds: [],
+    minimumAvailableMemoryMiB: 0,
+  }
   await page.route('**/api/nodes', route => route.fulfill({ json: [node] }))
+  const releases: string[] = []
+  await page.route(`**/api/nodes/${node.id}/exclusive/reservation/release`, async (route) => {
+    releases.push(route.request().method())
+    await route.fulfill({ status: 503, json: { error: 'The node is unreachable.' } })
+  })
   await page.goto(workspacePath('/nodes'))
   await workspace.signIn(page)
-  const panel = await openNode(page, 'Disk capacity fixture', 'Storage')
+  const panel = await openNode(page, 'Disk capacity fixture')
+  // A failed action is reported inside the panel, above the page it covers.
+  await panel.getByRole('button', { name: 'Release reservation', exact: true }).click()
+  await expect(panel.getByRole('alert')).toContainText('The node is unreachable.')
+  expect(releases).toEqual(['POST'])
+  await showSection(panel, 'Storage')
+  await panel.getByRole('button', { name: 'Free old disks', exact: true }).click()
+  const cleaning = page.getByRole('dialog', { name: 'Free old disks on Disk capacity fixture' })
+  await expect(cleaning.getByRole('button', { name: 'Delete 3 GiB', exact: true })).toBeVisible()
+  await cleaning.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  await expect(cleaning).toHaveCount(0)
+  await expect(panel).toBeVisible()
   const details = panel.getByRole('region', { name: 'Disk capacity details' })
   await expect(figure(details, 'Stored locally')).toHaveText('80 GiB')
   await expect(figure(details, 'Reclaimable')).toHaveText('16 GiB')
@@ -213,7 +241,12 @@ test('registers, configures and revokes a node through the owner interface', asy
   await expect(grant).toHaveCount(0)
   const row = nodeRow(page, 'Browser Linux')
   await expect(row).toBeVisible()
+  // Connected and set up: whatever the runtime reports, it is neither offline nor waiting for setup.
+  await expect(row.locator('[data-state]')).not.toHaveAttribute('data-state', /^(offline|setup|revoked)$/)
   await expect(row).not.toContainText('No agent can use this machine yet')
+  const summary = page.locator('dl[aria-label="Fleet summary"]')
+  await expect(summary.locator('div').filter({ hasText: 'connected' }).locator('dd')).toHaveText('1 / 1')
+  await expect(summary.locator('div').filter({ hasText: 'slots in use' }).locator('dd')).toHaveText('0 / 4')
   // It asks only once: the next refresh leaves the machine alone.
   await page.waitForResponse(reply => new URL(reply.url()).pathname.endsWith('/nodes') && reply.request().method() === 'GET', { timeout: 15000 })
   await expect(page.getByRole('dialog')).toHaveCount(0)
@@ -280,6 +313,8 @@ test('registers, configures and revokes a node through the owner interface', asy
   await page.getByRole('dialog', { name: 'Revoke node' }).getByRole('button', { name: 'Revoke node' }).click()
   await expect(node).toHaveCount(0)
   await expect(row).toHaveCount(0)
+  // The dialog returns focus to the list the revoked machine left.
+  await expect(page.getByRole('heading', { name: 'Machines', level: 2 })).toBeFocused()
   await page.getByRole('button', { name: 'Show revoked machines (1)' }).click()
   await expect(row).toContainText('Revoked')
   await openNode(page, 'Browser Linux')
@@ -906,6 +941,9 @@ test('previews node administrator powers and keeps failed transitions visibly bl
   })
   await page.goto(workspacePath('/nodes'))
   await authenticateWorkspace(page)
+  const row = nodeRow(page, 'Disposable administrator')
+  await expect(row).toContainText('Full')
+  await expect(row).toContainText('All 2 slots in use')
   const card = await openNode(page, 'Disposable administrator', 'Access')
   await expect(card).toContainText('Native protected')
   await card.getByRole('button', { name: 'Switch to Native administrator', exact: true }).click()
@@ -918,6 +956,8 @@ test('previews node administrator powers and keeps failed transitions visibly bl
   await review.getByRole('button', { name: 'Confirm access and restart managed executions' }).click()
   await expect(review).toHaveCount(0)
   await expect(card).toContainText('Change failed; new placements are blocked')
+  await expect(row).toContainText('The privilege change failed')
+  await expect(page.locator('dl[aria-label="Fleet summary"]').locator('div').filter({ hasText: 'attention' }).locator('dd')).toHaveText('1')
   await expect(card).toContainText('Last confirmed: Native protected')
   await expect(card).toContainText('Current privileges are unconfirmed')
   await expect(card).toContainText('Native protected')

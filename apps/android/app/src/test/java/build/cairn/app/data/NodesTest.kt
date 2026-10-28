@@ -90,6 +90,33 @@ class NodesTest {
                 capabilities = ready.capabilities.copy(backend = NATIVE_BACKEND, ublk = true)
             )
         assertEquals(NodeHealthState.SETUP, nodeHealth(native).state)
+        val enabled = native.copy(nativeEnabled = true, nativeAccounts = listOf("person"))
+        assertEquals(
+            "Un agent demande Natif administrateur",
+            nodeHealth(
+                    enabled.copy(
+                        nativeModeProposal =
+                            build.cairn.contracts.NativeModeProposal(
+                                mode = "administrator",
+                                previewId = "preview",
+                                status = "pending",
+                            )
+                    )
+                )
+                .detail,
+        )
+        assertEquals(
+            NodeHealthState.UPDATING,
+            nodeHealth(enabled.copy(nativeModeStatus = "pending", executionReady = false)).state,
+        )
+        assertEquals(
+            "Le changement de privilèges a échoué",
+            nodeHealth(enabled.copy(nativeModeStatus = "failed", executionReady = false)).detail,
+        )
+        assertEquals(
+            NodeHealth(NodeHealthState.ATTENTION, "À vérifier", "La mise à jour a échoué"),
+            nodeHealth(ready.copy(maintenance = "draining", maintenanceError = "disque plein")),
+        )
         assertEquals(
             NodeHealthState.READY,
             nodeHealth(native.copy(nativeEnabled = true, nativeAccounts = listOf("person"))).state,
