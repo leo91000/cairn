@@ -142,3 +142,42 @@ durability or integrity policy changes.
 
 This instrumentation becomes available in production through the normal delivery
 process. It cannot retrospectively decompose publications completed before delivery.
+
+## Local overhead qualification
+
+Run the opt-in fixture alone, with the isolated backend launcher:
+
+```sh
+pnpm test:backend -p cairn-installation --lib \
+  publication_transfer_overhead_measurement -- --ignored --nocapture --test-threads=1
+```
+
+The fixture writes sixteen distinct 4 MiB journal blocks: eight repeated-byte
+blocks and eight deterministic PRNG blocks (seed 42), each with its block index
+in the first eight bytes. It measures reopening the journal, reading through a
+retained reader, and the shipped manager transfer over HTTP to the real node
+snapshot producer and a loopback S3 PUT receiver. The transfer enables manager
+and node diagnostics, asserts that the correlation JSON reaches the producer,
+and formats summaries with the production default filter into a sink. It includes
+summary construction/formatting, but excludes stderr and log-collector I/O.
+Setup, deterministic input generation and final volume assertions are outside timed
+regions; transfer integrity and diagnostic-correlation checks remain in the path.
+Two warmups precede six samples; rows report process CPU separately from wall
+time and conserve plaintext/encoded PUT volumes. The process CPU includes the
+manager, producer and simulated S3 receiver in this one-process fixture.
+
+Compare with an unchanged production-source reference using the same test-only
+fixture. On a reference without this instrumentation, omit the
+`Publication.publication_attempt` initializer and its local UUID, and replace the
+node callback's diagnostic parsing and `served_publication_observed` call with
+`served_publication(&captured, hashes)`. No production code needs changing beyond
+the test module declaration. Keep both compiled binaries and alternate their
+execution order to limit drift; record the reference SHA, profile and host load
+with results in the PR.
+
+"Cold" here means a reopened reader/journal, while "warm" retains its volume.
+Neither drops the OS page cache or simulates a provider cold read. Record whether
+the temporary directory uses tmpfs or a physical disk. This loopback workload
+does not qualify WAN, TLS, remote base recovery, production CPU contention or
+logging transport. Do not turn local timing differences into CI thresholds or a
+claim about production transfer throughput.

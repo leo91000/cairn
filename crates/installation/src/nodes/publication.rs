@@ -1977,3 +1977,7 @@ mod capture_policy_tests {
 #[cfg(test)]
 #[path = "publication/diagnostic_tests.rs"]
 mod diagnostic_tests;
+
+#[cfg(test)]
+#[path = "publication/measurements.rs"]
+mod measurements;
