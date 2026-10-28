@@ -12,5 +12,6 @@ data class RenameChatInput(
 ) {
     init {
         java.util.UUID.fromString(chatId)
+        require(title.codePointCount(0, title.length) in 1..90)
     }
 }

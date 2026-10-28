@@ -26,7 +26,17 @@ data class McpReplacementInput(
     val url: String,
 ) {
     init {
+        require(args.size <= 100)
         require(Regex("^(none|bearer|oauth)\$").containsMatchIn(auth))
+        require(clientId.codePointCount(0, clientId.length) <= 500)
+        clientSecret?.let { require(it.codePointCount(0, it.length) <= 10000) }
+        require(command.codePointCount(0, command.length) <= 1000)
+        enabledTools?.let { require(it.size <= 500) }
+        require(name.codePointCount(0, name.length) in 1..100)
+        require(removeEnv.size <= 100)
+        require(scopes.codePointCount(0, scopes.length) <= 2000)
+        token?.let { require(it.codePointCount(0, it.length) <= 10000) }
         require(Regex("^(http|stdio)\$").containsMatchIn(transport))
+        require(url.codePointCount(0, url.length) <= 2000)
     }
 }

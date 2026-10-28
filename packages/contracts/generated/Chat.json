@@ -1578,6 +1578,31 @@
       "minimum": 0,
       "type": "integer"
     },
+    "environmentError": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "environmentExpiredAt": {
+      "default": null,
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "environmentState": {
+      "default": null,
+      "pattern": "^(cleaning|expired)$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "error": {
       "default": null,
       "type": [

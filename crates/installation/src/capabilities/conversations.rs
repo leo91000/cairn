@@ -68,7 +68,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "delete_chat_message",
         scope: "run",
-        description: "Remove a queued message before delivery. Removing a queued answer reopens its question.",
+        description: "Remove a queued ordinary message before delivery. Submitted questionnaire answers cannot be removed; send a new message to correct them.",
     },
     ChatOperation {
         name: "rename_chat",

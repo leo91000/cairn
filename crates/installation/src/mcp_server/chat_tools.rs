@@ -316,12 +316,14 @@ pub(crate) async fn invoke(
                 }
             })
             .await?;
-        if !paused && !record.0.cancelled_by_deletion && !record.0.session_restart_requested {
-            if let Some(run) = record.1.filter(|run| run.status.is_resumable()) {
-                s.worker
-                    .resume_authorized(s, &run.id, commit_authority.clone())
-                    .await?;
-            }
+        if !paused
+            && !record.0.cancelled_by_deletion
+            && !record.0.session_restart_requested
+            && let Some(run) = record.1.filter(|run| run.status.is_resumable())
+        {
+            s.worker
+                .resume_authorized(s, &run.id, commit_authority.clone())
+                .await?;
         }
         let result = s
             .store

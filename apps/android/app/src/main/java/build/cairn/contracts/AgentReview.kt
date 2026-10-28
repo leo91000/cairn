@@ -9,5 +9,8 @@ data class AgentReview(
     val nativeNodeReviews: List<String> = listOf(),
     val reapproveDelegations: List<String> = listOf(),
 ) {
-    init {}
+    init {
+        require(nativeNodeReviews.size <= 100)
+        require(reapproveDelegations.size <= 100)
+    }
 }
