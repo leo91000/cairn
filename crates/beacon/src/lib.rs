@@ -2,6 +2,10 @@
 // crates: the full facade also resolves SQLite and conflicts with rusqlite.
 extern crate sqlx_core as sqlx;
 
+// Private module tests reuse the real HTTP/Postgres integration fixture.
+#[cfg(test)]
+extern crate self as cairn_beacon;
+
 mod account;
 mod audit;
 mod fcm;

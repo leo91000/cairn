@@ -1378,10 +1378,11 @@ test('answers in-flight questions with choices or free text on desktop and mobil
   await page.getByRole('button', { name: 'Send answer', exact: true }).click()
   await expect(page.getByRole('dialog')).not.toBeVisible()
   await expect(page.getByRole('button', { name: 'Answer pending questions' })).not.toBeVisible()
-  await expectChatReady(page)
   const chatKey = new URL(page.url()).pathname.split('/').at(-1)!
   const chatId = (await workspace.api(`/api/chats/${chatKey}`)).id
-  expect(workspace.service.questions.list(chatId)[0].status).toBe('answered')
+  // Submission queues the answer; Ready can still describe the preceding turn.
+  await expect.poll(() => workspace.service.questions.list(chatId)[0].status).toBe('answered')
+  await expectChatReady(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.getByRole('button', { name: 'Chat details', exact: true }).click()
   await page.getByRole('link', { name: 'Question notifications' }).click()
@@ -1666,7 +1667,9 @@ test('context usage shows the latest request and an explicit compaction keeps th
   // Codex reports the latest request (40,900 tokens), not the thread's cumulative total.
   const indicator = page.getByTestId('context-indicator')
   await expect(indicator).toHaveText('Context 41K / 258K · 16%')
-  await expect(page.getByText('Ready for the next step.')).toBeVisible()
+  const earlierReply = page.getByRole('region', { name: 'Run conversation', exact: true })
+    .getByText('Ready for the next step.', { exact: true })
+  await expect(earlierReply).toBeVisible()
   await page.getByRole('button', { name: 'Chat details', exact: true }).click()
   const details = page.getByRole('dialog', { name: 'Chat details', exact: true })
   await expect(details.getByTestId('context-usage')).toContainText('40,900 of 258,400 tokens (16%)')
@@ -1683,7 +1686,7 @@ test('context usage shows the latest request and an explicit compaction keeps th
   await expect(divider).toContainText('Context compacted', { timeout: 15000 })
   await expect(indicator).toHaveText('Context ≈ 6K / 258K · 2%')
   // The earlier reply and request stay in the transcript; no reply or new finish is invented.
-  await expect(page.getByText('Ready for the next step.')).toBeVisible()
+  await expect(earlierReply).toBeVisible()
   await expect(page.locator('.user-bubble').filter({ hasText: 'Measure the context' })).toBeVisible()
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).compaction?.available).toBe(true)
   const after = await workspace.api(`/api/chats/${chat.id}`)
