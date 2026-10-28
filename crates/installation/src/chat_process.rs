@@ -884,6 +884,10 @@ impl Chat<'_> {
     }
 
     async fn start_turn(&mut self, plan: &Value, effort: &str, continuing: bool) -> Result<()> {
+        // A turn can complete before the first steering tick. Reject an oversized
+        // inbox before submitting any input, independently of provider timing.
+        crate::chat_inbox::read(inbox(plan), crate::chat_inbox::ADAPTER_LIMIT).await?;
+
         let message = if continuing {
             format!(
                 "Continue the interrupted conversation from its last completed step. Preserve completed work and verify external effects before repeating any action. The pending user request is:\n{}",
