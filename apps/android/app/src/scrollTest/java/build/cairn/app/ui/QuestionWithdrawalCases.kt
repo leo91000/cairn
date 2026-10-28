@@ -20,6 +20,8 @@ import org.junit.Test
 abstract class QuestionWithdrawalCases {
     @get:Rule val compose = createComposeRule()
 
+    protected open fun screenshot(name: String) {}
+
     @Test
     fun withdrawalRequiresNoAnswerAndCanBeRetriedAfterARejectedRequest() {
         MockWebServer().use { server ->
@@ -244,10 +246,13 @@ abstract class QuestionWithdrawalCases {
                     .onNode(hasText("Commentaire ou réponse libre") and hasSetTextAction())
                     .performTextInput("Android en priorité")
                 compose.onNodeWithText("Envoyer la réponse").assertIsNotEnabled()
+                compose.onNodeWithText("Choix sélectionnés : 1 · Encore 1 choix").assertExists()
                 compose.onNodeWithText("Web").performClick()
                 compose.onNodeWithText("Envoyer la réponse").assertIsEnabled()
+                screenshot("questionnaire-ready")
                 compose.onNodeWithText("Desktop").performClick()
                 compose.onNodeWithText("Envoyer la réponse").assertIsNotEnabled()
+                compose.onNodeWithText("Choix sélectionnés : 3 · Retirez 1 choix").assertExists()
                 compose.onNodeWithText("Desktop").performClick()
                 compose
                     .onNodeWithText("Envoyer la réponse")

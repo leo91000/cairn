@@ -57,6 +57,27 @@ function toggle(field: ChatQuestion['fields'][number], id: string) {
     : selected.includes(id) ? selected.filter(value => value !== id) : [...selected, id]
 }
 
+function selectionHint(field: ChatQuestion['fields'][number]) {
+  if (field.mode === 'single')
+    return 'Choose one option, or answer using text only'
+
+  const minimum = field.minChoices ?? 1
+  const maximum = field.maxChoices ?? field.options.length
+  const range = minimum === maximum ? `${minimum}` : `${minimum}–${maximum}`
+  return `Choose ${range} options, or answer using text only`
+}
+
+function selectionFeedback(field: ChatQuestion['fields'][number]) {
+  const count = answers.value[question.value!.id]?.[field.id]?.length ?? 0
+  const minimum = field.minChoices ?? 1
+  const maximum = field.mode === 'single' ? 1 : (field.maxChoices ?? field.options.length)
+  if (count > maximum)
+    return `${count} selected · Remove ${count - maximum}`
+  if (count > 0 && count < minimum)
+    return `${count} selected · Choose ${minimum - count} more`
+  return `${count} selected`
+}
+
 async function send() {
   const current = question.value
   if (!current || !ready.value || busy.value)
@@ -156,10 +177,10 @@ async function withdraw() {
             class="mt-1! size-4! shrink-0 p-0! accent-accent"
             @change="toggle(field, option.id)"
           >
-          <span class="min-w-0 break-words"><span class="block text-sm font-medium">{{ option.label }} <span v-if="option.recommended" class="text-xs text-accent">Recommended</span></span><span v-if="option.description" class="mt-1 block text-xs leading-relaxed text-muted">{{ option.description }}</span></span>
+          <span class="min-w-0 break-words"><span class="block text-sm font-medium">{{ option.label }} <span v-if="option.recommended" class="ml-1 inline-flex rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-semibold text-accent">Recommended</span></span><span v-if="option.description" class="mt-1 block text-xs leading-relaxed text-muted">{{ option.description }}</span></span>
         </label>
         <div v-if="field.options.length" class="flex items-center justify-between gap-2 text-xs text-muted">
-          <span>{{ field.mode === 'multiple' ? `Select ${field.minChoices ?? 1}–${field.maxChoices ?? field.options.length} choices, or answer using text only` : 'Select one choice, or answer using text only' }}</span>
+          <span>{{ selectionHint(field) }}</span>
           <button
             v-if="answers[question.id]?.[field.id]?.length"
             type="button"
@@ -169,6 +190,15 @@ async function withdraw() {
             Clear choices
           </button>
         </div>
+        <p
+          v-if="field.mode === 'multiple' && field.options.length"
+          role="status"
+          aria-live="polite"
+          class="text-xs"
+          :class="answers[question.id]?.[field.id]?.length && !validQuestionAnswer(field, { selected: answers[question.id]?.[field.id] ?? [], comment: '' }) ? 'text-danger' : 'text-muted'"
+        >
+          {{ selectionFeedback(field) }}
+        </p>
         <label class="block text-xs text-muted">
           {{ field.options.length ? 'Comment or your own answer (optional with choices)' : 'Your answer' }}
           <input

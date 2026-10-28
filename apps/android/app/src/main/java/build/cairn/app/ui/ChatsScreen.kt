@@ -1890,8 +1890,18 @@ internal fun QuestionDialog(
                                 OutlinedCard(
                                     onClick = toggle,
                                     modifier = Modifier.fillMaxWidth(),
+                                    colors =
+                                        CardDefaults.outlinedCardColors(
+                                            containerColor =
+                                                if (checked)
+                                                    MaterialTheme.colorScheme.secondaryContainer
+                                                else MaterialTheme.colorScheme.surface
+                                        ),
                                 ) {
-                                    Row(Modifier.padding(12.dp)) {
+                                    Row(
+                                        Modifier.padding(12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
                                         if (field.mode == "multiple")
                                             Checkbox(checked, { toggle() })
                                         else RadioButton(checked, toggle)
@@ -1912,12 +1922,35 @@ internal fun QuestionDialog(
                                 }
                             }
                             if (field.options.isNotEmpty()) {
+                                val minimum = field.minChoices ?: 1
+                                val maximum =
+                                    if (field.mode == "single") 1
+                                    else field.maxChoices ?: field.options.size
+                                val range =
+                                    if (minimum == maximum) "$minimum" else "$minimum à $maximum"
                                 Text(
                                     if (field.mode == "multiple")
-                                        "Choisissez ${field.minChoices ?: 1} à ${field.maxChoices ?: field.options.size} options, ou répondez en texte libre."
+                                        "Choisissez $range options, ou répondez en texte libre."
                                     else "Choisissez une option, ou répondez en texte libre.",
                                     style = MaterialTheme.typography.bodySmall,
                                 )
+                                if (field.mode == "multiple") {
+                                    val count = selected[field.id].orEmpty().size
+                                    val detail =
+                                        when {
+                                            count > maximum -> " · Retirez ${count - maximum} choix"
+                                            count in 1 until minimum ->
+                                                " · Encore ${minimum - count} choix"
+                                            else -> ""
+                                        }
+                                    Text(
+                                        "Choix sélectionnés : $count$detail",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color =
+                                            if (detail.isNotEmpty()) MaterialTheme.colorScheme.error
+                                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                                 if (selected[field.id].orEmpty().isNotEmpty())
                                     TextButton(
                                         onClick = {
