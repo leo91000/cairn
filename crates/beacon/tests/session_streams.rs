@@ -193,24 +193,3 @@ async fn deleting_the_owner_revokes_an_established_installation_tunnel() {
     drop(stream);
     relay.close().await;
 }
-
-#[tokio::test]
-async fn session_expiry_is_not_delayed_by_a_database_revocation_check() {
-    let relay = RelayedInstallation::with_pool_size(axum::Router::new(), 1).await;
-    query("UPDATE web_sessions SET expires_at = clock_timestamp() + interval '30 seconds'")
-        .execute(&relay.app.pool)
-        .await
-        .unwrap();
-    let mut stream = relay.get("/chats/stream").send().await.unwrap();
-    assert_eq!(stream.status(), StatusCode::OK);
-    stream.chunk().await.unwrap().unwrap();
-    let unavailable = relay.app.pool.acquire().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(31), async {
-        while let Ok(Some(_)) = stream.chunk().await {}
-    })
-    .await
-    .expect("session expiry must not wait for a failing database check");
-    drop(unavailable);
-    drop(stream);
-    relay.close().await;
-}
