@@ -392,3 +392,135 @@ async fn default_logging_filter_correlates_pretransfer_failure_and_cancelled_sum
     assert!(!logs.contains("credential-not-a-uuid"));
     assert!(!logs.contains("path-not-a-uuid"));
 }
+
+#[tokio::test]
+async fn converted_publications_have_distinct_attempt_summaries_on_success_and_failure() {
+    use tracing::instrument::WithSubscriber;
+    let root = tempfile::tempdir().unwrap();
+    let s = service(root.path()).await;
+    let fail_put = Arc::new(AtomicBool::new(false));
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (endpoint, server) = peer(Router::new().fallback({
+        let fail_put = fail_put.clone();
+        let requests = requests.clone();
+        move |request: Request| {
+            let fail_put = fail_put.clone();
+            let requests = requests.clone();
+            async move {
+                let _ = to_bytes(request.into_body(), 32768).await.unwrap();
+                requests.fetch_add(1, Ordering::Relaxed);
+                if fail_put.load(Ordering::Relaxed) {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "<Error><Code>BadDigest</Code><Message>fixture</Message></Error>",
+                    )
+                        .into_response()
+                } else {
+                    StatusCode::OK.into_response()
+                }
+            }
+        }
+    }))
+    .await;
+    let logical_endpoint = "https://converted-fixture.invalid";
+    let _storage =
+        fixture_storage_at(&endpoint, logical_endpoint, "diagnostics", s.hot_s3.clone()).await;
+    tokio::fs::write(
+        s.config.data_dir.join("storage-s3.json"),
+        json!({
+            "bucket": "diagnostics", "region": "us-east-1", "endpoint": logical_endpoint
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let output = bytes.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_env_filter("warn,cairn_performance=info")
+        .with_writer(move || LogWriter(output.clone()))
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    for (case, value) in [42, 43, 44].into_iter().enumerate() {
+        let run = json!({
+            "id": id(), "taskId": id(), "status": "interrupted", "createdAt": 0,
+            "backendMigration": { "id": id() }
+        });
+        let saved = run.clone();
+        s.store
+            .transaction(move |db| db.add_run_fixture(&saved, None))
+            .await
+            .unwrap();
+        let disk = root.path().join(format!("converted-{case}"));
+        tokio::fs::write(&disk, vec![value; 4096]).await.unwrap();
+        let manifest = snapshots::index(&disk).await.unwrap();
+        if case == 2 {
+            tokio::fs::write(&disk, vec![45; 4096]).await.unwrap();
+        }
+        fail_put.store(case == 1, Ordering::Relaxed);
+        let before = requests.load(Ordering::Relaxed);
+        let node = json!({ "id": super::super::LOCAL_NODE_ID });
+        let result = converted_environment(&s, &run, &node, &disk, manifest)
+            .with_subscriber(dispatch.clone())
+            .await;
+        match case {
+            0 => {
+                assert_eq!(result.unwrap()["uploadedBytes"], 4096);
+                assert_eq!(requests.load(Ordering::Relaxed) - before, 2);
+            }
+            1 => {
+                assert!(result.is_err());
+                assert_eq!(requests.load(Ordering::Relaxed) - before, 1);
+            }
+            _ => {
+                assert_eq!(
+                    result.unwrap_err().message,
+                    "Converted disk changed during publication."
+                );
+                assert_eq!(requests.load(Ordering::Relaxed), before);
+            }
+        }
+    }
+    let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+    let rows: Vec<Value> = logs
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let summaries: Vec<_> = rows
+        .iter()
+        .filter(|row| row["fields"]["operation"] == "disk_publication_transfer")
+        .collect();
+    assert_eq!(summaries.len(), 3, "{logs}");
+    let mut attempts = HashSet::new();
+    for (case, row) in summaries.iter().enumerate() {
+        let fields = &row["fields"];
+        let attempt = fields["publication_attempt"].as_str().unwrap();
+        crate::validation::uuid(attempt).unwrap();
+        assert!(attempts.insert(attempt));
+        assert_eq!(row["span"]["publication_attempt"], attempt);
+        assert_eq!(row["span"]["source"], "converted_environment");
+        assert_eq!(
+            fields["outcome"],
+            if case == 0 { "success" } else { "error" }
+        );
+        let metrics: Value = serde_json::from_str(fields["metrics"].as_str().unwrap()).unwrap();
+        let stages = &metrics["stages"];
+        assert_eq!(metrics["plannedPlaintextBytes"], 4096);
+        assert_eq!(stages["convertedRead"]["completed"], 1);
+        assert_eq!(stages["convertedRead"]["bytes"], 4096);
+        assert_eq!(stages["hash"]["completed"], 1);
+        assert_eq!(stages["nodeHeaders"]["started"], 0);
+        assert_eq!(
+            stages["compress"]["completed"],
+            if case == 2 { 0 } else { 1 }
+        );
+        assert_eq!(stages["putRequest"]["completed"], u64::from(case == 0));
+        assert_eq!(
+            stages["putRequest"]["failedOrCancelled"],
+            u64::from(case == 1)
+        );
+    }
+    assert!(!logs.contains(logical_endpoint));
+    server.abort();
+}

@@ -30,6 +30,12 @@ attribute physical work to the initiating attempt, while each consumer records
 its own inclusive `getCoalesced` wait; bytes there are consumer volumes, not
 additional S3 traffic.
 
+Offline converted-environment publications use the same attempt span and manager
+summary lifecycle, with `source="converted_environment"` on the span. Their existing
+serial read/hash/codec/PUT loop remains serial, so no producer upload-capacity wait
+or final parallel drain is needed. Failures before transfer still emit the correlated
+operation phase; transfer errors and dropped futures retain their partial summary.
+
 ## Units and interpretation
 
 All `*Us` fields are **wall-clock microseconds**, including synchronous codec jobs.
@@ -42,6 +48,10 @@ failure count, with zero successful bytes. An unfinished operation's elapsed tim
 is included in a live/cancelled summary and `inFlight` stays visible. Detached
 blocking work can finish after a cancelled manager summary; this is a partial
 observation, not proof of completion or a final byte total.
+`completed` describes the measured operation, not acceptance of its data. Hash
+computations count even when a later integrity comparison rejects the block or
+journal record; existing integrity checks and publication outcomes remain the
+authority for acceptance.
 
 - `wallUs`: elapsed transfer phase (node: since first request in this segment,
   including gaps between batches).
@@ -68,6 +78,7 @@ observation, not proof of completion or a final byte total.
 | `nodeHeaders` | One HTTP batch request from send to response headers, including route/relay startup; bytes zero. Receipt of an error status still counts as headers received. |
 | `nodeFirstByte` | Headers-to-first-body-byte wait, once per batch; bytes one. Together with headers gives time to first byte. Nested in `nodeBody`. |
 | `nodeBody` | One complete plaintext block read, including batch EOF check; plaintext bytes. Overlaps node production and S3 PUTs. |
+| `convertedRead` | One converted local block lookup/seek/read; plaintext bytes. File opening and other unmeasured setup remain residual. |
 | `baseRead` | Inclusive manager base-block read, admission through verified decode; plaintext bytes. |
 | `recoveryAdmission` | Recovery payload capacity before fetch/decode; bytes zero. |
 | `codecAdmission` | Shared codec permit wait; bytes zero. |

@@ -46,9 +46,10 @@ pub(crate) enum Stage {
     NodeLocalRead,
     NodeMetadata,
     NodeJournalLookup,
+    ConvertedRead,
 }
 
-const NAMES: [&str; 36] = [
+const NAMES: [&str; 37] = [
     "inventory",
     "nodeHeaders",
     "nodeBody",
@@ -85,6 +86,7 @@ const NAMES: [&str; 36] = [
     "nodeLocalRead",
     "nodeMetadata",
     "nodeJournalLookup",
+    "convertedRead",
 ];
 
 #[derive(Default, Clone, Copy)]

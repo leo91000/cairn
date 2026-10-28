@@ -533,6 +533,20 @@ impl Publication<'_> {
         manifest: &Value,
         objects: &[shared_blocks::Object],
     ) -> Result<u64> {
+        self.observe_transfer(
+            metrics,
+            objects,
+            Box::pin(self.transfer_operations(manifest, objects)),
+        )
+        .await
+    }
+
+    async fn observe_transfer(
+        &self,
+        metrics: &Arc<diagnostic::Metrics>,
+        objects: &[shared_blocks::Object],
+        operation: impl std::future::Future<Output = Result<u64>>,
+    ) -> Result<u64> {
         metrics.inventory(
             objects.len() as u64,
             objects.iter().filter(|object| object.ready).count() as u64,
@@ -547,13 +561,39 @@ impl Publication<'_> {
             metrics: metrics.clone(),
             outcome: "cancelled",
         };
-        let result = diagnostic::scope(
-            Some(metrics.clone()),
-            Box::pin(self.transfer_operations(manifest, objects)),
-        )
-        .await;
+        let result = diagnostic::scope(Some(metrics.clone()), operation).await;
         summary.outcome = if result.is_ok() { "success" } else { "error" };
         result
+    }
+
+    async fn transfer_converted(
+        &self,
+        disk: &Path,
+        manifest: &Value,
+        objects: &[shared_blocks::Object],
+    ) -> Result<u64> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let mut file = tokio::fs::File::open(disk).await?;
+        let mut uploaded = 0;
+        for object in objects.iter().filter(|object| !object.ready) {
+            let read = diagnostic::start(Stage::ConvertedRead);
+            let block = snapshots::find_block(manifest, &object.hash)
+                .ok_or_else(|| Error::bad("Converted block missing."))?;
+            file.seek(std::io::SeekFrom::Start(block["offset"].as_u64().unwrap()))
+                .await?;
+            let mut bytes = vec![0; object.size as usize];
+            file.read_exact(&mut bytes).await?;
+            read.finish(bytes.len());
+            if !crate::storage::digest::matches(&object.hash, &bytes) {
+                return Err(Error::bad("Converted disk changed during publication."));
+            }
+            let scope = shared_blocks::key(&object.hash, &object.id);
+            self.storage
+                .upload_bytes(encrypt_block(self.s, scope.clone(), bytes).await?, &scope)
+                .await?;
+            uploaded += object.size;
+        }
+        Ok(uploaded)
     }
 
     async fn transfer_operations(
@@ -805,18 +845,50 @@ pub(crate) async fn converted_environment(
     disk: &Path,
     manifest: Value,
 ) -> Result<Value> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let publication_attempt = id();
+    let span = tracing::info_span!(
+        target: "cairn_performance",
+        "disk_publication_attempt",
+        publication_attempt,
+        run_id = crate::performance::identity(text(run, "id")),
+        source = "converted_environment"
+    );
+    Box::pin(converted_environment_owned(
+        s,
+        run,
+        node,
+        disk,
+        manifest,
+        &publication_attempt,
+    ))
+    .instrument(span)
+    .await
+}
+
+async fn converted_environment_owned(
+    s: &Service,
+    run: &Value,
+    node: &Value,
+    disk: &Path,
+    manifest: Value,
+    publication_attempt: &str,
+) -> Result<Value> {
     let run_id = text(run, "id");
+    let mut timing = Operation::new(
+        "disk_publication",
+        crate::performance::identity(run_id),
+        "queue",
+    );
     let _operation = s.node_backup_operation.lock(run_id).await;
+    timing.next("prepare_upload");
     let storage = Storage::configured(s)?;
     let snapshot_id = id();
     let snapshot = json!({ "manifest": manifest });
-    let publication_attempt = id();
     let publication = Publication {
         s,
         run,
         run_id,
-        publication_attempt: &publication_attempt,
+        publication_attempt,
         attempt: "",
         node: &node["id"],
         storage: &storage,
@@ -831,24 +903,16 @@ pub(crate) async fn converted_environment(
     let mut intent = publication
         .write_intent(&directory, snapshot["manifest"].clone())
         .await?;
-    let mut file = tokio::fs::File::open(disk).await?;
-    let mut uploaded = 0;
-    for object in intent.objects.iter().filter(|object| !object.ready) {
-        let block = snapshots::find_block(&intent.manifest, &object.hash)
-            .ok_or_else(|| Error::bad("Converted block missing."))?;
-        file.seek(std::io::SeekFrom::Start(block["offset"].as_u64().unwrap()))
-            .await?;
-        let mut bytes = vec![0; object.size as usize];
-        file.read_exact(&mut bytes).await?;
-        if !crate::storage::digest::matches(&object.hash, &bytes) {
-            return Err(Error::bad("Converted disk changed during publication."));
-        }
-        let scope = shared_blocks::key(&object.hash, &object.id);
-        storage
-            .upload_bytes(encrypt_block(s, scope.clone(), bytes).await?, &scope)
-            .await?;
-        uploaded += object.size;
-    }
+    timing.next("transfer_blocks");
+    let metrics = diagnostic::Metrics::new(publication_attempt, run_id, &snapshot_id, "manager");
+    let uploaded = publication
+        .observe_transfer(
+            &metrics,
+            &intent.objects,
+            Box::pin(publication.transfer_converted(disk, &intent.manifest, &intent.objects)),
+        )
+        .await?;
+    timing.next("publish_manifest");
     publication.publish_manifest(&mut intent, uploaded).await?;
     let (owner, migration, point) = (
         run_id.to_owned(),
@@ -873,6 +937,7 @@ pub(crate) async fn converted_environment(
             Ok(())
         })
         .await?;
+    timing.finish();
     Ok(intent.value)
 }
 
