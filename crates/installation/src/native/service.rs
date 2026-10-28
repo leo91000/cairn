@@ -495,8 +495,6 @@ impl Controller {
             }
             // Release physical ownership before reporting completion to a replacement.
             drop(owner);
-            let _ = atomic_write(&controller.file(&id, "exit"), code.to_string().as_bytes()).await;
-            let _ = tokio::fs::remove_file(controller.file(&id, "active")).await;
             let suspension = controller
                 .active
                 .lock()
@@ -509,6 +507,10 @@ impl Controller {
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
             }
+            // The active marker must survive until suspension accounting is
+            // finalized, so recovery can close it after any controller crash.
+            let _ = atomic_write(&controller.file(&id, "exit"), code.to_string().as_bytes()).await;
+            let _ = tokio::fs::remove_file(controller.file(&id, "active")).await;
             controller.active.lock().await.remove(&id);
             controller.capacity.lock().await.attempts.remove(&id);
             controller.leases.lock().await.remove(&id);

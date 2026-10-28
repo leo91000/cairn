@@ -869,7 +869,9 @@ abstract class AgentPageCases {
                 .performClick()
             back()
             compose
-                .onNodeWithContentDescription("Nodes, Exécution native · 1 sur 1, modifié")
+                .onNodeWithContentDescription(
+                    "Nodes, Exécution native · 1 sur 1 · exclusivité sur 1, modifié"
+                )
                 .assertExists()
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(15000) {
