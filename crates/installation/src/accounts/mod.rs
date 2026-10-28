@@ -1029,12 +1029,11 @@ impl Accounts {
                 db.save_coding_account(&account)
             })
             .await?;
-        Ok(self
-            .list(s)
+        self.list(s)
             .await?
             .into_iter()
             .find(|a| a.id == id)
-            .ok_or_else(|| Error::not_found("Account not found."))?)
+            .ok_or_else(|| Error::not_found("Account not found."))
     }
 
     /// Saves the user's order for `provider`'s accounts; `ids` lists every account once.
