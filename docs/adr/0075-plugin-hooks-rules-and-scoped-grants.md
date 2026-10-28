@@ -116,8 +116,8 @@ vérifications d’accès restent celles des accès accordés), et ce qu’un me
 créer, hors ses règles, survit à son départ (une mission a le propriétaire pour
 auteur).
 
-Seul le propriétaire donne ou retire ces accès, et seulement depuis le web et Android
-: comme la gestion des membres, ils sont exclus du MCP public et de
+Seul le propriétaire donne ou retire ces accès, et seulement depuis le web et
+Android : comme la gestion des membres, ils sont exclus du MCP public et de
 `cairn_installation`, pour qu’aucun agent ni client externe ne puisse le faire. Le
 propriétaire a accès à tous les agents ; un nouvel agent n’est accessible qu’à lui. À
 la mise en place, les membres gardent l’accès aux agents existants. Ces accès
@@ -189,10 +189,10 @@ une règle qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l�
   déclenchement, avec le détail de l’erreur dans l’historique.
 
 Un bot Discord devient un agent qui a le hook `message` et les outils `read`, `post`
-et `react` limités à un salon, accompagné des règles du modèle « Bot conversationnel
-», dont les conditions choisissent les auteurs Discord auxquels il répond. Le plugin
-garde son transport, ses hooks, ses outils et ses ressources ; le rendu des
-conversations Cairn dans Discord disparaît.
+et `react` limités à un salon, accompagné des règles du modèle « Bot
+conversationnel », dont les conditions choisissent les auteurs Discord auxquels il
+répond. Le plugin garde son transport, ses hooks, ses outils et ses ressources ; le
+rendu des conversations Cairn dans Discord disparaît.
 
 ### Autorité des règles
 
@@ -317,9 +317,9 @@ un auteur externe peut tenter de lui faire faire tout le reste de ce que permet 
 accès, y compris supprimer l’agent ou l’instance dont dépendent les règles d’autres
 comptes : un agent qui répond à un salon public ne devrait pas l’avoir. De même, dans
 un tour qu’une personne a lancé, un agent qui lit un contenu externe par un outil (un
-salon, une issue) peut être poussé à écrire une règle durable au nom de cette personne
-; ce risque résiduel est accepté, et l’historique d’une règle montre dans quelle
-conversation elle a été écrite.
+salon, une issue) peut être poussé à écrire une règle durable au nom de cette
+personne ; ce risque résiduel est accepté, et l’historique d’une règle montre dans
+quelle conversation elle a été écrite.
 
 Comme toute capacité de l’interface, les règles (éditeur compris) et les droits par
 ressource arrivent sur le web, Android, le MCP public et `cairn_installation` en même
