@@ -6,8 +6,6 @@
         "OutcomeDismissal": "build.cairn.boundary.OutcomeDismissal",
         "ChatExecution": "build.cairn.boundary.ChatExecution",
         "ChatWakeup": "build.cairn.boundary.ChatWakeup",
-        "NodeResources": "build.cairn.boundary.NodeResources",
-        "NativeModeState": "build.cairn.boundary.NativeModeState",
         "ExclusiveReservation": "build.cairn.boundary.ExclusiveReservation",
         "NodeBackup": "build.cairn.boundary.NodeBackup",
         "RunStorage": "build.cairn.boundary.RunStorage",

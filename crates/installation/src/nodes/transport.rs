@@ -410,7 +410,7 @@ pub async fn authenticate(s: &Service, headers: &axum::http::HeaderMap) -> Resul
         .await?
         .and_then(|v| v.as_str().map(str::to_owned))
         .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
-    if s.get("nodes", &node).await?["revoked"] == true {
+    if s.node_boundary(&node).await?["revoked"] == true {
         return Err(Error::unauthorized("Node revoked."));
     }
     Ok(node)
@@ -431,7 +431,7 @@ pub async fn proxy(State(app): State<App>, request: Request) -> Result<Response>
         .split_once('/')
         .ok_or_else(|| Error::bad("Missing execution path."))?;
     crate::validation::uuid(node)?;
-    let record = s.get("nodes", node).await?;
+    let record = s.node_boundary(node).await?;
     if record["revoked"] == true {
         return Err(Error::conflict("Node revoked."));
     }

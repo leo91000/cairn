@@ -5,40 +5,17 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
-import kotlinx.serialization.Serializable
+import build.cairn.contracts.NativeModeChangeOutput
+import build.cairn.contracts.NativeModePreview
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-
-@Serializable
-internal data class NativeModeReview(val previewId: String, val preview: NativeModeImpact)
-
-@Serializable
-internal data class NativeModeImpact(
-    val mode: String,
-    val agents: List<NativeModeAgent> = emptyList(),
-    val conversations: List<NativeModeConversation> = emptyList(),
-    val tasks: List<NativeModeAgent> = emptyList(),
-    val trustedAccounts: List<String> = emptyList(),
-    val trustedPeople: List<NativeModePerson> = emptyList(),
-)
-
-@Serializable internal data class NativeModePerson(val id: String, val email: String? = null)
-
-@Serializable internal data class NativeModeAgent(val id: String, val name: String = "")
-
-@Serializable
-internal data class NativeModeConversation(
-    val id: String,
-    val name: String? = null,
-    val status: String = "",
-)
 
 internal const val NATIVE_ADMIN_WARNING =
     "Natif administrateur donne à toutes les conversations admises sudo sans mot de passe sur l’hôte réel. Root peut lire les fichiers et identifiants locaux, modifier Cairn, les services et processus, et contourner les budgets, baux et annulations coopératifs. Les droits Cairn distants restent inchangés. Le retour en protégé arrête les exécutions gérées et restreint les nouvelles ; il ne nettoie ni ne restaure la machine et ne crée pas une nouvelle frontière de confiance. Root peut déjouer son superviseur : l’arrêt confirmé reste coopératif."
 
 @Composable
 internal fun NativeNodeMode(vm: CairnViewModel, node: ExecutionNode, changed: suspend () -> Unit) {
-    var review by remember(node.id) { mutableStateOf<NativeModeReview?>(null) }
+    var review by remember(node.id) { mutableStateOf<NativeModePreview?>(null) }
     var busy by remember(node.id) { mutableStateOf(false) }
     var error by remember(node.id) { mutableStateOf<String?>(null) }
     val target =
@@ -52,12 +29,15 @@ internal fun NativeNodeMode(vm: CairnViewModel, node: ExecutionNode, changed: su
         error = null
         vm.perform {
             try {
-                review =
+                val result: NativeModeChangeOutput =
                     api.send(
                         "POST",
                         "/nodes/${node.id}/native-mode",
                         buildJsonObject { put("mode", mode) },
                     )
+                val prepared = result as? NativeModeChangeOutput.A ?: error("Aucun aperçu reçu")
+                review =
+                    NativeModePreview(previewId = prepared.previewId, preview = prepared.preview)
             } catch (e: Exception) {
                 error = e.message
             } finally {
@@ -91,7 +71,7 @@ internal fun NativeNodeMode(vm: CairnViewModel, node: ExecutionNode, changed: su
             )
         if (node.nativeModeProposal != null)
             Text("Un agent demande ${nativeModeLabel(target)}. Le propriétaire doit confirmer.")
-        if (node.capabilities.nativeModeProtocol == 1)
+        if (node.capabilities.nativeModeProtocol == 1L)
             TextButton(
                 onClick = { preview() },
                 enabled = !busy && !node.revoked && node.nativeModeStatus != "pending",

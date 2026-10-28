@@ -1,5 +1,6 @@
 use crate::common::run_fixture::DbRunFixture;
 use cairn_contracts::EventKind;
+use common::node_fixture::*;
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
@@ -330,6 +331,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
             json!({
                 "nodeId": next,
                 "node": {
+                    "revision": s.get_node(next).await.unwrap().revision,
                     "name": "Trusted desktop", "tags": ["gpu"],
                     "limits": { "cpu": 2, "memoryMiB": 2048, "diskMiB": 8192 },
                     "slots": 6, "accepting": true,
@@ -340,9 +342,9 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
         .await;
         assert_eq!(result(&updated)["nativeEnabled"], true);
         assert_eq!(result(&updated)["capabilities"]["backend"], "native");
-        let mut capable = s.get("nodes", next).await.unwrap();
+        let mut capable = s.node_boundary(next).await.unwrap();
         capable["capabilities"]["nativeModeProtocol"] = 1.into();
-        s.store.put("nodes", capable).await.unwrap();
+        s.store.put_node_fixture(capable).await.unwrap();
         let (_, preview) = node_management_call(
             &app,
             endpoint,
@@ -364,20 +366,16 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
             "nodeId": next, "change": { "mode": "administrator", "previewId": preview["previewId"], "confirm": true },
         })).await;
         if endpoint == "/mcp-installation" {
-            assert_eq!(
-                result(&requested)["status"],
-                "awaiting-owner",
-                "{requested}"
-            );
-            assert!(s.get("nodes", next).await.unwrap()["nativeModeRequest"].is_null());
+            assert_eq!(result(&requested)["kind"], "awaitingOwner", "{requested}");
+            assert!(s.node_boundary(next).await.unwrap()["nativeModeRequest"].is_null());
         } else {
             assert_eq!(
-                result(&requested)["nativeModeStatus"],
+                result(&requested)["node"]["nativeModeStatus"],
                 "pending",
                 "{requested}"
             );
             assert_eq!(
-                result(&requested)["nativeModeRequest"]["mode"],
+                result(&requested)["node"]["nativeModeRequest"]["mode"],
                 "administrator"
             );
         }
@@ -409,7 +407,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
             }),
         )
         .await;
-        assert_eq!(result(&retired)["revoked"], true);
+        assert_eq!(result(&retired)["node"]["revoked"], true);
         assert_eq!(result(&retired)["releasedPlacements"], 1);
         assert!(s.store.run(run["id"].as_str().unwrap()).await.unwrap()["pinnedNodeId"].is_null());
         // Ordinary revocation preserves an explicit preference, as the owner UI does.
@@ -477,22 +475,57 @@ async fn node_storage_controls_share_probes_persistence_and_permissions_across_b
     std::fs::create_dir(root.path().join("home")).unwrap();
     let probes = Arc::new(Mutex::new(Vec::<Value>::new()));
     let fail_probe = Arc::new(AtomicBool::new(false));
+    let hold_probe = Arc::new(AtomicBool::new(false));
+    let probed = Arc::new(tokio::sync::Notify::new());
+    let release_probe = Arc::new(tokio::sync::Notify::new());
+    let applied = Arc::new(Mutex::new(
+        std::collections::BTreeMap::<String, Value>::new(),
+    ));
+    let holding = hold_probe.clone();
+    let entered = probed.clone();
+    let released = release_probe.clone();
+    let configured = applied.clone();
     let recorded = probes.clone();
     let failure = fail_probe.clone();
-    let controller = axum::Router::new().route(
-        "/internal/execution/{node}/storage-policy",
-        axum::routing::post(move |axum::Json(policy): axum::Json<Value>| {
-            let recorded = recorded.clone();
-            let failure = failure.clone();
-            async move {
-                recorded.lock().unwrap().push(policy);
-                if failure.load(Ordering::SeqCst) {
-                    return StatusCode::CONFLICT;
+    let controller = axum::Router::new()
+        .route(
+            "/internal/execution/{node}/storage-policy/probe",
+            axum::routing::post(move |axum::Json(policy): axum::Json<Value>| {
+                let recorded = recorded.clone();
+                let failure = failure.clone();
+                let holding = holding.clone();
+                let entered = entered.clone();
+                let released = released.clone();
+                async move {
+                    recorded.lock().unwrap().push(policy);
+                    if failure.load(Ordering::SeqCst) {
+                        return StatusCode::CONFLICT;
+                    }
+                    if holding.swap(false, Ordering::SeqCst) {
+                        entered.notify_one();
+                        released.notified().await;
+                    }
+                    StatusCode::OK
                 }
-                StatusCode::OK
-            }
-        }),
-    );
+            }),
+        )
+        .route(
+            "/internal/execution/{node}/storage-policy",
+            axum::routing::post(
+                move |axum::extract::Path(node): axum::extract::Path<String>,
+                      axum::Json(configuration): axum::Json<Value>| {
+                    let configured = configured.clone();
+                    async move {
+                        assert!(configuration["generation"].as_u64().unwrap() > 0);
+                        configured
+                            .lock()
+                            .unwrap()
+                            .insert(node, configuration["policy"].clone());
+                        StatusCode::OK
+                    }
+                },
+            ),
+        );
     let (url, server) = common::serve_locally(controller).await;
     let mut config = common::config(root.path());
     config.public_url = url;
@@ -536,7 +569,7 @@ async fn node_storage_controls_share_probes_persistence_and_permissions_across_b
             endpoint,
             token,
             "update_node_storage",
-            json!({ "nodeId": node, "storage": policy }),
+            json!({ "nodeId": node, "revision": s.get_node(node).await.unwrap().revision, "storage": policy }),
         )
         .await;
         assert_eq!(result(&updated)["storage"], policy);
@@ -551,6 +584,51 @@ async fn node_storage_controls_share_probes_persistence_and_permissions_across_b
             .unwrap();
         assert_eq!(saved["storage"], policy);
 
+        assert_eq!(applied.lock().unwrap().get(node), Some(&policy));
+
+        // A draft that loses its revision during the side-effect-free probe
+        // must not reach the mutating controller route.
+        hold_probe.store(true, Ordering::SeqCst);
+        let pending_app = app.clone();
+        let pending_token = token.to_owned();
+        let pending_node = node.to_owned();
+        let mut draft = policy.clone();
+        draft["memoryCacheMiB"] = 1024.into();
+        let revision = s.get_node(node).await.unwrap().revision;
+        let pending = tokio::spawn(async move {
+            node_management_call(
+                &pending_app,
+                endpoint,
+                &pending_token,
+                "update_node_storage",
+                json!({ "nodeId": pending_node, "revision": revision, "storage": draft }),
+            )
+            .await
+        });
+        probed.notified().await;
+        let current = s.get_node(node).await.unwrap();
+        let (_, changed) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "update_node",
+            json!({ "nodeId": node, "node": {
+                "revision": current.revision, "name": "Changed during probe",
+                "tags": current.tags, "limits": current.limits,
+                "slots": current.slots, "accepting": current.accepting
+            } }),
+        )
+        .await;
+        assert_eq!(result(&changed)["name"], "Changed during probe");
+        release_probe.notify_one();
+        let (_, rejected) = pending.await.unwrap();
+        assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+        assert_eq!(
+            s.get_node(node).await.unwrap().storage,
+            serde_json::from_value(policy.clone()).unwrap()
+        );
+        assert_eq!(applied.lock().unwrap().get(node), Some(&policy));
+
         fail_probe.store(true, Ordering::SeqCst);
         let mut rejected = policy.clone();
         rejected["memoryCacheMiB"] = 1024.into();
@@ -559,14 +637,43 @@ async fn node_storage_controls_share_probes_persistence_and_permissions_across_b
             endpoint,
             token,
             "update_node_storage",
-            json!({ "nodeId": node, "storage": rejected }),
+            json!({ "nodeId": node, "revision": s.get_node(node).await.unwrap().revision, "storage": rejected }),
         )
         .await;
         assert_eq!(response["result"]["isError"], true, "{response}");
-        assert_eq!(s.get("nodes", node).await.unwrap()["storage"], policy);
+        assert_eq!(s.node_boundary(node).await.unwrap()["storage"], policy);
         fail_probe.store(false, Ordering::SeqCst);
         last_node = node.to_owned();
     }
+    hold_probe.store(true, Ordering::SeqCst);
+    let pending_app = app.clone();
+    let pending_token = agent_token.to_owned();
+    let pending_node = last_node.clone();
+    let revision = s.get_node(&last_node).await.unwrap().revision;
+    let mut draft = policy.clone();
+    draft["memoryCacheMiB"] = 1024.into();
+    let pending = tokio::spawn(async move {
+        node_management_call(
+            &pending_app,
+            "/mcp-installation",
+            &pending_token,
+            "update_node_storage",
+            json!({ "nodeId": pending_node, "revision": revision, "storage": draft }),
+        )
+        .await
+    });
+    probed.notified().await;
+    s.agent_fixture(
+        json!({ "name": "Main agent", "access": { "installation": false } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    release_probe.notify_one();
+    let (_, denied) = pending.await.unwrap();
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    assert_eq!(applied.lock().unwrap().get(&last_node), Some(&policy));
+
     let before = probes.lock().unwrap().len();
     let read_token = common::relay_fixture::grant(&s, &["read"]).await;
     let (_, denied) = node_management_call(
@@ -1078,6 +1185,13 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "cancel_plugin_operation",
     ]);
     public_names.extend([
+        "list_nodes",
+        "list_native_callers",
+        "create_node_enrollment",
+        "update_node",
+        "change_native_node_mode",
+        "update_node_storage",
+        "revoke_node",
         "set_agent_avatar",
         "list_agents",
         "get_agent",
@@ -3162,16 +3276,13 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
     let run = cairn_installation::config::id();
     let node = cairn_installation::config::id();
     s.store
-        .put(
-            "nodes",
-            json!({
-                "id": node,
-                "runtimeId": "development",
-                "capabilities": { "backend": "native" },
-                "nativeEnabled": true,
-                "nativeAccounts": [],
-            }),
-        )
+        .put_node_fixture(json!({
+            "id": node,
+            "runtimeId": "development",
+            "capabilities": { "backend": "native" },
+            "nativeEnabled": true,
+            "nativeAccounts": [],
+        }))
         .await
         .unwrap();
     s.store
@@ -3364,7 +3475,7 @@ async fn neither_agent_interface_can_review_an_administrator_node() {
     let mut nodes = Vec::new();
     for _ in 0..2 {
         let node = cairn_installation::config::id();
-        s.store.put("nodes", json!({
+        s.store.put_node_fixture(json!({
             "id": node, "capabilities": { "backend": "native", "nativeModeProtocol": 1 },
             "nativeModeRequest": { "mode": "administrator", "generation": cairn_installation::config::id() },
             "nativeReviewedAgents": [],
@@ -3386,7 +3497,7 @@ async fn neither_agent_interface_can_review_an_administrator_node() {
     .await;
     assert_eq!(denied["result"]["isError"], true, "{denied}");
     assert!(
-        s.get("nodes", &nodes[0]).await.unwrap()["nativeReviewedAgents"]
+        s.node_boundary(&nodes[0]).await.unwrap()["nativeReviewedAgents"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -3395,7 +3506,7 @@ async fn neither_agent_interface_can_review_an_administrator_node() {
         node_management_call(&app, "/mcp", &owner_token, "replace_agent", args).await;
     assert_eq!(response["result"]["isError"], true, "{response}");
     assert!(
-        s.get("nodes", &nodes[0]).await.unwrap()["nativeReviewedAgents"]
+        s.node_boundary(&nodes[0]).await.unwrap()["nativeReviewedAgents"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -4003,8 +4114,7 @@ async fn automatic_agent_priorities_round_trip_through_both_management_tools() {
     ];
     for id in &nodes {
         s.store
-            .put(
-                "nodes",
+            .put_node_fixture(
                 json!({ "id": id, "name": id, "capabilities": { "backend": "firecracker" } }),
             )
             .await

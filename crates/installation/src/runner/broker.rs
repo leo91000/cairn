@@ -53,6 +53,7 @@ pub(super) struct Broker {
     pub data: PathBuf,
     pub state: PathBuf,
     pub pool: Arc<Pool>,
+    pub storage_policy: crate::storage::policy::Control,
     pub active: Arc<Mutex<HashMap<String, Attempt>>>,
     pub stop: CancellationToken,
     /// Node lease deadline of each attempt, in controller boot milliseconds.
@@ -140,6 +141,7 @@ async fn remove_if_present(path: &Path) -> Result<()> {
 impl Broker {
     pub fn new(data: PathBuf, state: PathBuf, pool: Arc<Pool>, stop: CancellationToken) -> Self {
         Self {
+            storage_policy: crate::storage::policy::Control::default(),
             data,
             state,
             pool,

@@ -72,7 +72,7 @@ pub async fn authorize(s: &Service, credential: &str) -> Result<Option<Value>> {
         run = crate::backend_migration::candidate(&run);
     }
     let agent = s.agent_snapshot(super::run_agent(&run)).await?;
-    let record = s.get("nodes", node).await?;
+    let record = s.node_boundary(node).await?;
     if run["backendMigration"]["sourceReadReady"] == true {
         crate::native::policy::refresh(s).await?;
     }

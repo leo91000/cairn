@@ -148,7 +148,7 @@ impl LazyDisk {
         let (_lock, db) = offline(target)?;
         base_metadata(target, &db)?;
         drop(db);
-        super::super::policy::Policy::for_node(&context["policy"]).map_err(failure)?;
+        crate::storage::policy::for_node(&context["policy"]).map_err(failure)?;
         let encoded = super::state::encode_context(context)?;
         let db = journal::metadata(target, None)?;
         db.execute(

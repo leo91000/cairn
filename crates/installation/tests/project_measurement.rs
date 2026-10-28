@@ -1025,3 +1025,90 @@ mod plugin_packages;
 
 #[path = "measurements/events.rs"]
 mod event_measurement;
+
+impl StorageEntity for cairn_contracts::ExecutionNode {
+    const KIND: &'static str = "nodes";
+    const SAVE: &'static str = "node.configured";
+
+    fn id(&self) -> String {
+        self.id.to_string()
+    }
+
+    fn read(db: &Db<'_>, id: &str) -> Self {
+        db.node(id).unwrap().unwrap()
+    }
+
+    fn list(db: &Db<'_>) -> usize {
+        db.nodes().unwrap().len()
+    }
+
+    fn write(&self, db: &Db<'_>, _replacement: bool) {
+        db.save_node(self).unwrap();
+        db.audit(Self::SAVE, &json!({"id":self.id})).unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "local measurement; run alone with --ignored --nocapture --test-threads=1"]
+async fn node_storage_layouts() {
+    use cairn_contracts::*;
+    // Frozen A9 predecessor: 6b214471. Identical values in records and typed SQL;
+    // current configuration and machine observations, never historical formats.
+    let corpus: Vec<_> = (0..1000)
+        .map(|n| {
+            let capabilities = NodeCapabilities {
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                backend: if n % 2 == 0 {
+                    NodeBackend::Native
+                } else {
+                    NodeBackend::Firecracker
+                },
+                kvm: n % 2 != 0,
+                ublk: true,
+                cpu: 16,
+                memory_mi_b: 65536,
+                disk_mi_b: 262144,
+                disk_total_mi_b: 1048576,
+                native_mode_protocol: 1,
+            };
+            ExecutionNode {
+                id: NodeId(uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | n)),
+                name: format!("Build node {n}"),
+                revision: format!("revision-{n}"),
+                local: false,
+                accepting: true,
+                revoked: false,
+                tags: vec!["build".into(), format!("site-{}", n % 4)],
+                system_tags: capabilities.tags(),
+                limits: capabilities.limits(),
+                capabilities,
+                slots: Some(8),
+                runtime_slots: Some(8),
+                native_enabled: n % 2 == 0,
+                native_accounts: vec!["00000000-0000-4000-8000-000000000010".into()],
+                native_mode_request: Some(NativeModeRequest::default()),
+                native_mode_observed: Some(NativeModeObserved {
+                    mode: NativeMode::Protected,
+                    generation: None,
+                    status: NativeObservationStatus::Applied,
+                    error: None,
+                    target: None,
+                }),
+                execution_ready: true,
+                runtime_id: "development".into(),
+                last_seen: Some(1700000000000 + n as i64),
+                created_at: 1700000000000 + n as i64,
+                retained_runs: Some(vec![]),
+                storage: NodeStoragePolicy::default(),
+                usage: Some(NodeUsage {
+                    memory_mi_b: 4096,
+                    disk_mi_b: 32768,
+                    disk_bytes: (n % 2 == 0).then_some(32768 * 1_048_576),
+                }),
+                ..ExecutionNode::default()
+            }
+        })
+        .collect();
+    measure(&corpus);
+}

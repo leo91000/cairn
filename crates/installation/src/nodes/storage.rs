@@ -80,7 +80,7 @@ fn monitored_runs(db: &mut Db<'_>) -> Result<Vec<Value>> {
             runs.push(run);
         }
     }
-    for node in db.list("nodes")? {
+    for node in db.nodes_boundary()? {
         if node["revoked"] == true {
             continue;
         }

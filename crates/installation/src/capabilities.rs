@@ -571,3 +571,7 @@ pub(crate) use crate::runs::{RUN_OPERATIONS, RunOperation, run_operation};
 pub(crate) mod plugin_packages;
 
 pub(crate) use plugin_packages::{PLUGIN_PACKAGE_OPERATIONS, plugin_package_operation};
+
+pub(crate) mod nodes;
+
+pub(crate) use nodes::{NODE_OPERATIONS, NodeOperation, node_operation};

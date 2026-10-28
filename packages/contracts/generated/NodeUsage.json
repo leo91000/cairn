@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "diskBytes": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "diskMiB": {
+      "default": 0,
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "memoryMiB": {
+      "default": 0,
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "title": "NodeUsage",
+  "type": "object"
+}

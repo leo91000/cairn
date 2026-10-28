@@ -153,7 +153,7 @@ async fn prepare_source(
         ));
     }
     let policy: super::policy::Policy = serde_json::from_value(context["policy"].clone())?;
-    policy.validate()?;
+    policy.validate().map_err(Error::bad)?;
     let (total, free) = super::policy::space(directory)?;
     if free <= policy.reserve(total) + 64 * 1024 * 1024 {
         return Err(Error::new(

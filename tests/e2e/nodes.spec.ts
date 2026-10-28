@@ -9,9 +9,51 @@ import {
   workspacePath,
 } from './fixtures'
 
-test('shows reclaimable and unpublished disk data on desktop and phone', async ({ page, workspace }) => {
+test('shows disk accounting and keeps the storage draft revision through inventory polling', async ({ page, workspace }) => {
+  test.setTimeout(60000)
   await useRelayForHttpMocks(page)
   const node: ExecutionNode = {
+    revision: 'fixture',
+    createdAt: 0,
+    systemTags: [],
+    runtimeSlots: null,
+    nativeEnabled: false,
+    nativeAccounts: [],
+    nativeReviewedAgents: [],
+    nativeModeRequest: null,
+    nativeModeObserved: null,
+    nativeModeProposal: null,
+    nativeModeStatus: null,
+    exclusiveReservations: false,
+    exclusiveReservation: null,
+    exclusiveAgents: [],
+    usage: null,
+    budgetError: null,
+    pressure: null,
+    executionReady: false,
+    maintenance: null,
+    maintenanceError: null,
+    maintenanceGeneration: null,
+    maintenanceStartedAt: null,
+    imageDigest: null,
+    updateError: null,
+    retainedRuns: null,
+    diskGrowthProtocol: null,
+    diskCapacity: null,
+    occupiedSlots: 0,
+    availableSlots: 4,
+    agents: [],
+    staleDisks: { count: 0, diskMiB: 0 },
+    diskAccounting: null,
+    storage: {
+      cacheMiB: 102400,
+      memoryCacheMiB: 256,
+      reserveMiB: 10240,
+      reservePercent: 5,
+      backupSeconds: 60,
+      maxDirtySeconds: 300,
+    },
+
     id: randomUUID(),
     name: 'Disk capacity fixture',
     local: false,
@@ -20,12 +62,17 @@ test('shows reclaimable and unpublished disk data on desktop and phone', async (
     status: 'online',
     tags: [],
     capabilities: {
+      backend: 'firecracker',
+      ublk: false,
+      nativeModeProtocol: 0,
+      diskTotalMiB: 0,
       cpu: 8,
       memoryMiB: 16384,
       diskMiB: 92160,
       os: 'linux',
       arch: 'x86_64',
       kvm: true,
+
     },
     limits: { cpu: 4, memoryMiB: 8192, diskMiB: 102400 },
     slots: 4,
@@ -54,6 +101,42 @@ test('shows reclaimable and unpublished disk data on desktop and phone', async (
   await expect(details).toBeVisible()
   expect(await details.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
   await page.screenshot({ path: 'test-results/nodes-disk-accounting-phone.png', fullPage: true })
+  await page.getByRole('button', { name: 'Storage', exact: true }).click()
+  const editor = page.getByRole('dialog', { name: 'Storage · Disk capacity fixture' })
+  await editor.getByLabel('Shared memory cache (MiB)', { exact: true }).fill('1024')
+  const requests: { revision: string, storage: ExecutionNode['storage'] }[] = []
+  await page.route(`**/api/nodes/${node.id}/storage`, async (route) => {
+    const input = route.request().postDataJSON()
+    requests.push(input)
+    if (input.revision !== node.revision) {
+      await route.fulfill({ status: 409, json: { error: 'The node configuration changed. Reopen the editor.' } })
+      return
+    }
+
+    node.storage = input.storage
+    node.revision = 'saved'
+    await route.fulfill({ json: node })
+  })
+  // Another editor changes a field this draft has not touched.
+  node.revision = 'remote-change'
+  node.storage.reservePercent = 10
+  await page.waitForResponse(async response => response.request().method() === 'GET'
+    && new URL(response.url()).pathname.endsWith('/api/nodes')
+    && (await response.json())[0]?.revision === 'remote-change', { timeout: 15000 })
+  await expect(editor.getByLabel('Minimum free disk (%)', { exact: true })).toHaveValue('5')
+  await editor.getByRole('button', { name: 'Save storage settings', exact: true }).click()
+  await expect(editor.getByRole('alert')).toContainText('The node configuration changed')
+  expect(requests[0]?.revision).toBe('fixture')
+  expect(node.storage.reservePercent).toBe(10)
+  await editor.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  await page.getByRole('button', { name: 'Storage', exact: true }).click()
+  await expect(editor.getByLabel('Minimum free disk (%)', { exact: true })).toHaveValue('10')
+  await editor.getByLabel('Shared memory cache (MiB)', { exact: true }).fill('1024')
+  await editor.getByRole('button', { name: 'Save storage settings', exact: true }).click()
+  await expect(editor).toHaveCount(0)
+  expect(requests[1]?.revision).toBe('remote-change')
+  expect(node.storage.reservePercent).toBe(10)
+  expect(node.storage.memoryCacheMiB).toBe(1024)
 })
 
 test('registers, configures and revokes a node through the owner interface', async ({ page, workspace }) => {
@@ -639,7 +722,7 @@ test('switching a machine to native enrolls it again and retires the previous no
   await page.screenshot({ path: 'test-results/node-switch-retire.png' })
   const revoking = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname.endsWith(`/nodes/${vm}/revoke`))
   await retire.getByRole('button', { name: 'Revoke previous node', exact: true }).click()
-  expect((await revoking).postDataJSON()).toEqual({ releasePlacements: true })
+  expect((await revoking).postDataJSON()).toEqual({ nodeId: vm, releasePlacements: true })
   await expect(retire).toHaveCount(0)
   await expect(page.getByText('Workstation revoked; 1 conversation returns to automatic placement')).toBeVisible()
   const nodes = await workspace.api('/api/nodes')
@@ -747,11 +830,12 @@ test('previews node administrator powers and keeps failed transitions visibly bl
         status: 'failed',
         error: 'Stop confirmation unavailable',
       }
-      return route.fulfill({ json: node })
+      return route.fulfill({ json: { kind: 'requested', node } })
     }
 
     return route.fulfill({
       json: {
+        kind: 'preview',
         previewId: 'preview-one',
         preview: {
           mode: change.mode,
@@ -775,7 +859,7 @@ test('previews node administrator powers and keeps failed transitions visibly bl
   await expect(review).toContainText('First conversation')
   await expect(review).toContainText('Second conversation')
   await expect(review).toContainText('Nightly build')
-  expect(requests).toEqual([{ mode: 'administrator' }])
+  expect(requests).toEqual([{ mode: 'administrator', previewId: null, confirm: false }])
   await review.getByRole('button', { name: 'Confirm access and restart managed executions' }).click()
   await expect(review).toHaveCount(0)
   await expect(card).toContainText('Change failed; new placements are blocked')
@@ -784,5 +868,5 @@ test('previews node administrator powers and keeps failed transitions visibly bl
   await expect(card).toContainText('Native protected')
   expect(requests[1]).toEqual({ mode: 'administrator', previewId: 'preview-one', confirm: true })
   await card.getByRole('button', { name: 'Switch to Native administrator', exact: true }).click()
-  expect(requests.at(-1)).toEqual({ mode: 'administrator' })
+  expect(requests.at(-1)).toEqual({ mode: 'administrator', previewId: null, confirm: false })
 })

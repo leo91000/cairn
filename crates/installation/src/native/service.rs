@@ -89,7 +89,7 @@ fn budget_request(value: &Value) -> Result<crate::microvm::budget::Budget> {
         return Err(Error::bad("Unknown native mode storage protocol."));
     }
     let budget: crate::microvm::budget::Budget = serde_json::from_value(value)?;
-    budget.limits.validate()?;
+    budget.limits.validate().map_err(Error::bad)?;
     if !(1..=4096).contains(&budget.slots) {
         return Err(Error::bad("Use between 1 and 4096 execution slots."));
     }
@@ -134,6 +134,7 @@ struct Controller {
     admission: Arc<Mutex<()>>,
     base_warmer: Arc<super::bases_warmer::Warmer>,
     budget: Arc<Mutex<Value>>,
+    storage_policy: crate::storage::policy::Control,
     mode: Arc<Mutex<Value>>,
     changed: Arc<Notify>,
     log_lock: Arc<Mutex<()>>,
@@ -361,7 +362,7 @@ impl Controller {
         let plan = self.plan(id).await?;
         mode::check_plan(&*self.mode.lock().await, &plan)?;
         let resources: crate::nodes::Resources = serde_json::from_value(plan["resources"].clone())?;
-        resources.validate()?;
+        resources.validate().map_err(Error::bad)?;
         let budget: crate::nodes::Resources =
             serde_json::from_value(self.budget.lock().await["limits"].clone())?;
         if resources.cpu > budget.cpu
@@ -1467,7 +1468,8 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             "nativeMode": controller.mode.lock().await.clone(),
             "pool": { "capacity": budget["slots"] }, "activeRuns": controller.active.lock().await.len(),
             "sharedResources": true, "exclusiveReservations": false, "budget": budget,
-            "usage": usage, "pressure": null, "diskGrowth": disk_growth
+            "usage": usage, "pressure": null, "diskGrowth": disk_growth,
+            "storagePolicy": controller.storage_policy.current().await
         })).into_response());
     }
     let secret = tokio::fs::read_to_string(controller.data.join("runner-secret")).await?;
@@ -1546,17 +1548,20 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             }
             json!({ "ready": true })
         }
-        ("POST", ["storage-policy"]) => {
+        ("POST", ["storage-policy", "probe"]) => {
             let policy: crate::storage::policy::Policy =
                 serde_json::from_value(input(request, 16384).await?)?;
-            policy.validate()?;
-            let path = controller.state.join("storage-policy.json");
-            let encoded = serde_json::to_vec(&policy)?;
-            if tokio::fs::read(&path).await.ok().as_ref() != Some(&encoded) {
-                let _disk = disk::lock(&controller.state).await?;
-                atomic_write(&path, &encoded).await?;
-                crate::storage::runtime::configure(&controller.state, &policy)?;
-            }
+            policy.validate().map_err(Error::bad)?;
+            json!({ "ready": true })
+        }
+        ("POST", ["storage-policy"]) => {
+            let configuration: crate::storage::policy::Configuration =
+                serde_json::from_value(input(request, 16384).await?)?;
+            let _disk = disk::lock(&controller.state).await?;
+            controller
+                .storage_policy
+                .apply(&controller.state, configuration)
+                .await?;
             json!({ "ready": true })
         }
         ("POST", ["runs", id, "lease"]) => {
@@ -2082,6 +2087,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         atomic_write(&state.join(mode::FILE), &serde_json::to_vec(&mode)?).await?;
     }
     let controller = Controller {
+        storage_policy: crate::storage::policy::Control::default(),
         data,
         state,
         active: Arc::default(),
@@ -2287,6 +2293,7 @@ mod tests {
         .await
         .unwrap();
         let controller = Controller {
+            storage_policy: crate::storage::policy::Control::default(),
             data,
             state,
             active: Arc::default(),

@@ -1,21 +1,18 @@
+import type { ExecutionNode } from './generated/typescript/ExecutionNode'
+import type { NativeMode } from './generated/typescript/NativeMode'
+
+export type { ExecutionNode } from './generated/typescript/ExecutionNode'
+export type { NativeCaller } from './generated/typescript/NativeCaller'
+export type { NativeMode } from './generated/typescript/NativeMode'
+export type { NativeModeObserved } from './generated/typescript/NativeModeObserved'
+export type { NativeModePreview } from './generated/typescript/NativeModePreview'
+export type { NativeModeRequest } from './generated/typescript/NativeModeRequest'
+export type { NodeAgent } from './generated/typescript/NodeAgent'
+export type { NodeDiskAccounting } from './generated/typescript/NodeDiskAccounting'
+export type { NodeEnrollment } from './generated/typescript/NodeEnrollment'
+export type { NodeResources } from './generated/typescript/NodeResources'
+export type { NodeStoragePolicy } from './generated/typescript/NodeStoragePolicy'
 export const LOCAL_NODE_ID = '00000000-0000-4000-8000-000000000002'
-
-export interface NodeResources {
-  cpu: number
-  memoryMiB: number
-  diskMiB: number
-}
-
-export interface NodeDiskAccounting {
-  capturedAt: number
-  localBytes: number
-  unusedGrantedBytes: number
-  hostFreeBytes: number
-  hostReserveBytes: number
-  poolReserveBytes: number
-  reclaimableBytes: number
-  unsynchronizedBytes: number
-}
 
 export function diskCapacity(node: ExecutionNode): number {
   const total = node.capabilities.diskTotalMiB
@@ -25,75 +22,8 @@ export function diskCapacity(node: ExecutionNode): number {
   return node.capabilities.diskMiB
 }
 
-export type NativeMode = 'protected' | 'administrator'
-
 export function nativeModeLabel(mode: NativeMode) {
   return mode === 'administrator' ? 'Native administrator' : 'Native protected'
-}
-
-export interface NativeModeRequest { mode: NativeMode, generation: string | null }
-export interface NativeModeObserved extends NativeModeRequest { status: 'pending' | 'applied' | 'failed', error?: string | null }
-export interface NativeModePreview {
-  previewId: string
-  preview: {
-    mode: NativeMode
-    warning: string
-    interruptions: string
-    trustedAccounts: string[]
-    trustedPeople?: Array<{ id: string, email?: string | null }>
-    agents: Array<{ id: string, name: string }>
-    conversations: Array<{ id: string, name?: string, status: string }>
-    tasks: Array<{ id: string, name: string }>
-  }
-}
-
-export interface ExecutionNode {
-  id: string
-  name: string
-  local: boolean
-  accepting: boolean
-  nativeModeRequest?: NativeModeRequest | null
-  nativeModeObserved?: NativeModeObserved | null
-  nativeModeStatus?: string | null
-  nativeModeProposal?: { mode: NativeMode, status: string } | null
-  nativeReviewedAgents?: string[]
-  nativeEnabled?: boolean
-  nativeAccounts?: string[]
-  exclusiveAgents?: string[]
-  exclusiveReservations?: boolean
-  exclusiveReservation?: ExclusiveReservation | null
-  revoked: boolean
-  status: 'online' | 'offline' | 'revoked' | 'local'
-  tags: string[]
-  systemTags?: string[]
-  capabilities: NodeResources & {
-    diskTotalMiB?: number
-    backend?: 'firecracker' | 'native'
-    ublk?: boolean
-    nativeModeProtocol?: number
-    os: string
-    arch: string
-    kvm: boolean
-  }
-  limits: NodeResources
-  slots: number
-  occupiedSlots?: number
-  availableSlots?: number
-  usage?: { memoryMiB: number, diskMiB: number }
-  diskAccounting?: NodeDiskAccounting | null
-  budgetError?: string | null
-  pressure?: string | null
-  executionReady?: boolean
-  maintenance?: string | null
-  maintenanceError?: string | null
-  imageDigest?: string | null
-  updateError?: string | null
-  storage?: NodeStoragePolicy
-  runtimeId: string
-  lastSeen: number | null
-  agents?: NodeAgent[]
-  // Disk kept on the node that no conversation needs there any more.
-  staleDisks?: { count: number, diskMiB: number }
 }
 
 export interface ExclusiveReservation {
@@ -109,25 +39,6 @@ export interface ExclusiveReservation {
   pausedRunIds: string[]
   minimumAvailableMemoryMiB: number
   error?: string | null
-}
-
-export interface NodeAgent {
-  id: string
-  name: string
-  allNodes: boolean
-}
-
-export interface NativeCaller { id: string, email: string }
-
-export interface NodeEnrollment {
-  nodeId: string
-  backend?: 'firecracker' | 'native'
-  installCommand?: string | null
-  // `beacon` when Beacon introduces the machine to the manager, without an address.
-  route?: 'beacon' | 'direct'
-  managerUrl?: string | null
-  code: string
-  expiresAt: number
 }
 
 export interface NodeSyncSettings {
@@ -190,13 +101,4 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now()) {
   if (!node.agents?.length)
     reasons.push('No agent can use this machine yet.')
   return reasons
-}
-
-export interface NodeStoragePolicy {
-  memoryCacheMiB?: number
-  cacheMiB: number
-  reserveMiB: number
-  reservePercent: number
-  backupSeconds: number
-  maxDirtySeconds: number
 }

@@ -227,6 +227,11 @@ export const test = base.extend<object, { workspace: Workspace }>({
           : { ...(Object.hasOwn(patch, 'creationId') ? { creationId: patch.creationId } : {}), settings, review }
       }
 
+      if (method === 'PUT' && /^\/api\/nodes\/[0-9a-f-]+$/.test(route) && body && typeof body === 'object' && !('revision' in body)) {
+        const node = (await api('/api/nodes')).find((node: { id: string }) => route.endsWith(`/${node.id}`))
+        body = { ...body, revision: node?.revision }
+      }
+
       const response = await fetch(`${url}${apiPath(route)}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
       const result = await response.json()
       expect(response.ok, JSON.stringify(result)).toBe(true)

@@ -33,7 +33,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-const DATABASE_VERSION: i64 = 11;
+const DATABASE_VERSION: i64 = 12;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -77,7 +77,7 @@ impl Store {
         if fresh {
             let tx = writer.transaction()?;
             tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS records_kind ON records(kind,updated_at DESC);
 CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),type TEXT NOT NULL CHECK(length(type)>0),text TEXT NOT NULL,payload TEXT CHECK(payload IS NULL OR json_valid(payload)));
@@ -99,6 +99,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::runs::SCHEMA)?;
             tx.execute_batch(crate::nodes::shared_blocks::SCHEMA)?;
             tx.execute_batch(crate::projects::SCHEMA)?;
+            tx.execute_batch(crate::nodes::inventory::SCHEMA)?;
             tx.execute_batch(crate::agents::SCHEMA)?;
             tx.execute_batch(crate::mcps::sql::SCHEMA)?;
             tx.execute_batch(crate::plugins::instances::SCHEMA)?;
@@ -379,20 +380,10 @@ impl Db<'_> {
     }
 
     pub fn list(&self, kind: &str) -> Result<Vec<Value>> {
-        if self.0.is_autocommit() && matches!(kind, "nodes") {
-            let tx = rusqlite::Transaction::new_unchecked(
-                self.0,
-                rusqlite::TransactionBehavior::Deferred,
-            )?;
-            return Db(&tx).list(kind);
-        }
-        let mut values = self.json_rows(
+        let values = self.json_rows(
             "SELECT data FROM records WHERE kind=? ORDER BY updated_at DESC",
             [kind],
         )?;
-        for value in &mut values {
-            self.resource_grants(kind, value)?;
-        }
         Ok(values)
     }
 
@@ -409,29 +400,10 @@ impl Db<'_> {
 
     /// Typed variant of [`Db::get`].
     pub fn get_as<T: DeserializeOwned>(&self, kind: &str, id: &str) -> Result<Option<T>> {
-        if !matches!(kind, "nodes") {
-            return self.json_row(
-                "SELECT data FROM records WHERE kind=? AND id=?",
-                params![kind, id],
-            );
-        }
-        if self.0.is_autocommit() {
-            let tx = rusqlite::Transaction::new_unchecked(
-                self.0,
-                rusqlite::TransactionBehavior::Deferred,
-            )?;
-            return Db(&tx).get_as(kind, id);
-        }
-        let value: Option<Value> = self.json_row(
+        self.json_row(
             "SELECT data FROM records WHERE kind=? AND id=?",
             params![kind, id],
-        )?;
-        value
-            .map(|mut value| {
-                self.resource_grants(kind, &mut value)?;
-                Ok(serde_json::from_value(value)?)
-            })
-            .transpose()
+        )
     }
 
     pub fn chat_id_for_slug(&self, slug: &str) -> Result<Option<String>> {
@@ -461,7 +433,8 @@ impl Db<'_> {
     pub fn put(&self, kind: &str, value: &Value) -> Result<Value> {
         if matches!(
             kind,
-            "projects"
+            "nodes"
+                | "projects"
                 | "agents"
                 | "mcps"
                 | "plugin-connections"
@@ -476,18 +449,6 @@ impl Db<'_> {
         ) {
             return Err(Error::bad("Use typed domain commands."));
         }
-        let projection = match kind {
-            "nodes" => Some("exclusiveAgents"),
-            _ => None,
-        };
-        let mut resource;
-        let value = if let Some(field) = projection {
-            resource = value.clone();
-            resource.as_object_mut().unwrap().remove(field);
-            &resource
-        } else {
-            value
-        };
         let mut chat;
         let value = if kind == "chats" {
             chat = value.clone();
@@ -515,9 +476,7 @@ impl Db<'_> {
                 value.to_string(),
                 now()
             ])?;
-        let mut result = value.clone();
-        self.resource_grants(kind, &mut result)?;
-        Ok(result)
+        Ok(value.clone())
     }
 
     pub fn remove(&self, kind: &str, id: &str) -> Result<()> {
@@ -925,26 +884,22 @@ mod schema_tests {
     use crate::agent_fixture::StoreAgentFixture;
 
     #[tokio::test]
-    async fn offline_v11_migration_preserves_profiles_and_refuses_other_layouts() {
+    async fn fresh_node_schema_reopens_without_a_records_mirror() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
-        let id = "00000000-0000-4000-8000-000000000099";
-        let before = store
-            .put_agent_fixture(json!({ "id": id, "name": "Saved VM" }))
+        let node = crate::node_fixture::node(
+            json!({ "id": "00000000-0000-4000-8000-000000000099", "name": "Saved VM" }),
+        )
+        .unwrap();
+        store
+            .transaction(move |db| db.save_node(&node))
             .await
             .unwrap();
         drop(store);
+        let store = Store::open(root.path()).unwrap();
+        assert_eq!(store.nodes().await.unwrap()[0].name, "Saved VM");
+        assert!(store.list("nodes").await.unwrap().is_empty());
         let connection = Connection::open(root.path().join("manager.db")).unwrap();
-        let old_permissions = crate::agent_grants::SCHEMA
-            .split("CREATE TABLE agent_projects")
-            .next()
-            .unwrap()
-            .replace("'auto',", "");
-        connection.execute_batch("DROP TABLE agent_node_priorities; ALTER TABLE agent_permissions RENAME TO old_permissions;").unwrap();
-        connection.execute_batch(&old_permissions).unwrap();
-        connection.execute_batch("INSERT INTO agent_permissions SELECT * FROM old_permissions; DROP TABLE old_permissions; PRAGMA user_version=10;").unwrap();
-        let migration = include_str!("../../../docs/migrations/0011-mixed-node-agents.sql");
-        connection.execute_batch(migration).unwrap();
         assert_eq!(
             connection
                 .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
@@ -957,17 +912,6 @@ mod schema_tests {
                 .unwrap()
                 .exists([])
                 .unwrap()
-        );
-        let store = Store::open(root.path()).unwrap();
-        let after = store.agent_snapshot(id).await.unwrap().unwrap();
-        assert_eq!(before, after);
-        assert!(connection.execute_batch(migration).is_err());
-        connection.execute_batch("ROLLBACK").unwrap();
-        assert_eq!(
-            connection
-                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
-            11
         );
     }
 
@@ -1002,7 +946,7 @@ mod schema_tests {
 
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 99] {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();

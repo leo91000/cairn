@@ -57,8 +57,19 @@ export async function prepareStorageOrigin({
     maxDirtySeconds,
   }
   const storage = { master: master.href, grant: 'fixture-storage-grant', policy }
-  await api('/storage-policy', 'POST', policy)
-  return { origin, policy, storage }
+  let generation = 0
+
+  async function applyPolicy(policy) {
+    await api('/storage-policy', 'POST', { generation: generation++, policy })
+  }
+
+  await applyPolicy(policy)
+  return {
+    origin,
+    policy,
+    storage,
+    applyPolicy,
+  }
 }
 
 export async function storageSmoke({
@@ -73,7 +84,12 @@ export async function storageSmoke({
   const runId = randomUUID()
   const workspace = `/data/runs/${runId}/workspace`
   await mkdir(path.join(root, 'data/runs', runId, 'workspace'), { recursive: true })
-  const { origin, policy, storage } = storageFixture || await prepareStorageOrigin({
+  const {
+    origin,
+    policy,
+    storage,
+    applyPolicy,
+  } = storageFixture || await prepareStorageOrigin({
     root,
     docker,
     name,
@@ -279,7 +295,7 @@ export async function storageSmoke({
   const fetched = new Set((await readFile(path.join(origin, 'reads'), 'utf8')).trim().split('\n').filter(Boolean))
   assert.ok(fetched.size < hashes.size, 'unused data stays remote during boot')
   // Verify a real CPU pause and automatic resume when the reserve changes.
-  await api('/storage-policy', 'POST', { ...policy, reserveMiB: 16777216 })
+  await applyPolicy({ ...policy, reserveMiB: 16777216 })
   await until(async () => (await status()).waitingFor === 'disk-space')
   await setTimeout(2000)
   const ticks = (await logs(resumed)).split('storage.tick').length
@@ -287,7 +303,7 @@ export async function storageSmoke({
   assert.equal((await logs(resumed)).split('storage.tick').length, ticks)
   // Emergency publication while paused must not strand CPUs after pressure clears.
   await publish(resumed)
-  await api('/storage-policy', 'POST', policy)
+  await applyPolicy(policy)
   await until(async () => (await logs(resumed)).split('storage.tick').length > ticks)
   await stop(resumed)
   // Identical snapshot, guest command and read workload; each sample gets a new

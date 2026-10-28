@@ -11,7 +11,6 @@
 use crate::{
     error::{Error, Result, required},
     store::Db,
-    validation::text,
 };
 use serde_json::{Value, json};
 
@@ -66,7 +65,7 @@ pub(crate) fn validate(
             return Err(Error::bad("Only authorized nodes can be prioritized."));
         }
         if id != crate::nodes::LOCAL_NODE_ID {
-            let node = required(db.get("nodes", id)?, "Priority node not found")?;
+            let node = required(db.node_boundary(id)?, "Priority node not found")?;
             if node["revoked"] == true {
                 return Err(Error::bad("A revoked node cannot be prioritized."));
             }
@@ -101,7 +100,7 @@ pub(crate) fn validate(
         }
     }
     for node in &settings.exclusive_nodes {
-        let record = db.get("nodes", node)?.ok_or_else(|| {
+        let record = db.node_boundary(node)?.ok_or_else(|| {
             Error::bad("A node selected for exclusive reservations no longer exists.")
         })?;
         if record["revoked"] == true {
@@ -185,7 +184,7 @@ pub(crate) fn save_profile(
             }
             continue;
         }
-        let record = required(db.get("nodes", node)?, "Node not found")?;
+        let record = required(db.node_boundary(node)?, "Node not found")?;
         if record["revoked"] == true {
             return Err(Error::bad("A revoked node cannot be authorized."));
         }
@@ -609,24 +608,6 @@ impl Db<'_> {
                     .execute(rusqlite::params![id, connection, tool, position as i64])?;
             }
         }
-        Ok(())
-    }
-
-    /// Projection for nodes awaiting A9. Persisted resource JSON is never an authority.
-    pub(crate) fn resource_grants(&self, kind: &str, value: &mut Value) -> Result<()> {
-        let (sql, field) = match kind {
-            "nodes" => (
-                "SELECT agent_id FROM agent_exclusive_nodes WHERE node_id=? ORDER BY agent_id",
-                "exclusiveAgents",
-            ),
-            _ => return Ok(()),
-        };
-        let agents = self
-            .0
-            .prepare_cached(sql)?
-            .query_map([text(value, "id")], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        value[field] = json!(agents);
         Ok(())
     }
 }

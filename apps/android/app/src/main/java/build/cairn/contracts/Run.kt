@@ -5,9 +5,7 @@ import build.cairn.boundary.ChatExecution
 import build.cairn.boundary.ChatWakeup
 import build.cairn.boundary.ContextUsage
 import build.cairn.boundary.ExclusiveReservation
-import build.cairn.boundary.NativeModeState
 import build.cairn.boundary.NodeBackup
-import build.cairn.boundary.NodeResources
 import build.cairn.boundary.OutcomeDismissal
 import build.cairn.boundary.RunStorage
 import build.cairn.boundary.TaskOutcome
@@ -53,7 +51,7 @@ data class Run(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val movementError: String? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
-    val nativeMode: NativeModeState? = null,
+    val nativeMode: NativeModeRequest? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val nodeId: String? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)

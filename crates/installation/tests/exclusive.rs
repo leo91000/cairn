@@ -1,4 +1,5 @@
 use common::AgentFixture;
+use common::node_fixture::*;
 
 mod common;
 
@@ -59,14 +60,11 @@ impl Fixture {
                 .unwrap();
         });
         s.store
-            .put(
-                "nodes",
-                json!({
-                    "id": LOCAL_NODE_ID,
-                    "exclusiveReservations": true,
-                    "limits": { "memoryMiB": 4096 },
-                }),
-            )
+            .put_node_fixture(json!({
+                "id": LOCAL_NODE_ID,
+                "exclusiveReservations": true,
+                "limits": { "memoryMiB": 4096 },
+            }))
             .await
             .unwrap();
         s.agent_fixture(
@@ -219,7 +217,7 @@ async fn manager_acquisition_is_idempotent_fenced_and_released_before_waiting() 
     assert!(f.remote.lock().await["reservation"].is_null());
     assert!(
         f.s.store
-            .get("nodes", LOCAL_NODE_ID)
+            .node_boundary(LOCAL_NODE_ID)
             .await
             .unwrap()
             .unwrap()["exclusiveReservation"]

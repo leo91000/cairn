@@ -1,5 +1,6 @@
 use crate::common::run_fixture::DbRunFixture;
 use cairn_contracts::EventKind;
+use common::node_fixture::*;
 
 mod common;
 
@@ -542,10 +543,7 @@ async fn permanent_revocation_does_not_block_requested_conversation_erasure() {
         if let Some(revoked) = revoked {
             app.service
                 .store
-                .put(
-                    "nodes",
-                    json!({ "id": node, "revoked": revoked, "local": false }),
-                )
+                .put_node_fixture(json!({ "id": node, "revoked": revoked, "local": false }))
                 .await
                 .unwrap();
         }

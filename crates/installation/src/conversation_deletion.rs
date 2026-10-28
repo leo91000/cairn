@@ -133,7 +133,7 @@ async fn delete_disk_for_purge(s: &Service, run: &str, destination: Option<&str>
         .unwrap_or(crate::nodes::LOCAL_NODE_ID);
     let revoked = node != crate::nodes::LOCAL_NODE_ID
         && s.store
-            .get("nodes", node)
+            .node_boundary(node)
             .await?
             .is_some_and(|record| record["revoked"] == true);
     if revoked {

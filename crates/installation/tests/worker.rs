@@ -2,6 +2,7 @@ use crate::common::run_fixture::DbRunFixture;
 use common::AgentFixture;
 use common::MissionFixture;
 use common::StoreAgentFixture;
+use common::node_fixture::*;
 
 mod common;
 
@@ -1960,12 +1961,12 @@ async fn node_slots_exceed_manager_concurrency_without_overpreparing_the_queue()
     let mut node = fixture
         .service
         .store
-        .get("nodes", LOCAL_NODE_ID)
+        .node_boundary(LOCAL_NODE_ID)
         .await
         .unwrap()
         .unwrap();
     node["slots"] = 12.into();
-    fixture.service.store.put("nodes", node).await.unwrap();
+    fixture.service.store.put_node_fixture(node).await.unwrap();
     let mut runs = Vec::new();
     for _ in 0..13 {
         runs.push(fixture.enqueue("Inspect the VM fixture").await);
@@ -2203,20 +2204,20 @@ async fn refused_local_budget_keeps_presence_and_exposes_the_reason() {
     let mut node = fixture
         .service
         .store
-        .get("nodes", LOCAL_NODE_ID)
+        .node_boundary(LOCAL_NODE_ID)
         .await
         .unwrap()
         .unwrap();
     node["limits"]["memoryMiB"] = 256.into();
     node["lastSeen"] = 0.into();
-    fixture.service.store.put("nodes", node).await.unwrap();
+    fixture.service.store.put_node_fixture(node).await.unwrap();
     cairn_installation::nodes::refresh_local(&fixture.service)
         .await
         .unwrap();
     let node = fixture
         .service
         .store
-        .get("nodes", LOCAL_NODE_ID)
+        .node_boundary(LOCAL_NODE_ID)
         .await
         .unwrap()
         .unwrap();
@@ -2226,14 +2227,19 @@ async fn refused_local_budget_keeps_presence_and_exposes_the_reason() {
     assert!(text(&node, "budgetError").contains("below current usage"));
     let mut restored = node;
     restored["limits"]["memoryMiB"] = 15872.into();
-    fixture.service.store.put("nodes", restored).await.unwrap();
+    fixture
+        .service
+        .store
+        .put_node_fixture(restored)
+        .await
+        .unwrap();
     cairn_installation::nodes::refresh_local(&fixture.service)
         .await
         .unwrap();
     let node = fixture
         .service
         .store
-        .get("nodes", LOCAL_NODE_ID)
+        .node_boundary(LOCAL_NODE_ID)
         .await
         .unwrap()
         .unwrap();
@@ -3056,7 +3062,7 @@ async fn queued_work_waits_for_node_capacity_without_failing() {
             "pressure": "memory"
         })
     };
-    s.store.put("nodes", put_node("Laptop")).await.unwrap();
+    s.store.put_node_fixture(put_node("Laptop")).await.unwrap();
     let mut agent = s
         .agent_snapshot(cairn_installation::config::MAIN_AGENT_ID)
         .await
@@ -3084,7 +3090,7 @@ async fn queued_work_waits_for_node_capacity_without_failing() {
     );
     assert_eq!(waiting["status"], "queued");
     // New figures replace the reason without repeating the status event.
-    s.store.put("nodes", put_node("Desk")).await.unwrap();
+    s.store.put_node_fixture(put_node("Desk")).await.unwrap();
     let updated = fixture
         .until(run_id, |r| {
             text(r, "accountWaitReason").contains("Desk has")

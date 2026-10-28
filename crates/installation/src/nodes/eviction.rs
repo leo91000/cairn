@@ -123,7 +123,7 @@ async fn pressure(s: &Service) -> Result<()> {
         .store
         .transaction(|db| {
             let mut nodes = Vec::new();
-            for node in db.list("nodes")? {
+            for node in db.nodes_boundary()? {
                 let id = text(&node, "id");
                 let key = format!("native-capacity-pressure:{id}");
                 if db.kv(&key)? == Some(json!(true)) {
@@ -201,7 +201,7 @@ fn candidate(
     if expected_node.is_some_and(|expected| expected != node_id) {
         return Ok(None);
     }
-    let Some(node) = db.get("nodes", node_id)? else {
+    let Some(node) = db.node_boundary(node_id)? else {
         return Ok(None);
     };
     if !crate::native::policy::node_native(&node)
@@ -393,6 +393,9 @@ async fn evict_clean(
 }
 
 #[cfg(test)]
+use crate::node_fixture::*;
+
+#[cfg(test)]
 use crate::run_fixture::DbRunFixture;
 
 #[cfg(test)]
@@ -407,7 +410,7 @@ mod tests {
             "id": id(), "runId": run, "nodeId": node, "snapshotId": id(),
             "diskGeneration": 7, "destination": "s3", "bucket": "synthetic-bucket",
         });
-        db.put("nodes", &json!({
+        db.put_node_fixture(&json!({
             "id": node, "lastSeen": now(), "capabilities": { "backend": "native", "ublk": true },
         }))?;
         db.add_run_fixture(&json!({
@@ -556,7 +559,7 @@ mod tests {
                 assert_eq!(page.len(), 1);
                 assert_eq!(page[0]["id"], final_run);
                 assert!(candidate(db, &final_run, time, None)?.is_some());
-                let mut node = db.get("nodes", node_id)?.unwrap();
+                let mut node = db.node_boundary(node_id)?.unwrap();
                 node["diskCapacity"] = json!({ "capturedAt": time - 2_000 });
                 db.set(
                     &format!("native-capacity-reclaimed:{node_id}"),
@@ -588,7 +591,7 @@ mod tests {
                 let mut storage = db.run(&run)?.unwrap()["storage"].clone();
                 storage["dirtyBytes"] = 0.into();
                 db.update_run_boundary(&run, &json!({ "nodeId": node_id, "storage": storage }))?;
-                let mut node = db.get("nodes", node_id)?.unwrap();
+                let mut node = db.node_boundary(node_id)?.unwrap();
                 node["limits"] = json!({ "diskMiB": 102400 });
                 node["diskCapacity"] = json!({
                     "protocol": 1, "capturedAt": time, "usedBytes": 10000,

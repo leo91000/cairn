@@ -228,7 +228,7 @@ impl Fleet<'_> {
 
     fn fit(&self, request: &Request, node: &Value, resources: &Resources) -> Result<Option<f64>> {
         let free = self.free_slots(request, node);
-        let storage_policy = Policy::for_node(&node["storage"])?;
+        let storage_policy = crate::storage::policy::for_node(&node["storage"])?;
         if free == 0
             || node["pressure"].is_string()
             || !self.disk_fits(request, node, resources, &storage_policy)
@@ -369,7 +369,7 @@ impl Snapshot {
         let agent = db
             .agent_snapshot(super::run_agent(run))?
             .ok_or_else(|| Error::forbidden("Agent removed."))?;
-        let mut nodes = db.list("nodes")?;
+        let mut nodes = db.nodes_boundary()?;
         // Existing development execution stays available without a controller.
         if !configured && nodes.iter().all(|n| n["id"] != LOCAL_NODE_ID) {
             nodes.push(development_node(configured));
@@ -777,7 +777,7 @@ pub(crate) async fn renew_preparation(s: &Service, run: &str, attempt: &str) -> 
             let agent = db
                 .agent_snapshot(super::run_agent(&current))?
                 .unwrap_or_default();
-            let node = db.get("nodes", text(&held, "nodeId"))?.unwrap_or_default();
+            let node = db.node_boundary(text(&held, "nodeId"))?.unwrap_or_default();
             if current["status"] != RunStatus::Running
                 || !current["cancelRequestedAt"].is_null()
                 || !super::agent_allows(&agent, text(&held, "nodeId"))
@@ -901,7 +901,7 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
             crate::validation::uuid(node)?;
             let unauthorized = !allowed(&access["nodes"], node)
                 || (node != LOCAL_NODE_ID
-                    && db.get("nodes", node)?.is_none_or(|n| n["revoked"] == true));
+                    && db.node_boundary(node)?.is_none_or(|n| n["revoked"] == true));
             if unauthorized {
                 return Err(Error::forbidden(
                     "This node is not authorized for the conversation's agent.",
@@ -922,11 +922,11 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
         )?;
     }
     let nodes = db
-        .list("nodes")?
+        .nodes_boundary()?
         .into_iter()
         .filter(|n| n["revoked"] != true && allowed(&access["nodes"], text(n, "id")))
-        .map(super::public)
-        .collect::<Vec<_>>();
+        .map(super::public_boundary)
+        .collect::<Result<Vec<_>>>()?;
     Ok(json!({
         "nodes": nodes,
         "pinnedNodeId": record["pinnedNodeId"],

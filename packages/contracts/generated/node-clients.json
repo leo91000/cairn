@@ -1,0 +1,23 @@
+[
+  {
+    "input": "CreateNodeEnrollmentInput",
+    "method": "POST",
+    "name": "createNodeEnrollment",
+    "output": "NodeEnrollment",
+    "path": "/nodes/enrollments"
+  },
+  {
+    "input": "UpdateNodeStorageInput",
+    "method": "PUT",
+    "name": "updateNodeStorage",
+    "output": "ExecutionNode",
+    "path": "/nodes/{nodeId}/storage"
+  },
+  {
+    "input": "RevokeNodeInput",
+    "method": "POST",
+    "name": "revokeNode",
+    "output": "NodeRevocation",
+    "path": "/nodes/{nodeId}/revoke"
+  }
+]

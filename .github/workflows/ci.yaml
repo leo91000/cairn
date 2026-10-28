@@ -445,9 +445,17 @@ jobs:
           retention-days: 14
           if-no-files-found: error
       - name: Qualify the exact reference on the current disposable host
+        env:
+          REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
         run: |
+          # Keep the reference's private protocol fixtures paired with its binaries.
+          # The current S3 launcher still provides identical host/emulator conditions.
+          git fetch --no-tags origin "$REFERENCE_SHA"
+          reference_fixture="$RUNNER_TEMP/cairn-native-reference-fixture"
+          mkdir -p "$reference_fixture"
+          git archive "$REFERENCE_SHA" scripts/tests deploy/nodes/native-host.py | tar -x -C "$reference_fixture"
           chmod +x reference-native/cairn reference-native/examples/native_storage_qualifier
-          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" .native-s3-test/bin/python scripts/tests/node_s3_test.py --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
+          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
       - name: Qualify real ublk, S3, eviction, systemd ownership and crash recovery
         run: |
           chmod +x target/debug/cairn target/debug/examples/native_storage_qualifier

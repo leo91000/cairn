@@ -200,12 +200,12 @@ pub struct Run {
     #[ts(optional = nullable)]
     pub dismissal: Option<serde_json::Value>,
     #[serde(default)]
-    #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "NodeResources"))]
+    #[schemars(with = "Option<crate::NodeResources>")]
     #[ts(optional = nullable)]
     #[ts(type = "import('../../nodes').NodeResources | null")]
     pub resources: Option<serde_json::Value>,
     #[serde(default)]
-    #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "NativeModeState"))]
+    #[schemars(with = "Option<crate::NativeModeRequest>")]
     #[ts(optional = nullable)]
     #[ts(type = "import('../../nodes').NativeModeRequest | null")]
     pub native_mode: Option<serde_json::Value>,
