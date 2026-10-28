@@ -236,8 +236,49 @@ class DirectTransportDeviceTest {
                 assertTrue(control.contains("authorize:200"))
                 assertTrue(control.contains("signal:204"))
 
-                if (scenario == "same-lan" && diagnosticCase == "burst") {
+                if (scenario == "same-lan" && diagnosticCase in setOf("burst", "churn")) {
                     repeat(100) { index ->
+                        if (diagnosticCase == "churn") {
+                            phase("peer-churn-${index + 1}")
+                            val attempts = AtomicInteger()
+                            val status = listOf(200, 401, 403)[index % 3]
+                            val rejectedClient =
+                                client
+                                    .newBuilder()
+                                    .addInterceptor { chain ->
+                                        if (
+                                            chain
+                                                .request()
+                                                .url
+                                                .encodedPath
+                                                .endsWith("/direct/authorize")
+                                        ) {
+                                            attempts.incrementAndGet()
+                                            Response.Builder()
+                                                .request(chain.request())
+                                                .protocol(Protocol.HTTP_1_1)
+                                                .code(status)
+                                                .message("Control fixture")
+                                                .body("{\"available\":false}".toResponseBody())
+                                                .build()
+                                        } else chain.proceed(chain.request())
+                                    }
+                                    .build()
+                            val probe = CairnApi(origin, vault, rejectedClient, api.installationId)
+                            probe.csrf = api.csrf
+                            probe.directDiagnostic = { trace("churn-probe-native", it) }
+                            try {
+                                probe.startDirect(context)
+                                withTimeout(10000) {
+                                    while (attempts.get() == 0) delay(10)
+                                }
+                            } finally {
+                                probe.closeStreams()
+                            }
+                            // Let asynchronous native disposal run while primary traffic resumes.
+                            delay(50)
+                            trace("primary-route", api.transport.route.value)
+                        }
                         phase("large-burst-${index + 1}")
                         val failure = runCatching {
                             api.request(

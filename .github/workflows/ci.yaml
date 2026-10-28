@@ -1,4 +1,4 @@
-name: Android direct source comparison
+name: Android direct native lifecycle pressure
 on:
   workflow_dispatch:
     inputs:
@@ -7,24 +7,49 @@ on:
         required: true
         type: string
         default: "40696410719"
-      apk-run:
-        description: Existing instrumented APK artifact run
-        required: true
-        type: string
-        default: "40710472521"
 permissions:
   contents: read
   actions: read
 jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          install: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - uses: gradle/actions/setup-gradle@v5
+      - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+      - name: Build the native client and instrumented tests
+        working-directory: apps/android
+        run: ./gradlew assembleDebug assembleDebugAndroidTest --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: android-direct-apks
+          path: |
+            apps/android/app/build/outputs/apk/debug/app-debug.apk
+            apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          if-no-files-found: error
+          retention-days: 1
   device:
     name: same-lan ${{ matrix.case }} replica ${{ matrix.replica }}
+    needs:
+      - apk
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         case:
-          - full
+          - churn
         replica:
           - 1
           - 2
@@ -66,8 +91,6 @@ jobs:
         with:
           name: android-direct-apks
           path: apps/android/app/build/outputs/apk/
-          github-token: ${{ github.token }}
-          run-id: ${{ inputs.apk-run }}
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
@@ -90,7 +113,7 @@ jobs:
           target: google_apis
           profile: pixel_6
           disable-animations: true
-          script: for attempt in 1 2 3; do python3 tests/network-bench.py same-lan --android --output "test-results/android-direct/${{ matrix.case }}-${{ matrix.replica }}-$attempt.json"; done
+          script: python3 tests/network-bench.py same-lan --android --output "test-results/android-direct/${{ matrix.case }}-${{ matrix.replica }}.json"
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
