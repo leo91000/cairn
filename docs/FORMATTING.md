@@ -48,9 +48,11 @@ Kotlin files change, it also runs `pnpm format:android`. If fixes change tracked
 files, the commit stops so you can review and stage the changes. The hook never
 stages changes for you. It then checks Rust compilation and Clippy.
 
-The quality workflow runs the same lint and Rust formatting checks through
-`pnpm check`. The Android workflow runs `spotlessCheck` before its existing
-tests, lint, builds, and device checks. Both remain publication prerequisites.
+The short PR workflow runs the same lint and Rust formatting checks through
+`pnpm validate:pr quality`, with contracts and Android checks selected from changed
+inputs. Full container and Android qualification remains a publication prerequisite
+on nightly, manual and version-tag runs. See [PR validation](agents/pr-validation.md)
+for local coverage requirements and shared commands.
 
 ## What still needs review
 
@@ -99,10 +101,10 @@ a different cost. Separate cold cache initialization from warm runs and record
 both before claiming an improvement. PR caches cannot populate another PR’s cache;
 only the backend job saves the shared compiled Rust cache.
 
-Image reuse requires successful validation of the exact Git tree, paired Beacon
+Nightly image reuse requires successful validation of the exact Git tree, paired Beacon
 and installation digests, matching freshly resolved CLI versions, served engine
 releases matching what production serves, and schema-3 provenance from this
-repository. Fork and manual runs cannot provide release
-proof. Missing or stale evidence requires full validation. See the
+repository. Historical complete main/PR evidence remains usable; the short PR
+workflow, fork runs and manual runs cannot provide release proof. Missing or stale evidence requires full validation. See the
 [release runbook](PRODUCTION-CAIRN.md) and
 [Android publication guards](../apps/android/docs/UPDATES.md#fast-tag-publication).

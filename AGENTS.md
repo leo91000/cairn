@@ -33,6 +33,23 @@
   For Android, run `./gradlew spotlessCheck testDebugUnitTest lintDebug` from
   `apps/android/`; UI behavior changes also need the relevant browser or device tests.
 
+## PR validation and failures
+
+- Before every PR and merge, read [PR validation](docs/agents/pr-validation.md).
+  Map the changed behavior, indirect dependants and shared contracts to tests;
+  run every affected suite locally, choosing broader coverage when uncertain.
+  The short GitHub checks supplement this work. Record the tested commit,
+  commands, results and any missing coverage in the PR description, and rerun
+  affected checks after the final correction or base update.
+- Own every validation failure, including failures reproduced on the PR base.
+  Fix a focused defect in this PR. For a separate repair, start a delegated task
+  or sub-agent with explicit instructions to create another PR, apply
+  `review-until-clean`, validate and merge automatically. Link both PRs and track
+  the repair through verified merge; an issue or promised follow-up is insufficient.
+  Merge a prerequisite repair first, update this branch and rerun the failed checks.
+  Report unavailable infrastructure or delegation as a blocker; never count an
+  unexecuted, skipped or flaky check as passed.
+
 ## Agent skills
 
 ### Issue tracker
