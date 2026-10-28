@@ -1,4 +1,4 @@
-> Statut : remplacée en partie par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) : un droit sur une instance de plugin devient un accès complet, à côté de droits contribution par contribution, dont les outils, commandes et hooks peuvent être restreints à des ressources ; le MCP public expose ces droits, `cairn_installation` peut les lire et les réduire sans jamais les élargir ; les délégations externes, leur suspension et leur réapprobation disparaissent.
+> Statut : remplacée en partie par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) : un droit sur une instance de plugin devient un accès complet, à côté de droits contribution par contribution, dont les outils, commandes et hooks peuvent être restreints à des ressources ; le MCP public expose ces droits, `cairn_installation` peut les lire et les réduire dans ses limites sans jamais les élargir ; les délégations externes, leur suspension et leur réapprobation disparaissent.
 
 # Toutes les permissions d’un agent se règlent sur sa page
 

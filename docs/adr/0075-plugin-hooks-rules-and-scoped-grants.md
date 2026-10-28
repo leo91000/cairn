@@ -13,6 +13,7 @@ droits par instance d’[ADR-0045](0045-declarative-plugin-contributions.md),
 d’[ADR-0051](0051-agent-centric-permissions.md) et
 d’[ADR-0056](0056-plugin-oauth-file-transfers-and-gmail.md), la couverture des tâches
 déléguées d’[ADR-0059](0059-delegated-tasks.md), la règle d’une instance par package
+et celle de l’agent ouvert à tout le monde
 d’[ADR-0053](0053-github-as-a-bundled-plugin.md), la réutilisation des étapes
 partagées d’[ADR-0057](0057-guided-plugin-setup.md) et le rôle de membre
 d’[ADR-0029](0029-sharing-whole-installations.md) ; précise
@@ -96,11 +97,12 @@ vaut choix de l’instance qui fournit les identifiants de run si l’agent n’
 encore. Le web, Android et le MCP public, avec l’autorisation de gestion des agents
 que le propriétaire lui a donnée, accordent et retirent tous ces droits, choix des
 identifiants de run compris. `cairn_installation` peut lire et réduire ces droits,
-jamais les accorder. Un agent délégué ([ADR-0059](0059-delegated-tasks.md)) doit être
-couvert par son demandeur contribution par contribution et ressource par ressource,
-pas seulement instance par instance ; la couverture est revérifiée à chaque action de
-la tâche, pas seulement à sa création. Une fois la conversation demandeuse supprimée,
-la tâche déléguée exige l’accès à son propre agent.
+dans les limites ci-dessous, jamais les accorder. Un agent délégué
+([ADR-0059](0059-delegated-tasks.md)) doit être couvert par son demandeur contribution
+par contribution et ressource par ressource, pas seulement instance par instance ; la
+couverture est revérifiée à chaque action de la tâche, pas seulement à sa création.
+Une fois la conversation demandeuse supprimée, la tâche déléguée exige l’accès à son
+propre agent.
 
 ### Accès des comptes aux agents
 
@@ -184,7 +186,8 @@ qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l’arbre.
   commencé ; une modification ne vaut que pour les événements suivants.
 - **Historique** : chacun voit l’état des déclenchements des règles qu’il voit ; leur
   détail (payload et résultats des actions) n’est visible que du créateur, du
-  propriétaire et des membres qui ont accès à l’agent d’exécution.
+  propriétaire et des membres qui ont accès à l’agent d’exécution. Une conversation
+  démarrée par une règle reste visible de tous les membres, avec ce qu’elle contient.
 - **Échecs** : une erreur dont le service confirme que rien n’a été fait (limite de
   débit, refus avant traitement) fait réessayer l’action en échec seule, avec un délai
   croissant qui respecte celui que demande le service ; les actions déjà faites ne
@@ -234,16 +237,17 @@ celui qui l’importe, risque résiduel accepté comme ci-dessous), ou dont l’
 des instructions ou des skills qu’un agent a écrites, à quelque moment que ce soit
 (les instructions d’un plugin comptent comme écrites par le propriétaire qui l’a
 accordé). Il écrit au nom de cette personne : il crée des règles à son nom, et ne
-modifie, désactive, réactive ou supprime que les règles de ce compte. Il ne peut
-accorder de droits à aucun agent ni à aucun compte, ni toucher à la règle d’un autre
-compte, ni lever une pause d’urgence ou la contourner : tant qu’une règle de cette
-personne est en pause d’urgence, il ne crée, ne duplique, ne réactive ni ne supprime
-aucune de ses règles, ni réduire, sur l’agent d’exécution d’une règle d’un autre
-compte que cette personne (de n’importe quel compte, hors d’une telle conversation ;
-le propriétaire, ou un membre dont l’adhésion dure), un droit sur un hook ou un outil
-que cette règle utilise, ressources comprises, quel que soit l’état de la règle. Une
-règle créée par le MCP public a pour créateur le propriétaire qui a autorisé ce
-client.
+modifie, désactive, réactive ou supprime que les règles de ce compte. Tant qu’une
+règle de cette personne est en pause d’urgence, il n’écrit aucune de ses règles : ni
+création, ni duplication, ni modification, ni réactivation, ni suppression ; il ne
+lève jamais cette pause. Il n’accorde de droits à aucun agent ni à aucun compte, et ne
+touche pas à la règle d’un autre compte. Enfin, dans toute conversation, il ne réduit
+pas un droit sur un hook ou un outil qu’utilise, sur son agent d’exécution, la règle
+d’un autre compte que cette personne (le propriétaire, ou un membre dont l’adhésion
+dure), ressources comprises et quel que soit l’état de la règle ; hors d’une
+conversation qui remplit ces conditions, cela vaut pour les règles de tous les
+comptes. Une règle créée par le MCP public a pour créateur le propriétaire qui a
+autorisé ce client.
 
 Une règle n’atteint un agent dont la politique autorise l’exécution native, ou une
 conversation qui s’exécute en natif, que si son créateur détenait l’autorité native
@@ -259,7 +263,8 @@ les limites de node et le renouvellement de bail de tout travail natif.
 Fusionner ou supprimer des agents ([guide](../AGENT-MERGE.md)) met les règles dont
 l’agent d’exécution disparaît en « Droits perdus » jusqu’à ce que leur créateur en
 choisisse un autre ; une conversation déplacée vers un autre agent ne permet plus
-d’écrire de règles.
+d’écrire de règles. Les accès des comptes à l’agent fusionné ne passent pas à l’agent
+qui le reçoit : seul le propriétaire les accorde.
 
 ### Budget du moteur
 
