@@ -210,7 +210,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
         fun fail(error: Exception? = null) {
             if (!failed.isCompleted)
                 api.directDiagnostic?.invoke(
-                    "attempt-fail:${error?.javaClass?.simpleName ?: "unspecified"}"
+                    "attempt-fail:${error?.javaClass?.simpleName ?: "unspecified"}:active=${active.get() === this}"
                 )
             // Renewal unavailability belongs to this network generation, even if a newer
             // default network was observed while the HTTP request was in flight.

@@ -48,6 +48,8 @@ class DirectTransportDeviceTest {
         val context = instrumentation.targetContext
         val scenario =
             InstrumentationRegistry.getArguments().getString("cairnDirectScenario") ?: "direct-only"
+        val diagnosticCase =
+            InstrumentationRegistry.getArguments().getString("cairnDirectCase") ?: "full"
         val configuration =
             wireJson
                 .parseToJsonElement(File(context.filesDir, "direct-fixture.json").readText())
@@ -63,14 +65,16 @@ class DirectTransportDeviceTest {
         // Observe control acknowledgement without retaining SDP, IDs, headers or credentials.
         val control = ConcurrentLinkedQueue<String>()
         val diagnosticStarted = System.nanoTime()
-        val diagnosticCount = AtomicInteger()
+        val diagnosticEvents = ArrayDeque<String>()
         val diagnosticPhase = AtomicReference("startup")
         fun trace(source: String, event: String) {
-            if (diagnosticCount.incrementAndGet() > 150) return
             val elapsed = (System.nanoTime() - diagnosticStarted) / 1_000_000
             val message =
                 "[DIRECT-DIAG] ms=$elapsed phase=${diagnosticPhase.get()} source=$source event=$event authorize=${control.count { it == "authorize:200" }} renew=${control.count { it == "renew:200" }}"
-            instrumentation.sendStatus(0, Bundle().apply { putString("stream", "$message\n") })
+            synchronized(diagnosticEvents) {
+                if (diagnosticEvents.size == 150) diagnosticEvents.removeFirst()
+                diagnosticEvents.addLast(message)
+            }
         }
         fun phase(name: String) {
             diagnosticPhase.set(name)
@@ -232,6 +236,27 @@ class DirectTransportDeviceTest {
                 assertTrue(control.contains("authorize:200"))
                 assertTrue(control.contains("signal:204"))
 
+                if (scenario == "same-lan" && diagnosticCase == "burst") {
+                    repeat(100) { index ->
+                        phase("large-burst-${index + 1}")
+                        val failure = runCatching {
+                            api.request(
+                                "POST",
+                                "/chats/missing/messages",
+                                body(
+                                    "id" to java.util.UUID.randomUUID().toString(),
+                                    "text" to "x".repeat(1_000_000),
+                                ),
+                            )
+                        }
+                            .exceptionOrNull()
+                        assertEquals(413, (failure as? ApiException)?.status)
+                        assertEquals("direct", api.transport.route.value)
+                        read()
+                        assertEquals("direct", api.transport.route.value)
+                    }
+                }
+
                 if (scenario == "network-change") {
                     val manager = context.getSystemService(ConnectivityManager::class.java)
                     shell("svc data enable")
@@ -271,7 +296,7 @@ class DirectTransportDeviceTest {
                     assertEquals(2, networkChanges)
                 }
 
-                if (scenario == "same-lan") {
+                if (scenario == "same-lan" && diagnosticCase == "full") {
                     phase("background-load")
                     val authorizations = control.count { it == "authorize:200" }
                     val inFlight =
@@ -590,6 +615,7 @@ class DirectTransportDeviceTest {
                 .writeText(
                     buildJsonObject {
                         put("scenario", scenario)
+                        put("diagnosticCase", diagnosticCase)
                         put("firstRoute", "relay")
                         put("route", primaryRoute)
                         put("finalRoute", api.transport.route.value)
@@ -615,6 +641,8 @@ class DirectTransportDeviceTest {
             routeTrace.cancelAndJoin()
             api.closeStreams()
             if (scenario == "network-change") shell("svc wifi enable")
+            val trace = synchronized(diagnosticEvents) { diagnosticEvents.joinToString("\n") }
+            instrumentation.sendStatus(0, Bundle().apply { putString("stream", "$trace\n") })
         }
     }
 }

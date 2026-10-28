@@ -448,7 +448,9 @@ def android(network, directory, args, report):
     try:
         adb("shell", "run-as", "build.cairn.app", "sh", "-c", "'cat > files/direct-fixture.json'", input=private.read_bytes())
         result = adb("shell", "am", "instrument", "-w", "-e", "class", "build.cairn.app.data.DirectTransportDeviceTest",
-                     "-e", "cairnDirectScenario", args.scenario, "build.cairn.app.test/androidx.test.runner.AndroidJUnitRunner", text=True, timeout=360)
+                     "-e", "cairnDirectScenario", args.scenario,
+                     "-e", "cairnDirectCase", os.environ.get("CAIRN_DIRECT_CASE", "full"),
+                     "build.cairn.app.test/androidx.test.runner.AndroidJUnitRunner", text=True, timeout=360)
         args.output.with_suffix(".instrumentation.txt").write_text(result.stdout)
         if "OK (1 test)" not in result.stdout:
             raise RuntimeError("Native Android transport scenario failed; see instrumentation result")

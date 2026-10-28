@@ -471,8 +471,10 @@ class DirectChannel(
                     response["status"]!!.jsonPrimitive.int == 503 &&
                     responseHeaders.values("x-cairn-direct-rejection").singleOrNull() ==
                         "reassembly-busy"
-            )
+            ) {
+                diagnostic?.invoke("reassembly-busy")
                 throw DirectNotSent("Réassemblage direct indisponible")
+            }
 
             if (response["type"]!!.jsonPrimitive.content == "stream_start") {
                 streaming = true
