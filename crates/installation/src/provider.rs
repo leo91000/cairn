@@ -97,3 +97,10 @@ mod tests {
         }
     }
 }
+
+impl From<Provider> for cairn_contracts::AgentProvider {
+    fn from(value: Provider) -> Self { match value { Provider::Codex=>Self::Codex,Provider::Claude=>Self::Claude,Provider::Opencode=>Self::Opencode } }
+}
+impl From<cairn_contracts::AgentProvider> for Provider {
+    fn from(value: cairn_contracts::AgentProvider) -> Self { match value { cairn_contracts::AgentProvider::Codex=>Self::Codex,cairn_contracts::AgentProvider::Claude=>Self::Claude,cairn_contracts::AgentProvider::Opencode=>Self::Opencode } }
+}

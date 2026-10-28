@@ -10,6 +10,7 @@ pub mod codex;
 pub(crate) mod lenient;
 pub mod opencode;
 mod record;
+pub mod sql;
 mod sign_in;
 pub mod usage;
 
@@ -23,7 +24,7 @@ use crate::{
     provider::Provider,
     service::Service,
     skills::private_dir,
-    store::{Db, merge},
+    store::Db,
     validation::{text, uuid},
 };
 use serde::{Deserialize, Serialize};
@@ -38,7 +39,6 @@ use std::{
 use tokio::sync::{Mutex, OnceCell};
 use usage::Usage;
 
-pub const KIND: &str = "agentAccounts";
 const MAX_ACCOUNTS: usize = 10;
 const PARALLEL_RUNS: u64 = 4;
 const LOW: f64 = 10.;
@@ -157,7 +157,6 @@ impl Provider {
 
 #[derive(Default)]
 pub struct Accounts {
-    leases: Mutex<HashMap<String, Lease>>,
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     initialized: OnceCell<()>,
     attempted: Mutex<HashMap<String, i64>>,
@@ -167,51 +166,12 @@ pub struct Accounts {
     signing_in: Mutex<Option<SignIn>>,
 }
 
-/// What an account needs or does, as shown beside it on Connections.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-enum Status {
-    SignIn,
-    Reconnect,
-    Paused,
-    Unavailable,
-    Waiting,
-    Full,
-    Next,
-    Low,
-    Ready,
-}
+use cairn_contracts::{AccountStatus as Status, CodingAgentAccount, CodingAgentAccounts, AgentProvider, AccountSettings};
 
-/// What Connections shows beside the record itself.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Summary {
-    resets_at: Option<i64>,
-    remaining_percent: Option<f64>,
-    stale: bool,
-    status: Status,
-    active_run_ids: Vec<String>,
-    max_concurrent_runs: usize,
-    exhausted: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Overview {
-    accounts: Vec<Value>,
-    sign_in: Value,
-    required: Vec<Provider>,
-}
-
-fn stored(db: &Db<'_>) -> Result<Vec<Account>> {
-    db.list(KIND)?
-        .into_iter()
-        .map(Account::from_value)
-        .collect()
-}
+fn stored(db: &Db<'_>) -> Result<Vec<Account>> { db.coding_accounts() }
 
 pub(crate) async fn save(s: &Service, account: &Account) -> Result<()> {
-    s.store.put(KIND, account.to_value()).await?;
+    s.store.save_coding_account(account).await?;
     Ok(())
 }
 
@@ -230,7 +190,7 @@ pub(crate) async fn claim(s: &Service, account: Account) -> Result<()> {
                     "This account is already connected. Reconnect the existing account instead.",
                 ));
             }
-            db.put(KIND, &account.to_value())?;
+            db.save_coding_account(&account)?;
             Ok(())
         })
         .await
@@ -311,8 +271,8 @@ fn schedulable(account: &Account, driver: &dyn Driver, model: &str) -> bool {
         && has_capacity
 }
 
-fn running(leases: &HashMap<String, Lease>, id: &str) -> usize {
-    leases.values().filter(|l| l.account_id == id).count()
+fn running(leases: &[Lease], id: &str) -> usize {
+    leases.iter().filter(|l| l.account_id == id).count()
 }
 
 fn valid_name(name: &str) -> Result<&str> {
@@ -343,6 +303,8 @@ impl Accounts {
     pub async fn initialize(&self, s: &Service) -> Result<()> {
         self.initialized
             .get_or_try_init(|| async {
+                // Runtime credentials and their leases never survive a manager restart.
+                s.store.transaction(|db| { db.0.execute("DELETE FROM account_leases", [])?; Ok(()) }).await?;
                 // Sign-ins never survive a restart.
                 remove_directory(&s.config.data_dir.join("account-login")).await?;
                 for provider in Provider::ALL {
@@ -385,29 +347,12 @@ impl Accounts {
             .await
     }
 
-    pub async fn get(&self, s: &Service, id: &str) -> Result<Value> {
-        required(s.store.get(KIND, id).await?, "Account not found.")
-    }
-
     pub async fn account(&self, s: &Service, id: &str) -> Result<Account> {
-        Account::from_value(self.get(s, id).await?)
+        required(s.store.coding_account(id).await?, "Account not found.")
     }
 
     async fn find(&self, s: &Service, id: &str) -> Result<Option<Account>> {
-        s.store
-            .get(KIND, id)
-            .await?
-            .map(Account::from_value)
-            .transpose()
-    }
-
-    pub async fn records(&self, s: &Service, provider: Provider) -> Result<Vec<Value>> {
-        Ok(s.store
-            .list(KIND)
-            .await?
-            .into_iter()
-            .filter(|a| a["provider"] == provider.as_str())
-            .collect())
+        s.store.coding_account(id).await
     }
 
     /// The accounts of `provider`, most recently saved first.
@@ -421,22 +366,13 @@ impl Accounts {
         s.store.read(|db| stored(db)).await
     }
 
-    pub async fn lease(&self, run_id: &str) -> Option<Lease> {
-        self.leases.lock().await.get(run_id).cloned()
+    pub async fn lease(&self, s: &Service, run_id: &str) -> Result<Option<Lease>> {
+        Ok(s.store.read(|db|db.account_leases()).await?.into_iter().find(|lease|lease.run_id==run_id))
     }
 
     /// The account's leases, ordered by run.
-    pub async fn active(&self, id: &str) -> Vec<Lease> {
-        let mut leases = self
-            .leases
-            .lock()
-            .await
-            .values()
-            .filter(|l| l.account_id == id)
-            .cloned()
-            .collect::<Vec<_>>();
-        leases.sort_by(|a, b| a.run_id.cmp(&b.run_id));
-        leases
+    pub async fn active(&self, s: &Service, id: &str) -> Result<Vec<Lease>> {
+        Ok(s.store.read(|db|db.account_leases()).await?.into_iter().filter(|lease|lease.account_id==id).collect())
     }
 
     async fn recovering(&self, s: &Service, id: &str) -> Result<bool> {
@@ -464,7 +400,7 @@ impl Accounts {
         provider: Provider,
         model: &str,
         speed: &str,
-        leases: &HashMap<String, Lease>,
+        leases: &[Lease],
     ) -> Result<Vec<Account>> {
         let driver = provider.driver();
         let connecting = self.connecting.lock().await.clone();
@@ -542,8 +478,8 @@ impl Accounts {
         timing.next("availability");
         driver.warm(s, model).await?;
         let available = {
-            let leases = self.leases.lock().await;
-            if leases.contains_key(run_id) {
+            let leases = s.store.read(|db|db.account_leases()).await?;
+            if leases.iter().any(|lease|lease.run_id==run_id) {
                 return Err(Error::conflict("This run already holds an account."));
             }
             !self
@@ -560,8 +496,8 @@ impl Accounts {
         }
         timing.next("selection");
         let _selection = self.selection.lock().await;
-        let leases = self.leases.lock().await;
-        if leases.contains_key(run_id) {
+        let leases = s.store.read(|db|db.account_leases()).await?;
+        if leases.iter().any(|lease|lease.run_id==run_id) {
             return Err(Error::conflict("This run already holds an account."));
         }
         let candidates = self.eligible(s, provider, model, speed, &leases).await?;
@@ -573,7 +509,7 @@ impl Accounts {
             let Some(mut account) = self.find(s, &candidate.id).await? else {
                 continue;
             };
-            let leases = self.leases.lock().await;
+            let leases = s.store.read(|db|db.account_leases()).await?;
             let available = schedulable(&account, driver, model)
                 && running(&leases, &account.id) < account.parallel_runs();
             drop(leases);
@@ -592,12 +528,16 @@ impl Accounts {
             };
             timing.next("prepare_home");
             driver.prepare(s, &lease.account_id, &lease.home).await?;
-            self.leases
-                .lock()
-                .await
-                .insert(lease.run_id.clone(), lease.clone());
             account.last_used_at = Some(now());
-            save(s, &account).await?;
+            let saved = account.clone();
+            let reserved = lease.clone();
+            if let Err(error) = s.store.transaction(move |db| {
+                db.save_coding_account(&saved)?;
+                db.save_account_lease(&reserved)
+            }).await {
+                driver.clear(&lease.home).await?;
+                return Err(error);
+            }
             timing.finish();
             return Ok(Some(lease));
         }
@@ -620,7 +560,7 @@ impl Accounts {
                 compatible.push(account);
             }
         }
-        let leases = self.leases.lock().await;
+        let leases = s.store.read(|db|db.account_leases()).await?;
         let full = |a: &&Account| a.enabled && running(&leases, &a.id) >= a.parallel_runs();
         let message = if ready.is_empty() && accounts.iter().any(|a| a.state == AccountState::Error)
         {
@@ -649,10 +589,11 @@ impl Accounts {
             && !self.of(s, provider).await?.iter().any(Account::is_active))
     }
 
-    pub async fn release(&self, lease: &Lease) -> Result<()> {
+    pub async fn release(&self, s: &Service, lease: &Lease) -> Result<()> {
         let _guard = self.lock(&lease.account_id).await;
         let cleared = lease.provider.driver().clear(&lease.home).await;
-        self.leases.lock().await.remove(&lease.run_id);
+        let run = lease.run_id.clone();
+        s.store.transaction(move |db|db.remove_account_lease(&run)).await?;
         cleared
     }
 
@@ -666,10 +607,8 @@ impl Accounts {
         driver.prepare(s, &lease.account_id, home).await?;
         driver.clear(&lease.home).await?;
         lease.home = home.to_owned();
-        self.leases
-            .lock()
-            .await
-            .insert(lease.run_id.clone(), lease.clone());
+        let saved = lease.clone();
+        s.store.transaction(move |db|db.save_account_lease(&saved)).await?;
         Ok(())
     }
 
@@ -685,21 +624,15 @@ impl Accounts {
         for provider in Provider::ALL {
             provider.driver().recover(s, run_id).await?;
         }
-        self.leases
-            .lock()
-            .await
-            .retain(|_, lease| lease.run_id != run_id);
+        let run_id = run_id.to_owned();
+        s.store.transaction(move |db|db.remove_account_lease(&run_id)).await?;
         Ok(())
     }
 
     /// Answers a run's broker request.
     pub async fn access(&self, s: &Service, lease: &Lease, request: &Value) -> Result<Value> {
         let request = broker::Request::deserialize(request).unwrap_or_default();
-        let ended = self
-            .leases
-            .lock()
-            .await
-            .get(&lease.run_id)
+        let ended = self.lease(s, &lease.run_id).await?
             .is_none_or(|l| l.account_id != lease.account_id || l.home != lease.home);
         if ended {
             return Err(Error::conflict("This account lease has ended."));
@@ -721,13 +654,13 @@ impl Accounts {
         s.store
             .transaction(move |db| {
                 let mut account =
-                    Account::from_value(required(db.get(KIND, &id)?, "Account not found.")?)?;
+                    required(db.coding_account(&id)?, "Account not found.")?;
                 account.exhausted = Some(Exhaustion {
                     at: now(),
                     model,
                     usage: account.usage.clone(),
                 });
-                db.put(KIND, &account.to_value())?;
+                db.save_coding_account(&account)?;
                 db.audit("account.exhausted", &json!({ "id": id }))
             })
             .await
@@ -776,8 +709,8 @@ impl Accounts {
         }
         self.attempted.lock().await.insert(id.into(), now());
         let models = self
-            .active(id)
-            .await
+            .active(s, id)
+            .await?
             .into_iter()
             .map(|l| l.model)
             .collect::<Vec<_>>();
@@ -805,10 +738,10 @@ impl Accounts {
     }
 
     /// Accounts as shown on Connections. `status` summarizes what the account needs or does.
-    pub async fn list(&self, s: &Service) -> Result<Vec<Value>> {
+    pub async fn list(&self, s: &Service) -> Result<Vec<CodingAgentAccount>> {
         let mut accounts = self.all(s).await?;
         accounts.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.name.cmp(&b.name)));
-        let leases = self.leases.lock().await.clone();
+        let leases = s.store.read(|db|db.account_leases()).await?;
         let mut next = Vec::new();
         for provider in Provider::ALL {
             if let Some(first) = self.eligible(s, provider, "", "", &leases).await?.first() {
@@ -826,31 +759,31 @@ impl Accounts {
 
     /// Every account, the sign-in in progress, and the coding agents whose runs wait for the
     /// user to connect, reconnect or resume an account.
-    pub async fn overview(&self, s: &Service) -> Result<Value> {
+    pub async fn overview(&self, s: &Service) -> Result<CodingAgentAccounts> {
         let mut required = Vec::new();
         for provider in Provider::ALL {
             if self.needs_attention(s, provider).await? {
-                required.push(provider);
+                required.push(AgentProvider::from(provider));
             }
         }
-        let overview = Overview {
+        let overview = CodingAgentAccounts {
             accounts: self.list(s).await?,
             sign_in: self.sign_in().await,
             required,
         };
-        Ok(serde_json::to_value(overview)?)
+        Ok(overview)
     }
 
-    pub async fn sign_in(&self) -> Value {
+    pub async fn sign_in(&self) -> Option<cairn_contracts::AccountSignIn> {
         self.signing_in
             .lock()
             .await
             .as_ref()
-            .map_or(Value::Null, SignIn::view)
+            .map(SignIn::view)
     }
 
     /// Adds an account that is not signed in yet.
-    pub async fn create(&self, s: &Service, provider: Provider, name: &str) -> Result<Value> {
+    pub async fn create(&self, s: &Service, provider: Provider, name: &str) -> Result<Account> {
         let name = valid_name(name)?.to_owned();
         s.store
             .transaction(move |db| {
@@ -864,8 +797,8 @@ impl Accounts {
                         provider.label()
                     )));
                 }
-                let account = Account::new(provider, &name, AccountState::Pending).to_value();
-                db.put(KIND, &account)?;
+                let account = Account::new(provider, &name, AccountState::Pending);
+                db.save_coding_account(&account)?;
                 provider.driver().added(db)?;
                 Ok(account)
             })
@@ -873,14 +806,14 @@ impl Accounts {
     }
 
     /// Adds an account and starts its sign-in.
-    pub async fn add(&self, s: &Arc<Service>, provider: Provider, name: &str) -> Result<Value> {
+    pub async fn add(&self, s: &Arc<Service>, provider: Provider, name: &str) -> Result<cairn_contracts::AccountSignIn> {
         self.initialize(s).await?;
         let _selection = self.selection.lock().await;
         let mut current = self.signing_in.lock().await;
         if current.as_ref().is_some_and(SignIn::busy) {
             return Err(Error::conflict("Another sign-in is in progress."));
         }
-        let account = Account::from_value(self.create(s, provider, name).await?)?;
+        let account = self.create(s, provider, name).await?;
         self.begin(s, &mut current, &account).await
     }
 
@@ -893,7 +826,7 @@ impl Accounts {
         model_provider: &str,
         api_key: &str,
         id: Option<&str>,
-    ) -> Result<Value> {
+    ) -> Result<CodingAgentAccount> {
         let name = valid_name(name)?;
         let api_key = api_key.trim();
         if api_key.is_empty()
@@ -912,7 +845,7 @@ impl Accounts {
                     "The coding agent of this account cannot change.",
                 ));
             }
-            if self.busy(s, id).await? || !self.active(id).await.is_empty() {
+            if self.busy(s, id).await? || !self.active(s, id).await?.is_empty() {
                 return Err(Error::conflict(
                     "Wait for this account’s runs to finish before replacing its key.",
                 ));
@@ -943,18 +876,18 @@ impl Accounts {
             .list(s)
             .await?
             .into_iter()
-            .find(|a| a["id"] == id)
-            .unwrap_or(Value::Null))
+            .find(|a| a.id == id)
+            .ok_or_else(|| Error::not_found("Account not found."))?)
     }
 
-    pub async fn reconnect(&self, s: &Arc<Service>, id: &str) -> Result<Value> {
+    pub async fn reconnect(&self, s: &Arc<Service>, id: &str) -> Result<cairn_contracts::AccountSignIn> {
         self.initialize(s).await?;
         let _selection = self.selection.lock().await;
         let mut current = self.signing_in.lock().await;
         if current.as_ref().is_some_and(SignIn::busy) {
             return Err(Error::conflict("Another sign-in is in progress."));
         }
-        if self.recovering(s, id).await? || !self.active(id).await.is_empty() {
+        if self.recovering(s, id).await? || !self.active(s, id).await?.is_empty() {
             return Err(Error::conflict(
                 "Wait for this account’s runs to finish before reconnecting it.",
             ));
@@ -968,7 +901,7 @@ impl Accounts {
         s: &Arc<Service>,
         current: &mut Option<SignIn>,
         account: &Account,
-    ) -> Result<Value> {
+    ) -> Result<cairn_contracts::AccountSignIn> {
         let id = account.id.clone();
         let _guard = self.lock(&id).await;
         let home = s.config.data_dir.join("account-login").join(&id);
@@ -1014,7 +947,7 @@ impl Accounts {
             .submit(code)
     }
 
-    pub async fn update(&self, s: &Service, id: &str, input: &Value) -> Result<Value> {
+    pub async fn update(&self, s: &Service, id: &str, input: &AccountSettings) -> Result<CodingAgentAccount> {
         let _guard = self.lock(id).await;
         if self.connecting.lock().await.as_deref() == Some(id) {
             return Err(Error::conflict(
@@ -1022,32 +955,21 @@ impl Accounts {
             ));
         }
         let mut account = self.account(s, id).await?;
-        if let Some(name) = input.get("name") {
-            account.name = valid_name(name.as_str().unwrap_or(""))?.into();
-        }
-        if let Some(enabled) = input.get("enabled") {
-            account.enabled = enabled
-                .as_bool()
-                .ok_or_else(|| Error::bad("Choose whether this account is used."))?;
-        }
-        if let Some(limit) = input.get("maxConcurrentRuns") {
-            let limit = limit
-                .as_u64()
-                .filter(|n| *n > 0)
-                .ok_or_else(|| Error::bad("Parallel runs must be a positive integer."))?;
-            account.max_concurrent_runs = Some(limit);
-        }
+        account.name = valid_name(&input.name)?.into();
+        if !(1..=9_007_199_254_740_991).contains(&input.max_concurrent_runs) { return Err(Error::bad("Parallel runs must be a positive wire integer.")); }
+        account.enabled = input.enabled;
+        account.max_concurrent_runs = Some(input.max_concurrent_runs);
         save(s, &account).await?;
         Ok(self
             .list(s)
             .await?
             .into_iter()
-            .find(|a| a["id"] == id)
-            .unwrap_or(Value::Null))
+            .find(|a| a.id == id)
+            .ok_or_else(|| Error::not_found("Account not found."))?)
     }
 
     /// Saves the user's order for `provider`'s accounts; `ids` lists every account once.
-    pub async fn reorder(&self, s: &Service, provider: Provider, ids: &[String]) -> Result<Value> {
+    pub async fn reorder(&self, s: &Service, provider: Provider, ids: &[String]) -> Result<CodingAgentAccounts> {
         if !provider.driver().ordered() {
             return Err(Error::bad("This coding agent does not order its accounts."));
         }
@@ -1083,8 +1005,8 @@ impl Accounts {
                 }
                 for mut account in accounts {
                     let position = ids.iter().position(|id| *id == account.id).unwrap_or(0);
-                    account.extra.insert("priority".into(), position.into());
-                    db.put(KIND, &account.to_value())?;
+                    account.priority = Some(position as u64);
+                    db.save_coding_account(&account)?;
                 }
                 db.audit("account.reordered", &json!({ "provider": provider }))
             })
@@ -1103,7 +1025,7 @@ impl Accounts {
             .await
             .as_ref()
             .is_some_and(|c| c.busy() && c.account_id == id);
-        if signing_in || self.recovering(s, id).await? || !self.active(id).await.is_empty() {
+        if signing_in || self.recovering(s, id).await? || !self.active(s, id).await?.is_empty() {
             return Err(Error::conflict(
                 "Wait for this account’s runs or sign-in to finish before removing it.",
             ));
@@ -1113,7 +1035,7 @@ impl Accounts {
         let id = id.to_owned();
         s.store
             .transaction(move |db| {
-                db.remove(KIND, &id)?;
+                db.remove_coding_account(&id)?;
                 db.audit(
                     "account.removed",
                     &json!({ "id": id, "provider": provider }),
@@ -1150,130 +1072,20 @@ fn status(account: &Account, driver: &dyn Driver, runs: usize, next: bool) -> St
     }
 }
 
-fn view(account: &Account, leases: &HashMap<String, Lease>, next: bool) -> Value {
+fn view(account: &Account, leases: &[Lease], next: bool) -> CodingAgentAccount {
     let driver = account.provider.driver();
-    let mut runs = leases
-        .values()
-        .filter(|l| l.account_id == account.id)
-        .map(|l| l.run_id.clone())
-        .collect::<Vec<_>>();
+    let mut runs = leases.iter().filter(|l|l.account_id==account.id).map(|l|l.run_id.clone()).collect::<Vec<_>>();
     runs.sort();
     let usage = account.usage();
-    let summary = Summary {
-        resets_at: usage.limiting("").and_then(|w| w.resets_at),
-        remaining_percent: usage.remaining(""),
-        stale: !fresh(account, driver),
-        status: status(account, driver, runs.len(), next),
-        active_run_ids: runs,
-        max_concurrent_runs: account.parallel_runs(),
-        exhausted: account.exhausted.is_some(),
-    };
-    let mut value = account.to_value();
-    if let Some(fields) = value.as_object_mut() {
-        fields.remove("identity");
+    CodingAgentAccount {
+        id: account.id.clone(), provider: account.provider.into(), name: account.name.clone(), enabled: account.enabled,
+        email: account.email.clone(), plan: account.plan.clone(), model_provider: account.model_provider.clone(), model_provider_name: account.model_provider_name.clone(), priority: account.priority,
+        state: account.state, error: account.error.clone(), reset_error: account.reset_error.clone(),
+        created_at: account.created_at, checked_at: account.checked_at, last_used_at: account.last_used_at,
+        usage: account.usage.clone(), resets_at: usage.limiting("").and_then(|w|w.resets_at),
+        remaining_percent: usage.remaining(""), stale: !fresh(account,driver),
+        status: status(account,driver,runs.len(),next), active_run_ids: runs,
+        max_concurrent_runs: account.parallel_runs() as u64, exhausted: account.exhausted.is_some(),
     }
-    merge(
-        &mut value,
-        &serde_json::to_value(summary).unwrap_or(Value::Null),
-    );
-    value
 }
 
-pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
-    let segments = input
-        .path
-        .trim_start_matches("/api/accounts")
-        .trim_start_matches('/')
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>();
-    let accounts = &s.accounts;
-    match (input.method.as_str(), segments.as_slice()) {
-        ("GET", []) => {
-            accounts.initialize(s).await?;
-            accounts.overview(s).await
-        }
-        ("GET", ["providers", provider]) => {
-            Provider::parse(provider)?
-                .driver()
-                .api_key_providers(s)
-                .await
-        }
-        ("POST", []) => {
-            let provider = Provider::parse(input.string("provider", 20)?)?;
-            if provider.driver().accepts_api_keys() {
-                accounts
-                    .connect_api_key(
-                        s,
-                        provider,
-                        input.string("name", 200)?,
-                        input.string("modelProvider", 80)?,
-                        input.string("apiKey", 8192)?,
-                        None,
-                    )
-                    .await
-            } else {
-                accounts.add(s, provider, input.string("name", 200)?).await
-            }
-        }
-        ("POST", ["order"]) => {
-            let provider = Provider::parse(input.string("provider", 20)?)?;
-            let ids = input.body["ids"]
-                .as_array()
-                .filter(|ids| ids.len() <= MAX_ACCOUNTS)
-                .and_then(|ids| {
-                    ids.iter()
-                        .map(|id| id.as_str().filter(|id| uuid(id).is_ok()).map(str::to_owned))
-                        .collect::<Option<Vec<_>>>()
-                })
-                .ok_or_else(|| Error::bad("List the accounts in their new order."))?;
-            accounts.reorder(s, provider, &ids).await
-        }
-        ("POST", ["refresh"]) => {
-            accounts.poll(s, false).await?;
-            accounts.overview(s).await
-        }
-        ("POST", ["sign-in", "code"]) => {
-            let code = input.string("code", 4096)?.trim();
-            if code.is_empty() || code.chars().any(char::is_whitespace) {
-                return Err(Error::bad(
-                    "Paste the authorization code shown by the sign-in page.",
-                ));
-            }
-            accounts.submit_code(code).await?;
-            Ok(json!({ "submitted": true }))
-        }
-        ("DELETE", ["sign-in"]) => {
-            accounts.cancel(s).await?;
-            Ok(json!({ "cancelled": true }))
-        }
-        ("POST", [id, "sign-in"]) => {
-            uuid(id)?;
-            accounts.reconnect(s, id).await
-        }
-        ("POST", [id, "api-key"]) => {
-            uuid(id)?;
-            let account = accounts.account(s, id).await?;
-            accounts
-                .connect_api_key(
-                    s,
-                    account.provider,
-                    &account.name,
-                    input.string("modelProvider", 80)?,
-                    input.string("apiKey", 8192)?,
-                    Some(id),
-                )
-                .await
-        }
-        ("PATCH", [id]) => {
-            uuid(id)?;
-            accounts.update(s, id, &input.body).await
-        }
-        ("DELETE", [id]) => {
-            uuid(id)?;
-            accounts.remove(s, id).await?;
-            Ok(json!({ "deleted": true }))
-        }
-        _ => Err(Error::not_found("Unknown account operation.")),
-    }
-}

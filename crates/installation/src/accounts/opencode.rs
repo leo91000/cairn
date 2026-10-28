@@ -124,7 +124,7 @@ fn normalize(bytes: &[u8], checked: i64) -> Result<Usage> {
         usage.windows.push(Window {
             id: id.into(),
             label: label.into(),
-            used_percent: serde_json::Number::from_f64(window.usage_percent),
+            used_percent: Some(window.usage_percent),
             resets_at: Some(resets_at),
             duration_mins: Some(minutes),
             models: Vec::new(),
@@ -133,7 +133,7 @@ fn normalize(bytes: &[u8], checked: i64) -> Result<Usage> {
         });
     }
 
-    usage.extra.insert("useBalance".into(), use_balance.into());
+    usage.use_balance = use_balance;
     Ok(usage)
 }
 
@@ -239,7 +239,7 @@ impl Driver for Opencode {
             .flatten()
             .find(|p| p["id"] == model_provider)
             .ok_or_else(|| Error::bad("Choose a supported OpenCode model provider."))?;
-        if let Some(previous) = account.extra.get("modelProvider")
+        if let Some(previous) = account.model_provider.as_deref()
             && previous != model_provider
         {
             return Err(Error::bad(
@@ -248,12 +248,8 @@ impl Driver for Opencode {
         }
         let mut account = account.clone();
         account.identity = Some(hex_digest(&format!("{model_provider}:{api_key}")));
-        account
-            .extra
-            .insert("modelProvider".into(), model_provider.into());
-        account
-            .extra
-            .insert("modelProviderName".into(), provider["name"].clone());
+        account.model_provider = Some(model_provider.into());
+        account.model_provider_name = provider["name"].as_str().map(str::to_owned);
         account.plan = Some("API key".into());
         account.usage = None;
         account.exhausted = None;
@@ -275,7 +271,7 @@ impl Driver for Opencode {
                     ));
                 }
                 vault.set_in(db, &secret_id(&account.id), &credential)?;
-                db.put(super::KIND, &account.to_value())?;
+                db.save_coding_account(&account)?;
                 db.audit(
                     "account.api-key-saved",
                     &json!({
@@ -310,7 +306,7 @@ impl Driver for Opencode {
     }
 
     async fn due(&self, _s: &Service, account: &Account, attempted: i64) -> Result<bool> {
-        let go = account.extra.get("modelProvider").and_then(Value::as_str) == Some("opencode-go");
+        let go = account.model_provider.as_deref() == Some("opencode-go");
         let attempted = account
             .usage
             .as_ref()
@@ -335,7 +331,7 @@ impl Driver for Opencode {
             return Ok(true);
         }
         let account = s.accounts.account(s, id).await?;
-        let Some(provider) = account.extra.get("modelProvider").and_then(Value::as_str) else {
+        let Some(provider) = account.model_provider.as_deref() else {
             return Ok(false);
         };
         Ok(s.opencode.cached_route(model, provider)?.is_some())
@@ -474,7 +470,7 @@ mod tests {
         assert_eq!(usage.windows[2].resets_at, Some(1_799_366_400));
         assert!(usage.blocked(MODEL));
         assert!(!usage.uses_balance());
-        assert!(usage.extra.get("error").is_none_or(Value::is_null));
+        assert!(usage.error.is_none());
         task.abort();
     }
 
@@ -887,7 +883,7 @@ mod tests {
             let usage = account.usage();
             assert_eq!(usage.windows, previous.windows);
             assert_eq!(usage.checked_at, previous.checked_at);
-            assert_eq!(usage.extra["error"], USAGE_ERROR);
+            assert_eq!(usage.error.as_deref(), Some(USAGE_ERROR));
             assert_eq!(account.state, AccountState::Ready);
             assert!(!Opencode.due(&s, &account, 0).await.unwrap());
             assert!(!account.to_value().to_string().contains(KEY));

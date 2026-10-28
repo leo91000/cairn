@@ -1,4 +1,4 @@
-//! The persisted account record, as stored under [`super::KIND`].
+//! Private account state. Credentials remain in the encrypted vault.
 use super::{PARALLEL_RUNS, lenient, usage::Usage};
 use crate::{
     config::{id, now},
@@ -6,17 +6,9 @@ use crate::{
     provider::Provider,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AccountState {
-    /// Added, but never signed in.
-    Pending,
-    Ready,
-    /// Needs to be reconnected.
-    Error,
-}
+pub use cairn_contracts::AccountState;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,8 +33,9 @@ pub struct Account {
     /// Why a Codex banked reset is pending or could not be redeemed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_error: Option<String>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    pub priority: Option<u64>,
+    pub model_provider: Option<String>,
+    pub model_provider_name: Option<String>,
 }
 
 /// A run stopped on the account's usage limit for `model`, with the usage read at that time.
@@ -74,7 +67,9 @@ impl Account {
             exhausted: None,
             max_concurrent_runs: Some(PARALLEL_RUNS),
             reset_error: None,
-            extra: Map::new(),
+            priority: None,
+            model_provider: None,
+            model_provider_name: None,
         }
     }
 
@@ -113,10 +108,7 @@ impl Account {
     /// The user's position for this account, earlier first; unordered accounts follow by age.
     pub fn priority(&self) -> (u64, i64) {
         (
-            self.extra
-                .get("priority")
-                .and_then(Value::as_u64)
-                .unwrap_or(u64::MAX),
+            self.priority.unwrap_or(u64::MAX),
             self.created_at.unwrap_or(0),
         )
     }
@@ -129,55 +121,3 @@ impl Account {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn new_accounts_keep_their_stored_shape() {
-        let account = Account::new(Provider::Claude, "Work", AccountState::Pending).to_value();
-        let mut keys = account
-            .as_object()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        keys.sort();
-        assert_eq!(
-            keys,
-            [
-                "checkedAt",
-                "createdAt",
-                "email",
-                "enabled",
-                "error",
-                "exhausted",
-                "id",
-                "identity",
-                "lastUsedAt",
-                "maxConcurrentRuns",
-                "name",
-                "plan",
-                "provider",
-                "state",
-                "usage",
-            ]
-        );
-        assert_eq!(account["provider"], "claude");
-        assert_eq!(account["state"], "pending");
-        assert_eq!(account["maxConcurrentRuns"], 4);
-    }
-
-    #[test]
-    fn unknown_fields_round_trip() {
-        let value = {
-            let mut account = Account::new(Provider::Codex, "A", AccountState::Ready).to_value();
-            account["future"] = json!({ "x": 1 });
-            account
-        };
-        let account = Account::from_value(value).unwrap();
-        assert_eq!(account.provider, Provider::Codex);
-        assert_eq!(account.to_value()["future"], json!({ "x": 1 }));
-    }
-}

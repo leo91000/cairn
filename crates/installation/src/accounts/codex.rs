@@ -1,7 +1,7 @@
 //! Codex: ChatGPT sign-in through the app-server device code, credentials in the encrypted
 //! vault, usage from `account/rateLimits/read`, and banked resets redeemed at 2% remaining.
 use super::{
-    Account, AccountState, Driver, KIND, Lease, Login, broker, lenient, remove_directory,
+    Account, AccountState, Driver, Lease, Login, broker, lenient, remove_directory,
     remove_file, save,
     usage::{self, Resets, Usage},
 };
@@ -176,7 +176,7 @@ impl Bucket {
             windows.push(usage::Window {
                 id: format!("{key}:{slot}"),
                 label,
-                used_percent: window.used_percent.clone(),
+                used_percent: window.used_percent.as_ref().and_then(serde_json::Number::as_f64),
                 resets_at: window.resets_at,
                 duration_mins: minutes,
                 models: models.to_vec(),
@@ -346,7 +346,7 @@ async fn with_session<T>(
 
 pub async fn discover_models(s: &Service, id: &str) -> Result<Value> {
     let _guard = s.accounts.lock(id).await;
-    s.accounts.get(s, id).await?;
+    s.accounts.account(s, id).await?;
     if s.accounts.busy(s, id).await? {
         return Err(Error::conflict(
             "Account sign-in or recovery is in progress.",
@@ -677,10 +677,10 @@ async fn import_host_login(s: &Service) -> Result<()> {
         return Ok(());
     }
     let account = Account::new(Provider::Codex, "Primary account", AccountState::Ready);
-    let imported = account.to_value();
+    let imported = account.clone();
     s.store
         .transaction(move |db| {
-            db.put(KIND, &imported)?;
+            db.save_coding_account(&imported)?;
             Codex.added(db)
         })
         .await?;
