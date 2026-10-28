@@ -66,19 +66,19 @@ choisit explicitement et que Cairn retient ; un accès complet aux autres insta
 les comprend pas. Retirer le droit sur cette instance laisse l’agent sans identifiants
 de run pour ce package jusqu’à un nouveau choix du propriétaire : une réduction
 n’élargit jamais un autre droit. Les outils, commandes et hooks accordés un par un
-peuvent être restreints à des ressources : `discord.post` seulement dans #support, le
-hook `message` seulement pour
-#support. Un droit sur une ressource couvre ses descendants (un salon couvre ses
-fils). Cairn applique la restriction avant le plugin, à chaque appel d’outil ou de
-commande, et ne livre pas à une règle un événement dont la payload désigne une autre
-ressource. Une restriction porte sur un type de ressource et sur ses descendants :
-chaque ressource de ce type, ou d’un type descendant, que désigne l’entrée ou la
-payload doit se trouver sous une ressource couverte, d’après la hiérarchie que Cairn
-résout lui-même (un fil de #general est refusé quand seul
-#support est accordé). Les autres types restent libres : restreindre le hook `message`
-à #support n’empêche pas son auteur d’être n’importe qui. Une entrée ou une payload
-qui ne désigne aucune ressource identifiable d’un type restreint, ou des ressources
-contradictoires, ou dont Cairn ne peut pas résoudre la hiérarchie, est refusée.
+peuvent être restreints à des ressources : `discord.post` seulement dans `#support`,
+le hook `message` seulement pour `#support`. Un droit sur une ressource couvre ses
+descendants (un salon couvre ses fils). Cairn applique la restriction avant le plugin,
+à chaque appel d’outil ou de commande, et ne livre pas à une règle un événement dont
+la payload désigne une autre ressource. Une restriction porte sur un type de ressource
+et sur ses descendants : chaque ressource de ce type, ou d’un type descendant, que
+désigne l’entrée ou la payload doit se trouver sous une ressource couverte, d’après la
+hiérarchie que Cairn résout lui-même (un fil de `#general` est refusé quand seul
+`#support` est accordé). Les autres types restent libres : restreindre le hook
+`message` à `#support` n’empêche pas son auteur d’être n’importe qui. Une entrée ou
+une payload qui ne désigne aucune ressource identifiable d’un type restreint, ou des
+ressources contradictoires, ou dont Cairn ne peut pas résoudre la hiérarchie, est
+refusée.
 
 Les identifiants de run, les instructions ajoutées au prompt et les conditions
 d’attente s’accordent aussi un par un, sans restriction de ressource ; les conditions
