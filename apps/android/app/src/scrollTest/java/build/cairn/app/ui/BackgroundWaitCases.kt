@@ -704,7 +704,7 @@ abstract class BackgroundWaitCases {
             server.dispatcher =
                 object : Dispatcher() {
                     @Volatile var switching = false
-                    var switchRejected = false
+                    @Volatile var switchRejected = false
                     var alternativesReads = 0
 
                     override fun dispatch(request: RecordedRequest): MockResponse {

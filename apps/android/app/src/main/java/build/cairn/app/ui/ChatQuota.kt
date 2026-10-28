@@ -342,9 +342,17 @@ internal fun ChatQuotaRecovery(
     var readFailure by remember(chat.id) { mutableStateOf<String?>(null) }
     var sending by remember(chat.id) { mutableStateOf(false) }
     var loading by remember(chat.id) { mutableStateOf(false) }
+    var optionsRefresh by remember(chat.id) { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
     val switching = pending ?: options?.switching?.provider ?: chat.codingAgentSwitch?.provider
-    LaunchedEffect(chat.id, quota != null, chat.codingAgentSwitch, pending, sending) {
+    LaunchedEffect(
+        chat.id,
+        quota != null,
+        chat.codingAgentSwitch,
+        pending,
+        sending,
+        optionsRefresh,
+    ) {
         if (sending || (quota == null && switching == null)) return@LaunchedEffect
         do {
             loading = options == null
@@ -422,6 +430,7 @@ internal fun ChatQuotaRecovery(
                     } catch (error: Exception) {
                         pending = null
                         failure = error.message
+                        optionsRefresh++
                     } finally {
                         sending = false
                     }
