@@ -293,7 +293,7 @@ abstract class NodePlacementCases {
             .onNodeWithText("Tous les slots partagent ces budgets.", substring = true)
             .assertExists()
         compose.onNodeWithText("Réservation exclusive").assertDoesNotExist()
-        compose.onNodeWithText("Mettez à jour le runtime", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("Mettez à jour le runtime", substring = true).assertExists()
         compose.onNodeWithText("Personnes de confiance").performScrollTo().assertExists()
         val nativeToggle = compose.onNodeWithText("Activer l’exécution native").performScrollTo()
         nativeToggle.performClick()

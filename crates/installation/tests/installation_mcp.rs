@@ -344,6 +344,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
         assert_eq!(result(&updated)["capabilities"]["backend"], "native");
         let mut capable = s.node_boundary(next).await.unwrap();
         capable["capabilities"]["nativeModeProtocol"] = 1.into();
+        capable["exclusiveReservations"] = true.into();
         s.store.put_node_fixture(capable).await.unwrap();
         let (_, preview) = node_management_call(
             &app,
@@ -390,6 +391,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
             .unwrap();
         assert_eq!(node["nativeAccounts"], json!([trusted]));
         assert_eq!(node["slots"], 6);
+        assert_eq!(node["exclusiveReservations"], true);
         s.store
             .update_run_boundary(
                 run["id"].as_str().unwrap(),
