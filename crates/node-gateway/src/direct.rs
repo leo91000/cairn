@@ -347,10 +347,16 @@ async fn connect(config: &Config) -> Result<(Arc<dyn PeerConnection>, Cancellati
         let lifetime = closed.clone();
         tokio::spawn(async move {
             while let Some(event) = control.poll().await {
-                if matches!(event, DataChannelEvent::OnClosing | DataChannelEvent::OnClose | DataChannelEvent::OnError) {
+                if matches!(
+                    event,
+                    DataChannelEvent::OnClosing
+                        | DataChannelEvent::OnClose
+                        | DataChannelEvent::OnError
+                ) {
                     break;
                 }
             }
+
             lifetime.cancel();
         });
         Ok(())

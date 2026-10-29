@@ -1762,11 +1762,7 @@ impl Association {
                 _ => {
                     // A rejected reset cannot safely release its wire stream.
                     // End the unusable association and notify all its channels.
-                    self.reconfigs.clear();
-                    self.reconfig_requests.clear();
-                    self.stream_resets.clear();
-                    self.completed_stream_resets.clear();
-                    self.close(AssociationError::TransportError)?;
+                    self.fail_stream_resets()?;
                 }
             }
             Ok(())
@@ -2071,6 +2067,15 @@ impl Association {
         if should_awake_write_loop {
             self.awake_write_loop();
         }
+    }
+
+    fn fail_stream_resets(&mut self) -> Result<()> {
+        self.reconfigs.clear();
+        self.reconfig_requests.clear();
+        self.stream_resets.clear();
+        self.completed_stream_resets.clear();
+        self.will_retransmit_reconfig = false;
+        self.close(AssociationError::TransportError)
     }
 
     fn acknowledge_stream_reset(&mut self, sequence: u32) {
@@ -3495,6 +3500,12 @@ impl Association {
                 //  * ICE would fail if the connectivity is lost
                 //  * WebRTC spec is not clear how this incident should be reported to ULP
                 error!("[{}] retransmission failure: T3-rtx (DATA)", self.side);
+            }
+
+            Timer::Reconfig => {
+                // An otherwise healthy peer cannot recover a stream whose
+                // reset budget is exhausted. Notify channels and reconnect.
+                let _ = self.fail_stream_resets();
             }
 
             _ => {}

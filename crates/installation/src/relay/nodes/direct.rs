@@ -266,10 +266,16 @@ async fn serve_peer(
                         let lifetime = events.closed.clone();
                         tokio::spawn(async move {
                             while let Some(event) = channel.poll().await {
-                                if matches!(event, DataChannelEvent::OnClosing | DataChannelEvent::OnClose | DataChannelEvent::OnError) {
+                                if matches!(
+                                    event,
+                                    DataChannelEvent::OnClosing
+                                        | DataChannelEvent::OnClose
+                                        | DataChannelEvent::OnError
+                                ) {
                                     break;
                                 }
                             }
+
                             lifetime.cancel();
                         });
                     }

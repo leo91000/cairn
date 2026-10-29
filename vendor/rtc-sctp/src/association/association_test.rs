@@ -1005,3 +1005,47 @@ fn terminal_reset_rejection_ends_the_association_without_reuse() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn exhausted_reset_retries_end_the_unusable_association() -> Result<()> {
+    let mut association = create_association(TransportConfig::default());
+    association.set_state(AssociationState::Established);
+    association.handshake_completed = true;
+    association.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+    association.handle_reconfig_param(&reset_request(7, vec![2]), &mut vec![])?;
+    let sequence = *association.reconfigs.keys().next().unwrap();
+    let now = Instant::now();
+    while association.poll_transmit(now).is_some() {}
+
+    // No acknowledgement arrives through the entire configured retry budget,
+    // while the surrounding ICE/DTLS peer can remain healthy.
+    for _ in 0..=crate::TimerConfig::default().max_reconfig_retrans {
+        let deadline = association.timers.get(Timer::Reconfig).unwrap();
+        association.handle_timeout(deadline);
+        while association.poll_transmit(deadline).is_some() {}
+    }
+    assert_eq!(
+        association.state(),
+        AssociationState::Closed,
+        "exhausted reset retries must end the peer instead of reserving a wire stream forever"
+    );
+    assert!(association.reconfigs.is_empty());
+    assert!(association.timers.get(Timer::Reconfig).is_none());
+    assert!(association.events.iter().any(|event| matches!(
+        event,
+        Event::AssociationLost {
+            id: 2,
+            reason: AssociationError::TransportError
+        }
+    )));
+
+    // Delivery returning later cannot revive an association whose channels
+    // have already been notified; reconnecting creates a fresh transport.
+    acknowledge_reset(&mut association, sequence, ReconfigResult::SuccessPerformed)?;
+    assert!(
+        association
+            .open_stream(2, PayloadProtocolIdentifier::Binary)
+            .is_err()
+    );
+    Ok(())
+}
