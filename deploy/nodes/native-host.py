@@ -586,6 +586,7 @@ UMask=0077
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=300
+LimitNOFILE=65536
 KillMode=control-group
 [Install]
 WantedBy=multi-user.target
