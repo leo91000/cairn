@@ -324,6 +324,41 @@ class DiagramCorpusTest {
     }
 
     @Test
+    fun `keeps self-message labels clear of wide number badges`() {
+        for (number in listOf("1000.25", "1234567890123")) {
+            val scene =
+                layoutDiagram(
+                    parseDiagram("sequenceDiagram\nautonumber $number\nA->>A: work"),
+                    measure,
+                )
+            val text =
+                scene.items.filterIsInstance<TextItem>().first { it.lines.firstOrNull() == "work" }
+            val badge =
+                scene.items.filterIsInstance<PathItem>().first {
+                    it.fill == DiagramPaint.Tone("edge") && it.stroke == null
+                }
+            assertTrue(text.x > points(badge).maxOf { it.first })
+        }
+    }
+
+    @Test
+    fun `keeps activated message labels before their neighboring lifeline`() {
+        val label = "abcdefghijabcdefghijabcdefghij"
+        for (depth in listOf(20, 80)) for (target in listOf("A", "B")) {
+            val source =
+                "sequenceDiagram\nparticipant A\nparticipant B\n" +
+                    "activate A\n".repeat(depth) +
+                    "A->>$target: $label"
+            val texts =
+                layoutDiagram(parseDiagram(source), measure).items.filterIsInstance<TextItem>()
+            val text = texts.first { it.lines.firstOrNull() == label }
+            val peer = texts.first { it.lines.firstOrNull() == "B" }
+            val fraction = if (text.anchor == TextAnchor.MIDDLE) 0.5 else 1.0
+            assertTrue(text.x + measure.width(label, text.size, text.weight) * fraction < peer.x)
+        }
+    }
+
+    @Test
     fun `fits deep activations and leaves neighboring lifelines and frames clear`() {
         val sources =
             listOf(

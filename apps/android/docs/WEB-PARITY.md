@@ -16,7 +16,7 @@ unsupported types (gantt, class…) keep the code block, and invalid sources sho
 with a short note. State notes stay physically left/right of their target in every direction;
 multiple notes stack with reserved space. Notes on composite states or self-transition states
 keep readable source. Self-transitions on composite states or subgraphs, and concurrent state
-regions (`--`), also keep source with an explanation. Subgraphs with a differing local direction keep source unless
+regions (`--`), and sequence participant creation/destruction also keep source with an explanation. Subgraphs with a differing local direction keep source unless
 an external member link invokes Mermaid's documented parent-direction inheritance
 ([syntax](https://mermaid.js.org/syntax/flowchart.html#direction-in-subgraphs)). Each drawing has a source toggle, copy and a full-screen viewer with
 zoom and pan. Node links remain usable in the card and the full-screen viewer; dragging a

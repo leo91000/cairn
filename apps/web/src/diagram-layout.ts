@@ -1962,15 +1962,15 @@ export function layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): 
       const text = textBlock(item.label, SEQ_FONT, 400, 260, measure)
       const from = index.get(item.from)!
       const to = index.get(item.to)!
-      const numbered = item.number === undefined ? 0 : 22
+      const numbered = item.number === undefined ? 0 : sequenceBadgeWidth(item.number, measure) + 10
       if (from === to) {
         if (from + 1 < heads.length)
-          need(from, from + 1, text.width + 64 + numbered)
+          need(from, from + 1, text.width + 64 + numbered + activationReach[from]!)
         else
-          rightRoom = Math.max(rightRoom, text.width + 64 + numbered)
+          rightRoom = Math.max(rightRoom, text.width + 64 + numbered + activationReach[from]!)
       }
       else {
-        need(from, to, text.width + 36 + numbered)
+        need(from, to, text.width + 36 + numbered + activationReach[from]! + activationReach[to]!)
       }
 
       return { item, text }
@@ -2142,15 +2142,17 @@ export function layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): 
         rows.push(...messageHead(item.head, [x1, loopBottom], [-1, 0], paint))
         if (item.both)
           rows.push(...messageHead(item.head, [x0, loopTop], [-1, 0], paint))
-        rows.push(...messageText(block, x0 + 12 + (item.number === undefined ? 0 : 22), labelY, 'start'))
-        extend(x0, Math.max(x0 + 44, x0 + 12 + (item.number === undefined ? 0 : 22) + block.width))
+        const badgeWidth = item.number === undefined ? 0 : sequenceBadgeWidth(item.number, measure)
+        const labelX = x0 + 12 + (item.number === undefined ? 0 : badgeWidth + 10)
+        rows.push(...messageText(block, labelX, labelY, 'start'))
+        extend(x0, Math.max(x0 + 44, labelX + block.width))
         if (item.number !== undefined)
-          rows.push(...badge(item.number, x0 + 12, labelY, measure))
+          rows.push(...badge(item.number, x0 + 12 + badgeWidth / 2, labelY, measure))
         y = loopBottom + 16
       }
       else {
         const labelY = y + block.height / 2
-        y += Math.max(block.height, 4) + 6
+        y += Math.max(block.height, 4) + (item.number === undefined ? 6 : 14)
         if (item.activate)
           activate(to, y)
         const direction = to > from ? 1 : -1
@@ -2169,10 +2171,13 @@ export function layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): 
         if (item.both)
           rows.push(...messageHead(item.head, [x0, y], [-direction, 0], paint))
         const middle = (x0 + x1) / 2
-        rows.push(...messageText(block, middle + (item.number === undefined ? 0 : 11), labelY, 'middle'))
-        extend(Math.min(x0, x1, middle - block.width / 2), Math.max(x0, x1, middle + block.width / 2 + 11))
+        const labelX = middle + (item.number === undefined ? 0 : 11)
+        const badgeX = x0 + direction * 14
+        const badgeHalfWidth = item.number === undefined ? 0 : sequenceBadgeWidth(item.number, measure) / 2
+        rows.push(...messageText(block, labelX, labelY, 'middle'))
+        extend(Math.min(x0, x1, labelX - block.width / 2, badgeX - badgeHalfWidth), Math.max(x0, x1, labelX + block.width / 2, badgeX + badgeHalfWidth))
         if (item.number !== undefined)
-          rows.push(...badge(item.number, x0 + direction * 14, y, measure))
+          rows.push(...badge(item.number, badgeX, y, measure))
         y += 18
       }
 
@@ -2504,9 +2509,13 @@ function messageText(block: TextBlock, x: number, y: number, anchor: 'start' | '
   }]
 }
 
+function sequenceBadgeWidth(value: number, measure: TextMeasure): number {
+  return Math.max(18, measure.width(String(value), 10, 700) + 10)
+}
+
 function badge(value: number, x: number, y: number, measure: TextMeasure): SceneItem[] {
   const text = String(value)
-  const w = Math.max(18, measure.width(text, 10, 700) + 10)
+  const w = sequenceBadgeWidth(value, measure)
   return [
     { kind: 'path', d: roundedRect(x - w / 2, y - 9, w, 18, 9), fill: { tone: 'edge' } },
     {

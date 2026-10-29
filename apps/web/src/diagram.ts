@@ -1272,16 +1272,17 @@ function parseSequence(source: string): SequenceDiagram {
       continue
     }
 
-    const created = keyword === 'create' ? head(rest) : undefined
-    const declaration = created ?? [keyword, rest]
-    if (declaration[0] === 'participant' || declaration[0] === 'actor') {
-      const spec = declaration[1]
+    if (keyword === 'create' || keyword === 'destroy')
+      throw new DiagramError('Participant creation and destruction are not supported.')
+
+    if (keyword === 'participant' || keyword === 'actor') {
+      const spec = rest
       const as = spec.indexOf(' as ')
       const raw = as < 0 ? spec : spec.slice(0, as)
       const properties = raw.indexOf('@{')
       const id = (properties < 0 ? raw : raw.slice(0, properties)).trim()
       const label = as < 0 ? cleanLabel(id) : cleanLabel(spec.slice(as + 4))
-      const actor = declaration[0] === 'actor' || (properties >= 0 && raw.slice(properties).replace(/\s/g, '').includes('"type":"actor"'))
+      const actor = keyword === 'actor' || (properties >= 0 && raw.slice(properties).replace(/\s/g, '').includes('"type":"actor"'))
       participant(id)
       const known = participants.get(id)!
       known.label = label
@@ -1289,7 +1290,7 @@ function parseSequence(source: string): SequenceDiagram {
       continue
     }
 
-    if (['destroy', 'link', 'links', 'properties', 'details', 'accTitle', 'accTitle:', 'accDescr', 'accDescr:'].includes(keyword))
+    if (['link', 'links', 'properties', 'details', 'accTitle', 'accTitle:', 'accDescr', 'accDescr:'].includes(keyword))
       continue
 
     if ((keyword === 'activate' || keyword === 'deactivate') && rest) {

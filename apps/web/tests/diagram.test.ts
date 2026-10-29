@@ -144,6 +144,29 @@ describe('diagram layout', () => {
     expect(endpoints.filter(node => node.parent === 'root')).toHaveLength(2)
   })
 
+  it.each(['create participant B', 'create actor B', 'destroy A'])('retains unsupported lifecycle directive %s as source', (directive) => {
+    expect(() => parseDiagram(`sequenceDiagram\nparticipant A\n${directive}\nA->>B: work`)).toThrow(DiagramError)
+  })
+
+  it.each([1000.25, 1234567890123])('keeps self-message text clear of badge %s', (number) => {
+    const scene = layoutDiagram(parseDiagram(`sequenceDiagram\nautonumber ${number}\nA->>A: work`), measure)
+    const text = scene.items.find(item => item.kind === 'text' && item.lines[0] === 'work')!
+    const badge = scene.items.find((item): item is PathItem => item.kind === 'path' && !item.stroke && !!item.fill && 'tone' in item.fill && item.fill.tone === 'edge')!
+    expect(text.kind === 'text' && text.x).toBeGreaterThan(Math.max(...points(badge).map(([x]) => x)))
+  })
+
+  it.each([20, 80].flatMap(depth => ['A', 'B'].map(target => ({ depth, target }))))('keeps activated $target message labels clear at depth $depth', ({ depth, target }) => {
+    const label = 'abcdefghijabcdefghijabcdefghij'
+    const source = `sequenceDiagram\nparticipant A\nparticipant B\n${'activate A\n'.repeat(depth)}A->>${target}: ${label}`
+    const scene = layoutDiagram(parseDiagram(source), measure)
+    const text = scene.items.find(item => item.kind === 'text' && item.lines[0] === label)!
+    const peer = scene.items.find(item => item.kind === 'text' && item.lines[0] === 'B')!
+    if (text.kind !== 'text' || peer.kind !== 'text')
+      throw new Error('Expected a message and peer')
+    const right = text.x + measure.width(label, text.size) * (text.anchor === 'middle' ? 0.5 : 1)
+    expect(right).toBeLessThan(peer.x)
+  })
+
   it('fits deep activations and leaves neighboring lifelines and frames clear', () => {
     const sources = [
       `sequenceDiagram\nparticipant A\n${'activate A\n'.repeat(20)}`,

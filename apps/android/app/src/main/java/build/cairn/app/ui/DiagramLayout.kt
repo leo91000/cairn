@@ -2195,12 +2195,25 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                     val text = textBlock(item.label, SEQ_FONT, 400, 260.0, measure)
                     val from = index.getValue(item.from)
                     val to = index.getValue(item.to)
-                    val numbered = if (item.number == null) 0.0 else 22.0
+                    val numbered =
+                        if (item.number == null) 0.0
+                        else sequenceBadgeWidth(item.number, measure) + 10
                     if (from == to) {
-                        if (from + 1 < heads.size) need(from, from + 1, text.width + 64 + numbered)
-                        else rightRoom = max(rightRoom, text.width + 64 + numbered)
+                        if (from + 1 < heads.size)
+                            need(from, from + 1, text.width + 64 + numbered + activationReach[from])
+                        else
+                            rightRoom =
+                                max(rightRoom, text.width + 64 + numbered + activationReach[from])
                     } else {
-                        need(from, to, text.width + 36 + numbered)
+                        need(
+                            from,
+                            to,
+                            text.width +
+                                36 +
+                                numbered +
+                                activationReach[from] +
+                                activationReach[to],
+                        )
                     }
 
                     Prepared(item, text)
@@ -2322,7 +2335,6 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                 val block = text!!
                 val paint = tone("edge")
                 val dash = if (item.line == EdgeLine.DOTTED) listOf(5.0, 4.0) else null
-                val numbered = if (item.number == null) 0.0 else 22.0
                 if (from == to) {
                     val labelY = y + block.height / 2
                     y += max(block.height, 4.0) + 6
@@ -2358,14 +2370,17 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                     rows.addAll(messageHead(item.head, Pt(x1, loopBottom), Pt(-1.0, 0.0), paint))
                     if (item.both)
                         rows.addAll(messageHead(item.head, Pt(x0, loopTop), Pt(-1.0, 0.0), paint))
-                    rows.addAll(messageText(block, x0 + 12 + numbered, labelY, TextAnchor.START))
-                    extend(x0, max(x0 + 44, x0 + 12 + numbered + block.width))
+                    val badgeWidth =
+                        if (item.number == null) 0.0 else sequenceBadgeWidth(item.number, measure)
+                    val labelX = x0 + 12 + (if (item.number == null) 0.0 else badgeWidth + 10)
+                    rows.addAll(messageText(block, labelX, labelY, TextAnchor.START))
+                    extend(x0, max(x0 + 44, labelX + block.width))
                     if (item.number != null)
-                        rows.addAll(badge(item.number, x0 + 12, labelY, measure))
+                        rows.addAll(badge(item.number, x0 + 12 + badgeWidth / 2, labelY, measure))
                     y = loopBottom + 16
                 } else {
                     val labelY = y + block.height / 2
-                    y += max(block.height, 4.0) + 6
+                    y += max(block.height, 4.0) + (if (item.number == null) 6 else 14)
                     if (item.activate) activate(to, y)
                     val direction = if (to > from) 1.0 else -1.0
                     val x0 = edgeX(from, centers[to])
@@ -2394,20 +2409,17 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                     if (item.both)
                         rows.addAll(messageHead(item.head, Pt(x0, y), Pt(-direction, 0.0), paint))
                     val middle = (x0 + x1) / 2
-                    rows.addAll(
-                        messageText(
-                            block,
-                            middle + (if (item.number == null) 0.0 else 11.0),
-                            labelY,
-                            TextAnchor.MIDDLE,
-                        )
-                    )
+                    val labelX = middle + (if (item.number == null) 0.0 else 11.0)
+                    val badgeX = x0 + direction * 14
+                    val badgeHalfWidth =
+                        if (item.number == null) 0.0
+                        else sequenceBadgeWidth(item.number, measure) / 2
+                    rows.addAll(messageText(block, labelX, labelY, TextAnchor.MIDDLE))
                     extend(
-                        min(min(x0, x1), middle - block.width / 2),
-                        max(max(x0, x1), middle + block.width / 2 + 11),
+                        minOf(x0, x1, labelX - block.width / 2, badgeX - badgeHalfWidth),
+                        maxOf(x0, x1, labelX + block.width / 2, badgeX + badgeHalfWidth),
                     )
-                    if (item.number != null)
-                        rows.addAll(badge(item.number, x0 + direction * 14, y, measure))
+                    if (item.number != null) rows.addAll(badge(item.number, badgeX, y, measure))
                     y += 18
                 }
 
@@ -2806,9 +2818,12 @@ private fun messageText(
     )
 }
 
+private fun sequenceBadgeWidth(value: Double, measure: TextMeasure): Double =
+    max(18.0, measure.width(jsNumberString(value), 10.0, 700) + 10)
+
 private fun badge(value: Double, x: Double, y: Double, measure: TextMeasure): List<SceneItem> {
     val text = jsNumberString(value)
-    val w = max(18.0, measure.width(text, 10.0, 700) + 10)
+    val w = sequenceBadgeWidth(value, measure)
     return listOf(
         PathItem(d = roundedRect(x - w / 2, y - 9, w, 18.0, 9.0), fill = tone("edge")),
         TextItem(

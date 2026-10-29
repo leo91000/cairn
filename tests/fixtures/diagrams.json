@@ -819,8 +819,8 @@
         ]
       },
       "layout": {
-        "width": 644,
-        "height": 761,
+        "width": 673,
+        "height": 825,
         "items": 81
       }
     },
@@ -1645,7 +1645,7 @@
         "title": "Checkout"
       },
       "layout": {
-        "width": 405,
+        "width": 411,
         "height": 898,
         "items": 59
       }
@@ -4468,7 +4468,7 @@
       },
       "layout": {
         "width": 260,
-        "height": 226,
+        "height": 242,
         "items": 20
       }
     },
@@ -4530,7 +4530,7 @@
       },
       "layout": {
         "width": 260,
-        "height": 268,
+        "height": 292,
         "items": 25
       }
     },
@@ -4603,7 +4603,7 @@
       },
       "layout": {
         "width": 260,
-        "height": 310,
+        "height": 334,
         "items": 28
       }
     },
@@ -6274,6 +6274,1058 @@
         "height": 116,
         "items": 5
       }
+    },
+    {
+      "name": "sequence-wide-self-number",
+      "source": "sequenceDiagram\nautonumber 1234567890123\nA->>A: work",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "message",
+            "from": "A",
+            "to": "A",
+            "label": "work",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 1234567890123
+          }
+        ]
+      },
+      "layout": {
+        "width": 305,
+        "height": 204,
+        "items": 10
+      }
+    },
+    {
+      "name": "sequence-decimal-self-number",
+      "source": "sequenceDiagram\nautonumber 1000.25\nA->>A: work",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "message",
+            "from": "A",
+            "to": "A",
+            "label": "work",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 1000.25
+          }
+        ]
+      },
+      "layout": {
+        "width": 272,
+        "height": 204,
+        "items": 10
+      }
+    },
+    {
+      "name": "sequence-wide-normal-number",
+      "source": "sequenceDiagram\nautonumber 1234567890123\nA->>B: work",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "message",
+            "from": "A",
+            "to": "B",
+            "label": "work",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 1234567890123
+          }
+        ]
+      },
+      "layout": {
+        "width": 277,
+        "height": 192,
+        "items": 15
+      }
+    },
+    {
+      "name": "sequence-activated-message-20-A",
+      "source": "sequenceDiagram\nparticipant A\nparticipant B\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nA->>A: abcdefghijabcdefghijabcdefghij",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "message",
+            "from": "A",
+            "to": "A",
+            "label": "abcdefghijabcdefghijabcdefghij",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          }
+        ]
+      },
+      "layout": {
+        "width": 480,
+        "height": 204,
+        "items": 33
+      }
+    },
+    {
+      "name": "sequence-activated-message-20-B",
+      "source": "sequenceDiagram\nparticipant A\nparticipant B\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nA->>B: abcdefghijabcdefghijabcdefghij",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "message",
+            "from": "A",
+            "to": "B",
+            "label": "abcdefghijabcdefghijabcdefghij",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          }
+        ]
+      },
+      "layout": {
+        "width": 452,
+        "height": 184,
+        "items": 33
+      }
+    },
+    {
+      "name": "sequence-activated-message-80-A",
+      "source": "sequenceDiagram\nparticipant A\nparticipant B\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nA->>A: abcdefghijabcdefghijabcdefghij",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "message",
+            "from": "A",
+            "to": "A",
+            "label": "abcdefghijabcdefghijabcdefghij",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          }
+        ]
+      },
+      "layout": {
+        "width": 720,
+        "height": 204,
+        "items": 93
+      }
+    },
+    {
+      "name": "sequence-activated-message-80-B",
+      "source": "sequenceDiagram\nparticipant A\nparticipant B\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nactivate A\nA->>B: abcdefghijabcdefghijabcdefghij",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "activate",
+            "participant": "A"
+          },
+          {
+            "type": "message",
+            "from": "A",
+            "to": "B",
+            "label": "abcdefghijabcdefghijabcdefghij",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          }
+        ]
+      },
+      "layout": {
+        "width": 692,
+        "height": 184,
+        "items": 93
+      }
     }
   ],
   "errors": [
@@ -6400,6 +7452,18 @@
     {
       "name": "concurrent-state-regions",
       "source": "stateDiagram-v2\nstate Active {\n[*]-->A\nA-->[*]\n--\n[*]-->B\nB-->[*]\n}"
+    },
+    {
+      "name": "sequence-create-participant",
+      "source": "sequenceDiagram\nparticipant A\ncreate participant B\nA->>B: work"
+    },
+    {
+      "name": "sequence-create-actor",
+      "source": "sequenceDiagram\nparticipant A\ncreate actor B\nA->>B: work"
+    },
+    {
+      "name": "sequence-destroy-participant",
+      "source": "sequenceDiagram\nparticipant A\ndestroy A\nA->>B: work"
     }
   ],
   "unsupported": [

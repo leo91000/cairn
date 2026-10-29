@@ -209,6 +209,10 @@ class DiagramDeviceTest {
                     "stateDiagram-v2\n[*]-->Ready\nnote left of Ready : Input\nnote right of Ready : Output",
                     "sequenceDiagram\nA->>B: Hello",
                     "sequenceDiagram\nparticipant A\n" + "activate A\n".repeat(20),
+                    "sequenceDiagram\nautonumber 1234567890123\nA->>A: work",
+                    "sequenceDiagram\nparticipant A\nparticipant B\n" +
+                        "activate A\n".repeat(20) +
+                        "A->>A: abcdefghijabcdefghijabcdefghij",
                     "pie\n\"A\" : 1\n\"B\" : 2",
                 )) {
                 compose.runOnIdle {
@@ -236,6 +240,9 @@ class DiagramDeviceTest {
                 "stateDiagram-v2\nstate Active {\nIdle-->Running\n}\nActive --> Active : retry",
                 "flowchart TD\nsubgraph Active\nIdle-->Running\nend\nActive-->|retry|Active",
                 "stateDiagram-v2\nstate Active {\n[*]-->A\nA-->[*]\n--\n[*]-->B\nB-->[*]\n}",
+                "sequenceDiagram\nparticipant A\ncreate participant B\nA->>B: work",
+                "sequenceDiagram\nparticipant A\ncreate actor B\nA->>B: work",
+                "sequenceDiagram\nparticipant A\ndestroy A\nA->>B: work",
             )) {
             compose.runOnIdle { content = "```mermaid\n$source\n```" }
             compose.waitUntil(20000) {

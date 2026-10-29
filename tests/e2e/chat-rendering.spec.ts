@@ -199,6 +199,9 @@ test('cyclic and unsupported composite semantics preserve readable source', asyn
     ['stateDiagram-v2\nstate Active {\nIdle-->Running\n}\nActive --> Active : retry', 'Self-transitions on composite states or subgraphs are not supported.'],
     ['flowchart TD\nsubgraph Active\nIdle-->Running\nend\nActive-->|retry|Active', 'Self-transitions on composite states or subgraphs are not supported.'],
     ['stateDiagram-v2\nstate Active {\n[*]-->A\nA-->[*]\n--\n[*]-->B\nB-->[*]\n}', 'Concurrent state regions are not supported.'],
+    ['sequenceDiagram\nparticipant A\ncreate participant B\nA->>B: work', 'Participant creation and destruction are not supported.'],
+    ['sequenceDiagram\nparticipant A\ncreate actor B\nA->>B: work', 'Participant creation and destruction are not supported.'],
+    ['sequenceDiagram\nparticipant A\ndestroy A\nA->>B: work', 'Participant creation and destruction are not supported.'],
   ]
   for (const [source, explanation] of cases) {
     await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)
@@ -399,6 +402,36 @@ test('nested activations stay inside the SVG and clear the next lifeline', async
       return { bars: bars.length, contained: right < svg.viewBox.baseVal.width, separated: right < next }
     })
     expect(result).toEqual({ bars: depth, contained: true, separated: true })
+  }
+})
+
+test('sequence message labels clear wide badges and nested activations', async ({ page }) => {
+  for (const number of [1000.25, 1234567890123]) {
+    for (const target of ['A', 'B']) {
+      const source = `sequenceDiagram\nautonumber ${number}\nA->>${target}: work`
+      await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)
+      const separated = await page.locator('#app figure.diagram svg').evaluate((svg) => {
+        const text = [...svg.querySelectorAll('text')].find(item => item.textContent === 'work')!.getBBox()
+        const badge = [...svg.querySelectorAll('path')].find(item => item.style.fill === 'var(--dg-edge)' && item.style.stroke === 'none')!.getBBox()
+        return text.x > badge.x + badge.width || text.y + text.height < badge.y
+      })
+      expect(separated).toBe(true)
+    }
+  }
+
+  for (const depth of [20, 80]) {
+    for (const target of ['A', 'B']) {
+      const label = 'abcdefghijabcdefghijabcdefghij'
+      const source = `sequenceDiagram\nparticipant A\nparticipant B\n${'activate A\n'.repeat(depth)}A->>${target}: ${label}`
+      await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)
+      const separated = await page.locator('#app figure.diagram svg').evaluate((svg) => {
+        const texts = [...svg.querySelectorAll('text')]
+        const label = texts.find(item => item.textContent === 'abcdefghijabcdefghijabcdefghij')!.getBBox()
+        const peer = texts.find(item => item.textContent === 'B')!.getBBox()
+        return label.x + label.width < peer.x + peer.width / 2
+      })
+      expect(separated).toBe(true)
+    }
   }
 })
 

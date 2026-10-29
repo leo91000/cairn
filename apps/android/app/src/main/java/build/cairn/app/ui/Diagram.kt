@@ -1321,7 +1321,6 @@ private fun findArrow(line: String): Pair<Int, String>? {
 
 private val SKIPPED_SEQUENCE_KEYWORDS =
     setOf(
-        "destroy",
         "link",
         "links",
         "properties",
@@ -1401,16 +1400,18 @@ private fun parseSequence(source: String): SequenceDiagram {
             continue
         }
 
-        val declaration = if (keyword == "create") head(rest) else keyword to rest
-        if (declaration.first == "participant" || declaration.first == "actor") {
-            val spec = declaration.second
+        if (keyword == "create" || keyword == "destroy")
+            throw DiagramError("Participant creation and destruction are not supported.")
+
+        if (keyword == "participant" || keyword == "actor") {
+            val spec = rest
             val alias = spec.indexOf(" as ")
             val declared = if (alias < 0) spec else spec.substring(0, alias)
             val properties = declared.indexOf("@{")
             val id = jsTrim(if (properties < 0) declared else declared.substring(0, properties))
             val label = if (alias < 0) cleanLabel(id) else cleanLabel(spec.substring(alias + 4))
             val actor =
-                declaration.first == "actor" ||
+                keyword == "actor" ||
                     (properties >= 0 &&
                         declared
                             .substring(properties)
