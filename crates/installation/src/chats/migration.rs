@@ -116,7 +116,7 @@ ALTER TABLE kv_v15 RENAME TO kv;")?;
 use rusqlite::OptionalExtension;
 
 fn invalid() -> Error {
-    Error::bad("Cannot upgrade version 12 conversations; original database retained.")
+    Error::bad("Cannot upgrade version 14 conversations; original database retained.")
 }
 
 fn decode<T: serde::de::DeserializeOwned>(data: &str) -> Result<T> {
