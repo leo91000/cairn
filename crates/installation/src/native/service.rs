@@ -1663,6 +1663,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 let mut offset = 0;
                 let mut buffer = vec![0u8; 65536];
                 let mut at_line_boundary = true;
+                let mut attempt_finished = false;
                 let mut last_progress = tokio::time::Instant::now();
                 loop {
                     if file.seek(std::io::SeekFrom::Start(offset)).await.is_err() {
@@ -1670,8 +1671,14 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                     }
                     match file.read(&mut buffer).await {
                         Ok(0) => {
-                            if !controller.active.lock().await.contains_key(&id) {
+                            if attempt_finished {
                                 break;
+                            }
+                            if !controller.active.lock().await.contains_key(&id) {
+                                // The final append can land between the EOF read and
+                                // retirement observation. Drain again after retirement.
+                                attempt_finished = true;
+                                continue;
                             }
                             // Idle transport frames must not split a log record
                             // whose remaining bytes have not been appended yet.
@@ -3307,11 +3314,19 @@ mod tests {
                 .is_err(),
             "Heartbeats must not be inserted inside a partially written JSON record",
         );
+        // Queue the reader's EOF lifecycle check behind the final append and retirement.
+        let mut active = controller.active.lock().await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
         file.write_all(b"message\",\"text\":\"ok\"}\n")
             .await
             .unwrap();
         file.flush().await.unwrap();
-        controller.active.lock().await.remove(&attempt);
+        assert_eq!(
+            tokio::fs::read(&log).await.unwrap(),
+            b"{\"type\":\"agent_message\",\"text\":\"ok\"}\n"
+        );
+        active.remove(&attempt);
+        drop(active);
         let mut record = prefix.to_vec();
         while let Some(bytes) = tokio::time::timeout(Duration::from_secs(2), body.next())
             .await
