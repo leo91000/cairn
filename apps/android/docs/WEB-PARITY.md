@@ -308,3 +308,7 @@ are preserved. Both tools expose the same registry with account policies; agents
 never obtain human sign-in challenges or credential-management authority from an
 installation grant. Existing AccountsJourneyTest / AccountsDeviceTest and browser
 accounts/OpenCode/Claude journeys qualify the corresponding native presentations.
+
+Manual account refresh retains the authenticated owner policy on both apps: it can
+refresh credentials and redeem a banked reset. Agent tools expose the same operation
+with an explicit human-required refusal; automatic usage remains readable.

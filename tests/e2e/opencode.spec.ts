@@ -156,18 +156,18 @@ test('OpenCode Auto runs a model on the first connection, then the next one at i
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
   const existing = (await workspace.api('/api/accounts')).accounts
-  const zen = existing.find((a: { modelProvider?: string }) => a.modelProvider === 'opencode') ?? await workspace.api('/api/accounts', 'POST', {
+  const zen = existing.find((a: { modelProvider?: string }) => a.modelProvider === 'opencode') ?? (await workspace.api('/api/accounts', 'POST', {
     provider: 'opencode',
     name: 'OpenCode Zen',
     modelProvider: 'opencode',
     apiKey: 'synthetic-browser-zen-key',
-  })
-  const go = existing.find((a: { modelProvider?: string }) => a.modelProvider === 'opencode-go') ?? await workspace.api('/api/accounts', 'POST', {
+  })).account
+  const go = existing.find((a: { modelProvider?: string }) => a.modelProvider === 'opencode-go') ?? (await workspace.api('/api/accounts', 'POST', {
     provider: 'opencode',
     name: 'OpenCode Go',
     modelProvider: 'opencode-go',
     apiKey: 'synthetic-browser-go-key',
-  })
+  })).account
   const ordered = (await workspace.api('/api/accounts')).accounts.filter((a: { provider: string }) => a.provider === 'opencode').map((a: { id: string }) => a.id)
   await workspace.api('/api/accounts/order', 'POST', { provider: 'opencode', ids: [go.id, ...ordered.filter((id: string) => id !== go.id)] })
 

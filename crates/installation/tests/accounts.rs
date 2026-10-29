@@ -321,3 +321,47 @@ async fn account_settings_replace_rejects_stale_revision_and_never_returns_priva
         "Renamed"
     );
 }
+
+#[tokio::test]
+async fn release_retains_the_slot_until_a_transient_database_failure_is_repaired() {
+    use cairn_installation::accounts::{Account, AccountState, Lease};
+    let root = TempDir::new().unwrap();
+    let s = Service::new(config(&root)).await.unwrap();
+    s.accounts.initialize(&s).await.unwrap();
+    let account = Account::new(Provider::Codex, "Retained cleanup", AccountState::Ready);
+    s.store.save_coding_account(&account).await.unwrap();
+    let lease = Lease {
+        account_id: account.id.clone(),
+        provider: Provider::Codex,
+        run_id: "background-cleanup-fixture".into(),
+        model: "model".into(),
+        home: root.path().join("credential-home"),
+    };
+    s.store.transaction({
+        let lease = lease.clone();
+        move |db| {
+            db.reserve_account_lease(&lease)?;
+            db.0.execute_batch("CREATE TRIGGER fail_lease_delete BEFORE DELETE ON account_leases BEGIN SELECT RAISE(FAIL,'synthetic transient write failure'); END;")?;
+            Ok(())
+        }
+    }).await.unwrap();
+    let mut release = Box::pin(s.accounts.release(&s, &lease));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut release)
+            .await
+            .is_err()
+    );
+    assert_eq!(s.accounts.active(&s, &account.id).await.unwrap().len(), 1);
+    s.store
+        .transaction(|db| {
+            db.0.execute_batch("DROP TRIGGER fail_lease_delete")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), release)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(s.accounts.active(&s, &account.id).await.unwrap().is_empty());
+}

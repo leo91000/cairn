@@ -4807,6 +4807,26 @@ async fn typed_account_management_has_tool_parity_without_human_sign_in_authorit
         let current = s.accounts.account(&s, &account.id).await.unwrap();
         let (_,response)=node_management_call(&app,endpoint,token,"replace_coding_agent_account",json!({"accountId":account.id,"revision":current.revision,"settings":{"name":"Managed","enabled":false,"maxConcurrentRuns":2}})).await;
         assert_eq!(result(&response)["name"], "Managed");
+        let unchanged = s.accounts.account(&s, &account.id).await.unwrap();
+        let (_, refused) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "refresh_coding_agent_accounts",
+            json!({}),
+        )
+        .await;
+        assert_eq!(refused["result"]["isError"], true);
+        assert!(
+            refused["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("authenticated installation owner")
+        );
+        assert_eq!(
+            s.accounts.account(&s, &account.id).await.unwrap(),
+            unchanged
+        );
         let before = s.store.coding_accounts().await.unwrap().len();
         let (_, response) = node_management_call(
             &app,

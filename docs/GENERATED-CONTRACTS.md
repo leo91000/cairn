@@ -656,6 +656,8 @@ settings/order with read/manage scopes and transactional installation-grant rech
 They do not receive sign-in challenges. Connecting/reconnecting and key replacement
 return a human-required management path to agents; submitting codes, cancelling a
 human sign-in and deleting credentials require the authenticated human owner.
+Manual refresh also requires that proof because a Driver may refresh credentials
+and redeem a Codex banked reset; tools can read automatically refreshed usage.
 Installation access and public manage scopes never fabricate this proof.
 
 The existing A1/A2 `project_measurement::account_measurement::account_storage_layouts`

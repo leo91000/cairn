@@ -111,7 +111,7 @@ impl AccountOperation {
         };
         json!({
             "name": self.name,
-            "description": "Manage coding-agent account metadata and usage with account policies. Connecting, replacing credentials, submitting codes, cancelling sign-in and deleting credentials require an authenticated human owner; an installation grant is not human proof. Agents never receive sign-in challenges or credentials.",
+            "description": "Manage coding-agent account metadata and usage with account policies. Refreshing credentials/usage, connecting, replacing credentials, submitting codes, cancelling sign-in and deleting credentials require an authenticated human owner; an installation grant is not human proof. Agents never receive sign-in challenges or credentials.",
             "inputSchema": input,
             "outputSchema": output,
             "_meta": { "securitySchemes": [{ "type":"oauth2", "scopes":[self.scope] }] },
@@ -153,6 +153,14 @@ impl AccountOperation {
         let authorize = crate::installation_mcp::management_authorization(bearer.as_deref());
         let before = authorize.clone();
         s.store.read(move |db| before(db)).await?;
+        // A manual poll may refresh credentials and redeem a banked reset.
+        // Preserve the human owner policy before entering any Driver or lock wait.
+        if !human && self.name == "refresh_coding_agent_accounts" {
+            let _: ListAccountsInput = decode(input)?;
+            return Err(Error::forbidden(
+                "An authenticated installation owner must refresh accounts in Connections. Agents can read the automatically refreshed usage.",
+            ));
+        }
         s.accounts.initialize(s).await?;
         let result = match self.name {
             "list_coding_agent_account_providers" => {

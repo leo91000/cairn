@@ -616,11 +616,23 @@ impl Accounts {
     pub async fn release(&self, s: &Service, lease: &Lease) -> Result<()> {
         let _guard = self.lock(&lease.account_id).await;
         let cleared = lease.provider.driver().clear(&lease.home).await;
-        let run = lease.run_id.clone();
-        s.store
-            .transaction(move |db| db.remove_account_lease(&run))
-            .await?;
-        cleared
+        loop {
+            let run = lease.run_id.clone();
+            match s
+                .store
+                .transaction(move |db| db.remove_account_lease(&run))
+                .await
+            {
+                Ok(()) => return cleared,
+                Err(error) => {
+                    tracing::warn!(run_id = %lease.run_id, error = %error, "Could not release account lease; retaining its slot until cleanup is durable");
+                    tokio::select! {
+                        () = s.shutdown.cancelled() => return Err(error),
+                        () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                    }
+                }
+            }
+        }
     }
 
     /// Moves a lease to the home its run actually uses, such as inside an isolated workspace.
