@@ -214,16 +214,19 @@ async fn transfer_diagnostics_measure_base_get_decode_and_failed_put_without_los
         .unwrap();
     let encoded_len = encoded.len();
     let fail = Arc::new(AtomicBool::new(false));
+    let body_release = Arc::new(tokio::sync::Notify::new());
     let (url, server) = peer(Router::new().fallback({
         let fail = fail.clone();
+        let body_release = body_release.clone();
         move |request: Request| {
             let encoded = encoded.clone();
             let fail = fail.clone();
+            let body_release = body_release.clone();
             async move {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 if request.method() == "GET" {
                     return Body::from_stream(futures_util::stream::once(async move {
-                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        body_release.notified().await;
                         Ok::<_, std::io::Error>(Bytes::from(encoded))
                     }))
                     .into_response();
@@ -279,7 +282,7 @@ async fn transfer_diagnostics_measure_base_get_decode_and_failed_put_without_los
         } else {
             metrics.clone()
         };
-        diagnostic::scope(Some(metrics.clone()), async {
+        let transfer = diagnostic::scope(Some(metrics.clone()), async {
             let mut reads = snapshots::Fetch::new(
                 s.disk_http.clone(),
                 "http://127.0.0.1:1".into(),
@@ -301,8 +304,25 @@ async fn transfer_diagnostics_measure_base_get_decode_and_failed_put_without_los
             );
             let result = uploads.join_next().await.unwrap().unwrap();
             assert_eq!(result.is_err(), fails);
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(transfer, async {
+                // A server-side sleep can expire before the SDK returns headers.
+                // Hold the body until its client-side measurement is active.
+                while metrics.snapshot()["stages"]["getBody"]["inFlight"] != 1 {
+                    tokio::task::yield_now().await;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let live = metrics.snapshot();
+                assert_eq!(live["stages"]["getHeaders"]["completed"], 1);
+                assert_eq!(live["stages"]["getBody"]["inFlight"], 1);
+                assert_eq!(live["stages"]["getBody"]["completed"], 0);
+                assert!(live["stages"]["getBody"]["wallUsSum"].as_u64().unwrap() >= 15_000);
+                body_release.notify_one();
+            });
         })
-        .await;
+        .await
+        .expect("GET body measurement must start before releasing the fixture response");
         let value = metrics.snapshot();
         let stages = &value["stages"];
         for stage in [
