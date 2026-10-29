@@ -42,8 +42,10 @@ export function slotCapacity(node: ExecutionNode) {
   return Math.min(slots, node.runtimeSlots ?? slots)
 }
 
-/** A runtime unready without a reported error: usually on its way, but some causes last (image, pool, data root). */
-/** Unready machines without a reported error, first seen and last confirmed by successful listings. */
+/**
+ * Unready machines without a reported error, first seen and last confirmed by successful listings. Usually the
+ * runtime is on its way, but some causes last (image, pool, data root).
+ */
 export type UnreadyObservations = Record<string, { since: number, checkedAt: number }>
 
 /** How long an unexplained unready state may last before it needs the owner. */
@@ -332,7 +334,7 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now(), clock: nu
     reasons.push('KVM is unavailable: enable virtualization in the BIOS and load the kvm module.')
   if (node.capabilities.backend === 'native' && !node.capabilities.ublk)
     reasons.push('ublk is unavailable: this node needs a current native runtime and the ublk_drv kernel module (/dev/ublk-control) to mount S3-backed conversation disks.')
-  if (node.status !== 'offline' && !node.executionReady)
+  if ((node.local || node.status === 'online') && !node.executionReady)
     reasons.push(privilegeReason(node) ?? (node.budgetError != null ? `The shared budget could not be applied: ${node.budgetError}` : node.updateError != null ? `The runtime is not ready: ${node.updateError}` : 'The runtime is not ready yet or does not match the version approved by the master.'))
   if (node.maintenance != null)
     reasons.push('Maintenance in progress: new work waits until the update finishes.')

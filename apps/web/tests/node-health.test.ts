@@ -271,6 +271,7 @@ describe('node health', () => {
     const partial = node()
     delete (partial as Partial<ExecutionNode>).status
     expect(nodeHealth(partial).state).toBe('offline')
+    expect(nodeDiagnostics({ ...partial, executionReady: false }).filter(reason => reason.includes('not ready'))).toEqual([])
     expect(slotCapacity(node({ slots: null, runtimeSlots: 3 }))).toBe(3)
     expect(slotCapacity(node({ slots: null, runtimeSlots: null }))).toBe(4)
   })
