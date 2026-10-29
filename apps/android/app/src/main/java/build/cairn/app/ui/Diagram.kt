@@ -1112,6 +1112,21 @@ private fun readGroup(scanner: Scanner, builder: GraphBuilder, parent: String?):
 
 private val SPACES = Regex("$SPACE+")
 
+/** Endpoint class suffixes are not the single-colon delimiter before state label text. */
+private fun stateLabel(text: String): Pair<String, String?> {
+    var index = 0
+    while (index < text.length) {
+        if (text.startsWith(":::", index)) {
+            index += 3
+            continue
+        }
+        if (text[index] == ':')
+            return jsTrim(text.substring(0, index)) to jsTrim(text.substring(index + 1))
+        index++
+    }
+    return jsTrim(text) to null
+}
+
 private fun parseState(source: String): GraphDiagram {
     val statements = statements(source)
     val lines = statements.lines
@@ -1251,7 +1266,7 @@ private fun parseState(source: String): GraphDiagram {
 
         val arrow = line.indexOf("-->")
         if (arrow > 0) {
-            val (target, text) = colon(line.substring(arrow + 3))
+            val (target, text) = stateLabel(line.substring(arrow + 3))
             val origin = jsTrim(line.substring(0, arrow))
             if (
                 origin.isEmpty() ||
@@ -1277,7 +1292,7 @@ private fun parseState(source: String): GraphDiagram {
             continue
         }
 
-        val (name, description) = colon(line)
+        val (name, description) = stateLabel(line)
         if (
             name.isNotEmpty() &&
                 name.none(::isJsSpace) &&

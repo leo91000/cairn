@@ -7598,6 +7598,154 @@
         "height": 214,
         "items": 15
       }
+    },
+    {
+      "name": "state-class-transition",
+      "source": "stateDiagram-v2\nclassDef critical fill:red\nA --> B:::critical",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "round"
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "shape": "round",
+            "style": {
+              "fill": "red"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 80,
+        "height": 160,
+        "items": 6
+      }
+    },
+    {
+      "name": "state-class-transition-label",
+      "source": "stateDiagram-v2\nclassDef critical fill:red\nA --> B:::critical : proceed",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "round"
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "shape": "round",
+            "style": {
+              "fill": "red"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "proceed",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 85,
+        "height": 185,
+        "items": 8
+      }
+    },
+    {
+      "name": "state-class-both-endpoints",
+      "source": "stateDiagram-v2\nclassDef critical fill:red\nA:::critical --> B:::critical : go",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "round",
+            "style": {
+              "fill": "red"
+            }
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "shape": "round",
+            "style": {
+              "fill": "red"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "go",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 80,
+        "height": 185,
+        "items": 8
+      }
+    },
+    {
+      "name": "state-class-description",
+      "source": "stateDiagram-v2\nclassDef critical fill:red\nB:::critical : Ready",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "B",
+            "label": "Ready",
+            "shape": "round",
+            "style": {
+              "fill": "red"
+            }
+          }
+        ],
+        "edges": [],
+        "clusters": []
+      },
+      "layout": {
+        "width": 95,
+        "height": 66,
+        "items": 2
+      }
     }
   ],
   "errors": [

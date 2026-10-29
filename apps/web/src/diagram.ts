@@ -1037,6 +1037,22 @@ function readGroup(scanner: Scanner, builder: GraphBuilder, parent: string | und
   }
 }
 
+/** Endpoint class suffixes are not the single-colon delimiter before state label text. */
+function stateLabel(text: string): [string, string | undefined] {
+  for (let index = 0; index < text.length; index++) {
+    if (text[index] !== ':')
+      continue
+    if (text.startsWith(':::', index)) {
+      index += 2
+      continue
+    }
+
+    return [text.slice(0, index).trim(), text.slice(index + 1).trim()]
+  }
+
+  return [text.trim(), undefined]
+}
+
 function parseState(source: string): GraphDiagram {
   const { title, lines } = statements(source)
   const builder = new GraphBuilder()
@@ -1155,7 +1171,7 @@ function parseState(source: string): GraphDiagram {
 
     const arrow = line.indexOf('-->')
     if (arrow > 0) {
-      const [target, text] = colon(line.slice(arrow + 3))
+      const [target, text] = stateLabel(line.slice(arrow + 3))
       const source = line.slice(0, arrow).trim()
       if (!source || !target || /\s/.test(source) || /\s/.test(target))
         throw new DiagramError(`Unexpected “${line}”.`)
@@ -1171,7 +1187,7 @@ function parseState(source: string): GraphDiagram {
       continue
     }
 
-    const [name, description] = colon(line)
+    const [name, description] = stateLabel(line)
     if (name && !/\s/.test(name) && (description === undefined || description)) {
       const id = endpoint(name, 'to')
       if (description)

@@ -133,6 +133,21 @@ describe('diagram layout', () => {
     expect(texts.flatMap(item => item.lines)).toContain('Total: 1,000,000,000,000,000,000')
   })
 
+  it.each([
+    { statement: 'A --> B:::critical', labels: [''] },
+    { statement: 'A --> B:::critical : proceed', labels: ['proceed'] },
+    { statement: 'A:::critical --> B:::critical : go', labels: ['go'] },
+    { statement: 'B:::critical : Ready', labels: [] },
+  ])('preserves state class suffixes in $statement', ({ statement, labels }) => {
+    const graph = parseDiagram(`stateDiagram-v2\nclassDef critical fill:red\n${statement}`)
+    if (graph.kind !== 'graph')
+      throw new Error('Expected a graph')
+    expect(graph.nodes.find(node => node.id === 'B')!.style?.fill).toBe('red')
+    expect(graph.edges.map(edge => edge.label)).toEqual(labels)
+    if (!labels.length)
+      expect(graph.nodes.find(node => node.id === 'B')!.label).toBe('Ready')
+  })
+
   it('separates document endpoints from a composite named root', () => {
     const graph = parseDiagram('stateDiagram-v2\n[*] --> root\nstate root {\n[*] --> Ready\nReady --> [*]\n}\nroot --> [*]')
     expect(graph.kind).toBe('graph')

@@ -457,6 +457,23 @@ test('sequence message labels clear wide badges and nested activations', async (
   }
 })
 
+test('state class suffixes style their target without entering transition labels', async ({ page }) => {
+  for (const label of ['', ' : proceed']) {
+    const source = `stateDiagram-v2\nclassDef critical fill:red\nA --> B:::critical${label}`
+    await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)
+    const result = await page.locator('#app figure.diagram svg').evaluate((svg) => {
+      const texts = [...svg.querySelectorAll('text')].map(item => item.textContent)
+      const red = [...svg.querySelectorAll('path')].filter(item => item.style.fill === 'red').length
+      return { texts, red }
+    })
+    expect(result.red).toBe(1)
+    expect(result.texts).toContain('B')
+    expect(result.texts.some(text => text?.includes('critical'))).toBe(false)
+    if (label)
+      expect(result.texts).toContain('proceed')
+  }
+})
+
 test('horizontal cluster titles fit their boxes without hiding neighboring titles', async ({ page }) => {
   for (const direction of ['LR', 'RL']) {
     for (const empty of [false, true]) {

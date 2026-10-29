@@ -247,6 +247,7 @@ class DiagramDeviceTest {
                     "flowchart LR\nsubgraph S[Long descriptive group title]\nA[Go]\nend\nsubgraph T[Another group]\nB[Done]\nend\nS-->T",
                     "flowchart TD\nA{Ready?}-->|retry|A",
                     "stateDiagram-v2\n[*]-->Ready\nnote left of Ready : Input\nnote right of Ready : Output",
+                    "stateDiagram-v2\nclassDef critical fill:red\nA-->B:::critical : proceed",
                     "sequenceDiagram\nA->>B: Hello",
                     "sequenceDiagram\nparticipant A\n" + "activate A\n".repeat(20),
                     "sequenceDiagram\nautonumber 1234567890123\nA->>A: work",

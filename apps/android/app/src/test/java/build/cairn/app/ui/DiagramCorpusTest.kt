@@ -310,6 +310,26 @@ class DiagramCorpusTest {
     }
 
     @Test
+    fun `preserves state class suffixes before transition labels`() {
+        val cases =
+            listOf(
+                "A --> B:::critical" to listOf(""),
+                "A --> B:::critical : proceed" to listOf("proceed"),
+                "A:::critical --> B:::critical : go" to listOf("go"),
+                "B:::critical : Ready" to emptyList(),
+            )
+        for ((statement, labels) in cases) {
+            val graph =
+                parseDiagram("stateDiagram-v2\nclassDef critical fill:red\n$statement")
+                    as GraphDiagram
+            val target = graph.nodes.first { it.id == "B" }
+            assertEquals("red", target.style?.fill)
+            assertEquals(labels, graph.edges.map { it.label })
+            if (labels.isEmpty()) assertEquals("Ready", target.label)
+        }
+    }
+
+    @Test
     fun `separates document endpoints from a composite named root`() {
         val graph =
             parseDiagram(
