@@ -222,13 +222,13 @@ class FilPagerDeviceTest {
                 waitText("Lancer maintenant")
                 // Pour vous: the question, then this mission; then the live conversation.
                 swipe(left = true)
-                waitPage("chat-page:live")
+                waitPage("chat-page:451f26a2-b83b-5559-b07e-9a031e6de7cb")
                 compose.runOnIdle { assertEquals(PerfScreen.CHAT, Performance.screen) }
                 swipe(left = false)
                 waitPage("run-page:failed-run")
                 compose.runOnIdle { assertEquals(PerfScreen.RUN, Performance.screen) }
                 swipe(left = false)
-                waitPage("chat-page:question")
+                waitPage("chat-page:765886cd-efa2-5d30-bdce-99340ee87a3d")
                 compose.runOnIdle { assertEquals(PerfScreen.CHAT, Performance.screen) }
                 compose.onNodeWithContentDescription("Retour").performClick()
                 compose.waitUntil(10000) {

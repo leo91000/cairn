@@ -491,12 +491,12 @@ class SignalJourneyTest {
         // Pour vous: the question, then this mission; then the live conversation.
         val pager = compose.onNodeWithTag("conversation-pager")
         pager.performTouchInput { swipeLeft() }
-        waitPage("chat-page:live")
+        waitPage("chat-page:451f26a2-b83b-5559-b07e-9a031e6de7cb")
         waitDescription("Changer de conversation : Refonte de l’application")
         pager.performTouchInput { swipeRight() }
         waitPage("run-page:failed-run")
         pager.performTouchInput { swipeRight() }
-        waitPage("chat-page:question")
+        waitPage("chat-page:765886cd-efa2-5d30-bdce-99340ee87a3d")
         waitDescription("Changer de conversation : Choisir la pagination")
         // Swiping replaces nothing in the back stack: Back returns to the Fil.
         compose.onNodeWithContentDescription("Retour").performClick()
