@@ -22,17 +22,18 @@ busy, reserved, paused, updating, setup needed, needs attention, offline or
 revoked. Failed updates or privilege changes and an agent's pending privilege
 request count as needing attention; a runtime not yet ready without a reported
 error, as after a budget change, is getting ready. The built-in runner needs
-attention, and leaves the connected count, once its last usable report is a
-heartbeat timeout older than server time, estimated from machines the server
-reports online or from device time elapsed since the runner's contact last
-changed; device clock offset never marks it stale. The first blocker wins, in the
-same order on both platforms (`nodeHealth` in `packages/contracts/nodes.ts` and
-`data/Nodes.kt`); the full diagnostics list is unchanged. Platform difference: web
-lists machines as compact rows and opens a side panel (Overview, Access, Storage,
-Settings) whose existing editors and confirmations are unchanged; Android keeps
-its Material cards and adds the health pill and reason under each name. Health is
-derived from the existing `list_nodes` inventory, already returned by public MCP
-and `cairn_installation`; no capability, grant or command changes.
+attention, and leaves the connected count, when its last usable report lags
+machines the server reports online by the heartbeat timeout, or stays unchanged
+for a minute of device time (it is refreshed on every listing when healthy); a
+runner already stale when the page opens is found within a minute, and device
+clock offset never matters. The first blocker wins, in the same order on both
+platforms (`nodeHealth` in `packages/contracts/nodes.ts` and `data/Nodes.kt`); the
+full diagnostics list is unchanged. Platform difference: web lists machines as
+compact rows and opens a side panel (Overview, Access, Storage, Settings) whose
+existing editors and confirmations are unchanged; Android keeps its Material cards
+and adds the health pill and reason under each name. Health is derived from the
+existing `list_nodes` inventory, already returned by public MCP and
+`cairn_installation`; no capability, grant or command changes.
 
 ## Node priority drag and drop
 

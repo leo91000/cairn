@@ -112,12 +112,12 @@ const opened = computed(() => nodes.value.find(node => node.id === openedId.valu
 const active = computed(() => nodes.value.filter(node => !node.revoked))
 const revoked = computed(() => nodes.value.filter(node => node.revoked))
 const visible = computed(() => showRevoked.value ? nodes.value : active.value)
-// When the built-in runner's contact last changed, as seen by this device: it times a lone runner.
+// When the built-in runner's contact last changed, as seen by this device: an unchanged contact means it went stale.
 const runner = ref<RunnerObservation | null>(null)
-const clock = computed(() => fleetClock(nodes.value, runner.value))
-const healths = computed(() => active.value.map(node => nodeHealth(node, Date.now(), clock.value)))
+const clock = computed(() => fleetClock(nodes.value))
+const healths = computed(() => active.value.map(node => nodeHealth(node, Date.now(), clock.value, runner.value)))
 // Connected machines answer heartbeats; the built-in runner too, unless its contact went stale.
-const live = computed(() => active.value.filter((node, index) => (node.local || node.status === 'online') && healths.value[index].state !== 'offline' && !runnerStale(node, clock.value)))
+const live = computed(() => active.value.filter((node, index) => (node.local || node.status === 'online') && healths.value[index].state !== 'offline' && !runnerStale(node, clock.value, runner.value)))
 const totalSlots = computed(() => live.value.reduce((total, node) => total + (node.slots ?? 0), 0))
 const usedSlots = computed(() => live.value.reduce((total, node) => total + (node.occupiedSlots ?? 0), 0))
 const attention = computed(() => healths.value.filter(health => ['offline', 'attention', 'setup'].includes(health.state)).length)
@@ -579,6 +579,7 @@ function revoke() {
           <NodeRow
             :node="node"
             :clock="clock"
+            :runner="runner"
             :selected="node.id === openedId"
             @open="openNode(node)"
           />
@@ -605,6 +606,7 @@ function revoke() {
       :key="opened.id"
       :node="opened"
       :clock="clock"
+      :runner="runner"
       :busy="busy"
       :error="errorNodeId === opened.id ? error : ''"
       :refresh-error="refreshError"
@@ -785,6 +787,9 @@ function revoke() {
               <label v-for="person in nativeCallers" :key="person.id" class="access-row"><input v-model="editing.nativeAccounts" type="checkbox" :value="person.id"><span class="min-w-0 break-all">{{ person.email }}</span></label>
             </div>
           </template>
+          <UiAlert v-if="callersError">
+            {{ callersError }}
+          </UiAlert>
           <p v-if="!nativeCallers.length" class="text-sm text-muted">
             No current people are available. Refresh the installation connection before granting access.
           </p>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ExecutionNode } from '../../../../packages/contracts/nodes'
+import type { ExecutionNode, RunnerObservation } from '../../../../packages/contracts/nodes'
 import { computed } from 'vue'
 import {
   formatMiB,
@@ -16,10 +16,15 @@ import NodeMeter from './NodeMeter.vue'
 
 // One machine in the fleet: whether it takes work, its free slots, memory and disk in use, and who may run there.
 // `clock` is the server time seen in the inventory (`fleetClock`).
-const props = defineProps<{ node: ExecutionNode, selected?: boolean, clock?: number | null }>()
+const props = defineProps<{
+  node: ExecutionNode
+  selected?: boolean
+  clock?: number | null
+  runner?: RunnerObservation | null
+}>()
 defineEmits<{ open: [] }>()
-const health = computed(() => nodeHealth(props.node, Date.now(), props.clock ?? null))
-const live = computed(() => !['offline', 'revoked'].includes(health.value.state) && !runnerStale(props.node, props.clock ?? null))
+const health = computed(() => nodeHealth(props.node, Date.now(), props.clock ?? null, props.runner ?? null))
+const live = computed(() => !['offline', 'revoked'].includes(health.value.state) && !runnerStale(props.node, props.clock ?? null, props.runner ?? null))
 const slots = computed(() => props.node.slots ?? 0)
 const free = computed(() => props.node.availableSlots ?? 0)
 const runtime = computed(() => props.node.capabilities.backend === 'native' ? nodeAdministrator(props.node) ? 'Native · admin' : 'Native' : 'VM')

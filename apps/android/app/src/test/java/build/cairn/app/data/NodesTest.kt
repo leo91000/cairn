@@ -142,19 +142,29 @@ class NodesTest {
             nodeHealth(runner.copy(lastSeen = 120_000), 900_000, 125_000).state,
         )
         assertEquals(NodeHealthState.READY, nodeHealth(runner, 900_000).state)
-        // A lone runner is timed by the device time elapsed since its contact last changed.
-        val alone = listOf(runner.copy(lastSeen = 1_000))
-        val seen = observeRunner(alone, null, 3_600_000)!!
+        // A lone runner goes stale when its contact stops changing for a minute on this device.
+        val alone = runner.copy(lastSeen = 1_000)
+        val seen = observeRunner(listOf(alone), null, 3_600_000)!!
         assertEquals(RunnerObservation(1_000, 3_600_000), seen)
-        assertEquals(seen, observeRunner(alone, seen, 3_700_000))
+        assertEquals(seen, observeRunner(listOf(alone), seen, 3_700_000))
         assertEquals(
             RunnerObservation(11_000, 3_610_000),
             observeRunner(listOf(runner.copy(lastSeen = 11_000)), seen, 3_610_000),
         )
-        assertEquals(62_000L, fleetClock(alone, seen, 3_661_000))
+        assertEquals(NodeHealthState.READY, nodeHealth(alone, 3_659_000, null, seen).state)
         assertEquals(
-            NodeHealthState.ATTENTION,
-            nodeHealth(alone[0], 3_661_000, fleetClock(alone, seen, 3_661_000)).state,
+            NodeHealth(
+                NodeHealthState.ATTENTION,
+                "À vérifier",
+                "Aucun rapport exploitable depuis plus d’une minute",
+            ),
+            nodeHealth(alone, 3_660_000, null, seen),
+        )
+        // A runner already stale when the screen opened does not shorten other ages.
+        val stale = observeRunner(listOf(runner), null, 7_200_000)
+        assertEquals(
+            "Dernier contact il y a 2 h",
+            nodeHealth(ready.copy(status = "offline", lastSeen = 0), 7_200_000, null, stale).detail,
         )
         val native =
             ready.copy(

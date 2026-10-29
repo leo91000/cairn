@@ -31,8 +31,8 @@ fun NodesScreen(
     openAgents: () -> Unit = {},
 ) {
     var nodes by remember { mutableStateOf<List<ExecutionNode>>(emptyList()) }
-    // When the built-in runner's contact last changed, as seen by this device: it times a lone
-    // runner.
+    // When the built-in runner's contact last changed, as seen by this device: an unchanged
+    // contact means it went stale.
     var runner by remember { mutableStateOf<RunnerObservation?>(null) }
     var adding by remember { mutableStateOf(false) }
     var storage by remember { mutableStateOf<ExecutionNode?>(null) }
@@ -109,16 +109,16 @@ fun NodesScreen(
             "Gérez vos machines et leur capacité. L’accès des agents se règle sur leur fiche.",
         )
         val active = nodes.filter { !it.revoked }
-        val clock = fleetClock(nodes, runner)
+        val clock = fleetClock(nodes)
         // Connected machines answer heartbeats; the built-in runner too, unless its contact went
         // stale.
         val live = active.filter {
             (it.local || it.status == "online") &&
-                nodeHealth(it, clock = clock).state != NodeHealthState.OFFLINE &&
-                !runnerStale(it, clock)
+                nodeHealth(it, clock = clock, runner = runner).state != NodeHealthState.OFFLINE &&
+                !runnerStale(it, clock, runner)
         }
         val attention = active.count {
-            nodeHealth(it, clock = clock).state in
+            nodeHealth(it, clock = clock, runner = runner).state in
                 listOf(NodeHealthState.OFFLINE, NodeHealthState.ATTENTION, NodeHealthState.SETUP)
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -142,7 +142,7 @@ fun NodesScreen(
             .filter { showRevoked || !it.revoked }
             .forEach { node ->
                 Panel {
-                    val health = nodeHealth(node, clock = clock)
+                    val health = nodeHealth(node, clock = clock, runner = runner)
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -294,7 +294,7 @@ fun NodesScreen(
                             Text(message, color = MaterialTheme.colorScheme.error)
                         }
                     }
-                    nodeDiagnostics(node, clock = clock).forEach {
+                    nodeDiagnostics(node, clock = clock, runner = runner).forEach {
                         Text("• $it", color = MaterialTheme.colorScheme.error)
                     }
                     if (node.tags.isNotEmpty()) Text(node.tags.joinToString(" · "))

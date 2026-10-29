@@ -140,19 +140,25 @@ describe('node health', () => {
     expect(nodeHealth(node({ local: true, status: 'local', lastSeen: null }), 0, 120_000).state).toBe('ready')
   })
 
-  it('times a lone built-in runner by the device time elapsed since its contact last changed', () => {
+  it('finds a lone stale runner when its contact stops changing, without shortening other ages', () => {
     // The device clock is an hour ahead of the server: only elapsed time matters.
     const fresh = [node({ local: true, status: 'local', lastSeen: 1_000 })]
     const seen = observeRunner(fresh, null, 3_600_000)!
     expect(seen).toEqual({ lastSeen: 1_000, observedAt: 3_600_000 })
-    expect(nodeHealth(fresh[0], 3_600_000, fleetClock(fresh, seen, 3_600_000)).state).toBe('ready')
-    // Refreshed contacts restart the count; an unchanged one ages with the device's elapsed time.
+    expect(nodeHealth(fresh[0], 3_600_000, null, seen).state).toBe('ready')
+    // Refreshed contacts restart the count; an unchanged one goes stale after a minute on this device.
     const refreshed = [node({ local: true, status: 'local', lastSeen: 11_000 })]
     expect(observeRunner(refreshed, seen, 3_610_000)).toEqual({ lastSeen: 11_000, observedAt: 3_610_000 })
     expect(observeRunner(fresh, seen, 3_700_000)).toBe(seen)
-    expect(fleetClock(fresh, seen, 3_661_000)).toBe(62_000)
-    expect(nodeHealth(fresh[0], 3_661_000, fleetClock(fresh, seen, 3_661_000)).state).toBe('attention')
+    expect(nodeHealth(fresh[0], 3_659_000, null, seen).state).toBe('ready')
+    expect(nodeHealth(fresh[0], 3_660_000, null, seen)).toEqual({ state: 'attention', label: 'Needs attention', detail: 'No usable report for over a minute' })
+    expect(nodeDiagnostics(fresh[0], 3_660_000, null, seen)[0]).toContain('no usable report for over a minute')
     expect(observeRunner([node({ local: true, status: 'local', lastSeen: null })], seen)).toBeNull()
+    // A runner that was already stale when the page opened does not slow the clock used for other ages.
+    const fleet = [node({ local: true, status: 'local', lastSeen: 0 }), node({ id: 'remote', status: 'offline', lastSeen: 0 })]
+    const stale = observeRunner(fleet, null, 7_200_000)
+    expect(fleetClock(fleet)).toBeNull()
+    expect(nodeHealth(fleet[1], 7_200_000, fleetClock(fleet), stale).detail).toBe('Last contact 2 h ago')
   })
 
   it('asks for native activation before a native node takes work', () => {

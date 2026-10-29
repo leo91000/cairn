@@ -175,20 +175,11 @@ private const val HEARTBEAT_TIMEOUT_MS = 60_000L
  * The server's clock as seen in an inventory: the latest contact of a machine the server reports
  * online. Device clocks can drift from the server's, so staleness is judged against this.
  */
-fun fleetClock(
-    nodes: List<ExecutionNode>,
-    runner: RunnerObservation? = null,
-    now: Long = System.currentTimeMillis(),
-): Long? {
-    val seen =
-        nodes
-            .filter { !it.local && !it.revoked && it.status == "online" }
-            .mapNotNull { it.lastSeen }
-    // The built-in runner's contact plus the device time elapsed since it was first seen: no clock
-    // offset involved.
-    val timed = runner?.let { it.lastSeen + maxOf(0, now - it.observedAt) }
-    return (seen + listOfNotNull(timed)).maxOrNull()
-}
+fun fleetClock(nodes: List<ExecutionNode>): Long? =
+    nodes
+        .filter { !it.local && !it.revoked && it.status == "online" }
+        .mapNotNull { it.lastSeen }
+        .maxOrNull()
 
 /** The built-in runner's last contact, and when this device first saw that value. */
 data class RunnerObservation(val lastSeen: Long, val observedAt: Long)
@@ -203,18 +194,36 @@ fun observeRunner(
     return if (previous?.lastSeen == seen) previous else RunnerObservation(seen, now)
 }
 
+/** How long the built-in runner's contact is known to lag server time, if it is. */
+private fun runnerLag(node: ExecutionNode, clock: Long?): Long? =
+    if (clock != null && node.lastSeen != null) clock - node.lastSeen else null
+
 /**
- * The built-in runner always reports "local". Listing refreshes its contact only when it answers
- * with usable health, so a contact older than the server clock by the heartbeat timeout means it
- * stopped answering, runs a mismatched version or reports no capabilities. Without a reference, it
- * is not judged.
+ * The built-in runner always reports "local". Listing refreshes its contact (every refresh, 10 s)
+ * only when it answers with usable health, so it is stale when it lags the server clock by the
+ * heartbeat timeout, or when its contact has not changed for that long on this device. Neither
+ * depends on the device clock's offset; a runner already stale when the screen opens is found after
+ * a minute at most. The failure may be no answer, a mismatched version or missing capabilities.
  */
-fun runnerStale(node: ExecutionNode, clock: Long?): Boolean =
-    node.local &&
-        !node.revoked &&
-        clock != null &&
-        node.lastSeen != null &&
-        clock - node.lastSeen >= HEARTBEAT_TIMEOUT_MS
+fun runnerStale(
+    node: ExecutionNode,
+    clock: Long?,
+    runner: RunnerObservation? = null,
+    now: Long = System.currentTimeMillis(),
+): Boolean {
+    if (!node.local || node.revoked || node.lastSeen == null) return false
+    val lag = runnerLag(node, clock)
+    if (lag != null && lag >= HEARTBEAT_TIMEOUT_MS) return true
+    return runner?.lastSeen == node.lastSeen && now - runner.observedAt >= HEARTBEAT_TIMEOUT_MS
+}
+
+/**
+ * The stale runner's age when a server reference shows it; otherwise only its lower bound is known.
+ */
+private fun runnerSilence(node: ExecutionNode, clock: Long?): String? {
+    val lag = runnerLag(node, clock) ?: return null
+    return if (lag >= HEARTBEAT_TIMEOUT_MS) relativeAge(node.lastSeen!!, clock!!) else null
+}
 
 /**
  * Whether a node can take work, as one state and a short sentence; the first blocker wins. Online
@@ -225,6 +234,7 @@ fun nodeHealth(
     node: ExecutionNode,
     now: Long = System.currentTimeMillis(),
     clock: Long? = null,
+    runner: RunnerObservation? = null,
 ): NodeHealth {
     if (node.revoked) return NodeHealth(NodeHealthState.REVOKED, "Révoquée", "N’a plus accès")
     // Ages use the server clock when the fleet shows it, so device clock drift does not shift them.
@@ -236,11 +246,12 @@ fun nodeHealth(
             node.lastSeen?.let { "Dernier contact ${relativeAge(it, maxOf(reference, it))}" }
                 ?: "Jamais connectée",
         )
-    if (runnerStale(node, clock))
+    if (runnerStale(node, clock, runner, now))
         return NodeHealth(
             NodeHealthState.ATTENTION,
             "À vérifier",
-            "Dernier rapport exploitable ${relativeAge(node.lastSeen!!, clock!!)}",
+            runnerSilence(node, clock)?.let { "Dernier rapport exploitable $it" }
+                ?: "Aucun rapport exploitable depuis plus d’une minute",
         )
     val native = node.capabilities.backend == NATIVE_BACKEND
     if (!native && !node.capabilities.kvm)
@@ -353,13 +364,14 @@ fun nodeDiagnostics(
     node: ExecutionNode,
     now: Long = System.currentTimeMillis(),
     clock: Long? = null,
+    runner: RunnerObservation? = null,
 ): List<String> {
     if (node.revoked) return emptyList()
     val reasons = mutableListOf<String>()
     val reference = clock ?: now
-    if (runnerStale(node, clock))
+    if (runnerStale(node, clock, runner, now))
         reasons +=
-            "Le runner du master n’envoie plus de rapport exploitable depuis ${relativeAge(node.lastSeen!!, clock!!).removePrefix("il y a ")} : vérifiez qu’il tourne, à la même version que le serveur."
+            "Le runner du master n’envoie plus de rapport exploitable ${runnerSilence(node, clock)?.let { "depuis ${it.removePrefix("il y a ")}" } ?: "depuis plus d’une minute"} : vérifiez qu’il tourne, à la même version que le serveur."
     if (!node.local && node.status == "offline")
         reasons +=
             node.lastSeen?.let {

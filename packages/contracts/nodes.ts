@@ -100,13 +100,10 @@ const HEARTBEAT_TIMEOUT_MS = 60_000
  * The server's clock as seen in an inventory: the latest contact of a machine the server reports online.
  * Device clocks can drift from the server's, so staleness is judged against this rather than `Date.now()`.
  */
-export function fleetClock(nodes: ExecutionNode[], runner: RunnerObservation | null = null, now = Date.now()): number | null {
+export function fleetClock(nodes: ExecutionNode[]): number | null {
   const seen = nodes
     .filter(node => !node.local && !node.revoked && node.status === 'online' && node.lastSeen != null)
     .map(node => node.lastSeen!)
-  // The built-in runner's contact plus the device time elapsed since it was first seen: no clock offset involved.
-  if (runner)
-    seen.push(runner.lastSeen + Math.max(0, now - runner.observedAt))
   return seen.length ? Math.max(...seen) : null
 }
 
@@ -124,13 +121,31 @@ export function observeRunner(nodes: ExecutionNode[], previous: RunnerObservatio
   return previous?.lastSeen === runner.lastSeen ? previous : { lastSeen: runner.lastSeen, observedAt: now }
 }
 
+/** How long the built-in runner's contact is known to lag server time, if it is. */
+function runnerLag(node: ExecutionNode, clock: number | null) {
+  return clock != null && node.lastSeen != null ? clock - node.lastSeen : null
+}
+
 /**
- * The built-in runner always reports "local". Listing refreshes its contact only when it answers with
- * usable health, so a contact older than the server clock by the heartbeat timeout means it stopped
- * answering, runs a mismatched version or reports no capabilities. Without a reference, it is not judged.
+ * The built-in runner always reports "local". Listing refreshes its contact (every page refresh, 10 s)
+ * only when it answers with usable health, so it is stale when it lags the server clock by the heartbeat
+ * timeout, or when its contact has not changed for that long on this device. Neither depends on the
+ * device clock's offset; a runner already stale when the page opens is found after a minute at most.
+ * The failure may be no answer, a mismatched version or missing capabilities.
  */
-export function runnerStale(node: ExecutionNode, clock: number | null) {
-  return node.local && !node.revoked && clock != null && node.lastSeen != null && clock - node.lastSeen >= HEARTBEAT_TIMEOUT_MS
+export function runnerStale(node: ExecutionNode, clock: number | null, runner: RunnerObservation | null = null, now = Date.now()) {
+  if (!node.local || node.revoked || node.lastSeen == null)
+    return false
+  const lag = runnerLag(node, clock)
+  if (lag != null && lag >= HEARTBEAT_TIMEOUT_MS)
+    return true
+  return runner?.lastSeen === node.lastSeen && now - runner.observedAt >= HEARTBEAT_TIMEOUT_MS
+}
+
+/** The stale runner's age when a server reference shows it; otherwise only its lower bound is known. */
+function runnerSilence(node: ExecutionNode, clock: number | null) {
+  const lag = runnerLag(node, clock)
+  return lag != null && lag >= HEARTBEAT_TIMEOUT_MS ? relativeAge(node.lastSeen!, clock!) : null
 }
 
 /**
@@ -138,15 +153,17 @@ export function runnerStale(node: ExecutionNode, clock: number | null) {
  * Online follows the server's 60-second heartbeat timeout; placement wants a heartbeat within 30 seconds,
  * so a machine that just stopped answering can read Ready for up to half a minute.
  */
-export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number | null = null): NodeHealth {
+export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number | null = null, runner: RunnerObservation | null = null): NodeHealth {
   if (node.revoked)
     return { state: 'revoked', label: 'Revoked', detail: 'No longer has access' }
   // Ages use the server clock when the fleet shows it, so device clock drift does not shift them.
   const reference = clock ?? now
   if (!node.local && node.status === 'offline')
     return { state: 'offline', label: 'Offline', detail: node.lastSeen != null ? `Last contact ${relativeAge(node.lastSeen, Math.max(reference, node.lastSeen))}` : 'Never connected' }
-  if (runnerStale(node, clock))
-    return { state: 'attention', label: 'Needs attention', detail: `Last usable report ${relativeAge(node.lastSeen!, clock!)}` }
+  if (runnerStale(node, clock, runner, now)) {
+    const silence = runnerSilence(node, clock)
+    return { state: 'attention', label: 'Needs attention', detail: silence ? `Last usable report ${silence}` : 'No usable report for over a minute' }
+  }
 
   const native = node.capabilities.backend === 'native'
   if (!native && !node.capabilities.kvm)
@@ -201,13 +218,16 @@ export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number 
 }
 
 /** Why a node cannot take new work right now; empty when it can. */
-export function nodeDiagnostics(node: ExecutionNode, now = Date.now(), clock: number | null = null) {
+export function nodeDiagnostics(node: ExecutionNode, now = Date.now(), clock: number | null = null, runner: RunnerObservation | null = null) {
   if (node.revoked)
     return []
   const reasons: string[] = []
   const reference = clock ?? now
-  if (runnerStale(node, clock))
-    reasons.push(`The built-in runner has sent no usable report since ${relativeAge(node.lastSeen!, clock!)}: check that it is running, at the same version as the server.`)
+  if (runnerStale(node, clock, runner, now)) {
+    const silence = runnerSilence(node, clock)
+    reasons.push(`The built-in runner has sent no usable report ${silence ? `since ${silence}` : 'for over a minute'}: check that it is running, at the same version as the server.`)
+  }
+
   if (!node.local && node.status === 'offline')
     reasons.push(node.lastSeen != null ? `No contact since ${relativeAge(node.lastSeen, Math.max(reference, node.lastSeen))}: check that the machine is on, online and that the ${node.capabilities.backend === 'native' ? 'cairn-native-node' : 'cairn-node'} service is running.` : 'The machine has never connected: run the installation command on it.')
   if (node.capabilities.backend !== 'native' && !node.capabilities.kvm)
