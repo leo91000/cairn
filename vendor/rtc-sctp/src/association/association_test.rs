@@ -871,3 +871,137 @@ fn outgoing_reset_acknowledgement_waits_for_the_incoming_reset() -> Result<()> {
     assert!(!association.streams.contains_key(&2));
     Ok(())
 }
+
+#[test]
+fn reset_retry_deadline_survives_unrelated_transmit_polls() -> Result<()> {
+    let mut association = create_association(TransportConfig::default());
+    association.set_state(AssociationState::Established);
+    association.rwnd = 65536;
+    association.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+    association.open_stream(4, PayloadProtocolIdentifier::Binary)?;
+    association.handle_reconfig_param(&reset_request(7, vec![2]), &mut vec![])?;
+    let now = Instant::now();
+    while association.poll_transmit(now).is_some() {}
+    let deadline = association.timers.get(Timer::Reconfig).unwrap();
+    for millis in [10, 20, 30] {
+        let at = now + Duration::from_millis(millis);
+        association.stream(4)?.write_sctp(
+            at,
+            &Bytes::from_static(b"traffic"),
+            PayloadProtocolIdentifier::Binary,
+        )?;
+        while association.poll_transmit(at).is_some() {}
+        assert_eq!(
+            association.timers.get(Timer::Reconfig),
+            Some(deadline),
+            "traffic postponed the pending reset retry"
+        );
+    }
+    association.handle_timeout(deadline);
+    assert!(association.will_retransmit_reconfig);
+    Ok(())
+}
+
+#[test]
+fn replacement_data_before_reset_ack_remains_retransmittable() -> Result<()> {
+    let mut association = Association::default();
+    association.my_next_tsn = 1;
+    association.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+    association
+        .streams
+        .get_mut(&2)
+        .unwrap()
+        .reassembly_queue
+        .push(ChunkPayloadData {
+            stream_identifier: 2,
+            beginning_fragment: true,
+            ending_fragment: true,
+            user_data: Bytes::from_static(b"old generation"),
+            ..Default::default()
+        });
+    assert!(association.stream(2)?.read()?.is_some());
+    association.handle_reconfig_param(&reset_request(7, vec![2]), &mut vec![])?;
+    let replacement = ChunkPayloadData {
+        tsn: 1,
+        stream_identifier: 2,
+        beginning_fragment: true,
+        ending_fragment: true,
+        user_data: Bytes::from_static(b"replacement"),
+        ..Default::default()
+    };
+    association.handle_data(&replacement)?;
+    assert_eq!(
+        association.peer_last_tsn, 0,
+        "replacement DATA must not be acknowledged against the old generation"
+    );
+    acknowledge_pending_resets(&mut association)?;
+    association.handle_data(&replacement)?;
+    let chunks = association
+        .stream(2)?
+        .read()?
+        .expect("retransmitted replacement DATA");
+    let mut body = [0; 32];
+    let length = chunks.read(&mut body)?;
+    assert_eq!(&body[..length], b"replacement");
+    Ok(())
+}
+
+#[test]
+fn terminal_reset_rejection_ends_the_association_without_reuse() -> Result<()> {
+    for result in [
+        ReconfigResult::Denied,
+        ReconfigResult::ErrorWrongSsn,
+        ReconfigResult::ErrorRequestAlreadyInProgress,
+        ReconfigResult::ErrorBadSequenceNumber,
+    ] {
+        let mut association = create_association(TransportConfig::default());
+        association.set_state(AssociationState::Established);
+        association.handshake_completed = true;
+        association.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+        association.handle_reconfig_param(&reset_request(7, vec![2]), &mut vec![])?;
+        let sequence = *association.reconfigs.keys().next().unwrap();
+        acknowledge_reset(&mut association, sequence, result)?;
+        assert_eq!(
+            association.state(),
+            AssociationState::Closed,
+            "terminal reset rejection must end the unusable transport"
+        );
+        assert!(association.reconfigs.is_empty());
+        assert!(
+            association
+                .open_stream(2, PayloadProtocolIdentifier::Binary)
+                .is_err()
+        );
+        assert!(association.timers.get(Timer::Reconfig).is_none());
+        association.handle_inbound(
+            Packet {
+                common_header: CommonHeader {
+                    source_port: 5000,
+                    destination_port: 5000,
+                    verification_tag: association.my_verification_tag,
+                },
+                chunks: vec![Box::new(ChunkPayloadData {
+                    tsn: association.peer_last_tsn.wrapping_add(1),
+                    stream_identifier: 2,
+                    beginning_fragment: true,
+                    ending_fragment: true,
+                    user_data: Bytes::from_static(b"late DATA"),
+                    ..Default::default()
+                })],
+            },
+            Instant::now(),
+        )?;
+        assert!(
+            association.streams.is_empty(),
+            "late DATA must not reopen the failed association"
+        );
+        assert!(association.events.iter().any(|event| matches!(
+            event,
+            Event::AssociationLost {
+                id: 2,
+                reason: AssociationError::TransportError
+            }
+        )));
+    }
+    Ok(())
+}

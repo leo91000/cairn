@@ -731,6 +731,9 @@ impl Association {
         stream_identifier: StreamId,
         default_payload_type: PayloadProtocolIdentifier,
     ) -> Result<Stream<'_>> {
+        if self.state() == AssociationState::Closed && self.handshake_completed {
+            return Err(Error::ErrConnectionClosed);
+        }
         if self.streams.contains_key(&stream_identifier) {
             return Err(Error::ErrStreamAlreadyExist);
         }
@@ -899,6 +902,9 @@ impl Association {
 
     /// handle_inbound parses incoming raw packets
     fn handle_inbound(&mut self, p: Packet, now: Instant) -> Result<()> {
+        if self.state() == AssociationState::Closed && self.handshake_completed {
+            return Ok(());
+        }
         if let Err(err) = p.check_packet() {
             warn!("[{}] failed validating packet {}", self.side, err);
             return Ok(());
@@ -1282,6 +1288,17 @@ impl Association {
             d.unordered,
         );
         self.stats.inc_datas();
+
+        // New-generation DATA can overtake the acknowledgement of our reset.
+        // Do not acknowledge it against the closed generation's SSN queue:
+        // reliable SCTP will retransmit it once the wire stream is released.
+        if self
+            .stream_resets
+            .get(&d.stream_identifier)
+            .is_some_and(|reset| reset.incoming_complete && !reset.outgoing_acknowledged)
+        {
+            return self.handle_peer_last_tsn_and_acknowledgement(true);
+        }
 
         let can_push = self.payload_queue.can_push(d, self.peer_last_tsn);
         let mut stream_handle_data = false;
@@ -1731,14 +1748,26 @@ impl Association {
             self.reset_streams_if_any(p, reply)?;
             Ok(())
         } else if let Some(p) = raw.as_any().downcast_ref::<ParamReconfigResponse>() {
-            if matches!(
-                p.result,
-                ReconfigResult::SuccessNop | ReconfigResult::SuccessPerformed
-            ) {
-                self.acknowledge_stream_reset(p.reconfig_response_sequence_number);
+            if !self
+                .reconfigs
+                .contains_key(&p.reconfig_response_sequence_number)
+            {
+                return Ok(());
             }
-            if self.reconfigs.is_empty() {
-                self.timers.stop(Timer::Reconfig);
+            match p.result {
+                ReconfigResult::SuccessNop | ReconfigResult::SuccessPerformed => {
+                    self.acknowledge_stream_reset(p.reconfig_response_sequence_number);
+                }
+                ReconfigResult::InProgress => {}
+                _ => {
+                    // A rejected reset cannot safely release its wire stream.
+                    // End the unusable association and notify all its channels.
+                    self.reconfigs.clear();
+                    self.reconfig_requests.clear();
+                    self.stream_resets.clear();
+                    self.completed_stream_resets.clear();
+                    self.close(AssociationError::TransportError)?;
+                }
             }
             Ok(())
         } else {
@@ -2439,7 +2468,7 @@ impl Association {
         }
         // Reciprocal resets originate from the read path too. They must also
         // retransmit if their acknowledgement is lost.
-        if !self.reconfigs.is_empty() {
+        if !self.reconfigs.is_empty() && self.timers.get(Timer::Reconfig).is_none() {
             self.timers
                 .start(Timer::Reconfig, now, self.rto_mgr.get_rto());
         }

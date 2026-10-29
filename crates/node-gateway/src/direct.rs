@@ -343,8 +343,16 @@ async fn connect(config: &Config) -> Result<(Arc<dyn PeerConnection>, Cancellati
         if !matches!(opened, Ok(true)) {
             return Err("the manager did not open the connection".into());
         }
-        // Keep the control channel open for the connection's life.
-        tokio::spawn(async move { while control.poll().await.is_some() {} });
+        // Losing SCTP also ends this peer even if ICE and DTLS still look up.
+        let lifetime = closed.clone();
+        tokio::spawn(async move {
+            while let Some(event) = control.poll().await {
+                if matches!(event, DataChannelEvent::OnClosing | DataChannelEvent::OnClose | DataChannelEvent::OnError) {
+                    break;
+                }
+            }
+            lifetime.cancel();
+        });
         Ok(())
     }
     .await;

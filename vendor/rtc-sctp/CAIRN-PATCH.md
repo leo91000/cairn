@@ -24,9 +24,18 @@ The replacement channel then closed during opening or lost its HTTP response.
 A stream remains reserved until its incoming reset completes and the peer
 acknowledges its outgoing reset, explicitly or through a reciprocal reset.
 An In Progress reply keeps retransmission active. Reciprocal resets start the
-reconfiguration timer even when they originated on the read path. Concurrent
+reconfiguration timer even when they originated on the read path, preserving an
+existing deadline while unrelated streams exchange traffic. Concurrent
 local and reciprocal closure share one outgoing request instead of issuing a
-second reset against the same stream.
+second reset against the same stream. Replacement DATA arriving before the final
+ACK is not acknowledged against the old generation; reliable SCTP retransmits it
+after teardown completes instead of losing its DCEP message.
+
+A terminal reset refusal ends the unusable SCTP association and notifies its
+channels, rather than retrying a rejected request or reusing an unsafe ID.
+Already established closed associations reject new streams and late packets.
+The gateway and manager also end a node peer when its control DataChannel closes,
+so SCTP loss cannot leave a stale peer advertised as connected while ICE remains up.
 
 Keep the last completed incoming reset sequence for each wire stream ID across
 reuse, using SCTP serial-number comparisons. A repeated or older reset is still
@@ -50,8 +59,10 @@ pnpm test:backend -p cairn-beacon --test node_channel -- --test-threads=4
 ```
 
 The standalone dependency tests also cover both reset directions, In Progress
-responses, duplicate/older resets, serial-number wraparound and deferred reset
-completion after stream reuse. The upstream delivery regressions still assert
+responses, terminal refusals, retry deadlines under unrelated traffic,
+duplicate/older resets, serial-number wraparound and deferred reset completion
+after stream reuse. An endpoint test delays the final reset ACK until replacement
+DATA has arrived and verifies eventual byte-for-byte delivery after retransmission. The upstream delivery regressions still assert
 intact payloads and final stream removal, allowing the reciprocal ACK round trip
 before asserting that the wire stream was released:
 

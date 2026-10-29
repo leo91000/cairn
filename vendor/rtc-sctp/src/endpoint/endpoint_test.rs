@@ -3740,3 +3740,46 @@ fn kps_816_deferred_reset_completes_when_the_application_drains() -> Result<()> 
     );
     Ok(())
 }
+
+#[test]
+fn replacement_stream_data_survives_a_delayed_final_reset_ack() -> Result<()> {
+    let si = 1;
+    let (mut pair, client_ch, server_ch) = create_association_pair(AckMode::NoDelay, 0)?;
+    establish_session_pair(&mut pair, client_ch, server_ch, si)?;
+    let now = pair.time;
+    pair.client_stream(client_ch, si)?.close(now)?;
+    pair.drive_client();
+    pair.drive_server();
+    pair.drive_client();
+
+    assert!(pair.client_conn_mut(client_ch).stream(si).is_err());
+    assert!(pair.server_conn_mut(server_ch).stream(si).is_ok());
+    // The initiator has completed both reset directions and may reuse its ID,
+    // while its final acknowledgement has not reached the other endpoint.
+    let delayed_ack = std::mem::take(&mut pair.server.inbound);
+    assert!(!delayed_ack.is_empty());
+    pair.client_conn_mut(client_ch)
+        .open_stream(si, PayloadProtocolIdentifier::Dcep)?;
+    let body = Bytes::from_static(b"replacement DCEP message");
+    let now = pair.time;
+    pair.client_stream(client_ch, si)?
+        .write_sctp(now, &body, PayloadProtocolIdentifier::Dcep)?;
+    pair.drive_client();
+    let (delivered, _) = deliver_to_server_rtc_style(&mut pair, server_ch);
+    assert!(
+        delivered.is_empty(),
+        "replacement DATA must wait for old teardown"
+    );
+
+    pair.server.inbound.extend(delayed_ack);
+    pair.drive();
+    let chunks = pair
+        .server_stream(server_ch, si)?
+        .read_sctp()?
+        .expect("reliable replacement DATA must be retransmitted after the final ACK");
+    let mut received = [0; 64];
+    let length = chunks.read(&mut received)?;
+    assert_eq!(&received[..length], &body[..]);
+    assert_eq!(pair.client_conn_mut(client_ch).buffered_amount(), 0);
+    Ok(())
+}
