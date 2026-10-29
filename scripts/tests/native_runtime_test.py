@@ -333,10 +333,14 @@ def main():
                 CAIRN_NATIVE_DOCKER_TOOLS=str(docker_tools),
                 APP_RUNTIME_ID='synthetic', CAIRN_NATIVE_SUPERVISOR_UNIT=supervisor)
             command('systemd-run', '--quiet', '--collect', '--service-type=exec', '--unit=' + supervisor,
+                '--property=LimitNOFILE=1024:524288',
                 *['--setenv=' + key + '=' + value for key, value in environment.items()], str(binary), 'native-controller')
             eventually(lambda: api('/health', method='GET').get('backend') == 'native')
             assert (state / 'controller.sock').stat().st_mode & 0o777 == 0o600
             pid = command('systemctl', 'show', supervisor, '--property=MainPID', '--value').stdout.strip()
+            limits = Path('/proc/' + pid + '/limits').read_text().splitlines()
+            open_files = next(line.split() for line in limits if line.startswith('Max open files'))
+            assert int(open_files[3]) >= 65536, 'Controller inherited the unsafe systemd open-file limit.'
             assert Path('/proc/' + pid + '/ns/mnt').stat().st_ino == Path('/proc/1/ns/mnt').stat().st_ino, 'Controller mounts must be visible to the system manager.'
             # Restarts recover the configured budget, including capacity already
             # granted to retained Docker disks. Never shrink it to fixture defaults.
@@ -633,6 +637,45 @@ def main():
             start_controller()
             first = start(run, lease=45000, measure='nativeRetained')
             fenced(run, first)
+            # A terminal ext4 flush failure must retain a crash prefix and finish
+            # non-lazy unmount/device retirement after fencing, rather than loop
+            # forever before the unmount. Only this disposable filesystem changes.
+            readonly_run = create()
+            readonly_attempt = start(readonly_run)
+            readonly_mount = state / 'native' / readonly_run / 'data'
+            durable = managed(readonly_run) / 'readonly-durable-marker'
+            with open(durable, 'wb') as marker:
+                marker.write(b'kept across read-only close')
+                marker.flush()
+                os.fsync(marker.fileno())
+            # Attribute the disposable mount before using ext4's privileged
+            # error-injection interface. Never target the host/root filesystem.
+            device = readonly_mount.stat().st_dev
+            attachment = state / 'native-block' / readonly_run / 'root/disk.blk'
+            assert stat.S_ISBLK(attachment.stat().st_mode)
+            assert attachment.stat().st_rdev == device
+            sys_device = (Path('/sys/dev/block') / f'{os.major(device)}:{os.minor(device)}').resolve(strict=True)
+            assert sys_device.name.startswith('ublkb')
+            command('mount', '-o', 'remount,errors=remount-ro', str(readonly_mount))
+            # The resumed workload also checks its earlier Claude/session files.
+            # Flush those before the fault; a crash prefix does not promise to
+            # preserve unrelated dirty kernel pages merely because marker fsync
+            # succeeded. The descendant may continue appending after this flush.
+            command('sync', '-f', str(readonly_mount))
+            (Path('/sys/fs/ext4') / sys_device.name / 'trigger_fs_error').write_text('cairn-disposable-flush-failure\n')
+            api('/runs/' + readonly_attempt, method='DELETE')
+            readonly_snapshot = fenced(readonly_run, readonly_attempt)
+            assert int((state / (readonly_attempt + '.exit')).read_text()) == 70
+            output = b''.join(base64.b64decode(json.loads(record).get('data', ''))
+                              for record in (state / (readonly_attempt + '.log')).read_text().splitlines())
+            assert b'Native filesystem could not be flushed; the durable crash prefix was retained.' in output
+            assert not (state / 'native-block' / readonly_run / 'root/disk.blk').exists()
+            assert readonly_snapshot['manifest']['kind'] == 'native-ext4-v1'
+            # Resume the same local journal and confirm the acknowledged bytes.
+            readonly_resume = start(readonly_run)
+            assert durable.read_bytes() == b'kept across read-only close'
+            api('/runs/' + readonly_resume, method='DELETE')
+            fenced(readonly_run, readonly_resume)
             assert not (state / 'native-block' / run / 'root/disk.blk').exists(), 'Retired device inode was retained.'
             stopped_health = api('/health', method='GET')
             assert stopped_health['usage']['diskBytes'] > 0
