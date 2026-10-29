@@ -41,7 +41,7 @@ import UiButton from '../components/UiButton.vue'
 import VirtualSelect from '../components/VirtualSelect.vue'
 import {
   Plus,
-  RefreshCw,
+  Settings2,
 } from '../icons'
 
 const nodes = ref<ExecutionNode[]>([])
@@ -444,7 +444,7 @@ function revoke() {
       </div>
       <div class="flex shrink-0 gap-2 phone:flex-none!">
         <UiButton aria-label="Synchronization settings" title="Synchronization settings" @click="configureRecovery">
-          <Icon :name="RefreshCw" :size="15" /><span class="phone:hidden">Synchronization</span>
+          <Icon :name="Settings2" :size="15" /><span class="phone:hidden">Synchronization</span>
         </UiButton>
         <UiButton variant="primary" aria-label="Add a machine" @click="addMachine">
           <Icon :name="Plus" :size="16" /><span class="phone:hidden">Add a machine</span>
@@ -609,6 +609,7 @@ function revoke() {
       :node="opened"
       :clock="clock"
       :runner="runner"
+      :return-focus="visible.some(node => node.id === opened!.id) ? undefined : machinesHeading"
       :busy="busy"
       :error="errorNodeId === opened.id ? error : ''"
       :refresh-error="refreshError"
@@ -628,6 +629,9 @@ function revoke() {
       @close="recovery = null"
     >
       <form class="node-form" @submit.prevent="saveRecovery">
+        <p class="text-sm text-muted">
+          How often disk changes are published to S3 and how long nodes wait before pausing. The defaults suit most setups.
+        </p>
         <p>Changed disk blocks upload in the background after a coherent capture. Chat history is streamed separately. Each conversation shows its last completed synchronization.</p>
         <p v-if="!recovery.s3Configured" class="text-sm text-muted">
           Configure S3 on the server to publish disk changes.

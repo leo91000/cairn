@@ -7,12 +7,14 @@ import {
   watch,
 } from 'vue'
 import {
+  diskCapacity,
   formatBytes,
   formatMiB,
   freeSlots,
   nativeModeLabel,
   nodeDiagnostics,
   nodeHealth,
+  runnerStale,
   slotCapacity,
   usedPercent,
 } from '../../../../packages/contracts/nodes'
@@ -40,6 +42,8 @@ const props = defineProps<{
   // A failed inventory refresh: the panel's figures may be out of date.
   refreshError?: string
   clock?: number | null
+  // Where focus goes when the panel closes, if its row is gone.
+  returnFocus?: HTMLElement
   runner?: RunnerObservation | null
 }>()
 const emit = defineEmits<{
@@ -78,6 +82,8 @@ const sections: { value: Section, label: string }[] = [
   { value: 'settings', label: 'Settings' },
 ]
 const health = computed(() => nodeHealth(props.node, Date.now(), props.clock ?? null, props.runner ?? null))
+// Offline or silent machines show their last report.
+const live = computed(() => !['offline', 'revoked'].includes(health.value.state) && !runnerStale(props.node, props.clock ?? null, props.runner ?? null))
 const diagnostics = computed(() => nodeDiagnostics(props.node, Date.now(), props.clock ?? null, props.runner ?? null))
 const native = computed(() => props.node.capabilities.backend === 'native')
 // Placement's capacity; Settings shows the configured count.
@@ -105,7 +111,12 @@ const reserve = computed(() => {
 </script>
 
 <template>
-  <Modal :title="node.name" drawer @close="emit('close')">
+  <Modal
+    :title="node.name"
+    drawer
+    :return-focus="returnFocus"
+    @close="emit('close')"
+  >
     <template #heading>
       <span class="flex min-w-0 items-center gap-3.5">
         <span class="grid size-11 shrink-0 place-items-center rounded-xl bg-inset text-accent"><Icon :name="Server" :size="20" /></span>
@@ -195,7 +206,10 @@ const reserve = computed(() => {
             <h3 id="node-capacity" class="eyebrow mb-3.5">
               Shared capacity
             </h3>
-            <dl class="grid gap-3 text-sm">
+            <p v-if="!live" class="mb-3 text-xs text-muted">
+              Last reported values: this machine is not reporting.
+            </p>
+            <dl class="grid gap-3 text-sm" :class="{ 'opacity-60': !live }">
               <div class="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-3">
                 <dt class="text-muted">
                   Slots
@@ -267,7 +281,7 @@ const reserve = computed(() => {
               <dt class="text-muted">
                 Detected
               </dt>
-              <dd>{{ node.capabilities.cpu }} CPU · {{ formatMiB(node.capabilities.memoryMiB) }} RAM · {{ formatMiB(node.capabilities.diskMiB) }} disk</dd>
+              <dd>{{ node.capabilities.cpu }} CPU · {{ formatMiB(node.capabilities.memoryMiB) }} RAM · {{ formatMiB(diskCapacity(node)) }} disk ({{ formatMiB(node.capabilities.diskMiB) }} free)</dd>
               <dt class="text-muted">
                 Platform
               </dt>
