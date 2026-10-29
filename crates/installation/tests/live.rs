@@ -1442,3 +1442,66 @@ async fn typed_history_get_keeps_native_history_readable_to_members_after_agent_
     assert_eq!(status, StatusCode::OK, "{page}");
     assert_eq!(page["events"][0]["id"], first);
 }
+
+#[tokio::test]
+async fn conversation_streams_mask_queued_and_sending_private_answers() {
+    use cairn_installation::chats::MessageStatus;
+    let f = Fixture::new().await;
+    let mut chat = f.service.chat_create(json!({})).await.unwrap();
+    let chat_id = text(&chat, "id").to_owned();
+    chat["runId"] = f.run.clone().into();
+    f.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
+    let question_id = "a".repeat(64);
+    f.service
+        .question_receive(
+            &f.run,
+            json!({
+                "id": question_id, "blocking": false,
+                "fields": [{ "id": "secret", "title": "Private credential", "secret": true }],
+            }),
+        )
+        .await
+        .unwrap();
+    let message_id = id();
+    f.service.question_answer(&chat_id, &question_id, json!({
+        "id": message_id,
+        "answers": { "secret": { "selected": [], "comment": "private-answer-must-never-cross-sse" } },
+    })).await.unwrap();
+
+    for status in [MessageStatus::Queued, MessageStatus::Sending] {
+        let (stored_chat, stored_message) = (chat_id.clone(), message_id.clone());
+        f.service
+            .store
+            .transaction(move |db| {
+                let mut message = db
+                    .conversation_message(&stored_chat, &stored_message)?
+                    .unwrap();
+                assert!(
+                    serde_json::to_string(&message.answers)?
+                        .contains("private-answer-must-never-cross-sse")
+                );
+                message.status = status;
+                db.save_message(&message)
+            })
+            .await
+            .unwrap();
+        for window in [false, true] {
+            let path = format!("/api/chats/{chat_id}/stream?window={}", u8::from(window));
+            let (_, batch) = f.open_path(&path, None).await.batch().await;
+            assert!(
+                !batch
+                    .to_string()
+                    .contains("private-answer-must-never-cross-sse"),
+                "{batch}"
+            );
+            let messages = batch["state"]["chat"]["messages"].as_array().unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0]["text"], "Private answer");
+            assert!(messages[0].get("answers").is_none());
+        }
+    }
+}
