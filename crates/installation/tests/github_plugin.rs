@@ -551,3 +551,75 @@ async fn live_device_sign_in_against_github() {
         .unwrap();
     println!("LIVE_GITHUB_TEST {test}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pending_project_import_excludes_only_its_own_installation() {
+    let first = fixture().await;
+    let other = fixture().await;
+    let started = first.root.path().join("import-started");
+    let released = first.root.path().join("import-released");
+    let mut requests = Vec::new();
+    for fixture in [&first, &other] {
+        std::fs::write(
+            fixture.s.config.home.join(".gitconfig"),
+            format!(
+                "[url \"file://{}/missing/\"]\n\tinsteadOf = https://github.com/\n",
+                fixture.root.path().display()
+            ),
+        )
+        .unwrap();
+        fixture.github.state(&json!({"repositories":{"fixture/repo":{"full_name":"fixture/repo","name":"repo","default_branch":"main"}}}));
+        let instance = github::instance(&fixture.s, "Source", "synthetic-project-token", &[]).await;
+        requests.push(json!({"pluginId":"github","source":"repositories","instance":instance,"id":"fixture/repo"}));
+    }
+    first.github.state(&json!({"repositories":{"fixture/repo":{"full_name":"fixture/repo","name":"repo","default_branch":"main"}}, "gate":{"path":"repos/fixture/repo","started":started,"released":released}}));
+    let service = first.s.clone();
+    let body = requests[0].clone();
+    let pending = tokio::spawn(async move {
+        common::owner_api_route(&service, "POST", "/api/projects/import", body).await
+    });
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !started.exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        common::owner_api_route(
+            &first.s,
+            "POST",
+            "/api/projects/import",
+            requests[0].clone()
+        )
+        .await
+        .unwrap_err()
+        .status,
+        409
+    );
+    // The other installation reaches its own local Git fixture, rather than
+    // inheriting the first installation's import conflict. No real remote is used.
+    let independent = tokio::time::timeout(
+        Duration::from_secs(15),
+        common::owner_api_route(
+            &other.s,
+            "POST",
+            "/api/projects/import",
+            requests[1].clone(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(independent.unwrap_err().status, 400);
+    assert!(
+        other
+            .github
+            .api_calls()
+            .iter()
+            .any(|call| call["path"] == "repos/fixture/repo")
+    );
+    std::fs::write(released, "release").unwrap();
+    assert_eq!(pending.await.unwrap().unwrap_err().status, 400);
+    assert!(first.s.store.projects().await.unwrap().is_empty());
+    assert!(other.s.store.projects().await.unwrap().is_empty());
+}
