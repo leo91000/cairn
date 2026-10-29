@@ -134,6 +134,8 @@ export class DiagramError extends Error {}
 export const DIAGRAM_LIMITS = {
   source: 20_000,
   nodes: 250,
+  clusters: 128,
+  clusterDepth: 32,
   edges: 500,
   participants: 40,
   items: 600,
@@ -388,7 +390,9 @@ class GraphBuilder {
 
   build(title: string | undefined, dir: Direction): GraphDiagram {
     // Reusing a cluster ID can reparent an existing ancestor. Reject cycles before layout.
-    const checked = new Set<string>()
+    if (this.clusters.size > DIAGRAM_LIMITS.clusters)
+      throw new DiagramError('This diagram has too many subgraphs to draw.')
+    const checked = new Map<string, number>()
     for (const id of this.clusters.keys()) {
       const ancestors = new Set<string>()
       let current: string | undefined = id
@@ -396,11 +400,18 @@ class GraphBuilder {
         if (ancestors.has(current))
           throw new DiagramError('Subgraphs cannot contain themselves.')
         ancestors.add(current)
+        if (ancestors.size > DIAGRAM_LIMITS.clusterDepth)
+          throw new DiagramError('This diagram nests subgraphs too deeply to draw.')
         current = this.clusters.get(current)?.parent
       }
 
-      for (const ancestor of ancestors)
-        checked.add(ancestor)
+      let depth = current ? checked.get(current) ?? 0 : 0
+      for (const ancestor of [...ancestors].reverse()) {
+        depth++
+        if (depth > DIAGRAM_LIMITS.clusterDepth)
+          throw new DiagramError('This diagram nests subgraphs too deeply to draw.')
+        checked.set(ancestor, depth)
+      }
     }
 
     const nodes = [...this.nodes.values()].filter(node => !this.clusters.has(node.id))

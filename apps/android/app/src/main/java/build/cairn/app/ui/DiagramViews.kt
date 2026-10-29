@@ -656,22 +656,31 @@ private fun DiagramViewer(
         }
     }
 
-    fun fit() {
-        if (stage == IntSize.Zero) return
-        val padding = 32 * density
+    fun fitScale(): Float {
+        if (stage == IntSize.Zero) return 1f
+        val padding = min(32 * density, min(stage.width, stage.height) / 4f)
         val width = scene.width.toFloat() * density
         val height = scene.height.toFloat() * density
-        val next =
-            min(min((stage.width - padding * 2) / width, (stage.height - padding * 2) / height), 2f)
-                .coerceIn(MIN_ZOOM, MAX_ZOOM)
+        return min(
+                min((stage.width - padding * 2) / width, (stage.height - padding * 2) / height),
+                2f,
+            )
+            .coerceAtLeast(0.000001f)
+    }
+
+    fun fit() {
+        if (stage == IntSize.Zero) return
+        val next = fitScale()
         scale = next
+        val width = scene.width.toFloat() * density
+        val height = scene.height.toFloat() * density
         offset = Offset((stage.width - width * next) / 2, (stage.height - height * next) / 2)
         fitted = true
     }
 
     /** Zoom around a point of the stage, keeping the drawing under it in place. */
     fun zoomAt(next: Float, pivot: Offset) {
-        val target = next.coerceIn(MIN_ZOOM, MAX_ZOOM)
+        val target = next.coerceIn(min(MIN_ZOOM, fitScale()), MAX_ZOOM)
         offset = pivot - (pivot - offset) * (target / scale)
         scale = target
         fitted = false

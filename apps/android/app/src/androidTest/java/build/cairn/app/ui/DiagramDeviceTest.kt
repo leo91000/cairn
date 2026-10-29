@@ -153,6 +153,42 @@ class DiagramDeviceTest {
     }
 
     @Test
+    fun largeDiagramFitsBelowFifteenPercent() {
+        val source =
+            "flowchart LR\n" + (0 until 100).joinToString("\n") { "A$it[Step $it] --> A${it + 1}" }
+        show { "```mermaid\n$source\n```" }
+        compose.waitUntil(20000) {
+            compose.onAllNodesWithTag("diagram").fetchSemanticsNodes().size == 1
+        }
+        compose.onNodeWithContentDescription("Agrandir").performClick()
+        val stage = compose.onNodeWithTag("diagram-stage")
+        stage.assertIsDisplayed()
+        fun zoomPercent(): Int =
+            compose
+                .onAllNodesWithContentDescription("Ajuster à l’écran")
+                .onFirst()
+                .fetchSemanticsNode()
+                .config[SemanticsProperties.Text]
+                .single()
+                .text
+                .substringBefore(' ')
+                .toInt()
+        compose.waitUntil(10000) { zoomPercent() in 1..14 }
+        val scene = renderDiagram(source, DiagramFonts.get(context))!!.scene!!
+        val bounds = stage.fetchSemanticsNode().boundsInRoot
+        val density = context.resources.displayMetrics.density
+        val available =
+            minOf(
+                bounds.width / (scene.width * density),
+                bounds.height / (scene.height * density),
+            ) * 100
+        assertTrue(zoomPercent() <= available + 0.5)
+        compose.onNodeWithContentDescription("Zoom avant").performClick()
+        compose.onAllNodesWithContentDescription("Ajuster à l’écran").onLast().performClick()
+        compose.waitUntil(10000) { zoomPercent() in 1..14 }
+    }
+
+    @Test
     fun allKindsAndMalformedHierarchyUseNativeCardsInBothThemes() {
         var content by mutableStateOf("")
         var theme by mutableStateOf("light")

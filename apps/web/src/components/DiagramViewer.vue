@@ -46,16 +46,24 @@ let observer: ResizeObserver | undefined
 let fitted = true
 let copiedTimer: ReturnType<typeof setTimeout> | undefined
 
+function fitScale() {
+  const area = stage.value
+  if (!area || !scene || !area.clientWidth || !area.clientHeight)
+    return undefined
+  const padding = Math.min(32, area.clientWidth / 4, area.clientHeight / 4)
+  return Math.min((area.clientWidth - padding * 2) / scene.width, (area.clientHeight - padding * 2) / scene.height, 2)
+}
+
 function clamp(value: number) {
-  return Math.min(6, Math.max(0.15, value))
+  const minimum = Math.min(0.15, fitScale() ?? 0.15)
+  return Math.min(6, Math.max(minimum, value))
 }
 
 function fit() {
   const area = stage.value
-  if (!area || !scene)
+  const next = fitScale()
+  if (!area || !scene || next === undefined)
     return
-  const padding = 32
-  const next = clamp(Math.min((area.clientWidth - padding * 2) / scene.width, (area.clientHeight - padding * 2) / scene.height, 2))
   scale.value = next
   x.value = (area.clientWidth - scene.width * next) / 2
   y.value = (area.clientHeight - scene.height * next) / 2

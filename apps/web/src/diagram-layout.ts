@@ -298,12 +298,12 @@ function nodeBox(node: GraphNode, horizontal: boolean, measure: TextMeasure): No
     case 'choice':
       return box(28, 28)
     case 'circle': {
-      const d = Math.max(tw, th) + 28
+      const d = Math.sqrt(tw * tw + th * th) + 28
       return box(d, d)
     }
 
     case 'doublecircle': {
-      const d = Math.max(tw, th) + 38
+      const d = Math.sqrt(tw * tw + th * th) + 38
       return box(d, d)
     }
 

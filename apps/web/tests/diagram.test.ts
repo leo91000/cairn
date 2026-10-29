@@ -145,6 +145,20 @@ describe('diagram layout', () => {
     expect(a!.right <= b!.left || b!.right <= a!.left || a!.bottom <= b!.top || b!.bottom <= a!.top).toBe(true)
   })
 
+  it.each(['circle', 'doublecircle'])('keeps multiline text inside the %s outline', (shape) => {
+    const label = Array.from({ length: 10 }).fill('abcdefghijklmnopqrstuvwxy').join('<br>')
+    const source = shape === 'circle' ? `flowchart TD\nA(("${label}"))` : `flowchart TD\nA((("${label}")))`
+    const scene = layoutDiagram(parseDiagram(source), measure)
+    const box = nodeBoxes(scene)[0]!
+    const text = scene.items.find(item => item.kind === 'text' && item.lines.length === 10)!
+    if (text.kind !== 'text')
+      throw new Error('Expected a multiline label')
+    const width = Math.max(...text.lines.map(line => measure.width(line, text.size)))
+    const height = text.lines.length * lineHeight(text.size)
+    const innerRadius = (box.right - box.left) / 2 - (shape === 'doublecircle' ? 5 : 0)
+    expect(Math.hypot(width / 2, height / 2)).toBeLessThan(innerRadius)
+  })
+
   it('wraps long labels between words and inside long words', () => {
     expect(wrapText('alpha beta gamma', 10, 400, 50, measure)).toEqual(['alpha', 'beta', 'gamma'])
     expect(wrapText('abcdefghijklmnop', 10, 400, 30, measure)).toEqual(['abcde', 'fghij', 'klmno', 'p'])

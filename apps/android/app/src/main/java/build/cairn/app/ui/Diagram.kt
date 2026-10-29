@@ -180,6 +180,8 @@ internal class DiagramError(message: String) : Exception(message)
 internal object DiagramLimits {
     const val SOURCE = 20_000
     const val NODES = 250
+    const val CLUSTERS = 128
+    const val CLUSTER_DEPTH = 32
     const val EDGES = 500
     const val PARTICIPANTS = 40
     const val ITEMS = 600
@@ -472,16 +474,26 @@ private class GraphBuilder {
 
     fun build(title: String?, dir: Direction): GraphDiagram {
         // Reusing a cluster ID can reparent an existing ancestor. Reject cycles before layout.
-        val checked = mutableSetOf<String>()
+        if (clusters.size > DiagramLimits.CLUSTERS)
+            throw DiagramError("This diagram has too many subgraphs to draw.")
+        val checked = mutableMapOf<String, Int>()
         for (id in clusters.keys) {
             val ancestors = mutableSetOf<String>()
             var current: String? = id
             while (current != null && current !in checked) {
                 if (!ancestors.add(current))
                     throw DiagramError("Subgraphs cannot contain themselves.")
+                if (ancestors.size > DiagramLimits.CLUSTER_DEPTH)
+                    throw DiagramError("This diagram nests subgraphs too deeply to draw.")
                 current = clusters[current]?.parent
             }
-            checked.addAll(ancestors)
+            var depth = if (current != null) checked[current] ?: 0 else 0
+            for (ancestor in ancestors.toList().asReversed()) {
+                depth++
+                if (depth > DiagramLimits.CLUSTER_DEPTH)
+                    throw DiagramError("This diagram nests subgraphs too deeply to draw.")
+                checked[ancestor] = depth
+            }
         }
 
         val nodes = nodes.values.filter { !clusters.containsKey(it.id) }

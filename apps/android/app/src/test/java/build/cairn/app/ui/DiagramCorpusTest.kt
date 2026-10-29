@@ -217,6 +217,23 @@ class DiagramCorpusTest {
     }
 
     @Test
+    fun `keeps multiline text inside circular outlines`() {
+        val label = List(10) { "abcdefghijklmnopqrstuvwxy" }.joinToString("<br>")
+        for (double in listOf(false, true)) {
+            val source =
+                if (double) "flowchart TD\nA(((\"$label\")))" else "flowchart TD\nA((\"$label\"))"
+            val scene = layoutDiagram(parseDiagram(source), measure)
+            val node = scene.items.filterIsInstance<PathItem>().first { it.shadow }
+            val xs = points(node).map { it.first }
+            val text = scene.items.filterIsInstance<TextItem>().first { it.lines.size == 10 }
+            val width = text.lines.maxOf { measure.width(it, text.size, text.weight) }
+            val height = text.lines.size * lineHeight(text.size)
+            val radius = (xs.max() - xs.min()) / 2 - (if (double) 5 else 0)
+            assertTrue(kotlin.math.hypot(width / 2, height / 2) < radius)
+        }
+    }
+
+    @Test
     fun `wraps long labels between words and inside long words`() {
         assertEquals(
             listOf("alpha", "beta", "gamma"),

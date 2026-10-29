@@ -338,11 +338,11 @@ private fun nodeBox(node: GraphNode, horizontal: Boolean, measure: TextMeasure):
         NodeShape.FORK -> if (horizontal) box(8.0, 64.0) else box(64.0, 8.0)
         NodeShape.CHOICE -> box(28.0, 28.0)
         NodeShape.CIRCLE -> {
-            val d = max(tw, th) + 28
+            val d = sqrt(tw * tw + th * th) + 28
             box(d, d)
         }
         NodeShape.DOUBLE_CIRCLE -> {
-            val d = max(tw, th) + 38
+            val d = sqrt(tw * tw + th * th) + 38
             box(d, d)
         }
         NodeShape.DIAMOND -> {
