@@ -5,6 +5,7 @@ Invoked through node_s3_test.py so credentials, bucket and network are synthetic
 The loopback bridge exists only in this fixture; production remains Unix-only.
 """
 import base64
+import contextlib
 import boto3
 import http.client
 import http.server
@@ -124,7 +125,9 @@ def main():
         print('Native qualification: ' + json.dumps(sample), flush=True)
 
     progress('start')
-    with tempfile.TemporaryDirectory(prefix='cairn-native-smoke-', dir='/var/tmp') as temporary:
+    # Diagnostic-only: the disposable VM owns final reclamation if an uncertain
+    # mounted filesystem cannot be safely removed during bounded cleanup.
+    with contextlib.nullcontext(tempfile.mkdtemp(prefix='cairn-native-smoke-', dir='/var/tmp')) as temporary:
         root = Path(temporary)
         root.chmod(0o700)
         host.require_docker_host()
@@ -1107,14 +1110,20 @@ def main():
                 server.shutdown()
                 server.server_close()
             for unit in [supervisor] + ['cairn-native-' + attempt + '.service' for attempt in attempts] + ['cairn-native-guardian-' + attempt + '.service' for attempt in attempts]:
-                subprocess.run(['systemctl', 'stop', unit], capture_output=True, timeout=30)
+                try:
+                    subprocess.run(['systemctl', 'stop', unit], capture_output=True, timeout=5)
+                except subprocess.TimeoutExpired:
+                    print('Diagnostic cleanup: stop timed out for ' + unit, file=sys.stderr, flush=True)
             for current in runs:
-                subprocess.run(['userdel', 'cairn-c-' + current.replace('-', '')[:24]], capture_output=True, timeout=30)
+                try:
+                    subprocess.run(['userdel', 'cairn-c-' + current.replace('-', '')[:24]], capture_output=True, timeout=5)
+                except subprocess.TimeoutExpired:
+                    print('Diagnostic cleanup: user removal timed out', file=sys.stderr, flush=True)
             for reserved in reserved_users:
-                subprocess.run(['userdel', reserved], check=True, capture_output=True)
+                subprocess.run(['userdel', reserved], capture_output=True, timeout=5)
             Path('/etc/sudoers.d/cairn-native-' + str(__import__('pwd').getpwnam(user).pw_uid)).unlink(missing_ok=True)
             host_marker.unlink(missing_ok=True)
-            subprocess.run(['userdel', user], check=True, capture_output=True)
+            subprocess.run(['userdel', user], capture_output=True, timeout=5)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,12 @@
 name: Native pressure cycle diagnostics
 on:
   workflow_dispatch:
+    inputs:
+      artifact-run:
+        description: Exact source workflow ID for candidate binaries
+        type: string
+        default: '40792090216'
+        required: true
 permissions:
   contents: read
   actions: read
@@ -19,7 +25,7 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
-          run-id: 40792090216
+          run-id: ${{ inputs.artifact-run }}
           github-token: ${{ github.token }}
       - name: Prepare disposable host block storage and synthetic S3
         run: |
