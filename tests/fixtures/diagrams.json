@@ -10024,6 +10024,216 @@
         "height": 379,
         "items": 23
       }
+    },
+    {
+      "name": "sequence-frame-bounds-minimum",
+      "source": "sequenceDiagram\nparticipant A\nloop Outer\nloop Inner\nA->>A: Hi\nend\nend",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "block",
+            "kind": "loop",
+            "label": "Outer"
+          },
+          {
+            "type": "block",
+            "kind": "loop",
+            "label": "Inner"
+          },
+          {
+            "type": "message",
+            "from": "A",
+            "to": "A",
+            "label": "Hi",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          },
+          {
+            "type": "end"
+          },
+          {
+            "type": "end"
+          }
+        ]
+      },
+      "layout": {
+        "width": 199,
+        "height": 298,
+        "items": 16
+      }
+    },
+    {
+      "name": "sequence-frame-bounds-empty",
+      "source": "sequenceDiagram\nparticipant A\nloop Outer\nloop Inner\nend\nend",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "block",
+            "kind": "loop",
+            "label": "Outer"
+          },
+          {
+            "type": "block",
+            "kind": "loop",
+            "label": "Inner"
+          },
+          {
+            "type": "end"
+          },
+          {
+            "type": "end"
+          }
+        ]
+      },
+      "layout": {
+        "width": 168,
+        "height": 236,
+        "items": 13
+      }
+    },
+    {
+      "name": "sequence-frame-bounds-unused-columns",
+      "source": "sequenceDiagram\nparticipant A\nparticipant B\nparticipant C\nloop Outer\nA->>A: Before\nrect rgb(255,0,0)\nend\nend",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "actor": false
+          },
+          {
+            "id": "C",
+            "label": "C",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "block",
+            "kind": "loop",
+            "label": "Outer"
+          },
+          {
+            "type": "message",
+            "from": "A",
+            "to": "A",
+            "label": "Before",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          },
+          {
+            "type": "block",
+            "kind": "rect",
+            "label": "",
+            "color": "rgb(255,0,0)"
+          },
+          {
+            "type": "end"
+          },
+          {
+            "type": "end"
+          }
+        ]
+      },
+      "layout": {
+        "width": 400,
+        "height": 283,
+        "items": 23
+      }
+    },
+    {
+      "name": "sequence-frame-bounds-mixed-depth",
+      "source": "sequenceDiagram\nparticipant A\nrect rgb(255,0,0)\nloop Outer\nrect rgb(0,255,0)\nloop Inner\nA->>A: Hi\nend\nend\nend\nend",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "block",
+            "kind": "rect",
+            "label": "",
+            "color": "rgb(255,0,0)"
+          },
+          {
+            "type": "block",
+            "kind": "loop",
+            "label": "Outer"
+          },
+          {
+            "type": "block",
+            "kind": "rect",
+            "label": "",
+            "color": "rgb(0,255,0)"
+          },
+          {
+            "type": "block",
+            "kind": "loop",
+            "label": "Inner"
+          },
+          {
+            "type": "message",
+            "from": "A",
+            "to": "A",
+            "label": "Hi",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          },
+          {
+            "type": "end"
+          },
+          {
+            "type": "end"
+          },
+          {
+            "type": "end"
+          },
+          {
+            "type": "end"
+          }
+        ]
+      },
+      "layout": {
+        "width": 199,
+        "height": 362,
+        "items": 18
+      }
     }
   ],
   "errors": [

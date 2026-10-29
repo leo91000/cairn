@@ -8,6 +8,49 @@ import org.junit.Test
 /** Mermaid parsing and layout, on the corpus the web's diagram tests check too. */
 class DiagramCorpusTest {
     @Test
+    fun `keeps complete nested sequence frames within their parents`() {
+        val frameCases =
+            cases("parse").filter {
+                it.getValue("name").jsonPrimitive.content.startsWith("sequence-frame-bounds-")
+            }
+        assertTrue(frameCases.isNotEmpty())
+        for (case in frameCases) {
+            val name = case.getValue("name").jsonPrimitive.content
+            val diagram =
+                parseDiagram(case.getValue("source").jsonPrimitive.content) as SequenceDiagram
+            val scene = layoutDiagram(diagram, measure)
+            val frames =
+                scene.items
+                    .filterIsInstance<PathItem>()
+                    .filter {
+                        it.d.lastOrNull() == PathCommand.Close &&
+                            ((it.stroke == DiagramPaint.Tone("cluster-line") && it.width == 1.25) ||
+                                (it.opacity != null && it.fill != null))
+                    }
+                    .map { item ->
+                        val vertices = points(item)
+                        doubleArrayOf(
+                            vertices.minOf { it.first },
+                            vertices.maxOf { it.first },
+                            vertices.minOf { it.second },
+                            vertices.maxOf { it.second },
+                        )
+                    }
+                    .sortedBy { it[2] }
+            assertEquals(diagram.items.filterIsInstance<SequenceBlock>().size, frames.size)
+            for ((outer, inner) in frames.zipWithNext()) {
+                assertTrue(
+                    "$name nested frame crosses parent",
+                    inner[0] >= outer[0] + 4 &&
+                        inner[1] <= outer[1] - 4 &&
+                        inner[2] >= outer[2] + 4 &&
+                        inner[3] <= outer[3] - 4,
+                )
+            }
+        }
+    }
+
+    @Test
     fun `preserves group membership across ranks`() {
         fun bounds(item: PathItem): DoubleArray {
             val vertices = points(item)

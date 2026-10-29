@@ -60,6 +60,29 @@ describe('diagrams (shared Android corpus)', () => {
 })
 
 describe('diagram layout', () => {
+  it.each([
+    'sequenceDiagram\nparticipant A\nloop Outer\nloop Inner\nA->>A: Hi\nend\nend',
+    'sequenceDiagram\nparticipant A\nloop Outer\nloop Inner\nend\nend',
+    'sequenceDiagram\nparticipant A\nparticipant B\nparticipant C\nloop Outer\nA->>A: Before\nrect rgb(255,0,0)\nend\nend',
+  ])('keeps complete nested sequence frames within their parents %#', (source) => {
+    const scene = layoutDiagram(parseDiagram(source), measure)
+    const frames = scene.items.filter((item): item is PathItem => item.kind === 'path' && item.d.at(-1)?.[0] === 'Z' && ((item.stroke && 'tone' in item.stroke && item.stroke.tone === 'cluster-line' && item.width === 1.25) || (item.opacity !== undefined && !!item.fill))).map((item) => {
+      const vertices = points(item)
+      return {
+        left: Math.min(...vertices.map(([x]) => x)),
+        right: Math.max(...vertices.map(([x]) => x)),
+        top: Math.min(...vertices.map(([, y]) => y)),
+        bottom: Math.max(...vertices.map(([, y]) => y)),
+      }
+    }).sort((a, b) => a.top - b.top)
+    expect(frames).toHaveLength(2)
+    const [outer, inner] = frames as [typeof frames[number], typeof frames[number]]
+    expect(inner.left).toBeGreaterThanOrEqual(outer.left + 4)
+    expect(inner.right).toBeLessThanOrEqual(outer.right - 4)
+    expect(inner.top).toBeGreaterThanOrEqual(outer.top + 4)
+    expect(inner.bottom).toBeLessThanOrEqual(outer.bottom - 4)
+  })
+
   it.each(['TB', 'BT', 'LR', 'RL'])('keeps group titles away from nodes in %s', (direction) => {
     const scene = layoutDiagram(parseDiagram(`flowchart ${direction}\nsubgraph S[Group]\nA\nB\nend\nA-->B`), measure)
     const title = scene.items.find(item => item.kind === 'text' && item.lines[0] === 'Group')!

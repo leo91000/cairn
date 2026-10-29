@@ -2090,10 +2090,18 @@ export function layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): 
   }
 
   const stack: Frame[] = []
+  const framePadding = 14
   const frameStartX = (frame: Frame) => {
     const columns = frame.columns.size ? [...frame.columns] : centers.map((_, column) => column)
     const columnLeft = Math.min(...columns.map(column => centers[column]!)) - 52 + frame.depth * 6
-    return Math.max(MARGIN / 2 + frame.depth * 6, Math.min(columnLeft, frame.low - 14))
+    return Math.max(MARGIN / 2 + frame.depth * 6, Math.min(columnLeft, frame.low - framePadding))
+  }
+
+  const frameBounds = (frame: Frame) => {
+    const columns = frame.columns.size ? [...frame.columns] : centers.map((_, column) => column)
+    const left = frameStartX(frame)
+    const columnRight = Math.max(...columns.map(column => centers[column]!)) + 52 - frame.depth * 6
+    return { left, right: Math.max(columnRight, left + 140, frame.high + framePadding) }
   }
 
   const finished: (Frame & { end: number })[] = []
@@ -2319,6 +2327,10 @@ export function layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): 
           frame.high = Math.max(frame.high, headerRight, branchRight)
         }
 
+        // Include the drawn minimum width and unused columns before enclosing this child.
+        const bounds = frameBounds(frame)
+        frame.low = Math.min(frame.low, bounds.left + framePadding)
+        frame.high = Math.max(frame.high, bounds.right - framePadding)
         finished.push({ ...frame, end: y })
         for (const parent of stack) {
           for (const column of frame.columns)
@@ -2342,13 +2354,8 @@ export function layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): 
   // Frames are drawn deepest last, inset by their depth so nested frames stay readable.
   let widest = right
   for (const frame of finished.sort((a, b) => a.depth - b.depth)) {
-    const columns = frame.columns.size ? [...frame.columns] : centers.map((_, column) => column)
-    const frameLeft = frameStartX(frame)
-    let frameRight = Math.max(...columns.map(column => centers[column]!)) + 52 - frame.depth * 6
-    frameRight = Math.max(frameRight, frameLeft + 140, frame.high + 14)
-    widest = Math.max(widest, frameRight + MARGIN / 2)
-    const left = frameLeft
-    const right = frameRight
+    const { left, right } = frameBounds(frame)
+    widest = Math.max(widest, right + MARGIN / 2)
     if (frame.kind === 'rect') {
       frames.unshift({
         kind: 'path',

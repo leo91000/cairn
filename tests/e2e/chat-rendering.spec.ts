@@ -806,6 +806,35 @@ test('horizontal cluster titles fit their boxes without hiding neighboring title
   }
 })
 
+test('nested sequence frames enclose short and empty children including unused participants', async ({ page }) => {
+  const cases = [
+    { source: 'sequenceDiagram\nparticipant A\nloop Outer\nloop Inner\nA->>A: Hi\nend\nend', texts: 7 },
+    { source: 'sequenceDiagram\nparticipant A\nloop Outer\nloop Inner\nend\nend', texts: 6 },
+    { source: 'sequenceDiagram\nparticipant A\nparticipant B\nparticipant C\nloop Outer\nA->>A: Before\nrect rgb(255,0,0)\nend\nend', texts: 9 },
+  ]
+  for (const { source, texts } of cases) {
+    await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)
+    const svg = page.locator('#app figure.diagram svg')
+    await expect(svg.locator('text')).toHaveCount(texts)
+    const frames = await svg.evaluate(svg => [...svg.querySelectorAll('path')].filter(path =>
+      path.getAttribute('d')?.trim().endsWith('Z')
+      && ((path.style.stroke === 'var(--dg-cluster-line)' && Number.parseFloat(path.style.strokeWidth) === 1.25) || (!!path.style.opacity && path.style.fill !== 'none'))).map((path) => {
+      const box = path.getBoundingClientRect()
+      return {
+        left: box.left,
+        right: box.right,
+        top: box.top,
+        bottom: box.bottom,
+      }
+    }).sort((a, b) => a.top - b.top))
+    expect(frames).toHaveLength(2)
+    expect(frames[1]!.left).toBeGreaterThan(frames[0]!.left)
+    expect(frames[1]!.right).toBeLessThan(frames[0]!.right)
+    expect(frames[1]!.top).toBeGreaterThan(frames[0]!.top)
+    expect(frames[1]!.bottom).toBeLessThan(frames[0]!.bottom)
+  }
+})
+
 test('group frames preserve membership across ranks in every direction', async ({ page }) => {
   const cases = [
     { body: 'subgraph S1\nN2\nN8\nend\nsubgraph S2\nN0\nN9\nend\nN3-->N8\nN3-->N7\nN10-->N0', members: [['N2', 'N8'], ['N0', 'N9']], outside: ['N3', 'N7', 'N10'] },

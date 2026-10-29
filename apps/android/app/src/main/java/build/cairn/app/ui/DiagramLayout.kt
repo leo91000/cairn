@@ -2320,11 +2320,19 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
     val active = diagram.participants.map { mutableListOf<Double>() }
     val activations = mutableListOf<Activation>()
     val stack = mutableListOf<Frame>()
+    val framePadding = 14.0
     fun frameStartX(frame: Frame): Double {
         val columns =
             if (frame.columns.isNotEmpty()) frame.columns.toList() else centers.indices.toList()
         val columnLeft = minimum(columns.map { centers[it] }) - 52 + frame.depth * 6
-        return max(MARGIN / 2 + frame.depth * 6, min(columnLeft, frame.low - 14))
+        return max(MARGIN / 2 + frame.depth * 6, min(columnLeft, frame.low - framePadding))
+    }
+    fun frameBounds(frame: Frame): Pair<Double, Double> {
+        val columns =
+            if (frame.columns.isNotEmpty()) frame.columns.toList() else centers.indices.toList()
+        val left = frameStartX(frame)
+        val columnRight = maximum(columns.map { centers[it] }) + 52 - frame.depth * 6
+        return Pair(left, max(max(columnRight, left + 140), frame.high + framePadding))
     }
     val finished = mutableListOf<Frame>()
     var y = top + headHeight + 26
@@ -2564,6 +2572,11 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                                 (frame.branches.maxOfOrNull { it.label?.width ?: 0.0 } ?: 0.0)
                         frame.high = max(frame.high, max(headerRight, branchRight))
                     }
+                    // Include the drawn minimum width and unused columns before enclosing this
+                    // child.
+                    val (frameLeft, frameRight) = frameBounds(frame)
+                    frame.low = min(frame.low, frameLeft + framePadding)
+                    frame.high = max(frame.high, frameRight - framePadding)
                     finished.add(frame)
                     for (parent in stack) {
                         parent.columns.addAll(frame.columns)
@@ -2587,14 +2600,8 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
     var widest = right
     finished.sortWith { a, b -> a.depth - b.depth }
     for (frame in finished) {
-        val columns =
-            if (frame.columns.isNotEmpty()) frame.columns.toList() else centers.indices.toList()
-        val frameLeft = frameStartX(frame)
-        var frameRight = maximum(columns.map { centers[it] }) + 52 - frame.depth * 6
-        frameRight = max(max(frameRight, frameLeft + 140), frame.high + 14)
-        widest = max(widest, frameRight + MARGIN / 2)
-        val left = frameLeft
-        val frameEnd = frameRight
+        val (left, frameEnd) = frameBounds(frame)
+        widest = max(widest, frameEnd + MARGIN / 2)
         if (frame.kind == BlockKind.RECT) {
             frames.add(
                 0,
