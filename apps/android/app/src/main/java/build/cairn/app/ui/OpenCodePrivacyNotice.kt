@@ -16,7 +16,7 @@ internal fun isOpenCodePrivacyError(message: String) =
 internal fun OpenCodePrivacyNotice(
     enabled: Boolean,
     retry: (() -> Unit)?,
-    create: () -> Unit,
+    create: (() -> Unit)?,
     dismiss: () -> Unit,
 ) {
     Surface(
@@ -42,11 +42,14 @@ internal fun OpenCodePrivacyNotice(
             retry?.let {
                 OutlinedButton(onClick = it, enabled = enabled) { Text("Réessayer la réponse") }
             }
-            Text(
-                "Pour garder vos réglages Privacy, choisissez un autre modèle dans une nouvelle conversation. Celle-ci et ses fichiers restent conservés.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-            TextButton(onClick = create, enabled = enabled) { Text("Nouvelle conversation") }
+            // Only someone who may use this agent is offered to start again with it.
+            create?.let {
+                Text(
+                    "Pour garder vos réglages Privacy, choisissez un autre modèle dans une nouvelle conversation. Celle-ci et ses fichiers restent conservés.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = it, enabled = enabled) { Text("Nouvelle conversation") }
+            }
         }
     }
 }

@@ -789,15 +789,15 @@ constructor(
         val mcps = async {
             if (owner) target.listMcps(build.cairn.contracts.ListMcpsInput()).mcps else emptyList()
         }
-        // Unknown (an older installation, a failed read) offers every agent: the server decides.
+        // An older installation without the route offers every agent: the server decides.
+        // Any other failure fails the refresh like the other lists, offering nothing more.
         val usable = async {
             if (owner) null
             else
                 try {
                     target.listUsableAgents(build.cairn.contracts.ListAgentsInput()).agentIds
-                } catch (e: Exception) {
-                    if (e is CancellationException || (e is ApiException && e.status == 401))
-                        throw e
+                } catch (e: ApiException) {
+                    if (e.status != 404) throw e
                     null
                 }
         }

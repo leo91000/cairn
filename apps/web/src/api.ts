@@ -432,8 +432,15 @@ export async function refresh() {
       listMissions(api, {}).then(output => output.tasks),
       api<Skill[]>('/skills'),
       owner ? listMcps(api, {}).then(result => result.mcps) : Promise.resolve([]),
-      // Unknown (an older installation, a failed read) offers every agent: the server decides.
-      owner ? Promise.resolve(null) : listUsableAgents(api, {}).then(output => output.agentIds, () => null),
+      // An older installation without the route offers every agent: the server decides.
+      // Any other failure fails the refresh like the other lists, offering nothing more.
+      owner
+        ? Promise.resolve(null)
+        : listUsableAgents(api, {}).then(output => output.agentIds, (error) => {
+            if (error instanceof ApiError && error.status === 404)
+              return null
+            throw error
+          }),
     ])
   }
   catch (error) {

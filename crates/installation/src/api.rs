@@ -163,10 +163,7 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
             .identity
             .clone()
             .ok_or_else(|| Error::unauthorized("A verified identity is required."))?;
-        let agent_ids = s
-            .store
-            .read(move |db| crate::agent_access::usable(db, &identity))
-            .await?;
+        let agent_ids = crate::agent_access::usable_now(s, identity).await?;
         return Ok(Some(serde_json::to_value(
             cairn_contracts::UsableAgentsOutput { agent_ids },
         )?));

@@ -241,6 +241,11 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
         ("POST", format!("/api/runs/{run}/chat"), json!({})),
         ("POST", format!("/api/runs/{chat_run}/retry"), json!({})),
         ("POST", format!("/api/chats/{chat}/restore"), json!({})),
+        (
+            "PUT",
+            format!("/api/chats/{chat}/attachments/{unknown}"),
+            json!({}),
+        ),
     ];
 
     // Each route reaches its own handler, whatever it then decides, only with access.

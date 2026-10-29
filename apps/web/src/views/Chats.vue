@@ -1239,7 +1239,7 @@ function key(event: KeyboardEvent) {
                   Retry response
                 </UiButton>
               </div>
-              <p class="mt-2.5 text-2xs text-muted">
+              <p v-if="!readOnly" class="mt-2.5 text-2xs text-muted">
                 To keep your current Privacy settings, <RouterLink :to="{ path: '/chats', query: { agent: detail?.agentId, project: detail?.projectId || undefined } }" class="font-medium text-accent underline">
                   choose another model in a new conversation
                 </RouterLink>. This conversation and its files stay saved.

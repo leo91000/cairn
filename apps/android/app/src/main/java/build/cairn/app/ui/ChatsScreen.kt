@@ -1137,7 +1137,7 @@ internal fun ChatPage(
                         enabled = !state.busy,
                         retry =
                             if (readOnly) null else ({ if (chat != null) setPaused(chat, false) }),
-                        create = create,
+                        create = if (readOnly) null else create,
                         dismiss = { errorDismissed = true },
                     )
                 else if (error != null && !errorDismissed && !errorShown)

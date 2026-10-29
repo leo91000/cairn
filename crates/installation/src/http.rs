@@ -660,6 +660,10 @@ async fn raw_route(app: &App, path: &str, request: Request) -> Result<Route> {
         }
         ["", "api", "chats", chat, "attachments", id] => {
             let chat = resolve_chat_id(s, chat).await?;
+            if !matches!(request.method(), &Method::GET | &Method::HEAD) {
+                let identity = request.extensions().get::<InstallationIdentity>();
+                crate::agent_access::authorize_upload(s, identity, &chat).await?;
+            }
             s.attachment_http(&chat, id, request).await?
         }
         ["", "api", "chats", chat, "attachments", id, "stream"]

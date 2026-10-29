@@ -216,26 +216,55 @@ fn require_task(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Resul
 /// Read-only admission preflight for people, before dispatch, like native authority.
 /// Reductions (pause, archive, stop, cancel) and reads stay open to every member.
 /// Access allowed by a member's entry relies on a recently verified membership, so an
-/// entry from an ended membership never serves a re-invited member for long.
+/// entry from an ended membership never serves a re-invited member for long. As with
+/// native authority, a change committed between this check and the command can still let
+/// that one request through.
 pub(crate) async fn authorize_request(s: &Service, input: &crate::http::Input) -> Result<()> {
     let Some(identity) = input.identity.clone() else {
         return Ok(());
     };
-    if identity.role == InstallationRole::Owner
-        || identity.mcp_scopes.is_some()
-        || matches!(input.method.as_str(), "GET" | "HEAD")
-    {
+    if matches!(input.method.as_str(), "GET" | "HEAD") {
         return Ok(());
     }
     let request = Arc::new((input.method.clone(), input.path.clone(), input.body.clone()));
-    let check = || {
-        let (identity, request) = (identity.clone(), request.clone());
-        s.store.read(move |db| {
-            let (method, path, body) = &*request;
-            gate(db, &identity, method, path, body)
-        })
+    authorize(s, identity, move |db, identity| {
+        let (method, path, body) = &*request;
+        gate(db, identity, method, path, body)
+    })
+    .await
+}
+
+/// Files are uploaded for a conversation's next message: only those who may direct it.
+pub(crate) async fn authorize_upload(
+    s: &Service,
+    identity: Option<&InstallationIdentity>,
+    chat: &str,
+) -> Result<()> {
+    let Some(identity) = identity.cloned() else {
+        return Ok(());
     };
-    if !check().await? || s.missions.membership_verified_within(MEMBERSHIP_AGE) {
+    let chat = chat.to_owned();
+    authorize(s, identity, move |db, identity| {
+        require_chat(db, identity, &chat)
+    })
+    .await
+}
+
+/// Runs a check that reports whether a member's entry allowed the request, first
+/// confirming the membership again when the last check is too old.
+async fn authorize<F>(s: &Service, identity: InstallationIdentity, check: F) -> Result<()>
+where
+    F: Fn(&Db<'_>, &InstallationIdentity) -> Result<bool> + Send + Sync + 'static,
+{
+    if identity.role == InstallationRole::Owner || identity.mcp_scopes.is_some() {
+        return Ok(());
+    }
+    let check = Arc::new(check);
+    let run = || {
+        let (identity, check) = (identity.clone(), check.clone());
+        s.store.read(move |db| check(db, &identity))
+    };
+    if !run().await? || s.missions.membership_verified_within(MEMBERSHIP_AGE) {
         return Ok(());
     }
 
@@ -246,7 +275,23 @@ pub(crate) async fn authorize_request(s: &Service, input: &crate::http::Input) -
             "Your access to this agent could not be confirmed right now. Try again in a moment.",
         ));
     }
-    check().await.map(|_| ())
+    run().await.map(|_| ())
+}
+
+/// The agents a person may use now. A member's list first confirms their membership when
+/// the last check is too old, so an ended membership's entries soon stop showing; when
+/// the Beacon cannot answer, the list still shows them and directing requests fail closed.
+pub(crate) async fn usable_now(
+    s: &Service,
+    identity: InstallationIdentity,
+) -> Result<Vec<AgentId>> {
+    if member(&identity)
+        && !s.missions.membership_verified_within(MEMBERSHIP_AGE)
+        && let Err(error) = s.missions.verify_membership(s, MEMBERSHIP_AGE).await
+    {
+        tracing::warn!(status = error.status, "Agent access could not be confirmed");
+    }
+    s.store.read(move |db| usable(db, &identity)).await
 }
 
 /// How long a membership check vouches for a member's entries.
