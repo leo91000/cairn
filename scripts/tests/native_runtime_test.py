@@ -5,7 +5,6 @@ Invoked through node_s3_test.py so credentials, bucket and network are synthetic
 The loopback bridge exists only in this fixture; production remains Unix-only.
 """
 import base64
-import fcntl
 import boto3
 import http.client
 import http.server
@@ -21,7 +20,6 @@ import resource
 import select
 import shutil
 import stat
-import struct
 import socketserver
 import sqlite3
 import subprocess
@@ -650,17 +648,22 @@ def main():
                 marker.write(b'kept across read-only close')
                 marker.flush()
                 os.fsync(marker.fileno())
-            # FS_IOC_SHUTDOWN, FS_SHUTDOWN_FLAGS_LOGFLUSH: abort the journal
-            # after committing it. Unlike a healthy read-only remount, this
-            # produces the terminal syncfs error observed in production.
-            mount_fd = os.open(readonly_mount, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                fcntl.ioctl(mount_fd, 0x8004587d, struct.pack('I', 1))
-            finally:
-                os.close(mount_fd)
+            # Attribute the disposable mount before using ext4's privileged
+            # error-injection interface. Never target the host/root filesystem.
+            device = readonly_mount.stat().st_dev
+            attachment = state / 'native-block' / readonly_run / 'root/disk.blk'
+            assert stat.S_ISBLK(attachment.stat().st_mode)
+            assert attachment.stat().st_rdev == device
+            sys_device = (Path('/sys/dev/block') / f'{os.major(device)}:{os.minor(device)}').resolve(strict=True)
+            assert sys_device.name.startswith('ublkb')
+            command('mount', '-o', 'remount,errors=remount-ro', str(readonly_mount))
+            (Path('/sys/fs/ext4') / sys_device.name / 'trigger_fs_error').write_text('cairn-disposable-flush-failure\n')
             api('/runs/' + readonly_attempt, method='DELETE')
             readonly_snapshot = fenced(readonly_run, readonly_attempt)
-            assert int((state / (readonly_attempt + '.exit')).read_text()) != 0
+            assert int((state / (readonly_attempt + '.exit')).read_text()) == 70
+            output = b''.join(base64.b64decode(json.loads(record).get('data', ''))
+                              for record in (state / (readonly_attempt + '.log')).read_text().splitlines())
+            assert b'Native filesystem could not be flushed; the durable crash prefix was retained.' in output
             assert not (state / 'native-block' / readonly_run / 'root/disk.blk').exists()
             assert readonly_snapshot['manifest']['kind'] == 'native-ext4-v1'
             # Resume the same local journal and confirm the acknowledged bytes.
