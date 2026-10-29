@@ -170,7 +170,7 @@ Le choix d’un compte de retirer de « Pour vous » le résultat bloqué d’un
 _Avoid_ : archivage (qui retire la mission elle-même)
 
 **Auteur d’une tâche** :
-Le compte Cairn qui a créé une tâche. Le retrait de cet auteur met fin aux lancements planifiés de ses tâches, et la perte de son accès à l’agent d’une tâche les suspend ; leur travail reste partagé avec toute l’installation.
+Le compte Cairn qui a créé une tâche. Le retrait de cet auteur met fin aux lancements planifiés de ses tâches, et une tâche sur un agent auquel il n’a pas ou plus accès est suspendue ; leur travail reste partagé avec toute l’installation.
 
 **Skill** :
 Un savoir-faire réutilisable que les agents appliquent : ses instructions et les fichiers qui les accompagnent (références, modèles, scripts, images). Une skill est globale ou propre à un projet ; une conversation ou une exécution reçoit les skills sélectionnées telles qu’elles étaient à sa création.

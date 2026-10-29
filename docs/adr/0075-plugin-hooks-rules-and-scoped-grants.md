@@ -218,7 +218,7 @@ supprimer sa règle, et le propriétaire n’importe laquelle ; supprimer une r
 ses déclenchements en cours. Comme les tâches
 ([ADR-0029](0029-sharing-whole-installations.md)), une règle appartient à une
 adhésion, et, pour un membre, un déclenchement exige une adhésion vérifiée récemment,
-de nouveau avant toute action qui démarre ou oriente un agent après une attente ; si
+de nouveau avant toute action qui suit une attente ; si
 elle ne peut pas l’être, il attend.
 
 Une règle ne se déclenche que si rien ne l’en empêche. Chaque empêchement se lève
@@ -229,7 +229,7 @@ indépendamment des autres :
 | Désactivée | son créateur, ou une duplication (le duplicata démarre ainsi) ; arrête les déclenchements en cours | son créateur |
 | Pause d’urgence | le propriétaire ; arrête aussi les déclenchements en cours | le propriétaire |
 | Budget épuisé | un plafond horaire dépassé ; le créateur est prévenu | son créateur ou le propriétaire |
-| Droits perdus | le créateur perd l’accès à l’agent d’exécution ou à un agent que la règle démarre, ou l’agent d’exécution perd le hook de plugin écouté | le retour du droit, de lui-même, ou le créateur qui modifie la règle (autre agent d’exécution ou autre agent démarré) |
+| Droits perdus | le créateur perd l’accès à l’agent d’exécution ou à un agent que la règle démarre, ou l’agent d’exécution perd le hook de plugin écouté | le retour du droit, de lui-même, ou le créateur qui modifie la règle (autre agent d’exécution ou autre agent démarré) ; arrête les déclenchements en cours |
 | Adhésion terminée | le créateur est retiré, part ou est supprimé ; le réinviter n’y change rien | jamais : il reste à dupliquer ; arrête les déclenchements en cours |
 
 Un agent qui a l’accès à l’installation n’écrit des règles que dans un tour lancé par
@@ -361,9 +361,8 @@ faisait l’assistant des bots
 
 Avant qu’un droit élargisse un agent (des droits de plugin, des connexions MCP,
 plusieurs projets, l’écriture de fichiers ou l’exécution de commandes, le pouvoir de
-déléguer, l’exécution native ou l’accès à l’installation), la revue du propriétaire,
-sur le web, Android et le MCP public, liste les comptes qui ont accès à cet agent et
-les règles de tous les comptes qui le démarrent, l’utilisent comme agent d’exécution
+déléguer, l’exécution native ou l’accès à l’installation), la revue du propriétaire liste, sur le web et Android, les comptes qui ont accès à cet
+agent, et partout, MCP public compris, les règles de tous les comptes qui le démarrent, l’utilisent comme agent d’exécution
 ou, quand leur créateur a des clés rattachées à ses conversations, orientent des
 conversations ou répondent à leurs questions par une clé ; l’approbation d’une mise à
 jour de plugin montre de même les agents en accès complet, leurs comptes et leurs
