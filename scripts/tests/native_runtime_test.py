@@ -657,6 +657,11 @@ def main():
             sys_device = (Path('/sys/dev/block') / f'{os.major(device)}:{os.minor(device)}').resolve(strict=True)
             assert sys_device.name.startswith('ublkb')
             command('mount', '-o', 'remount,errors=remount-ro', str(readonly_mount))
+            # The resumed workload also checks its earlier Claude/session files.
+            # Flush those before the fault; a crash prefix does not promise to
+            # preserve unrelated dirty kernel pages merely because marker fsync
+            # succeeded. The descendant may continue appending after this flush.
+            command('sync', '-f', str(readonly_mount))
             (Path('/sys/fs/ext4') / sys_device.name / 'trigger_fs_error').write_text('cairn-disposable-flush-failure\n')
             api('/runs/' + readonly_attempt, method='DELETE')
             readonly_snapshot = fenced(readonly_run, readonly_attempt)
