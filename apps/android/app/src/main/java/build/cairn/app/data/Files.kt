@@ -115,9 +115,9 @@ class Files(private val context: Context) {
                 }
                 DraftAttachment(
                     ChatAttachment(
-                        id,
+                        id = id,
                         name = name,
-                        size = total,
+                        size = total.toInt(),
                         mediaType = mime,
                         kind =
                             if (

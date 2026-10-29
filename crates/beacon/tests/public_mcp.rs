@@ -378,7 +378,7 @@ async fn an_external_mcp_connection_returns_through_the_beacon_installation_and_
         saved["callbackUrl"],
         format!(
             "{}/installations/{installation}/mcps/callback",
-            relay.app.url
+            relay.beacon_origin
         )
     );
 

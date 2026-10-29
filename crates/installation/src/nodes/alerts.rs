@@ -50,7 +50,11 @@ pub async fn raise(s: &Service, run: &str, kind: &str, title: &str, body: &str) 
             }
             db.set(&throttle, &now().into(), Some(now() + REPEAT_MS))?;
             db.event(&run, &EventKind::Status, &body, None)?;
-            let Some(chat) = db.list("chats")?.into_iter().find(|c| c["runId"] == run) else {
+            let Some(chat) = db
+                .conversations_boundary()?
+                .into_iter()
+                .find(|c| c["runId"] == run)
+            else {
                 return Ok(());
             };
             for old in db.list("node-alerts")? {

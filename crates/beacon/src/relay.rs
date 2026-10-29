@@ -5,6 +5,11 @@ pub(crate) mod nodes;
 mod response_deadline_tests;
 #[cfg(test)]
 mod session_expiry_tests;
+#[cfg(test)]
+mod session_stream_tests;
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod test_common;
 
 use super::{ApiError, Service, digest, installations};
 use axum::{
@@ -98,6 +103,8 @@ impl Tunnel {
 pub struct Relay {
     #[cfg(test)]
     identity_checks: Arc<Mutex<session_expiry_tests::IdentityChecks>>,
+    #[cfg(test)]
+    identity_monitor: Arc<Mutex<session_stream_tests::IdentityMonitor>>,
     stun_url: Arc<Mutex<Option<String>>>,
     connections: Arc<Mutex<HashMap<String, Arc<Tunnel>>>>,
     closing: Arc<AtomicBool>,
@@ -432,10 +439,28 @@ async fn serve_socket(
 
                 _ = check_stopped.changed() => break,
                 _ = ticks.tick() => {
+                    #[cfg(test)]
+                    {
+                        check_service.relay.identity_monitor.lock().unwrap().started += 1;
+                    }
+
                     let current = tokio::time::timeout(
                         Duration::from_secs(5),
                         identity_is_current(&check_service, &check_installation, &check_token),
                     ).await;
+
+                    #[cfg(test)]
+                    {
+                        use session_stream_tests::CheckOutcome;
+
+                        let outcome = match &current {
+                            Ok(Ok(true)) => CheckOutcome::Current,
+                            Ok(Ok(false)) => CheckOutcome::Revoked,
+                            Ok(Err(_)) => CheckOutcome::DatabaseError,
+                            Err(_) => CheckOutcome::TimedOut,
+                        };
+                        check_service.relay.identity_monitor.lock().unwrap().completed.push(outcome);
+                    }
 
                     let end_connection = match current {
                         Ok(Ok(true)) => {

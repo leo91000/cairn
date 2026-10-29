@@ -228,7 +228,7 @@ async fn a_node_without_a_manager_address_connects_directly_after_beacon_introdu
         native["installCommand"],
         format!(
             "curl --fail --silent --show-error '{}/install/node.sh' | sudo bash -s -- '{installation}' native {pin}",
-            relay.app.url
+            relay.beacon_origin
         )
     );
     // The pin is the manager's node certificate, kept across enrollments.

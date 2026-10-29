@@ -10,8 +10,11 @@ function wire({
   ui = '200',
   config = 'en-rUS-w412dp-port',
   processes = ['artd', 'com.android.systemui'],
+  wakefulness = 'Awake',
+  showing = false,
+  restricted = false,
 } = {}) {
-  return `__CAIRN_BOOT__\n${boot}\n__CAIRN_ANIMATION__\n${animation}\n__CAIRN_SYSTEM__\n${system}\n__CAIRN_UI__\n${ui}\n__CAIRN_CPU__\ncpu ${1000 + step * (100 - idle)} 0 0 ${1000 + step * idle} 0 0 0 0 123 456\n__CAIRN_CONFIG__\nconfig: ${config}\nabi: x86_64\n__CAIRN_PROCESSES__\nNAME\n${processes.join('\n')}\n`
+  return `__CAIRN_BOOT__\n${boot}\n__CAIRN_ANIMATION__\n${animation}\n__CAIRN_SYSTEM__\n${system}\n__CAIRN_UI__\n${ui}\n__CAIRN_CPU__\ncpu ${1000 + step * (100 - idle)} 0 0 ${1000 + step * idle} 0 0 0 0 123 456\n__CAIRN_CONFIG__\nconfig: ${config}\nabi: x86_64\n__CAIRN_POWER__\nwakefulness=${wakefulness}\n__CAIRN_KEYGUARD__\nshowing=${showing}\ninputRestricted=${restricted}\n__CAIRN_PROCESSES__\nNAME\n${processes.join('\n')}\n`
 }
 
 function loop(sequence, options = {}) {
@@ -41,6 +44,9 @@ describe('device startup readiness', () => {
     expect(sample.cpu).toEqual({ total: 2000, idle: 1000 })
     expect(sample.compilers).toEqual([])
     expect(sample.config).toBe('en-rUS-w412dp-port')
+    expect(sample.wakefulness).toBe('Awake')
+    expect(sample.keyguardShowing).toBe(false)
+    expect(sample.inputRestricted).toBe(false)
     expect(parseDeviceSample(wire({ processes: ['/apex/com.android.art/bin/dex2oat64', 'profman'] })).compilers).toHaveLength(2)
   })
 
@@ -76,15 +82,51 @@ describe('device startup readiness', () => {
     { ui: '' },
     { idle: 10 },
     { processes: ['dex2oat32'] },
+    { wakefulness: 'Asleep' },
+    { wakefulness: 'Dozing' },
+    { showing: true },
+    { restricted: true },
   ])('times out instead of accepting an unhealthy device: %j', async (condition) => {
-    const run = loop(step => wire({ step, ...condition }), { timeoutMs: 8000 })
+    const run = loop(step => wire({ step, ...condition }), { timeoutMs: 8000, quietMs: 2000 })
     await expect(run.promise).rejects.toThrow('instrumentation was not started')
     expect(run.time()).toBe(8000)
   })
 
+  it('keeps ADB timeouts positive integers near a fractional deadline', async () => {
+    let time = 0
+    const timeouts = []
+    const ready = waitForDeviceReady({
+      adb: async (_args, { timeout }) => {
+        timeouts.push(timeout)
+        time += 0.25
+        return { stdout: wire({ step: timeouts.length, boot: '' }) }
+      },
+      now: () => time,
+      sleep: async (ms) => { time += ms },
+      timeoutMs: 7.25,
+      intervalMs: 2,
+      log: () => {},
+    })
+
+    await expect(ready).rejects.toThrow('Boot is not complete')
+    expect(timeouts.every(timeout => Number.isInteger(timeout) && timeout > 0)).toBe(true)
+    expect(timeouts).toContain(1)
+    expect(time).toBe(7.25)
+  })
+
   it('fails closed on partial or malformed ADB output and CPU counters that stop advancing', async () => {
-    for (const response of ['', '__CAIRN_BOOT__\n1\n', wire().replace('cpu 1000', 'cpu nope'), wire()]) {
-      const run = loop(() => response, { timeoutMs: 6000 })
+    const responses = [
+      () => '',
+      () => '__CAIRN_BOOT__\n1\n',
+      step => wire({ step }).replace('cpu 1000', 'cpu nope'),
+      step => wire({ step }).replace('__CAIRN_POWER__', '__CAIRN_MISSING__'),
+      step => wire({ step }).replace('wakefulness=Awake', 'wakefulness='),
+      step => wire({ step }).replace('showing=false', 'showing=unknown'),
+      step => wire({ step }).replace('inputRestricted=false', 'inputRestricted=unknown'),
+      () => wire(),
+    ]
+    for (const response of responses) {
+      const run = loop(step => response(step), { timeoutMs: 6000, quietMs: 2000 })
       await expect(run.promise).rejects.toThrow('Android did not settle')
     }
   })

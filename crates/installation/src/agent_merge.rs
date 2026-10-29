@@ -109,13 +109,13 @@ pub(crate) fn merge(
             tasks += 1;
         }
     }
-    for mut record in db.list("chats")? {
+    for mut record in db.conversations_boundary()? {
         if record["agentId"] != source_id {
             continue;
         }
         record["agentId"] = target_id.into();
         record["agentName"] = target.settings.name.clone().into();
-        db.put("chats", &record)?;
+        db.save_conversation_boundary(&record)?;
         chats += 1;
     }
     // Keep each run's provider, model, instructions and access snapshot. Only its

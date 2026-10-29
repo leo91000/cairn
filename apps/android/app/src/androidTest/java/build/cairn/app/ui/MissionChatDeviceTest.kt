@@ -159,13 +159,13 @@ class MissionChatDeviceTest {
     fun completedMissionOpensTheConvertedChat() {
         val run =
             Run(
-                id = "done",
+                id = "00000000-0000-4000-8000-000000000087",
                 taskId = "mission",
                 status = "succeeded",
                 trigger = "manual",
                 sessionId = "saved",
             )
-        val chat = Chat("follow-up", runId = run.id)
+        val chat = Chat(id = "f3debea2-168f-5dfd-8ec3-d9ba21b0f7de", runId = run.id)
         var opened = ""
         val conversions = java.util.concurrent.atomic.AtomicInteger()
         MockWebServer().use { server ->
@@ -177,12 +177,12 @@ class MissionChatDeviceTest {
                             when {
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
-                                path.endsWith("/runs/done/chat") -> {
+                                path.endsWith("/runs/${run.id}/chat") -> {
                                     assertEquals("POST", request.method)
                                     conversions.incrementAndGet()
                                     wireJson.encodeToString(chat)
                                 }
-                                path.endsWith("/runs/done/stream") -> {
+                                path.endsWith("/runs/${run.id}/stream") -> {
                                     val frame =
                                         "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(run = run), true, false))}\n\n"
                                     return MockResponse()

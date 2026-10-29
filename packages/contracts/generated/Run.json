@@ -273,6 +273,201 @@
       ],
       "type": "object"
     },
+    "ChatAttachment": {
+      "properties": {
+        "chatId": {
+          "default": "",
+          "type": "string"
+        },
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "digest": {
+          "default": "",
+          "type": "string"
+        },
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "default": "file",
+          "pattern": "^(image|file)$",
+          "type": "string"
+        },
+        "mediaType": {
+          "default": "application/octet-stream",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "size": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 41943040,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "chatId",
+        "name",
+        "size",
+        "mediaType",
+        "kind",
+        "digest",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "ChatExecution": {
+      "properties": {
+        "attachments": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/ChatAttachment"
+          },
+          "type": "array"
+        },
+        "context": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "operation": {
+          "pattern": "^compact$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "previous": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CompactionReply"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery": {
+          "default": false,
+          "type": "boolean"
+        },
+        "text": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "messageId",
+        "text",
+        "attachments",
+        "recovery"
+      ],
+      "type": "object"
+    },
+    "CompactionReply": {
+      "properties": {
+        "finishedAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "outcome": {
+          "additionalProperties": true,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "TaskOutcome"
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "summary",
+        "finishedAt",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "ContextUsage": {
+      "properties": {
+        "cachedTokens": {
+          "default": null,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "contextTokens": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "contextWindow": {
+          "default": null,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "estimated": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "contextTokens",
+        "contextWindow",
+        "cachedTokens",
+        "estimated"
+      ],
+      "type": "object"
+    },
     "MissionPluginGrant": {
       "additionalProperties": false,
       "properties": {
@@ -922,22 +1117,26 @@
       ]
     },
     "chatExecution": {
-      "additionalProperties": true,
-      "default": null,
-      "type": [
-        "object",
-        "null"
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ChatExecution"
+        },
+        {
+          "type": "null"
+        }
       ],
-      "x-kotlin-type": "ChatExecution"
+      "default": null
     },
     "contextUsage": {
-      "additionalProperties": true,
-      "default": null,
-      "type": [
-        "object",
-        "null"
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ContextUsage"
+        },
+        {
+          "type": "null"
+        }
       ],
-      "x-kotlin-type": "ContextUsage"
+      "default": null
     },
     "createdAt": {
       "default": 0,

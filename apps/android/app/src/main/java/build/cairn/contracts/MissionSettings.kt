@@ -21,5 +21,7 @@ data class MissionSettings(
     init {
         java.util.UUID.fromString(agentId)
         projectId?.let { java.util.UUID.fromString(it) }
+        skills?.let { require(it.size <= 100) }
+        require(tags.size <= 10)
     }
 }
