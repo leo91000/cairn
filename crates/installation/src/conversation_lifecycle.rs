@@ -518,9 +518,12 @@ impl Service {
 /// A restoration keeps the historical offer lifetime: any later failed or
 /// interrupted turn can offer a fresh session, even after an intervening success.
 /// Both clients consume this availability rather than duplicating the rule.
-pub(crate) fn can_request_new_session(chat: &Value, run: Option<&Value>) -> bool {
-    is_active(chat)
-        && chat["sessionRestartRequested"] != true
+pub(crate) fn can_request_new_session(
+    chat: &crate::chats::Conversation,
+    run: Option<&Value>,
+) -> bool {
+    chat.lifecycle == Lifecycle::Active
+        && !chat.session_restart_requested
         && run.is_some_and(|run| {
             !run["restoredAt"].is_null()
                 && matches!(
@@ -544,7 +547,7 @@ pub(crate) fn request_new_session(db: &Db<'_>, id: &str) -> Result<Value> {
         return Ok(serde_json::to_value(chat)?);
     }
 
-    if !can_request_new_session(&serde_json::to_value(&chat)?, Some(&run)) {
+    if !can_request_new_session(&chat, Some(&run)) {
         return Err(Error::conflict(
             "A fresh session is available after a restored session fails.",
         ));

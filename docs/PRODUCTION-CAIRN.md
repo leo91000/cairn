@@ -56,7 +56,9 @@ work and update separately through their existing host supervisor.
 ## Data-preserving upgrades
 
 Installation database version 11 upgrades automatically to version 12 at manager
-startup through the [typed inventory migration](migrations/0012-typed-node-inventory.md).
+startup through the [typed inventory migration](migrations/0012-typed-node-inventory.md),
+then version 12 upgrades to 13 through the
+[typed conversation migration](migrations/0013-typed-conversations.md).
 Stop the old manager and retain a consistent database/WAL backup first. Keep the
 installation identity, configuration, data roots, node state and object storage.
 The migration preserves node identities, credentials, configuration and references;

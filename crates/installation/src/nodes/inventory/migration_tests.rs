@@ -16,6 +16,7 @@ async fn version11(root: &std::path::Path) -> Connection {
         .unwrap();
     drop(store);
     let db = Connection::open(root.join("manager.db")).unwrap();
+    crate::chats::migration::tests::version12(&db);
     db.execute_batch("DROP TABLE node_reviewed_agents; DROP TABLE node_trusted_accounts; DROP TABLE node_tags; DROP TABLE nodes;
 DROP TABLE records;
 CREATE TABLE records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
@@ -287,7 +288,7 @@ async fn empty_version11_inventory_upgrades_without_creating_a_node() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        12
+        13
     );
 }
 

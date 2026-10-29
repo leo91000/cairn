@@ -16,14 +16,19 @@ use std::{collections::HashSet, sync::Arc};
 
 const RECEIPT_TTL_MS: i64 = 7 * 86_400_000;
 
-pub(crate) fn progress(db: &Db<'_>, chat: &str) -> Result<Value> {
-    Ok(db
-        .engine_switch(chat)?
+pub(crate) fn progress(
+    db: &Db<'_>,
+    chat: &str,
+) -> Result<Option<cairn_contracts::CodingAgentSwitch>> {
+    db.engine_switch(chat)?
         .filter(|state| state.pending)
-        .map_or(
-            Value::Null,
-            |state| json!({ "provider": state.provider, "error": state.error }),
-        ))
+        .map(|state| {
+            Ok(cairn_contracts::CodingAgentSwitch {
+                provider: serde_json::from_value(Value::from(state.provider))?,
+                error: state.error,
+            })
+        })
+        .transpose()
 }
 
 pub(crate) fn quota_blocked(db: &Db<'_>, run: &Value) -> Result<bool> {
