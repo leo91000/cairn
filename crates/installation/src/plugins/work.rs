@@ -928,7 +928,6 @@ pub async fn questions(
 ) -> Result<Vec<Value>> {
     let expected = expected.clone();
     let delivery = delivery.clone();
-    let prefix = crate::chats::questions::question_prefix(&delivery.chat_id);
     s.store
         .read(move |db| {
             let connection = authorize(db, &expected)?;
@@ -940,15 +939,16 @@ pub async fn questions(
                 return Ok(Vec::new());
             }
             Ok(db
-                .keys(&prefix)?
+                .questions(&delivery.chat_id)?
                 .into_iter()
-                .map(|(_, question)| question)
-                .filter(|question| question["status"] == "pending" && question["runId"] == run)
+                .filter(|question| {
+                    question.status == cairn_contracts::QuestionStatus::Pending
+                        && question.run_id == run
+                })
                 .filter_map(|question| {
                     match db.kv(&format!(
                         "plugin-question-seen:{}:{}",
-                        connection.id,
-                        text(&question, "id")
+                        connection.id, &question.id
                     )) {
                         Ok(None) => Some(Ok(question)),
                         Ok(Some(_)) => None,
@@ -959,9 +959,9 @@ pub async fn questions(
                 .into_iter()
                 .map(|question| {
                     json!({
-                        "id": question["id"],
-                        "blocking": question["blocking"],
-                        "fields": question["fields"],
+                        "id": question.id,
+                        "blocking": question.blocking,
+                        "fields": question.fields,
                     })
                 })
                 .collect())

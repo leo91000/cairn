@@ -1,0 +1,211 @@
+//! Questionnaire SQL; answer material is owned separately from public message views.
+use crate::{
+    error::{Error, Result},
+    store::Db,
+};
+use cairn_contracts::{ChatQuestion, QuestionField, QuestionOption};
+use rusqlite::params;
+use std::collections::HashMap;
+
+pub(crate) const SCHEMA: &str = "
+CREATE TABLE chat_questions(
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id)>0),
+    chat_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL,
+    blocking INTEGER NOT NULL CHECK(blocking IN (0,1)),
+    source TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','answering','answered','cancelled')),
+    created_at INTEGER CHECK(created_at BETWEEN 0 AND 9007199254740991),
+    message_id TEXT
+);
+CREATE INDEX chat_questions_chat ON chat_questions(chat_id,created_at,id);
+CREATE INDEX chat_questions_run ON chat_questions(run_id,status);
+CREATE TABLE question_fields(
+    question_id TEXT NOT NULL REFERENCES chat_questions(id) ON DELETE CASCADE,
+    id TEXT NOT NULL CHECK(length(id) BETWEEN 1 AND 200),
+    position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 19),
+    title TEXT NOT NULL CHECK(length(title) BETWEEN 1 AND 10000),
+    secret INTEGER NOT NULL CHECK(secret IN (0,1)),
+    mode TEXT NOT NULL CHECK(mode IN ('single','multiple')),
+    min_choices INTEGER CHECK(min_choices BETWEEN 1 AND 30),
+    max_choices INTEGER CHECK(max_choices BETWEEN 1 AND 30),
+    CHECK(min_choices IS NULL OR max_choices IS NULL OR min_choices<=max_choices),
+    CHECK(mode!='single' OR max_choices IS NULL OR max_choices=1),
+    PRIMARY KEY(question_id,id), UNIQUE(question_id,position)
+) WITHOUT ROWID;
+CREATE TABLE question_options(
+    question_id TEXT NOT NULL,
+    field_id TEXT NOT NULL,
+    id TEXT NOT NULL CHECK(length(id) BETWEEN 1 AND 200),
+    position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 29),
+    label TEXT NOT NULL CHECK(length(label) BETWEEN 1 AND 2000),
+    description TEXT NOT NULL CHECK(length(description)<=4000),
+    recommended INTEGER NOT NULL CHECK(recommended IN (0,1)),
+    PRIMARY KEY(question_id,field_id,id), UNIQUE(question_id,field_id,position),
+    FOREIGN KEY(question_id,field_id) REFERENCES question_fields(question_id,id) ON DELETE CASCADE
+) WITHOUT ROWID;
+CREATE TABLE question_answers(
+    message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+    field_id TEXT NOT NULL,
+    comment TEXT NOT NULL CHECK(length(comment)<=10000),
+    PRIMARY KEY(message_id,field_id)
+) WITHOUT ROWID;
+CREATE TABLE question_answer_choices(
+    message_id TEXT NOT NULL,
+    field_id TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 29),
+    option_id TEXT NOT NULL,
+    PRIMARY KEY(message_id,field_id,position),
+    FOREIGN KEY(message_id,field_id) REFERENCES question_answers(message_id,field_id) ON DELETE CASCADE
+) WITHOUT ROWID;
+CREATE TABLE question_answer_deliveries(
+    message_id TEXT PRIMARY KEY NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+    text TEXT NOT NULL
+) WITHOUT ROWID;
+";
+
+impl Db<'_> {
+    pub fn questions(&self, chat: &str) -> Result<Vec<ChatQuestion>> {
+        self.load_questions(chat, None)
+    }
+
+    pub fn question(&self, chat: &str, id: &str) -> Result<Option<ChatQuestion>> {
+        Ok(self.load_questions(chat, Some(id))?.pop())
+    }
+
+    fn load_questions(&self, chat: &str, id: Option<&str>) -> Result<Vec<ChatQuestion>> {
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let result = Db(&tx).load_questions(chat, id)?;
+            tx.commit()?;
+            return Ok(result);
+        }
+        let filter = if id.is_some() {
+            "q.chat_id=?1 AND q.id=?2"
+        } else {
+            "q.chat_id=?1 AND ?2 IS NULL"
+        };
+        let mut questions = self.0.prepare_cached(&format!("SELECT q.id,q.chat_id,q.run_id,q.blocking,q.source,q.status,q.created_at,q.message_id FROM chat_questions q WHERE {filter} ORDER BY q.created_at,q.id"))?
+            .query_map(params![chat,id], |r| {
+                let status: String = r.get(5)?;
+                Ok(ChatQuestion {
+                    id:r.get(0)?,chat_id:r.get(1)?,run_id:r.get(2)?,blocking:r.get(3)?,source:r.get(4)?,
+                    status:serde_json::from_value(status.into()).map_err(|e| rusqlite::Error::FromSqlConversionFailure(5,rusqlite::types::Type::Text,Box::new(e)))?,
+                    created_at:r.get(6)?,message_id:r.get(7)?,fields:Vec::new(),
+                })
+            })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut options = HashMap::<(String, String), Vec<QuestionOption>>::new();
+        let mut statement = self.0.prepare_cached(&format!("SELECT o.question_id,o.field_id,o.id,o.label,o.description,o.recommended FROM question_options o JOIN chat_questions q ON q.id=o.question_id WHERE {filter} ORDER BY o.question_id,o.field_id,o.position"))?;
+        for value in statement.query_map(params![chat, id], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                QuestionOption {
+                    id: r.get(2)?,
+                    label: r.get(3)?,
+                    description: r.get(4)?,
+                    recommended: r.get(5)?,
+                },
+            ))
+        })? {
+            let (question, field, option) = value?;
+            options.entry((question, field)).or_default().push(option);
+        }
+        let mut fields = HashMap::<String, Vec<QuestionField>>::new();
+        let mut statement = self.0.prepare_cached(&format!("SELECT f.question_id,f.id,f.title,f.secret,f.mode,f.min_choices,f.max_choices FROM question_fields f JOIN chat_questions q ON q.id=f.question_id WHERE {filter} ORDER BY f.question_id,f.position"))?;
+        for value in statement.query_map(params![chat, id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                QuestionField {
+                    id: r.get(1)?,
+                    title: r.get(2)?,
+                    secret: r.get(3)?,
+                    mode: r.get(4)?,
+                    min_choices: r.get::<_, Option<u32>>(5)?.map(|n| n as usize),
+                    max_choices: r.get::<_, Option<u32>>(6)?.map(|n| n as usize),
+                    options: Vec::new(),
+                },
+            ))
+        })? {
+            let (question, mut field) = value?;
+            field.options = options
+                .remove(&(question.clone(), field.id.clone()))
+                .unwrap_or_default();
+            fields.entry(question).or_default().push(field);
+        }
+        for question in &mut questions {
+            question.fields = fields.remove(&question.id).unwrap_or_default();
+        }
+        Ok(questions)
+    }
+
+    pub fn save_question(&self, question: &ChatQuestion) -> Result<()> {
+        cairn_contracts::validate_question_fields(&question.fields).map_err(Error::bad)?;
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            Db(&tx).save_question(question)?;
+            tx.commit()?;
+            return Ok(());
+        }
+        self.0.execute_batch("SAVEPOINT question_write")?;
+        let result = self.write_question(question);
+        match result {
+            Ok(()) => self.0.execute_batch("RELEASE question_write")?,
+            Err(error) => {
+                self.0
+                    .execute_batch("ROLLBACK TO question_write; RELEASE question_write")?;
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn write_question(&self, q: &ChatQuestion) -> Result<()> {
+        let existing = self.question(&q.chat_id, &q.id)?;
+        self.0.prepare_cached("INSERT INTO chat_questions VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET blocking=excluded.blocking,status=excluded.status,message_id=excluded.message_id WHERE chat_questions.chat_id=excluded.chat_id AND chat_questions.run_id=excluded.run_id")?
+            .execute(params![q.id,q.chat_id,q.run_id,q.blocking,q.source,q.status.as_str(),q.created_at,q.message_id])?;
+        if let Some(existing) = existing {
+            if existing.fields != q.fields
+                || existing.source != q.source
+                || existing.created_at != q.created_at
+            {
+                return Err(Error::conflict("Question definitions are immutable."));
+            }
+            return Ok(());
+        }
+        for (position, field) in q.fields.iter().enumerate() {
+            self.0
+                .prepare_cached("INSERT INTO question_fields VALUES(?,?,?,?,?,?,?,?)")?
+                .execute(params![
+                    q.id,
+                    field.id,
+                    position as i64,
+                    field.title,
+                    field.secret,
+                    field.mode,
+                    field.min_choices.map(|n| n as i64),
+                    field.max_choices.map(|n| n as i64)
+                ])?;
+            for (position, option) in field.options.iter().enumerate() {
+                self.0
+                    .prepare_cached("INSERT INTO question_options VALUES(?,?,?,?,?,?,?)")?
+                    .execute(params![
+                        q.id,
+                        field.id,
+                        option.id,
+                        position as i64,
+                        option.label,
+                        option.description,
+                        option.recommended
+                    ])?;
+            }
+        }
+        Ok(())
+    }
+}

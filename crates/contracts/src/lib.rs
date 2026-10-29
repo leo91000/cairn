@@ -188,5 +188,8 @@ mod models;
 pub use models::*;
 
 mod conversations;
+mod questions;
+
+pub use questions::*;
 
 pub use conversations::*;

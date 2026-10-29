@@ -5,12 +5,13 @@ use crate::worker::checkpoint::RunCheckpoint;
 use cairn_contracts::EventKind;
 
 mod handoff;
+pub(crate) mod question_storage;
 pub(crate) mod questions;
 
 pub use crate::waits as wait_for;
 
 pub use handoff::{execution_text, with_invoked_skills};
-pub use questions::{Question, QuestionField, QuestionStatus, question_prefix};
+pub use questions::{Question, QuestionField, QuestionStatus};
 
 use crate::{
     config::{id, now},

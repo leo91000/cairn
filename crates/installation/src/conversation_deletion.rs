@@ -254,7 +254,6 @@ async fn files(s: &Service, chat: &Value) -> Result<()> {
 fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
     for prefix in [
         format!("artifact:{run}:"),
-        crate::chats::question_prefix(cid),
         format!("chat-attachment:{cid}:"),
     ] {
         for (key, value) in db.keys(&prefix)? {

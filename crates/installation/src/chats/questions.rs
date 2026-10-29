@@ -1,5 +1,4 @@
-//! Questions an agent asks the user during a chat, stored as
-//! `chat-question:{chatId}:{id}` key-value records.
+//! Typed questionnaire lifecycle, backed by the owning question tables.
 use super::{chat, chat_for_run, find_message, send};
 use crate::{
     config::now,
@@ -7,110 +6,29 @@ use crate::{
     notifications,
     service::Service,
     store::Db,
-    validation::{parse, parse_as, string_enum, text},
+    validation::{text, uuid},
 };
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 
 pub const NATIVE_DENIED: &str =
     "Native question tools are disabled. Use cairn_workspace.ask_questions to ask the user.";
 
-string_enum! {
-    pub enum QuestionStatus {
-        Pending => "pending",
-        Answering => "answering",
-        Answered => "answered",
-        Cancelled => "cancelled",
-    }
-}
-
-/// One entry of the validated `questions` input schema.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QuestionField {
-    pub id: String,
-    pub title: String,
-    #[serde(default)]
-    pub secret: bool,
-    #[serde(default = "single_mode")]
-    pub mode: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_choices: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_choices: Option<usize>,
-    #[serde(default)]
-    pub options: Vec<Value>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
-}
-
-fn single_mode() -> String {
-    "single".into()
-}
-
-/// A persisted question and its delivery state.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Question {
-    pub id: String,
-    pub chat_id: String,
-    pub run_id: String,
-    pub blocking: bool,
-    #[serde(default)]
-    pub source: String,
-    pub status: QuestionStatus,
-    pub fields: Vec<QuestionField>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<i64>,
-    /// The queued answer message, while the answer is being delivered.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message_id: Option<String>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
-}
-
-impl Question {
-    /// Still waiting for, or delivering, the user's answer.
-    pub fn is_open(&self) -> bool {
-        matches!(
-            self.status,
-            QuestionStatus::Pending | QuestionStatus::Answering
-        )
-    }
-
-    /// Answers to secret fields are never shown again nor forwarded to a new session.
-    pub fn is_private(&self) -> bool {
-        self.fields.iter().any(|field| field.secret)
-    }
-}
-
-pub fn question_prefix(chat: &str) -> String {
-    format!("chat-question:{chat}:")
-}
+use cairn_contracts::{
+    AskQuestionsInput, QuestionAnswer as FieldAnswer, QuestionAnswerInput as AnswerInput,
+};
+pub use cairn_contracts::{ChatQuestion as Question, QuestionField, QuestionStatus};
 
 pub(super) fn questions(db: &Db<'_>, chat: &str) -> Result<Vec<Question>> {
-    let mut questions = db
-        .keys_as::<Question>(&question_prefix(chat))?
-        .into_iter()
-        .map(|(_, question)| question)
-        .collect::<Vec<_>>();
-    questions.sort_by_key(|question| question.created_at);
-    Ok(questions)
+    db.questions(chat)
 }
 
 pub(super) fn find_question(db: &Db<'_>, chat: &str, id: &str) -> Result<Option<Question>> {
-    Ok(questions(db, chat)?
-        .into_iter()
-        .find(|question| question.id == id))
+    db.question(chat, id)
 }
 
 pub(super) fn save_question(db: &Db<'_>, question: &Question) -> Result<()> {
-    db.set_as(
-        &format!("{}{}", question_prefix(&question.chat_id), question.id),
-        question,
-        None,
-    )
+    db.save_question(question)
 }
 
 /// Agent-generated question identifiers are lowercase SHA-256 digests.
@@ -121,58 +39,8 @@ fn valid_question_id(id: &str) -> bool {
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
-#[derive(Deserialize)]
-struct AnswerInput {
-    id: String,
-    answers: BTreeMap<String, FieldAnswer>,
-}
-
-#[derive(Deserialize, Serialize)]
-struct FieldAnswer {
-    #[serde(default)]
-    selected: Vec<String>,
-    #[serde(default)]
-    comment: String,
-}
-
 fn validate_fields(fields: &[QuestionField]) -> Result<()> {
-    // Together with 20 comments of at most 10,000 characters, this leaves room
-    // for JSON escaping within the adapter inbox's 2 MB delivery budget.
-    if serde_json::to_vec(fields)?.len() > 64 * 1024 {
-        return Err(Error::bad(
-            "Keep the complete questionnaire within 64 KiB of encoded JSON.",
-        ));
-    }
-    let mut ids = HashSet::new();
-    for field in fields {
-        let mut options = HashSet::new();
-        let unique = field
-            .options
-            .iter()
-            .all(|option| options.insert(text(option, "id")));
-        let minimum = field.min_choices.unwrap_or(1);
-        let maximum = field.max_choices.unwrap_or(if field.mode == "single" {
-            1
-        } else {
-            field.options.len()
-        });
-        let has_bounds = field.min_choices.is_some() || field.max_choices.is_some();
-        if !ids.insert(&field.id) || !unique {
-            return Err(Error::bad(
-                "Question and option identifiers must be unique.",
-            ));
-        }
-        if has_bounds
-            && (minimum > maximum
-                || maximum > field.options.len()
-                || (field.mode == "single" && maximum > 1))
-        {
-            return Err(Error::bad(
-                "Selection bounds must fit the mode and the available options.",
-            ));
-        }
-    }
-    Ok(())
+    cairn_contracts::validate_question_fields(fields).map_err(Error::bad)
 }
 
 fn validate_answer(field: &QuestionField, answer: &FieldAnswer) -> Result<()> {
@@ -183,9 +51,10 @@ fn validate_answer(field: &QuestionField, answer: &FieldAnswer) -> Result<()> {
         return Ok(());
     }
     let mut selected = HashSet::new();
-    let known = answer.selected.iter().all(|id| {
-        selected.insert(id) && field.options.iter().any(|option| text(option, "id") == id)
-    });
+    let known = answer
+        .selected
+        .iter()
+        .all(|id| selected.insert(id) && field.options.iter().any(|option| option.id == *id));
     let maximum = if field.mode == "single" {
         1
     } else {
@@ -270,13 +139,15 @@ pub fn ask_tool() -> Value {
     json!({
         "name": "ask_questions",
         "description": "Ask the user a questionnaire in this conversation. Returns immediately with questionId; answers arrive later as a user message with separate selected options and comment. Reuse requestId only when retrying the same questionnaire. Choose single or multiple selection per question, optional bounds and recommended options (never preselected). Free text is always available. Keep the complete questionnaire within 64 KiB of encoded JSON. Continue independent work or report needs_input and end the turn when a reply is required. Use this tool instead of native question tools.",
-        "inputSchema": crate::validation::input_schema("askQuestions"),
+        "inputSchema": cairn_contracts::schema_for::<AskQuestionsInput>(cairn_contracts::Contract::Deserialize),
     })
 }
 
 pub async fn ask(s: &Service, bearer: &str, input: Value) -> Result<Value> {
-    let input = parse("askQuestions", input)?;
-    let fields = parse_as::<Vec<QuestionField>>("questions", input["questions"].clone())?;
+    let input: AskQuestionsInput = serde_json::from_value(input)
+        .map_err(|_| Error::bad("Provide a requestId and questions."))?;
+    uuid(&input.request_id)?;
+    let fields = input.questions;
     validate_fields(&fields)?;
     let bearer = bearer.to_owned();
     let result = s
@@ -287,7 +158,7 @@ pub async fn ask(s: &Service, bearer: &str, input: Value) -> Result<Value> {
             let chat = required(chat_for_run(db, run_id)?, "This run has no conversation.")?;
             crate::conversation_lifecycle::require_active(&chat)?;
             let chat_id = text(&chat, "id");
-            let id = crate::auth::hex_digest(&format!("{chat_id}:{}", text(&input, "requestId")));
+            let id = crate::auth::hex_digest(&format!("{chat_id}:{}", input.request_id));
             if let Some(existing) = find_question(db, chat_id, &id)? {
                 if serde_json::to_value(&existing.fields)? != serde_json::to_value(&fields)? {
                     return Err(Error::conflict(
@@ -308,7 +179,6 @@ pub async fn ask(s: &Service, bearer: &str, input: Value) -> Result<Value> {
                     fields,
                     created_at: Some(now()),
                     message_id: None,
-                    extra: Map::new(),
                 },
             )?;
             Ok(json!({ "questionId": id, "status": "pending" }))
@@ -320,22 +190,10 @@ pub async fn ask(s: &Service, bearer: &str, input: Value) -> Result<Value> {
 
 /// Retire pre-Cairn questionnaires without rewriting historical user messages.
 pub(crate) async fn retire_native(s: &Service) -> Result<()> {
-    s.store
-        .transaction(|db| {
-            for (key, mut question) in db.keys_as::<Value>("chat-question:")? {
-                if question["source"] != "cairn"
-                    && (question["status"] == "pending" || question["blocking"] == true)
-                {
-                    if question["status"] == "pending" {
-                        question["status"] = "cancelled".into();
-                    }
-                    question["blocking"] = false.into();
-                    db.set(&key, &question, None)?;
-                }
-            }
-            Ok(())
-        })
-        .await
+    s.store.transaction(|db| {
+        db.0.execute("UPDATE chat_questions SET status=CASE WHEN status='pending' THEN 'cancelled' ELSE status END,blocking=0 WHERE source!='cairn' AND (status='pending' OR blocking=1)", [])?;
+        Ok(())
+    }).await
 }
 
 pub fn list_tool() -> Value {
@@ -424,11 +282,11 @@ fn answer_text(fields: &[QuestionField], answers: &BTreeMap<String, FieldAnswer>
                     let option = field
                         .options
                         .iter()
-                        .find(|option| text(option, "id") == id)
+                        .find(|option| option.id == *id)
                         .expect("validated option");
                     json!({
                         "id": id,
-                        "label": option["label"],
+                        "label": option.label,
                     })
                 })
                 .collect::<Vec<_>>();
@@ -502,7 +360,7 @@ impl Service {
         if !valid_question_id(id) {
             return Ok(());
         }
-        let Ok(fields) = parse_as::<Vec<QuestionField>>("questions", input["fields"].clone())
+        let Ok(fields) = serde_json::from_value::<Vec<QuestionField>>(input["fields"].clone())
         else {
             return Ok(());
         };
@@ -517,7 +375,6 @@ impl Service {
             fields,
             created_at: Some(now()),
             message_id: None,
-            extra: Map::new(),
         };
         self.store
             .transaction(move |db| receive(db, question))
@@ -583,7 +440,9 @@ impl Service {
         if origin.known() {
             crate::native::policy::refresh_chat(self, chat_id).await?;
         }
-        let input = parse_as::<AnswerInput>("answer", input)?;
+        let mut input: AnswerInput = serde_json::from_value(input)
+            .map_err(|_| Error::bad("Provide an answer message id and answers."))?;
+        input.validate().map_err(Error::bad)?;
         let (chat_id, id) = (chat_id.to_owned(), id.to_owned());
         let question = self
             .store

@@ -121,7 +121,7 @@ fn message_is_pending(message: &Message) -> bool {
 fn cancel_pending_input(
     db: &Db<'_>,
     messages: Vec<Message>,
-    questions: Vec<(String, Question)>,
+    questions: Vec<Question>,
 ) -> Result<()> {
     for mut message in messages {
         if message_is_pending(&message) {
@@ -129,11 +129,11 @@ fn cancel_pending_input(
             db.save_message(&message)?;
         }
     }
-    for (key, mut question) in questions {
+    for mut question in questions {
         if question.is_open() {
             question.status = QuestionStatus::Cancelled;
             question.blocking = false;
-            db.set_as(&key, &question, None)?;
+            db.save_question(&question)?;
         }
     }
     Ok(())
@@ -176,11 +176,11 @@ fn trash(db: &Db<'_>, id: &str, confirmed: bool) -> Result<Value> {
     }
     let run = db.run(chat.run_id.as_deref().unwrap_or(""))?;
     let messages = db.conversation_messages(id)?;
-    let questions = db.keys_as::<Question>(&crate::chats::question_prefix(id))?;
+    let questions = db.questions(id)?;
     let busy = run_is_active(run.as_ref())
         || chat.wakeup.is_some()
         || messages.iter().any(message_is_pending)
-        || questions.iter().any(|(_, question)| question.is_open());
+        || questions.iter().any(Question::is_open);
     if busy && !confirmed {
         return Err(Error::conflict(
             "Confirm deletion to stop the agent and cancel pending messages and questions.",
@@ -411,10 +411,7 @@ fn mark_environment_expiring(db: &Db<'_>, id: &str) -> Result<Option<Conversatio
     });
     let pending = chat.wakeup.is_some()
         || db.conversation_messages(id)?.iter().any(message_is_pending)
-        || db
-            .keys_as::<Question>(&crate::chats::question_prefix(id))?
-            .iter()
-            .any(|(_, q)| q.is_open());
+        || db.questions(id)?.iter().any(Question::is_open);
     if run_busy || pending || crate::chats::coding_agent::pending_for_run(db, run_id)? {
         return Ok(None);
     }
