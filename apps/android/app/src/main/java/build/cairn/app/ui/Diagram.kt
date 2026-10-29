@@ -856,23 +856,24 @@ private fun labelledLink(text: String, at: Int): LabelledLink? {
         return null
     for (index in at + 3 until text.length) {
         var end = -1
-        var body = ""
         if (open == "-.") {
             if (text[index] == '.' && text[index - 1] != '.') {
                 val close = index + run(text, index, '.')
                 if (text.getOrNull(close) == '-') {
                     end = headEnd(text, close + 1)
                     end = if (end >= 0) end else close + 1
-                    body = "-${text.substring(index, end)}"
                 }
             }
         } else if (text[index] == open[0] && text[index - 1] != open[0]) {
             end = linkBody(text, index)
-            if (end >= 0) body = text.substring(index, end)
         }
 
+        if (end <= 0) continue
         val label = jsTrim(text.substring(at + 2, index))
-        if (end > 0 && label.isNotEmpty()) return LabelledLink(label, body, end)
+        if (label.isNotEmpty()) {
+            val body = (if (open == "-.") "-" else "") + text.substring(index, end)
+            return LabelledLink(label, body, end)
+        }
     }
 
     return null

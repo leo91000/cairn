@@ -144,6 +144,22 @@ class DiagramMarkdownTest {
     }
 
     @Test
+    fun `only delimiters excluded from the parsed literal close streaming fences`() {
+        val renderer = MarkdownBlocks(Markwon.create(context))
+        val open = "```mermaid\nflowchart TD\nA-->B"
+        for (line in listOf("    ```", "\t```", "> ```")) {
+            assertTrue(renderer.render("$open\n$line").none { it.diagram != null })
+            assertTrue(renderer.render("$open\n$line\n```").any { it.diagram != null })
+        }
+        val quote = "> ```mermaid\n> flowchart TD\n> A-->B\n>     ```"
+        assertTrue(renderer.render(quote).none { it.diagram != null })
+        assertTrue(renderer.render("$quote\n> ```\n>").any { it.diagram != null })
+        val list = "- Item\n\n  ```mermaid\n  flowchart TD\n  A-->B\n      ```"
+        assertTrue(renderer.render(list).none { it.diagram != null })
+        assertTrue(renderer.render("$list\n  ```").any { it.diagram != null })
+    }
+
+    @Test
     fun `unsupported kinds keep their code block and failures explain themselves`() {
         val gantt = "gantt\n  title A plan\n  section One\n  Task :a1, 2024-01-01, 3d"
         var content by mutableStateOf(fence(gantt))

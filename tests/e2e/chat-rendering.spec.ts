@@ -360,3 +360,19 @@ test('Unicode wrapping, sequence increments and large totals remain readable', a
   await page.evaluate(text => window.chatRendering.markdown(text), `${quoted}\n>`)
   await expect(page.locator('#app figure.diagram svg')).toHaveCount(1)
 })
+
+test('fence closure follows parsed literals in quotes and lists', async ({ page }) => {
+  const root = '```mermaid\nflowchart TD\nA-->B'
+  const cases = [
+    ...['    ```', '\t```', '> ```'].map(line => ({ open: `${root}\n${line}`, close: '\n```' })),
+    { open: '> ```mermaid\n> flowchart TD\n> A-->B\n>     ```', close: '\n> ```\n>' },
+    { open: '- Item\n\n  ```mermaid\n  flowchart TD\n  A-->B\n      ```', close: '\n  ```' },
+  ]
+  for (const { open, close } of cases) {
+    await page.evaluate(text => window.chatRendering.markdown(text), open)
+    await expect(page.locator('#app figure.diagram')).toHaveCount(0)
+    await expect(page.locator('#app pre code')).toContainText('A-->B')
+    await page.evaluate(text => window.chatRendering.markdown(text), open + close)
+    await expect(page.locator('#app figure.diagram')).toHaveCount(1)
+  }
+})

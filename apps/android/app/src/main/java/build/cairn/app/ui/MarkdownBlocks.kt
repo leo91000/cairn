@@ -113,18 +113,22 @@ internal class MarkdownBlocks(
         while (node is BlockQuote || node is ListBlock || node is ListItem) node = node.lastChild
         val fence = node as? FencedCodeBlock ?: return null
         if (!isDiagramLanguage(fenceLanguage(fence.info))) return null
-        // Closed by a last line of the opening fence's character, at least as long as it.
-        val trimmed = content.trimEnd()
-        val closing =
-            trimmed
-                .lineSequence()
-                .map { it.trimStart(' ', '\t', '>').trim() }
-                .lastOrNull { it.isNotEmpty() }
-                .orEmpty()
-        val closed =
-            trimmed.contains('\n') &&
-                closing.length >= fence.fenceLength &&
-                closing.all { it == fence.fenceChar }
+        // A real closing delimiter is present in raw Markdown but excluded from its parsed literal.
+        fun trailingFences(text: String): Int {
+            var count = 0
+            var end = text.length
+            while (end > 0) {
+                val start = text.lastIndexOf('\n', end - 1)
+                val line = text.substring(start + 1, end).trimStart(' ', '\t', '>').trim()
+                end = start
+                if (line.isEmpty()) continue
+                if (line.length < fence.fenceLength || line.any { it != fence.fenceChar }) break
+                count++
+            }
+            return count
+        }
+        // Literal lines may themselves end with indented ticks; count the entire trailing run.
+        val closed = trailingFences(content) > trailingFences(fence.literal)
         return fence.takeUnless { closed }
     }
 

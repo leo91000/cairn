@@ -770,25 +770,26 @@ function labelledLink(text: string, at: number) {
     return undefined
   for (let index = at + 3; index < text.length; index++) {
     let end = -1
-    let body = ''
     if (open === '-.') {
       if (text[index] === '.' && text[index - 1] !== '.') {
         const close = index + run(text, index, '.')
         if (text[close] === '-') {
           end = headEnd(text, close + 1)
           end = end >= 0 ? end : close + 1
-          body = `-${text.slice(index, end)}`
         }
       }
     }
     else if (text[index] === open[0] && text[index - 1] !== open[0]) {
       end = linkBody(text, index)
-      body = text.slice(index, end)
     }
 
+    if (end <= 0)
+      continue
     const label = text.slice(at + 2, index).trim()
-    if (end > 0 && label)
+    if (label) {
+      const body = `${open === '-.' ? '-' : ''}${text.slice(index, end)}`
       return { label, body, end }
+    }
   }
 
   return undefined

@@ -103,12 +103,30 @@ async function openLink(event: MouseEvent) {
   }
 }
 
-/** A fence is closed by a line of its own character, at least as long as its opening. */
-function closedFence(raw: string) {
-  const lines = raw.trimEnd().split('\n')
-  const opening = /^ {0,3}(`{3,}|~{3,})/.exec(lines[0]!)?.[1]
-  const closing = lines.length > 1 ? lines.at(-1)!.trim() : ''
-  return !!opening && closing.length >= opening.length && closing === opening[0]!.repeat(closing.length)
+/** A real closing delimiter is present in raw Markdown but excluded from its parsed literal. */
+function closedFence(raw: string, literal: string) {
+  const opening = /^ {0,3}(`{3,}|~{3,})/.exec(raw)?.[1]
+  if (!opening)
+    return false
+  const trailingFences = (text: string) => {
+    let count = 0
+    let end = text.length
+    while (end > 0) {
+      const start = text.lastIndexOf('\n', end - 1)
+      const line = text.slice(start + 1, end).replace(/^[ \t>]*/, '').trim()
+      end = start
+      if (!line)
+        continue
+      if (line.length < opening.length || line !== opening[0]!.repeat(line.length))
+        break
+      count++
+    }
+
+    return count
+  }
+
+  // Literal lines may themselves end with indented ticks; count the entire trailing run.
+  return trailingFences(raw) > trailingFences(literal)
 }
 
 const html = computed(() => {
@@ -120,7 +138,7 @@ const html = computed(() => {
   const renderCode = codeRenderer.code.bind(codeRenderer)
   codeRenderer.code = (token) => {
     const rendered = renderCode(token)
-    if (!isDiagramLanguage(token.lang?.split(/\s/)[0]) || !closedFence(token.raw))
+    if (!isDiagramLanguage(token.lang?.split(/\s/)[0]) || !closedFence(token.raw, token.text))
       return rendered
     hasDiagrams = true
     return rendered.replace('<pre>', `<pre ${closedFenceAttribute}>`)
