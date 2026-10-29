@@ -25,6 +25,15 @@ abstract class QuestionWithdrawalCases {
 
     @Test
     fun withdrawalRequiresNoAnswerAndCanBeRetriedAfterARejectedRequest() {
+        withdrawalCase(false)
+    }
+
+    @Test
+    fun unsupportedLegacyOptionsCannotBeAnsweredButCanBeWithdrawn() {
+        withdrawalCase(true)
+    }
+
+    private fun withdrawalCase(legacy: Boolean) {
         MockWebServer().use { server ->
             val writes = CopyOnWriteArrayList<Pair<String, String>>()
             val question =
@@ -32,7 +41,12 @@ abstract class QuestionWithdrawalCases {
                     "question",
                     "chat",
                     blocking = true,
-                    fields = listOf(QuestionField("scope", "Quelle portée ?")),
+                    fields =
+                        if (legacy)
+                            wireJson.decodeFromString<List<QuestionField>>(
+                                """[{"id":"scope","title":"Quelle portée ?","options":[{"label":"Application entière"},{"label":"Un seul module"}]}]"""
+                            )
+                        else listOf(QuestionField("scope", "Quelle portée ?")),
                 )
             server.dispatcher =
                 object : Dispatcher() {
@@ -119,6 +133,15 @@ abstract class QuestionWithdrawalCases {
             try {
                 ready()
                 compose.onNodeWithText("Envoyer la réponse").assertIsNotEnabled()
+                if (legacy) {
+                    compose
+                        .onNodeWithText(
+                            "Cette question utilise un format non pris en charge.",
+                            substring = true,
+                        )
+                        .assertExists()
+                    compose.onAllNodes(isSelectable()).assertCountEquals(0)
+                }
                 compose.onNodeWithText("Ce n’est plus utile").performClick()
                 compose.waitUntil(10000) {
                     compose

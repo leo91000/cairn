@@ -232,6 +232,56 @@ async fn disk_notice_is_submitted_without_user_delivery_receipts_including_repla
 }
 
 #[tokio::test]
+async fn later_submissions_settle_when_their_assistant_response_was_created_first() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s).await;
+    tokio::fs::create_dir_all(root.path().join("inbox"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        root.path().join("inbox/disk-notice.json"),
+        json!({ "id": "disk-notice", "operationalNotice": true, "text": "Runtime disk pressure" })
+            .to_string(),
+    )
+    .await
+    .unwrap();
+    let mut input = plan(&root, "Build the status panel");
+    input["opencodeConfig"] = json!({ "fixtureReversePromptCompletion": true });
+    for _ in 0..2 {
+        let (result, events) = run(&s, input.clone()).await;
+        result.unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(root.path().join("result.md"))
+                .await
+                .unwrap(),
+            "Runtime disk pressure"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event["type"] == "chat.delivered" && event["messageId"] == "initial")
+        );
+        assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["type"] == "chat.delivered"
+                    && event["messageId"] == "disk-notice")
+        );
+    }
+    let receipt = tokio::fs::read_to_string(root.path().join("result.opencode-receipt.json"))
+        .await
+        .unwrap();
+    assert!(
+        !serde_json::from_str::<Value>(&receipt).unwrap()["delivered"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("disk-notice"))
+    );
+}
+
+#[tokio::test]
 async fn native_turn_streams_and_completed_receipt_replays_without_an_engine() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
