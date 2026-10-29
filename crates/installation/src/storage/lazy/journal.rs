@@ -40,11 +40,15 @@ pub(super) struct Record {
 
 impl Record {
     pub fn read(&self) -> io::Result<Vec<u8>> {
+        let sample = crate::performance::publication::start(
+            crate::performance::publication::Stage::NodeLocalRead,
+        );
         let mut actual = [0; HEADER];
         self.file.read_exact_at(&mut actual, self.position)?;
         let mut data = vec![0; (self.end - self.start) as usize];
         self.file
             .read_exact_at(&mut data, self.position + HEADER as u64)?;
+        sample.finish(actual.len() + data.len());
         if actual != self.header
             || digest(&actual[..48], &[]) != actual[48..80]
             || digest(&actual[..80], &data) != actual[80..]
@@ -63,10 +67,14 @@ impl Record {
 }
 
 pub(super) fn digest(header: &[u8], data: &[u8]) -> [u8; 32] {
+    let sample =
+        crate::performance::publication::start(crate::performance::publication::Stage::JournalHash);
     let mut hasher = blake3::Hasher::new();
     hasher.update(header);
     hasher.update(data);
-    *hasher.finalize().as_bytes()
+    let digest = *hasher.finalize().as_bytes();
+    sample.finish(header.len() + data.len());
+    digest
 }
 
 fn integer(header: &[u8], offset: usize) -> i64 {

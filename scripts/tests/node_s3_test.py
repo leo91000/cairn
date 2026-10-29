@@ -8,12 +8,45 @@ import os
 from pathlib import Path
 import resource
 import subprocess
+from threading import Lock
 
 import boto3
 from moto.server import ThreadedMotoServer
 
 NATIVE_S3_KEY_BUFFER_BYTES = 64 * 1024
 NATIVE_S3_OPEN_FILES = 65536
+
+
+class SnapshotS3Application:
+    """Moto's model operations need a consistent snapshot during version GC."""
+
+    def __init__(self, application):
+        self.application = application
+        self.lock = Lock()
+
+    def __call__(self, environment, start_response):
+        # Moto 5.2.3 snapshots key names, then looks up their mutable version
+        # lists. A concurrent DELETE can turn that lookup into None and make
+        # ListObjectVersions return 500. Finish model execution and materialize
+        # its response atomically; serve those bytes outside the model lock.
+        # Native objects are disk blocks (<=4 MiB plus framing), not whole disks.
+        with self.lock:
+            response = self.application(environment, start_response)
+            try:
+                return list(response)
+            finally:
+                if hasattr(response, 'close'):
+                    response.close()
+
+
+def s3_server(native=False):
+    server = ThreadedMotoServer(ip_address='127.0.0.1', port=0, verbose=False)
+    server.start()
+    if native:
+        # Moto exposes no application constructor parameter. This is installed
+        # before creating any client, on the pinned fixture server only.
+        server._server.app = SnapshotS3Application(server._server.app)
+    return server
 
 
 def configure_native_s3():
@@ -44,8 +77,7 @@ def main():
     args = parser.parse_args()
     if args.native_runtime:
         configure_native_s3()
-    server = ThreadedMotoServer(ip_address='127.0.0.1', port=0, verbose=False)
-    server.start()
+    server = s3_server(native=bool(args.native_runtime))
     try:
         host, port = server.get_host_and_port()
         endpoint = f'http://{host}:{port}'

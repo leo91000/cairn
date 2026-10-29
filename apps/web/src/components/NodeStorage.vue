@@ -93,14 +93,14 @@ async function save() {
           max="3600"
           required
         ></label>
-        <label>Maximum active synchronization delay (seconds)<input
+        <label>Synchronization warning after (seconds)<input
           v-model.number="policy.maxDirtySeconds"
           type="number"
           :min="policy.backupSeconds"
           max="86400"
           required
         ></label>
-        <p>Old unsaved work is synchronized first on resume. This limit bounds how long the resumed execution can continue without publication.</p>
+        <p>Old unsaved work is synchronized first on resume. Overdue synchronization is reported while work continues; integrity and free-space protections still apply.</p>
       </fieldset><p v-if="error" role="alert" class="text-coral">
         {{ error }}
       </p>

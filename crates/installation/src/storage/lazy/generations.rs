@@ -182,6 +182,9 @@ impl LazyDisk {
     }
 
     pub fn captured_block(&self, generation: i64, hash: &str) -> io::Result<Vec<u8>> {
+        let metadata = crate::performance::publication::start(
+            crate::performance::publication::Stage::NodeMetadata,
+        );
         let _publication = self.publication.read().map_err(failure)?;
         let manifest: String = self
             .db
@@ -207,6 +210,7 @@ impl LazyDisk {
             .as_u64()
             .filter(|size| *size <= BLOCK)
             .ok_or_else(|| failure("Invalid extent"))?;
+        metadata.finish(0);
         let mut bytes = vec![0; length as usize];
         self.read_generation(generation, offset, &mut bytes)?;
         if !super::super::digest::matches(hash, &bytes) {
@@ -218,9 +222,40 @@ impl LazyDisk {
     /// Call only after the master has durably published every dependency and
     /// authorized reads of the new base. Completion drains readers of the old base.
     pub fn commit_published(&self, generation: i64, backup_id: &str) -> io::Result<()> {
+        self.commit_published_guarded(generation, backup_id, false, || Ok(()))
+    }
+
+    pub(crate) fn try_commit_published_guarded<G>(
+        &self,
+        generation: i64,
+        backup_id: &str,
+        guard: impl FnOnce() -> io::Result<G>,
+    ) -> io::Result<()> {
+        self.commit_published_guarded(generation, backup_id, true, guard)
+    }
+
+    fn commit_published_guarded<G>(
+        &self,
+        generation: i64,
+        backup_id: &str,
+        nonblocking: bool,
+        guard: impl FnOnce() -> io::Result<G>,
+    ) -> io::Result<()> {
         let mut timing =
             crate::performance::Operation::new("journal_publish", backup_id, "reader_lock");
-        let _publication = self.publication.write().map_err(failure)?;
+        let _publication = if nonblocking {
+            self.publication.try_write().map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Journal readers must finish before acknowledgement.",
+                ),
+                error => failure(error),
+            })?
+        } else {
+            self.publication.write().map_err(failure)?
+        };
+        // Readers take publication before reporting; never reverse that order.
+        let _guard = guard()?;
         timing.next("commit");
         let mut journal = self.journal.lock().map_err(failure)?;
         let mut db = self.db.lock().map_err(failure)?;

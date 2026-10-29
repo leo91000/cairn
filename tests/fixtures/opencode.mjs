@@ -15,7 +15,8 @@ if (process.argv.includes('--version')) {
 async function main() {
   const root = path.join(process.env.XDG_DATA_HOME, 'opencode')
   await mkdir(root, { recursive: true })
-  if (JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}').fixtureStartupHang) {
+  const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}')
+  if (config.fixtureStartupHang) {
     await writeFile(path.join(root, 'startup.pid'), `${process.pid}`)
     setInterval(() => {}, 1000)
     return
@@ -118,7 +119,8 @@ async function main() {
     await persist()
     emit('message.updated', { info: message.info })
     emit('message.part.updated', { part })
-    emit('session.status', { sessionID: session.id, status: { type: 'idle' } })
+    if (!session.deferIdle)
+      emit('session.status', { sessionID: session.id, status: { type: 'idle' } })
   }
 
   async function prompt(session, input) {
@@ -301,7 +303,10 @@ async function main() {
     tool.state = { ...tool.state, status: 'completed', output: 'Workspace ready\n' }
     emit('message.part.updated', { part: tool })
     hanging.delete(session.id)
-    await finish(session, input.messageID, 'I checked the workspace and prepared a compact status panel. The model and API key were selected through OpenCode.', body.includes('fixture:opencode-length') ? 'length' : 'stop')
+    const answer = config.fixtureReversePromptCompletion
+      ? body
+      : 'I checked the workspace and prepared a compact status panel. The model and API key were selected through OpenCode.'
+    await finish(session, input.messageID, answer, body.includes('fixture:opencode-length') ? 'length' : 'stop')
   }
 
   const server = http.createServer(async (request, response) => {
@@ -393,7 +398,27 @@ async function main() {
     if (route[2] === '/prompt_async') {
       response.writeHead(204)
       response.end()
-      setTimeout(() => void prompt(session, body).catch(() => emit('session.error', { sessionID: session.id, error: { name: 'FixtureError' } })), 20)
+      const fail = () => emit('session.error', { sessionID: session.id, error: { name: 'FixtureError' } })
+      if (config.fixtureReversePromptCompletion) {
+        if (!session.firstPrompt) {
+          session.firstPrompt = body
+          return
+        }
+
+        // Both histories must be visible at idle. Complete the second prompt
+        // first, so assistant creation time disagrees with submission order.
+        session.deferIdle = true
+        void (async () => {
+          await prompt(session, body)
+          await prompt(session, session.firstPrompt)
+          session.deferIdle = false
+          emit('session.status', { sessionID: session.id, status: { type: 'idle' } })
+        })().catch(fail)
+      }
+      else {
+        setTimeout(() => void prompt(session, body).catch(fail), 20)
+      }
+
       return
     }
 

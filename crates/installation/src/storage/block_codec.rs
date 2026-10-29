@@ -1,11 +1,17 @@
 //! Authenticated S3 block representations; content identity always names decoded bytes.
 //! CPU work runs off Tokio's executor, with permits retained even if a caller cancels.
 use super::{digest, metrics::Counter};
+use crate::performance::publication::{self as diagnostic, Stage};
 use crate::{
     error::{Error, Result},
     nodes::snapshots::BLOCK,
     vault::Vault,
 };
+use aes_gcm::{
+    Aes256Gcm, KeyInit, Nonce,
+    aead::{Aead, Payload},
+};
+use rand::RngCore;
 use serde_json::{Value, json};
 use std::sync::{
     Arc,
@@ -14,6 +20,7 @@ use std::sync::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const V2: &[u8; 8] = b"CAIRNB\x02\0";
+const V3: &[u8; 8] = b"CAIRNB\x03\0";
 const RAW: u8 = 0;
 const ZSTD: u8 = 1;
 const PAYLOAD_HEADER: usize = 5;
@@ -72,6 +79,7 @@ impl BlockCodec {
     }
 
     pub async fn encode(&self, vault: Vault, scope: String, bytes: Vec<u8>) -> Result<Vec<u8>> {
+        let diagnostic_admission = diagnostic::start(Stage::CodecAdmission);
         let admission = self.metrics.admission.start();
         let permit = self
             .workers
@@ -80,9 +88,10 @@ impl BlockCodec {
             .await
             .map_err(Error::internal)?;
         admission.finish(0);
+        diagnostic_admission.finish(0);
         let metrics = self.metrics.clone();
 
-        tokio::task::spawn_blocking(move || {
+        diagnostic::blocking(move || {
             let _permit = permit;
             let sample = metrics.encode.start();
             let (encoded, codec) = encode(&vault, &scope, &bytes)?;
@@ -120,6 +129,7 @@ impl BlockCodec {
     /// includes the CPU queue, so completed GETs cannot accumulate unbounded bytes.
     /// It is independent of CPU admission: a blocked GET never occupies a CPU slot.
     pub(crate) async fn read_permit(&self) -> Result<OwnedSemaphorePermit> {
+        let diagnostic_admission = diagnostic::start(Stage::RecoveryAdmission);
         let sample = self.metrics.read_admission.start();
         let permit = self
             .reads
@@ -128,6 +138,7 @@ impl BlockCodec {
             .await
             .map_err(Error::internal)?;
         sample.finish(0);
+        diagnostic_admission.finish(0);
         Ok(permit)
     }
 
@@ -140,6 +151,7 @@ impl BlockCodec {
         encoded: Vec<u8>,
         read_permit: OwnedSemaphorePermit,
     ) -> Result<Vec<u8>> {
+        let diagnostic_admission = diagnostic::start(Stage::CodecAdmission);
         let admission = self.metrics.admission.start();
         let permit = self
             .workers
@@ -148,9 +160,10 @@ impl BlockCodec {
             .await
             .map_err(Error::internal)?;
         admission.finish(0);
+        diagnostic_admission.finish(0);
         let metrics = self.metrics.clone();
 
-        tokio::task::spawn_blocking(move || {
+        diagnostic::blocking(move || {
             let _permit = permit;
             let _read_permit = read_permit;
             let sample = metrics.decode.start();
@@ -187,7 +200,9 @@ fn valid_size(size: u64) -> Result<usize> {
 
 fn encode(vault: &Vault, scope: &str, bytes: &[u8]) -> Result<(Vec<u8>, u8)> {
     valid_size(bytes.len() as u64)?;
+    let sample = diagnostic::start(Stage::Compress);
     let compressed = zstd::bulk::compress(bytes, 3)?;
+    sample.finish(bytes.len());
     let (codec, data) = if compressed.len() < bytes.len() {
         (ZSTD, compressed.as_slice())
     } else {
@@ -198,11 +213,106 @@ fn encode(vault: &Vault, scope: &str, bytes: &[u8]) -> Result<(Vec<u8>, u8)> {
     payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     payload.extend_from_slice(data);
 
+    let sample = diagnostic::start(Stage::Encrypt);
     let encrypted = vault.encrypt_bytes(&v2_scope(scope), &payload)?;
+    sample.finish(payload.len());
     let mut encoded = Vec::with_capacity(V2.len() + encrypted.len());
     encoded.extend_from_slice(V2);
     encoded.extend_from_slice(&encrypted);
     Ok((encoded, codec))
+}
+
+/// Node-side encoding. The key is restricted to this immutable object incarnation.
+pub(crate) fn encode_direct(
+    key: &[u8; 32],
+    scope: &str,
+    hash: &str,
+    bytes: &[u8],
+) -> Result<Vec<u8>> {
+    valid_size(bytes.len() as u64)?;
+    if !digest::matches(hash, bytes) {
+        return Err(Error::bad(
+            "Direct upload plaintext failed integrity verification.",
+        ));
+    }
+    let sample = diagnostic::start(Stage::Compress);
+    let compressed = zstd::bulk::compress(bytes, 3)?;
+    sample.finish(bytes.len());
+    let (codec, data) = if compressed.len() < bytes.len() {
+        (ZSTD, compressed.as_slice())
+    } else {
+        (RAW, bytes)
+    };
+    let mut payload = vec![codec];
+    payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    payload.extend_from_slice(data);
+    let mut nonce = [0; 12];
+    rand::rng().fill_bytes(&mut nonce);
+    let aad = format!("disk-block:v3:{scope}");
+    let sample = diagnostic::start(Stage::Encrypt);
+    let encrypted = Aes256Gcm::new(key.into())
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: &payload,
+                aad: aad.as_bytes(),
+            },
+        )
+        .map_err(|_| Error::internal("Direct storage encryption failed."))?;
+    sample.finish(payload.len());
+    let mut encoded = V3.to_vec();
+    encoded.extend_from_slice(&nonce);
+    encoded.extend_from_slice(&encrypted);
+    Ok(encoded)
+}
+
+pub(crate) fn decode_direct(
+    key: &[u8; 32],
+    scope: &str,
+    hash: &str,
+    size: u64,
+    encoded: &[u8],
+) -> Result<Vec<u8>> {
+    let size = valid_size(size)?;
+    if !encoded.starts_with(V3)
+        || encoded.len() < 8 + 12 + 16 + PAYLOAD_HEADER
+        || encoded.len() as u64 > MAX_ENCODED_BYTES
+    {
+        return Err(Error::bad("Invalid direct storage envelope."));
+    }
+    let aad = format!("disk-block:v3:{scope}");
+    let sample = diagnostic::start(Stage::Decrypt);
+    let payload = Aes256Gcm::new(key.into())
+        .decrypt(
+            Nonce::from_slice(&encoded[8..20]),
+            Payload {
+                msg: &encoded[20..],
+                aad: aad.as_bytes(),
+            },
+        )
+        .map_err(|_| Error::bad("Direct storage authentication failed."))?;
+    sample.finish(encoded.len() - 20);
+    if payload.len() < PAYLOAD_HEADER
+        || u32::from_le_bytes(payload[1..5].try_into().unwrap()) as usize != size
+    {
+        return Err(Error::bad("Direct storage plaintext size mismatch."));
+    }
+    let bytes = match payload[0] {
+        RAW if payload.len() == size + PAYLOAD_HEADER => payload[PAYLOAD_HEADER..].to_vec(),
+        ZSTD => {
+            let sample = diagnostic::start(Stage::Decompress);
+            let bytes = decompress(&payload[PAYLOAD_HEADER..], size)?;
+            sample.finish(bytes.len());
+            bytes
+        }
+        _ => return Err(Error::bad("Invalid direct storage codec.")),
+    };
+    if !digest::matches(hash, &bytes) {
+        return Err(Error::bad(
+            "Direct storage plaintext failed integrity verification.",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn decode(
@@ -221,7 +331,9 @@ fn decode(
     }
     let ciphertext = &encoded[V2.len()..];
     let (bytes, codec) = {
+        let sample = diagnostic::start(Stage::Decrypt);
         let payload = vault.decrypt_bytes(&v2_scope(scope), ciphertext)?;
+        sample.finish(ciphertext.len());
         let header = payload
             .get(..PAYLOAD_HEADER)
             .ok_or_else(|| Error::bad("Invalid disk block header."))?;
@@ -232,7 +344,12 @@ fn decode(
         let data = &payload[PAYLOAD_HEADER..];
         let bytes = match header[0] {
             RAW if data.len() == size => data.to_vec(),
-            ZSTD => decompress(data, size)?,
+            ZSTD => {
+                let sample = diagnostic::start(Stage::Decompress);
+                let bytes = decompress(data, size)?;
+                sample.finish(bytes.len());
+                bytes
+            }
             _ => return Err(Error::bad("Invalid disk block codec or length.")),
         };
         (bytes, header[0])
@@ -551,7 +668,7 @@ mod tests {
         runtime.block_on(async {
             let (entered, ready) = tokio::sync::oneshot::channel();
             let (release, wait) = std::sync::mpsc::channel();
-            let occupied = tokio::task::spawn_blocking(move || {
+            let occupied = diagnostic::blocking(move || {
                 entered.send(()).unwrap();
                 wait.recv().unwrap();
             });

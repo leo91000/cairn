@@ -1110,14 +1110,14 @@ private fun NodeStorageEditor(
                 keyboardOptions = InputKeyboards.Number,
             )
             Field(
-                "Suspendre après (secondes)",
+                "Avertir du retard après (secondes)",
                 dirty,
                 { dirty = it },
                 enabled = !state.busy,
                 keyboardOptions = InputKeyboards.Number,
             )
             Text(
-                "Suspend les exécutions si leurs modifications restent non synchronisées trop longtemps.",
+                "Signale le retard sans suspendre le travail. Les protections d’intégrité et d’espace libre restent actives.",
                 style = MaterialTheme.typography.bodySmall,
             )
         }

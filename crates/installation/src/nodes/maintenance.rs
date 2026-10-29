@@ -268,7 +268,7 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
         let mut synchronized = true;
         if run["sessionId"].is_string() {
             loop {
-                match super::publication::capture(s, &run).await {
+                match super::publication::capture_for_update(s, &run, node).await {
                     Ok(_) => break,
                     Err(error) if native && error.status == 425 => {
                         // The enclosing drain deadline bounds this wait. Keep

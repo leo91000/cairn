@@ -128,6 +128,8 @@ bounds remain within the twenty-minute lease.
 
 Version-11 manager databases support the automatic
 [data-preserving upgrade to version 12](migrations/0012-typed-node-inventory.md).
+Direct-storage releases continue with the preserving
+[version 13 metadata upgrade](migrations/0013-direct-node-storage.md).
 Retain a consistent database/WAL backup before upgrading; automatic updates create
 no backups. Preserve installation identity, node state and object storage. Other
 schema transitions require their own documented compatibility path; an unsupported
