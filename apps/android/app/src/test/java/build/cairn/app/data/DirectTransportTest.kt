@@ -23,6 +23,168 @@ import org.junit.Test
 
 class DirectTransportTest {
     @Test
+    fun `direct history negotiates gzip and decodes unicode JSON`() = runTest {
+        MockWebServer().use { server ->
+            server.start()
+            val expected = body("text" to "History 🦊 ".repeat(1000)).toString()
+            val compressed =
+                java.io
+                    .ByteArrayOutputStream()
+                    .also { output ->
+                        java.util.zip.GZIPOutputStream(output).use {
+                            it.write(expected.toByteArray())
+                        }
+                    }
+                    .toByteArray()
+            val api = CairnApi(server.url("/"), MemoryVault(), installationId = "test")
+            lateinit var channel: DirectChannel
+            channel =
+                DirectChannel(
+                    { packet, _, _ ->
+                        val request =
+                            wireJson
+                                .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
+                                .jsonObject
+                        assertTrue(
+                            request["headers"]!!.jsonArray.any {
+                                it.jsonArray[0].jsonPrimitive.content == "accept-encoding" &&
+                                    it.jsonArray[1].jsonPrimitive.content == "gzip"
+                            }
+                        )
+                        val frame = buildJsonObject {
+                            put("type", "response")
+                            put("id", request["id"]!!)
+                            put("status", 200)
+                            put(
+                                "headers",
+                                buildJsonArray {
+                                    add(
+                                        buildJsonArray {
+                                            add("content-type")
+                                            add("application/json")
+                                        }
+                                    )
+                                    add(
+                                        buildJsonArray {
+                                            add("content-encoding")
+                                            add("gzip")
+                                        }
+                                    )
+                                    add(
+                                        buildJsonArray {
+                                            add("content-length")
+                                            add(compressed.size.toString())
+                                        }
+                                    )
+                                },
+                            )
+                            put(
+                                "body",
+                                if (request["method"]!!.jsonPrimitive.content == "HEAD") ""
+                                else Base64.getEncoder().encodeToString(compressed),
+                            )
+                        }
+                        channel.receive(singleFramePacket(frame.toString().toByteArray()))
+                    },
+                    {},
+                )
+            api.transport.attach(channel)
+            val head =
+                Request.Builder()
+                    .url(server.url("/api/installations/test/api/chats"))
+                    .head()
+                    .build()
+            channel.request(head, "/api/installations/test/api/", { false }).use {
+                assertEquals("gzip", it.header("content-encoding"))
+                assertEquals("", it.body.string())
+            }
+            assertEquals(expected, api.request("GET", "/runs/r/history?before=42&history=v1:r:1"))
+            assertEquals("direct", api.transport.route.value)
+            assertEquals(0, server.requestCount)
+            api.closeStreams()
+        }
+    }
+
+    @Test
+    fun `stream paths request identity so JSON errors remain readable`() = runTest {
+        for (path in listOf("/runs/r/stream?history=invalid", "/shared-artifacts/a/file")) {
+            MockWebServer().use { server ->
+                server.start()
+                lateinit var channel: DirectChannel
+                channel =
+                    DirectChannel(
+                        { packet, _, _ ->
+                            val request =
+                                wireJson
+                                    .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
+                                    .jsonObject
+                            val type = request["type"]!!.jsonPrimitive.content
+                            if (type == "request") {
+                                assertTrue(
+                                    request["headers"]!!.jsonArray.any {
+                                        it.jsonArray[0].jsonPrimitive.content ==
+                                            "accept-encoding" &&
+                                            it.jsonArray[1].jsonPrimitive.content == "identity"
+                                    }
+                                )
+                                channel.receive(
+                                    singleFramePacket(
+                                        buildJsonObject {
+                                            put("type", "stream_start")
+                                            put("id", request["id"]!!)
+                                            put("status", 400)
+                                            put(
+                                                "headers",
+                                                buildJsonArray {
+                                                    add(
+                                                        buildJsonArray {
+                                                            add("content-type")
+                                                            add("application/json")
+                                                        }
+                                                    )
+                                                },
+                                            )
+                                            put(
+                                                "body",
+                                                Base64.getEncoder()
+                                                    .encodeToString(
+                                                        """{"error":"Invalid history version."}"""
+                                                            .toByteArray()
+                                                    ),
+                                            )
+                                        }
+                                            .toString()
+                                            .toByteArray()
+                                    )
+                                )
+                            } else if (type == "stream_credit") {
+                                channel.receive(
+                                    singleFramePacket(
+                                        buildJsonObject {
+                                            put("type", "stream_end")
+                                            put("id", request["id"]!!)
+                                            put("failed", false)
+                                        }
+                                            .toString()
+                                            .toByteArray()
+                                    )
+                                )
+                            }
+                        },
+                        {},
+                    )
+                val request =
+                    Request.Builder().url(server.url("/api/installations/test/api$path")).build()
+                channel.request(request, "/api/installations/test/api/", { false }).use {
+                    assertEquals(400, it.code)
+                    assertEquals("""{"error":"Invalid history version."}""", it.body.string())
+                }
+                channel.close()
+            }
+        }
+    }
+
+    @Test
     fun `a protocol mismatch is actionable and never falls back to relay`() = runBlocking {
         val packets =
             listOf(

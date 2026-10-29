@@ -1,6 +1,6 @@
 import type { BrowserContext, Page } from '@playwright/test'
 import type { RunEvent } from '../../packages/contracts/contracts'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   signIn as authenticateWorkspace,
   expect,
@@ -12,6 +12,12 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+
+// Keep these chaining fixtures byte-limited even with a 1,000-event page cap.
+// Output stays inside collapsed tools, so the visible rows still fold tightly.
+function historyNoise(id: string) {
+  return Array.from({ length: 128 }, (_, index) => createHash('sha256').update(`${id}:${index}`).digest('hex')).join('')
+}
 
 test('chat groups visible calls despite diagnostics, updates and global event ID gaps', async ({ page, workspace }) => {
   const original = workspace.service.store.runs().find(run => run.status === 'succeeded')!
@@ -177,6 +183,7 @@ for (const kind of ['chat', 'task'] as const) {
           type: 'command_execution',
           command: 'cat README.md',
           exit_code: 0,
+          aggregated_output: historyNoise(`fold-${i}`),
         },
       })
     }
@@ -268,6 +275,7 @@ test('automatic history pauses on errors and resumes only after retry', async ({
         type: 'command_execution',
         command: 'cat README.md',
         exit_code: 0,
+        aggregated_output: historyNoise(`retry-${i}`),
       },
     })
   }
@@ -613,6 +621,9 @@ test('a cached run restores the reading offset while its stream is still connect
 })
 
 test('following the latest output resumes a long backlog on the recent window, while a reader keeps its place', async ({ page, workspace }) => {
+  // Each of the 560 durable fixture appends starts the real Rust helper. Keep
+  // that setup time separate from the unchanged per-assertion response limits.
+  test.setTimeout(60_000)
   await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs()[0]
   const write = (from: number, to: number) => {
