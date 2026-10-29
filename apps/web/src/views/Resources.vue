@@ -171,9 +171,14 @@ function edit(item?: Project) {
 }
 
 async function projectRequest<T>(path: string, options: RequestInit): Promise<T> {
-  if (path === '/projects/import')
-    return await importProject(api, JSON.parse(options.body as string)) as T
   const payload = JSON.parse(options.body as string)
+  if (path === '/projects/import') {
+    // Imports recover by their source identity; the generic form's creation ID
+    // belongs only to locally registered projects.
+    delete payload.creationId
+    return await importProject(api, payload) as T
+  }
+
   const saved = options.method === 'PUT'
     ? await replaceProject(api, { projectId: editing.value!, revision: revision.value, settings: form.value })
     : await createProject(api, {

@@ -5648,13 +5648,13 @@ async fn source_tools_share_status_updates_and_fence_instance_revocation_during_
         let invoke = |name: &'static str, input: Value| {
             let s = s.clone();
             let configuration = configuration.clone();
-            async move {
+            Box::pin(async move {
                 if internal {
                     call(&s, &configuration, name, input).await
                 } else {
                     public_call(&s, &["read", "manage"], name, input).await
                 }
-            }
+            })
         };
         let first = "1".repeat(40);
         let second = "2".repeat(40);

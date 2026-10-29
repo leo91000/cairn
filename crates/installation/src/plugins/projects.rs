@@ -170,7 +170,10 @@ pub(crate) async fn import(
             .as_ref()
             .is_some_and(|source| source.plugin_id == plugin_id && source.id == item_id)
     }) {
-        return Ok(serde_json::to_value(project)?);
+        authority.recheck(s).await?;
+        if let Some(current) = s.store.project(&project.id.to_string()).await? {
+            return Ok(serde_json::to_value(current)?);
+        }
     }
     let scope = Scope::Instance(Box::new(connection.clone()));
     let payload = json!({
@@ -194,7 +197,11 @@ pub(crate) async fn import(
             "The plugin resolved a remote outside its declared hosts.",
         ));
     }
-    if let Some(project) = projects
+    authority.recheck(s).await?;
+    if let Some(project) = s
+        .store
+        .projects()
+        .await?
         .iter()
         .find(|project| same_remote(&project.origin, &origin))
     {

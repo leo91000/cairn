@@ -4,5 +4,11 @@ package build.cairn.contracts
 import build.cairn.app.data.CairnApi
 import build.cairn.app.data.segment
 
-suspend fun CairnApi.listSkills(input: ListSkillsInput): List<Skill> =
-    send("GET", "/skills?scope=${segment(input.scope?.toString().orEmpty())}")
+suspend fun CairnApi.listSkills(input: ListSkillsInput): List<Skill> {
+    val query =
+        listOfNotNull(input.scope?.let { "scope" to it.toString() }).joinToString("&") {
+            (key, value) ->
+            "$key=${segment(value)}"
+        }
+    return send("GET", "/skills${if (query.isEmpty()) "" else "?$query"}")
+}

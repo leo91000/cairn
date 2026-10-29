@@ -401,7 +401,7 @@ fn global_scope() -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum ReadSkillOutput {
-    Bundle(SkillBundle),
+    Bundle(Box<SkillBundle>),
     File(SkillFileContent),
 }
 

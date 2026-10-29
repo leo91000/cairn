@@ -460,51 +460,6 @@ impl Skills {
         Ok(serde_json::to_value(parsed)?)
     }
 
-    /// Writes one file immediately, as a batch of one change.
-    pub async fn write(
-        &self,
-        skill: &str,
-        file: &str,
-        bytes: Vec<u8>,
-        executable: Option<bool>,
-        project: Option<&Path>,
-    ) -> Result<Value> {
-        name(skill)?;
-        let root = self.root(project).await?;
-        let directory = root.join(skill);
-        let revision = match fs::symlink_metadata(&directory).await {
-            Ok(_) => Some(bundle::describe(&directory).await?.revision),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-        let base = revision.as_deref().map_or(Base::Create, Base::Edit);
-        let change = Change::Write {
-            path: file.to_owned(),
-            bytes,
-            executable,
-        };
-        bundle::save(&root, skill, base, &[change]).await?;
-        Ok(json!({ "saved": true }))
-    }
-
-    pub async fn remove(&self, skill: &str, project: Option<&Path>) -> Result<()> {
-        let _write = bundle::ACCESS.write().await;
-        let directory = self.directory(skill, project).await?;
-        fs::remove_dir_all(directory).await?;
-        Ok(())
-    }
-
-    /// Paths of the visible files, for clients that predate bundles.
-    pub async fn files(&self, skill: &str, project: Option<&Path>) -> Result<Vec<String>> {
-        let _read = bundle::ACCESS.read().await;
-        let directory = self.directory(skill, project).await?;
-        Ok(bundle::scan(&directory)
-            .await?
-            .into_iter()
-            .map(|entry| entry.path)
-            .collect())
-    }
-
     /// Text files as UTF-8, other files as base64.
     pub async fn read(&self, skill: &str, file: &str, project: Option<&Path>) -> Result<Value> {
         let _read = bundle::ACCESS.read().await;
@@ -628,19 +583,6 @@ impl Skills {
         let root = self.root(project).await?;
         let base = base.map_or(Base::Create, Base::Edit);
         bundle::save_authorized(&root, skill, base, changes, authorization).await
-    }
-
-    /// Replaces every file of an existing skill.
-    pub async fn replace(
-        &self,
-        skill: &str,
-        base: &str,
-        changes: &[Change],
-        project: Option<&Path>,
-    ) -> Result<bundle::Described> {
-        name(skill)?;
-        let root = self.root(project).await?;
-        bundle::save(&root, skill, Base::Replace(base), changes).await
     }
 
     fn uploads(&self) -> PathBuf {

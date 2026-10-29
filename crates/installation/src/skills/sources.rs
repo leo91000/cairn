@@ -16,6 +16,7 @@ use crate::{
     service::Service,
     validation::{text, uuid},
 };
+use cairn_contracts::{SkillSource, SkillSourceChange, SkillSourceStatus, SkillSourceVersion};
 use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -25,6 +26,7 @@ const PARALLEL_DOWNLOADS: usize = 6;
 // Files whose upstream changes include line diffs; others list only their status.
 const DIFF_FILES: usize = 60;
 const DIFF_BYTES: u64 = 1_000_000;
+const DIFF_RESULT_BYTES: usize = 128 * 1024;
 const MAX_FILES: usize = 2000;
 
 pub(crate) fn key(scope: &str, skill: &str) -> String {
@@ -210,6 +212,7 @@ async fn files(
         if !visible(&path) {
             continue;
         }
+        super::bundle::path(&path)?;
         files.push(File {
             path,
             size: raw["size"].as_u64().ok_or_else(invalid)?,
@@ -271,7 +274,7 @@ async fn fetch(s: &Service, origin: &Origin, file: &File) -> Result<Vec<u8>> {
         let chunk = chunk.map_err(|_| Error::bad_gateway("A download was interrupted."))?;
         if bytes.len() + chunk.len() > limit {
             return Err(Error::too_large(format!(
-                "Skill files are limited to {} MiB each.",
+                "The source file exceeds its declared size or the {} MiB file limit.",
                 super::bundle::FILE_BYTES >> 20
             )));
         }
@@ -310,7 +313,7 @@ struct SourceRecord {
     plugin_id: String,
     source: String,
     instance: String,
-    location: Value,
+    location: BTreeMap<String, Value>,
     folder: String,
     version: String,
     label: String,
@@ -320,19 +323,19 @@ struct SourceRecord {
 }
 
 /// The source as clients see it, with `modified` against the current files.
-fn public(record: &SourceRecord, revision: &str) -> Value {
-    json!({
-        "pluginId": record.plugin_id,
-        "source": record.source,
-        "instance": record.instance,
-        "label": record.label,
-        "location": record.location,
-        "url": record.url,
-        "folder": record.folder,
-        "version": record.version,
-        "importedAt": record.imported_at,
-        "modified": record.revision != revision,
-    })
+fn public(record: &SourceRecord, revision: &str) -> SkillSource {
+    SkillSource {
+        plugin_id: record.plugin_id.clone(),
+        source: record.source.clone(),
+        instance: Some(record.instance.clone()),
+        label: record.label.clone(),
+        location: record.location.clone(),
+        url: record.url.clone(),
+        folder: record.folder.clone(),
+        version: record.version.clone(),
+        imported_at: record.imported_at,
+        modified: record.revision != revision,
+    }
 }
 
 async fn record(s: &Service, scope: &str, skill: &str) -> Result<SourceRecord> {
@@ -422,11 +425,11 @@ pub(crate) async fn import(
         .collect();
     let changes = download(s, &origin, selected).await?;
     let skill = imported_name(&changes)?;
-    let record = SourceRecord {
+    let mut record = SourceRecord {
         plugin_id: plugin.to_owned(),
         source: origin.source.clone(),
         instance: origin.connection.id.clone(),
-        location: resolved.location,
+        location: serde_json::from_value(resolved.location)?,
         folder: join(&requested, &chosen),
         version: resolved.version,
         label,
@@ -457,8 +460,8 @@ pub(crate) async fn import(
         )
         .await?;
     let mut bundle = super::bundle_response(scope, &skill, &saved);
-    bundle["source"] = public(&record, &saved.revision);
-    bundle["source"]["modified"] = false.into();
+    record.revision = saved.revision.clone();
+    bundle["source"] = serde_json::to_value(public(&record, &saved.revision))?;
     s.store
         .audit(
             "skill.imported",
@@ -484,7 +487,7 @@ pub async fn attach(s: &Service, skills: &mut [Value]) -> Result<()> {
                     .parent()
                     .unwrap_or(Path::new(""));
                 match super::bundle::read_all(directory).await {
-                    Ok((revision, _)) => public(record, &revision),
+                    Ok((revision, _)) => serde_json::to_value(public(record, &revision))?,
                     Err(_) => Value::Null,
                 }
             }
@@ -496,7 +499,7 @@ pub async fn attach(s: &Service, skills: &mut [Value]) -> Result<()> {
 
 pub async fn source(s: &Service, scope: &str, skill: &str, bundle: &mut Value) -> Result<()> {
     if let Some(record) = s.store.kv_as::<SourceRecord>(&key(scope, skill)).await? {
-        bundle["source"] = public(&record, text(bundle, "revision"));
+        bundle["source"] = serde_json::to_value(public(&record, text(bundle, "revision")))?;
     }
     Ok(())
 }
@@ -551,25 +554,32 @@ pub(crate) async fn status(
     skill: &str,
     project: Option<&Path>,
     authority: Authority,
-) -> Result<Value> {
+) -> Result<SkillSourceStatus> {
     super::name(skill)?;
     let record = record(s, scope, skill).await?;
     let bundle = s.skills.bundle(scope, skill, project).await?;
     let origin = recorded_origin(s, &record, &authority).await?;
     let folder = &record.folder;
-    let latest = resolve(s, &origin, &record.location).await?;
-    let mut result = json!({
-        "source": public(&record, text(&bundle, "revision")),
-        "latest": { "version": latest.version, "message": latest.message, "date": latest.date },
-        "current": latest.version == record.version,
-        "changes": [],
-    });
-    if result["current"] == true {
+    let location = serde_json::to_value(&record.location)?;
+    let latest = resolve(s, &origin, &location).await?;
+    let mut result = SkillSourceStatus {
+        source: public(&record, text(&bundle, "revision")),
+        latest: SkillSourceVersion {
+            version: latest.version.clone(),
+            message: latest.message,
+            date: latest.date,
+        },
+        current: latest.version == record.version,
+        changes: Vec::new(),
+    };
+    if result.current {
         return Ok(result);
     }
 
-    let (old, _) = files(s, &origin, &record.location, &record.version, folder).await?;
-    let (new, _) = files(s, &origin, &record.location, &latest.version, folder).await?;
+    let (old, _) = files(s, &origin, &location, &record.version, folder).await?;
+    let (new, _) = files(s, &origin, &location, &latest.version, folder).await?;
+    check_sizes(old.iter().map(|file| file.size))?;
+    check_sizes(new.iter().map(|file| file.size))?;
     let old = old
         .into_iter()
         .map(|file| (file.path.clone(), file))
@@ -583,6 +593,7 @@ pub(crate) async fn status(
     paths.sort();
     paths.dedup();
     let mut changes = Vec::new();
+    let mut diff_bytes = 0;
     for path in paths {
         let (before, after) = (old.get(&path), new.get(&path));
         let status = match (before, after) {
@@ -593,7 +604,12 @@ pub(crate) async fn status(
             }
             _ => continue,
         };
-        let mut change = json!({ "path": path, "status": status, "binary": false });
+        let mut change = SkillSourceChange {
+            path,
+            status: status.to_owned(),
+            binary: false,
+            lines: None,
+        };
         let content_changed = before.is_none_or(|a| after.is_none_or(|b| a.digest != b.digest));
         if changes.len() < DIFF_FILES && content_changed {
             let (a, b) = (
@@ -604,16 +620,20 @@ pub(crate) async fn status(
                 match (String::from_utf8(a), String::from_utf8(b)) {
                     (Ok(a), Ok(b)) if !a.contains('\0') && !b.contains('\0') => {
                         if let Some(lines) = diff::lines(&a, &b) {
-                            change["lines"] = lines.into();
+                            let bytes = serde_json::to_vec(&lines)?.len();
+                            if diff_bytes + bytes <= DIFF_RESULT_BYTES {
+                                diff_bytes += bytes;
+                                change.lines = Some(lines);
+                            }
                         }
                     }
-                    _ => change["binary"] = true.into(),
+                    _ => change.binary = true,
                 }
             }
         }
         changes.push(change);
     }
-    result["changes"] = changes.into();
+    result.changes = changes;
     Ok(result)
 }
 
@@ -636,7 +656,8 @@ pub(crate) async fn update(
     let base = input.base.as_str();
     let origin = recorded_origin(s, &record, &authority).await?;
     let folder = record.folder.clone();
-    let (files, truncated) = files(s, &origin, &record.location, &version, &folder).await?;
+    let location = serde_json::to_value(&record.location)?;
+    let (files, truncated) = files(s, &origin, &location, &version, &folder).await?;
     if truncated {
         return Err(Error::bad(
             "The source listed only part of this folder, so it cannot be updated safely.",
@@ -671,8 +692,8 @@ pub(crate) async fn update(
         db.set_as(&source_key, &publication_record, None)
     })))).await?;
     let mut bundle = super::bundle_response(scope, skill, &saved);
-    bundle["source"] = public(&record, &saved.revision);
-    bundle["source"]["modified"] = false.into();
+    record.revision = saved.revision.clone();
+    bundle["source"] = serde_json::to_value(public(&record, &saved.revision))?;
     s.store
         .audit(
             "skill.updated",

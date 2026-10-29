@@ -406,10 +406,7 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
 
 async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
     let command = match route {
-        ("GET", ["skills"]) => Some((
-            "list_skills",
-            json!({ "scope": input.query.get("scope").filter(|scope| !scope.is_empty()) }),
-        )),
+        ("GET", ["skills"]) => Some(("list_skills", json!({ "scope": input.query.get("scope") }))),
         ("POST", ["skills", "import"]) => Some(("import_skill", input.body.clone())),
         ("POST", ["skills", "stage"]) => Some(("stage_skill_upload", input.body.clone())),
         ("POST", ["skills", scope, "import"]) => {

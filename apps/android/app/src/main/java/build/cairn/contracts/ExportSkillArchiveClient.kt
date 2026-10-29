@@ -4,8 +4,15 @@ package build.cairn.contracts
 import build.cairn.app.data.CairnApi
 import build.cairn.app.data.segment
 
-suspend fun CairnApi.exportSkillArchive(input: ExportSkillArchiveInput): SkillArchiveChunk =
-    send(
+suspend fun CairnApi.exportSkillArchive(input: ExportSkillArchiveInput): SkillArchiveChunk {
+    val query =
+        listOfNotNull(
+                "offset" to input.offset.toString(),
+                input.revision?.let { "revision" to it.toString() },
+            )
+            .joinToString("&") { (key, value) -> "$key=${segment(value)}" }
+    return send(
         "GET",
-        "/skills/${segment(input.scope)}/${segment(input.name)}/archive?offset=${segment(input.offset.toString())}&revision=${segment(input.revision?.toString().orEmpty())}",
+        "/skills/${segment(input.scope)}/${segment(input.name)}/archive${if (query.isEmpty()) "" else "?$query"}",
     )
+}

@@ -40,7 +40,7 @@ class SkillBundlesTest {
     fun invalidSkillsCanBeDecodedAndRepaired() {
         val decoded =
             wireJson.decodeFromString<SkillBundle>(
-                """{"name":"review","description":null,"files":[{"path":"SKILL.md","size":3}]}"""
+                """{"name":"review","description":null,"limits":{},"files":[{"path":"SKILL.md","size":3}]}"""
             )
         assertTrue(SkillDraft.of(decoded).edit(SKILL_FILE, skill).problems().isEmpty())
     }
@@ -397,12 +397,12 @@ class SkillBundlesTest {
         assertFalse("content" in staged)
         assertEquals("true", staged["executable"]!!.jsonPrimitive.content)
         assertEquals(
-            """{"op":"move","from":"a","to":"b"}""",
-            DraftSkillChange.Move("a", "b").toJson().toString(),
+            wireJson.parseToJsonElement("""{"op":"move","from":"a","to":"b"}"""),
+            DraftSkillChange.Move("a", "b").toJson(),
         )
         assertEquals(
-            """{"op":"mode","path":"a","executable":true}""",
-            DraftSkillChange.Mode("a", true).toJson().toString(),
+            wireJson.parseToJsonElement("""{"op":"mode","path":"a","executable":true}"""),
+            DraftSkillChange.Mode("a", true).toJson(),
         )
     }
 
@@ -645,7 +645,9 @@ class SkillBundlesTest {
             server.enqueue(MockResponse().setBody("""{"id":"up-1","size":4}"""))
             server.enqueue(
                 MockResponse()
-                    .setBody("""{"scope":"global","name":"review","revision":"rev-2","files":[]}""")
+                    .setBody(
+                        """{"scope":"global","name":"review","revision":"rev-2","limits":{},"files":[]}"""
+                    )
             )
             server.start()
             val api = CairnApi(server.url("/"), MemoryVault(), installationId = "i")
@@ -675,8 +677,10 @@ class SkillBundlesTest {
             val json = wireJson.parseToJsonElement(batch.body.readUtf8()).jsonObject
             assertEquals("rev-1", json["base"]!!.jsonPrimitive.content)
             assertEquals(
-                """[{"op":"delete","path":"old.md"},{"op":"write","path":"assets/logo.png","upload":"up-1","executable":false},{"op":"write","path":"notes.md","content":"hi","executable":false}]""",
-                json["changes"].toString(),
+                wireJson.parseToJsonElement(
+                    """[{"op":"delete","path":"old.md"},{"op":"write","path":"assets/logo.png","upload":"up-1","executable":false},{"op":"write","path":"notes.md","content":"hi","executable":false}]"""
+                ),
+                json["changes"],
             )
         }
     }
@@ -685,7 +689,8 @@ class SkillBundlesTest {
     fun newSkillsSendANullBase() = runTest {
         MockWebServer().use { server ->
             server.enqueue(
-                MockResponse().setBody("""{"scope":"p1","name":"notes","revision":"r"}""")
+                MockResponse()
+                    .setBody("""{"scope":"p1","name":"notes","revision":"r","limits":{}}""")
             )
             server.start()
             val api = CairnApi(server.url("/"), MemoryVault(), installationId = "i")

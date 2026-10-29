@@ -563,6 +563,7 @@ test('plugin skill source candidates reset when its fields or the folder change'
   await authenticateWorkspace(page)
   const base = {
     source: 'plugin',
+    scope: 'global',
     pluginId: 'github',
     skillSource: 'repository',
     instance: 'work',

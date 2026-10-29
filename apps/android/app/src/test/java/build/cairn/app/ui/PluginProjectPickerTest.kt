@@ -225,9 +225,9 @@ class PluginProjectPickerTest {
             val paths = List(server.requestCount) { server.takeRequest().path.orEmpty() }
             assertEquals(
                 listOf(
-                    "/api/plugins/forge/projects?source=repositories&instance=acct-1&page=1",
-                    "/api/plugins/forge/projects?source=repositories&instance=acct-1&page=1",
-                    "/api/plugins/forge/projects?source=repositories&instance=acct-1&page=2",
+                    "/api/plugins/forge/projects?source=repositories&instance=acct-1&page=1&query=",
+                    "/api/plugins/forge/projects?source=repositories&instance=acct-1&page=1&query=",
+                    "/api/plugins/forge/projects?source=repositories&instance=acct-1&page=2&query=",
                 ),
                 paths,
             )

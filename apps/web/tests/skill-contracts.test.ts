@@ -4,6 +4,7 @@ import { editSkillFiles } from '../../../packages/contracts/generated/editSkillF
 import { exportSkillArchive } from '../../../packages/contracts/generated/exportSkillArchive'
 import { importSkill } from '../../../packages/contracts/generated/importSkill'
 import importSchema from '../../../packages/contracts/generated/ImportSkillInput.json'
+import { listSkills } from '../../../packages/contracts/generated/listSkills'
 import { listSourceProjects } from '../../../packages/contracts/generated/listSourceProjects'
 import bundleSchema from '../../../packages/contracts/generated/SkillBundle.json'
 import changeSchema from '../../../packages/contracts/generated/SkillChange.json'
@@ -57,4 +58,16 @@ it('uses the generated resource transports with revisions, encoded scopes and pa
   expect(JSON.parse(calls[1]!.options.body as string).base).toBe('revision')
   expect(calls[2]!.path).toBe('/skills/global/review/archive?offset=512&revision=revision')
   expect(calls[3]!.path).toBe('/plugins/forge/projects?source=repositories&instance=acct+1&page=2&query=')
+})
+
+it('omits absent optional query parameters from generated skill clients', async () => {
+  const paths: string[] = []
+  const request = async <T>(path: string): Promise<T> => {
+    paths.push(path)
+    return {} as T
+  }
+
+  await listSkills(request, {})
+  await exportSkillArchive(request, { scope: 'global', name: 'review', offset: 0 })
+  expect(paths).toEqual(['/skills', '/skills/global/review/archive?offset=0'])
 })

@@ -3,5 +3,6 @@ import type { ListSkillsInput } from './typescript/ListSkillsInput'
 import type { Skill } from './typescript/Skill'
 
 export function listSkills(request: <T>(path: string, options: RequestInit) => Promise<T>, input: ListSkillsInput): Promise<Skill[]> {
-  return request<Skill[]>(`/skills?${new URLSearchParams({ scope: String(input.scope ?? '') }).toString()}`, { method: 'GET' })
+  const query = new URLSearchParams({ ...(input.scope == null ? {} : { scope: String(input.scope) }) }).toString()
+  return request<Skill[]>(`/skills${query ? `?${query}` : ''}`, { method: 'GET' })
 }

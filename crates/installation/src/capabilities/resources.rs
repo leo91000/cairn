@@ -353,7 +353,7 @@ impl ResourceOperation {
                         )
                         .await?;
                         authority.recheck(s).await?;
-                        return output::<SkillSourceStatus>(result);
+                        return Ok(serde_json::to_value(result)?);
                     }
                     "forget_skill_source" => {
                         sources::forget(s, &input.scope, &input.name, authority).await?;

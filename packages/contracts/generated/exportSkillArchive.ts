@@ -3,5 +3,6 @@ import type { ExportSkillArchiveInput } from './typescript/ExportSkillArchiveInp
 import type { SkillArchiveChunk } from './typescript/SkillArchiveChunk'
 
 export function exportSkillArchive(request: <T>(path: string, options: RequestInit) => Promise<T>, input: ExportSkillArchiveInput): Promise<SkillArchiveChunk> {
-  return request<SkillArchiveChunk>(`/skills/${encodeURIComponent(input.scope)}/${encodeURIComponent(input.name)}/archive?${new URLSearchParams({ offset: String(input.offset), revision: String(input.revision ?? '') }).toString()}`, { method: 'GET' })
+  const query = new URLSearchParams({ offset: String(input.offset), ...(input.revision == null ? {} : { revision: String(input.revision) }) }).toString()
+  return request<SkillArchiveChunk>(`/skills/${encodeURIComponent(input.scope)}/${encodeURIComponent(input.name)}/archive${query ? `?${query}` : ''}`, { method: 'GET' })
 }
