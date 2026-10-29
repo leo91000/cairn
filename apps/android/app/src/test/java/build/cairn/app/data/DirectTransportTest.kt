@@ -3,6 +3,8 @@ package build.cairn.app.data
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.Base64
+import java.util.concurrent.CountDownLatch
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onEach
@@ -692,7 +694,9 @@ class DirectTransportTest {
                 server.enqueue(MockResponse().setBody("{\"route\":\"relay\"}"))
                 server.start()
                 val api = CairnApi(server.url("/"), MemoryVault(), installationId = "test")
-                var disposed = false
+                val disposed = CompletableDeferred<Unit>()
+                val disposalStarted = CompletableDeferred<Unit>()
+                val allowDisposal = CountDownLatch(1)
                 lateinit var channel: DirectChannel
                 channel =
                     DirectChannel(
@@ -722,17 +726,31 @@ class DirectTransportTest {
                                 )
                             }
                         },
-                        { disposed = true },
+                        {
+                            disposalStarted.complete(Unit)
+                            allowDisposal.await()
+                            disposed.complete(Unit)
+                        },
                     )
                 api.transport.attach(channel)
-                assertEquals(
-                    "{\"route\":\"relay\"}",
-                    withTimeout(5000) { api.request("GET", "/chats") },
-                )
-                assertTrue(disposed)
-                assertEquals("relay", api.transport.route.value)
-                assertEquals(1, server.requestCount)
-                api.closeStreams()
+                try {
+                    assertEquals(
+                        "{\"route\":\"relay\"}",
+                        withTimeout(5000) { api.request("GET", "/chats") },
+                    )
+                    withTimeout(5000) { disposalStarted.await() }
+                    // A safe read may recover while native disposal is still running.
+                    assertFalse(disposed.isCompleted)
+                    assertEquals("relay", api.transport.route.value)
+                    assertEquals(1, server.requestCount)
+                    server.enqueue(MockResponse().setBody("[]"))
+                    assertEquals("[]", withTimeout(5000) { api.request("GET", "/chats") })
+                    assertEquals(2, server.requestCount)
+                } finally {
+                    allowDisposal.countDown()
+                    api.closeStreams()
+                }
+                withTimeout(5000) { disposed.await() }
             }
         }
     }
