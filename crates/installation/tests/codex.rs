@@ -1,8 +1,10 @@
+use common::account_fixture::AccountFixtures;
+
 mod common;
 
 use cairn_installation::{
     accounts::{
-        KIND, Lease, broker,
+        Lease, broker,
         codex::{Client, normalize},
         usage::{blocked, recovered, remaining},
     },
@@ -244,11 +246,14 @@ async fn acquire(service: &Service, run: &str, model: &str) -> Lease {
 
 /// Creates a Codex account holding synthetic credentials and refreshes its usage.
 async fn refreshed_account(service: &Service, name: &str, tokens: Value) -> String {
-    let account = service
-        .accounts
-        .create(service, Provider::Codex, name)
-        .await
-        .unwrap();
+    let account = serde_json::to_value(
+        service
+            .accounts
+            .create(service, Provider::Codex, name)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let id = account["id"].as_str().unwrap().to_owned();
     service
         .vault
@@ -503,11 +508,14 @@ async fn sign_in(mode: &str) -> (TempDir, Arc<Service>, String) {
     let root = TempDir::new().unwrap();
     let service = Service::new(config(&root)).await.unwrap();
     service.accounts.initialize(&service).await.unwrap();
-    let account = service
-        .accounts
-        .create(&service, Provider::Codex, "Personal")
-        .await
-        .unwrap();
+    let account = serde_json::to_value(
+        service
+            .accounts
+            .create(&service, Provider::Codex, "Personal")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let id = account["id"].as_str().unwrap().to_owned();
     let home = service
         .config
@@ -521,7 +529,8 @@ async fn sign_in(mode: &str) -> (TempDir, Arc<Service>, String) {
         json!({ "mode": mode }).to_string(),
     )
     .unwrap();
-    let view = service.accounts.reconnect(&service, &id).await.unwrap();
+    let view =
+        serde_json::to_value(service.accounts.reconnect(&service, &id).await.unwrap()).unwrap();
     assert_eq!(view["provider"], "codex");
     (root, service, id)
 }
@@ -532,7 +541,7 @@ async fn sign_in_until(service: &Service, condition: impl Fn(&Value) -> bool) ->
         Duration::from_secs(10),
         Duration::from_millis(20),
         async || {
-            let view = service.accounts.sign_in().await;
+            let view = serde_json::to_value(service.accounts.sign_in().await).unwrap();
             condition(&view).then_some(view)
         },
     )
@@ -599,8 +608,12 @@ async fn structured_sign_in_displays_the_code_and_cancelling_removes_the_unfinis
     assert_eq!(view["accountId"], id.as_str());
     assert!(view["expiresAt"].as_i64().unwrap() > now());
     service.accounts.cancel(&service).await.unwrap();
-    assert!(service.accounts.sign_in().await.is_null());
-    assert!(service.store.get(KIND, &id).await.unwrap().is_none());
+    assert!(
+        serde_json::to_value(service.accounts.sign_in().await)
+            .unwrap()
+            .is_null()
+    );
+    assert!(service.store.account_fixture(&id).await.unwrap().is_none());
     assert!(
         service
             .vault
@@ -626,7 +639,7 @@ async fn structured_sign_in_handles_completion_before_the_start_reply() {
     assert_eq!(view["state"], "complete", "{view}");
     assert!(view["code"].is_null());
     assert_eq!(
-        service.accounts.get(&service, &id).await.unwrap()["state"],
+        serde_json::to_value(service.accounts.account(&service, &id).await.unwrap()).unwrap()["state"],
         "ready"
     );
 }
@@ -645,7 +658,7 @@ async fn structured_sign_in_reports_errors_without_exposing_provider_details() {
         }
         // A failed sign-in keeps the account so it can be retried.
         assert_eq!(
-            service.accounts.get(&service, &id).await.unwrap()["state"],
+            serde_json::to_value(service.accounts.account(&service, &id).await.unwrap()).unwrap()["state"],
             "pending"
         );
     }
@@ -655,18 +668,21 @@ async fn structured_sign_in_reports_errors_without_exposing_provider_details() {
 async fn completed_sign_in_is_already_cleaned_up_and_available() {
     let root = TempDir::new().unwrap();
     let service = Service::new(config(&root)).await.unwrap();
-    let flow = service
-        .accounts
-        .add(&service, Provider::Codex, "Personal")
-        .await
-        .unwrap();
+    let flow = serde_json::to_value(
+        service
+            .accounts
+            .add(&service, Provider::Codex, "Personal")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let id = flow["accountId"].as_str().unwrap();
 
     // Observe the publication boundary, rather than allowing a polling delay to
     // hide work that still happens after the UI is told sign-in is complete.
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            let view = service.accounts.sign_in().await;
+            let view = serde_json::to_value(service.accounts.sign_in().await).unwrap();
             if is_settled(&view) {
                 assert_eq!(view["state"], "complete", "{view}");
                 break;
@@ -687,11 +703,12 @@ async fn completed_sign_in_is_already_cleaned_up_and_available() {
     );
     assert!(!service.accounts.busy(&service, id).await.unwrap());
     assert_eq!(
-        service.accounts.list(&service).await.unwrap()[0]["status"],
+        common::account_fixture::account_values(service.accounts.list(&service).await.unwrap())[0]
+            ["status"],
         "next"
     );
 
-    service.accounts.reconnect(&service, id).await.unwrap();
+    serde_json::to_value(service.accounts.reconnect(&service, id).await.unwrap()).unwrap();
     service.accounts.cancel(&service).await.unwrap();
 }
 
@@ -699,18 +716,21 @@ async fn completed_sign_in_is_already_cleaned_up_and_available() {
 async fn account_sign_in_verifies_identity_captures_credentials_and_cleans_up() {
     let root = TempDir::new().unwrap();
     let service = Service::new(config(&root)).await.unwrap();
-    let view = service
-        .accounts
-        .add(&service, Provider::Codex, "Personal")
-        .await
-        .unwrap();
+    let view = serde_json::to_value(
+        service
+            .accounts
+            .add(&service, Provider::Codex, "Personal")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let id = view["accountId"].as_str().unwrap().to_owned();
     assert_eq!(
         sign_in_until(&service, is_settled).await["state"],
         "complete"
     );
     assert_eq!(
-        service.accounts.get(&service, &id).await.unwrap()["state"],
+        serde_json::to_value(service.accounts.account(&service, &id).await.unwrap()).unwrap()["state"],
         "ready"
     );
     assert!(
@@ -821,12 +841,14 @@ async fn model_catalog_respects_enabled_accounts_and_routes_to_an_account_with_t
     }
     let lease = acquire(&service, FIRST_RUN, "fixture-deep").await;
     assert_eq!(lease.account_id, ids[1]);
-    service.accounts.release(&lease).await.unwrap();
-    service
-        .accounts
-        .update(&service, &ids[1], &json!({ "enabled": false }))
-        .await
-        .unwrap();
+    service.accounts.release(&service, &lease).await.unwrap();
+    common::account_fixture::update_account_fixture(
+        &service,
+        &ids[1],
+        &json!({ "enabled": false }),
+    )
+    .await
+    .unwrap();
     let catalog = service.models.list(&service).await.unwrap();
     assert!(
         !catalog["models"]
@@ -903,8 +925,8 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
         .unwrap()
         .unwrap();
     assert_ne!(first.account_id, second.account_id);
-    service.accounts.release(&first).await.unwrap();
-    service.accounts.release(&second).await.unwrap();
+    service.accounts.release(&service, &first).await.unwrap();
+    service.accounts.release(&service, &second).await.unwrap();
 
     // A speed one account lacks goes to the account offering it, every time.
     for run in [FIRST_RUN, SECOND_RUN] {
@@ -915,16 +937,18 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
             .unwrap()
             .unwrap();
         assert_eq!(lease.account_id, ids[1]);
-        service.accounts.release(&lease).await.unwrap();
+        service.accounts.release(&service, &lease).await.unwrap();
     }
 
     // The speed is only preferred: while the account offering it cannot take another run,
     // the run goes to an available account at Standard instead of waiting.
-    service
-        .accounts
-        .update(&service, &ids[1], &json!({ "maxConcurrentRuns": 1 }))
-        .await
-        .unwrap();
+    common::account_fixture::update_account_fixture(
+        &service,
+        &ids[1],
+        &json!({ "maxConcurrentRuns": 1 }),
+    )
+    .await
+    .unwrap();
     let busy = service
         .accounts
         .acquire_for(
@@ -951,8 +975,8 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
         .unwrap()
         .unwrap();
     assert_eq!(fallback.account_id, ids[0]);
-    service.accounts.release(&busy).await.unwrap();
-    service.accounts.release(&fallback).await.unwrap();
+    service.accounts.release(&service, &busy).await.unwrap();
+    service.accounts.release(&service, &fallback).await.unwrap();
 
     // An account whose catalog confirms the speed comes before one that cannot tell, which
     // Codex could run at Standard without notice.
@@ -977,7 +1001,7 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
                 .unwrap()
                 .unwrap();
             assert_eq!(lease.account_id, ids[confirmed]);
-            service.accounts.release(&lease).await.unwrap();
+            service.accounts.release(&service, &lease).await.unwrap();
         }
         service.store.set(&key, catalog, None).await.unwrap();
     }
@@ -1025,18 +1049,22 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
         .unwrap()
         .unwrap();
     assert_eq!(landed.account_id, ids[0]);
-    service.accounts.release(&confirming).await.unwrap();
-    service.accounts.release(&landed).await.unwrap();
+    service
+        .accounts
+        .release(&service, &confirming)
+        .await
+        .unwrap();
+    service.accounts.release(&service, &landed).await.unwrap();
     // An account that needs reconnecting takes no run, so its unknown catalog confirms nothing.
     let record = service
         .store
-        .get("agentAccounts", &ids[0])
+        .account_fixture(&ids[0])
         .await
         .unwrap()
         .unwrap();
     let mut reconnect = record.clone();
     reconnect["state"] = "error".into();
-    service.store.put("agentAccounts", reconnect).await.unwrap();
+    service.store.save_account_fixture(reconnect).await.unwrap();
     let listed = service.models.list(&service).await.unwrap();
     let fast = listed["models"]
         .as_array()
@@ -1054,7 +1082,7 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
         .set(&key, catalog.clone(), None)
         .await
         .unwrap();
-    service.store.put("agentAccounts", restored).await.unwrap();
+    service.store.save_account_fixture(restored).await.unwrap();
     let listed = service.models.list(&service).await.unwrap();
     let fast = listed["models"]
         .as_array()
@@ -1064,7 +1092,7 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
         .unwrap();
     assert_eq!(fast["serviceTiers"][1]["id"], "ultrafast");
     assert!(fast["serviceTiers"][1].get("limited").is_none(), "{fast}");
-    service.store.put("agentAccounts", record).await.unwrap();
+    service.store.save_account_fixture(record).await.unwrap();
     service.store.set(&key, catalog, None).await.unwrap();
     let listed = service.models.list(&service).await.unwrap();
     let fast = listed["models"]
@@ -1077,11 +1105,13 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
 
     // Without an enabled account offering it, the run is not held back: it goes to an
     // available account, and the turn's own check says how it runs there.
-    service
-        .accounts
-        .update(&service, &ids[1], &json!({ "enabled": false }))
-        .await
-        .unwrap();
+    common::account_fixture::update_account_fixture(
+        &service,
+        &ids[1],
+        &json!({ "enabled": false }),
+    )
+    .await
+    .unwrap();
     let lease = service
         .accounts
         .acquire_for(
@@ -1095,7 +1125,7 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
         .unwrap()
         .unwrap();
     assert_eq!(lease.account_id, ids[0]);
-    service.accounts.release(&lease).await.unwrap();
+    service.accounts.release(&service, &lease).await.unwrap();
 }
 
 #[tokio::test]
@@ -1341,15 +1371,19 @@ async fn queued_reasoning_is_idempotent_editable_and_part_of_the_run_snapshot() 
 async fn device_login_verifies_identity_then_leases_private_credentials() {
     let root = TempDir::new().unwrap();
     let service = Service::new(config(&root)).await.unwrap();
-    let flow = service
-        .accounts
-        .add(&service, Provider::Codex, "Test account")
-        .await
-        .unwrap();
+    let flow = serde_json::to_value(
+        service
+            .accounts
+            .add(&service, Provider::Codex, "Test account")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let id = flow["accountId"].as_str().unwrap();
     let view = sign_in_until(&service, is_settled).await;
     assert_eq!(view["state"], "complete", "{view}");
-    let accounts = service.accounts.list(&service).await.unwrap();
+    let accounts =
+        common::account_fixture::account_values(service.accounts.list(&service).await.unwrap());
     assert_eq!(accounts.len(), 1);
     assert_eq!(accounts[0]["remainingPercent"], 60.0);
     assert_eq!(accounts[0]["provider"], "codex");
@@ -1362,13 +1396,19 @@ async fn device_login_verifies_identity_then_leases_private_credentials() {
     assert!(service.accounts.remove(&service, id).await.is_err());
     let second = acquire(&service, SECOND_RUN, "").await;
     assert_eq!(second.account_id, lease.account_id);
-    service.accounts.release(&lease).await.unwrap();
-    assert_eq!(service.accounts.active(id).await.len(), 1);
+    service.accounts.release(&service, &lease).await.unwrap();
+    assert_eq!(
+        service.accounts.active(&service, id).await.unwrap().len(),
+        1
+    );
     assert!(service.accounts.remove(&service, id).await.is_err());
-    service.accounts.release(&second).await.unwrap();
+    service.accounts.release(&service, &second).await.unwrap();
     assert!(!lease.home.join("auth.json").exists());
     service.accounts.remove(&service, id).await.unwrap();
-    assert!(service.accounts.list(&service).await.unwrap().is_empty());
+    assert!(
+        common::account_fixture::account_values(service.accounts.list(&service).await.unwrap())
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1462,7 +1502,7 @@ async fn assert_refreshes_are_shared(
         json!({ "tokens": { "access_token": "stale", "account_id": "intruder" } }).to_string(),
     )
     .unwrap();
-    service.accounts.release(first).await.unwrap();
+    service.accounts.release(service, first).await.unwrap();
     assert!(a.tokens(false).await.is_err());
     assert!(
         b.tokens(false).await.unwrap()["accessToken"] == "synthetic-refreshed",
@@ -1487,7 +1527,10 @@ async fn parallel_runs_share_one_refresh_and_cannot_overwrite_or_reuse_released_
     let _first_broker = broker::serve(&service, &first).await.unwrap();
     let _second_broker = broker::serve(&service, &second).await.unwrap();
     assert_refreshes_are_shared(&service, &id, &first, &second).await;
-    assert_eq!(service.accounts.active(&id).await.len(), 1);
+    assert_eq!(
+        service.accounts.active(&service, &id).await.unwrap().len(),
+        1
+    );
     assert!(service.accounts.reconnect(&service, &id).await.is_err());
     assert!(!second.home.join("auth.json").exists());
     let (events, mut receiver) = tokio::sync::mpsc::channel(32);
@@ -1517,7 +1560,7 @@ async fn parallel_runs_share_one_refresh_and_cannot_overwrite_or_reuse_released_
         assert!(!event.to_string().contains("synthetic-refreshed"));
     }
     assert!(root.path().join("reply.md").exists());
-    service.accounts.release(&second).await.unwrap();
+    service.accounts.release(&service, &second).await.unwrap();
     assert_eq!(
         service
             .vault
@@ -1595,7 +1638,7 @@ async fn resident_logs_in_and_releases_managed_account_for_each_native_turn() {
     }
     stop.cancel();
     native.await.unwrap().unwrap();
-    service.accounts.release(&lease).await.unwrap();
+    service.accounts.release(&service, &lease).await.unwrap();
     let log: Vec<Value> = std::fs::read_to_string(&record)
         .unwrap()
         .lines()
@@ -1625,9 +1668,11 @@ async fn parallel_capacity_prefers_usage_and_lowering_limits_does_not_stop_runs(
         let tokens = json!({ "access_token": "synthetic", "account_id": name });
         let id = refreshed_account(&service, name, tokens).await;
         if name == "less" {
-            let mut account = service.accounts.get(&service, &id).await.unwrap();
+            let mut account =
+                serde_json::to_value(service.accounts.account(&service, &id).await.unwrap())
+                    .unwrap();
             account["usage"]["windows"][0]["usedPercent"] = 90.into();
-            service.store.put(KIND, account).await.unwrap();
+            service.store.save_account_fixture(account).await.unwrap();
         }
         ids.push(id);
     }
@@ -1636,9 +1681,7 @@ async fn parallel_capacity_prefers_usage_and_lowering_limits_does_not_stop_runs(
     assert_eq!(first.account_id, ids[0]);
     assert_eq!(second.account_id, ids[0]);
     let limit = |runs: Value| json!({ "maxConcurrentRuns": runs });
-    let view = service
-        .accounts
-        .update(&service, &ids[0], &limit(json!(1)))
+    let view = common::account_fixture::update_account_fixture(&service, &ids[0], &limit(json!(1)))
         .await
         .unwrap();
     assert_eq!(view["activeRunIds"].as_array().unwrap().len(), 2);
@@ -1646,19 +1689,15 @@ async fn parallel_capacity_prefers_usage_and_lowering_limits_does_not_stop_runs(
     assert_eq!(third.account_id, ids[1]);
     for invalid in [json!(0), json!(-1), json!(1.5), json!("2"), Value::Null] {
         assert!(
-            service
-                .accounts
-                .update(&service, &ids[0], &limit(invalid))
+            common::account_fixture::update_account_fixture(&service, &ids[0], &limit(invalid))
                 .await
                 .is_err()
         );
     }
     for lease in [first, second, third] {
-        service.accounts.release(&lease).await.unwrap();
+        service.accounts.release(&service, &lease).await.unwrap();
     }
-    service
-        .accounts
-        .update(&service, &ids[0], &limit(json!(12)))
+    common::account_fixture::update_account_fixture(&service, &ids[0], &limit(json!(12)))
         .await
         .unwrap();
     let mut leases = Vec::new();
@@ -1671,6 +1710,6 @@ async fn parallel_capacity_prefers_usage_and_lowering_limits_does_not_stop_runs(
     assert_eq!(overflow.account_id, ids[1]);
     leases.push(overflow);
     for lease in leases {
-        service.accounts.release(&lease).await.unwrap();
+        service.accounts.release(&service, &lease).await.unwrap();
     }
 }

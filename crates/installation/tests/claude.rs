@@ -1,7 +1,9 @@
+use common::account_fixture::AccountFixtures;
+
 mod common;
 
 use cairn_installation::{
-    accounts::{self, KIND, Lease},
+    accounts::{self, Lease},
     claude, claude_process,
     config::{Config, now},
     error::Result,
@@ -36,7 +38,7 @@ async fn sign_in_until(s: &Service, condition: impl Fn(&Value) -> bool) -> Value
         Duration::from_secs(8),
         Duration::from_millis(30),
         async || {
-            let view = s.accounts.sign_in().await;
+            let view = serde_json::to_value(s.accounts.sign_in().await).unwrap();
             condition(&view).then_some(view)
         },
     )
@@ -53,11 +55,13 @@ async fn finish_sign_in(s: &Service, code: &str) -> Value {
 
 /// A signed-in Claude account, as if it had completed sign-in.
 async fn connected(s: &Arc<Service>) -> String {
-    let mut account = s
-        .accounts
-        .create(s, Provider::Claude, "Personal")
-        .await
-        .unwrap();
+    let mut account = serde_json::to_value(
+        s.accounts
+            .create(s, Provider::Claude, "Personal")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let id = account["id"].as_str().unwrap().to_owned();
     let home = accounts::claude::account_home(&s.config, &id);
     std::fs::create_dir_all(&home).unwrap();
@@ -70,15 +74,12 @@ async fn connected(s: &Arc<Service>) -> String {
     });
     std::fs::write(home.join(".credentials.json"), credentials.to_string()).unwrap();
     account["state"] = "ready".into();
-    s.store.put(KIND, account).await.unwrap();
+    s.store.save_account_fixture(account).await.unwrap();
     id
 }
 
 async fn view(s: &Service, id: &str) -> Value {
-    s.accounts
-        .list(s)
-        .await
-        .unwrap()
+    common::account_fixture::account_values(s.accounts.list(s).await.unwrap())
         .into_iter()
         .find(|a| a["id"] == id)
         .unwrap()
@@ -86,9 +87,9 @@ async fn view(s: &Service, id: &str) -> Value {
 
 /// Makes the next refresh read usage again, regardless of its back-off.
 async fn reset_usage_backoff(s: &Service, id: &str) {
-    let mut account = s.accounts.get(s, id).await.unwrap();
+    let mut account = serde_json::to_value(s.accounts.account(s, id).await.unwrap()).unwrap();
     account["usage"]["attemptedAt"] = 0.into();
-    s.store.put(KIND, account).await.unwrap();
+    s.store.save_account_fixture(account).await.unwrap();
 }
 
 /// The catalog read by a signed-in account names the models and efforts Claude
@@ -328,31 +329,39 @@ async fn native_cli_lists_its_model_catalog_without_inference() {
 async fn sign_in_cancellation_failure_retry_identity_and_removal() {
     let root = TempDir::new().unwrap();
     let s = Service::new(config(&root)).await.unwrap();
-    let started = s
-        .accounts
-        .add(&s, Provider::Claude, "Personal")
-        .await
-        .unwrap();
+    let started = serde_json::to_value(
+        s.accounts
+            .add(&s, Provider::Claude, "Personal")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(started["provider"], "claude");
     sign_in_until(&s, |v| v["acceptsCode"] == true).await;
     // One sign-in at a time, whichever the coding agent.
     assert!(s.accounts.add(&s, Provider::Codex, "Other").await.is_err());
     s.accounts.cancel(&s).await.unwrap();
-    assert!(s.accounts.sign_in().await.is_null());
-    assert!(s.accounts.list(&s).await.unwrap().is_empty());
+    assert!(
+        serde_json::to_value(s.accounts.sign_in().await)
+            .unwrap()
+            .is_null()
+    );
+    assert!(common::account_fixture::account_values(s.accounts.list(&s).await.unwrap()).is_empty());
     assert!(s.accounts.submit_code("fixture-code").await.is_err());
 
-    let failed = s
-        .accounts
-        .add(&s, Provider::Claude, "Personal")
-        .await
-        .unwrap();
+    let failed = serde_json::to_value(
+        s.accounts
+            .add(&s, Provider::Claude, "Personal")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let id = failed["accountId"].as_str().unwrap().to_owned();
     let failed = finish_sign_in(&s, "wrong").await;
     assert_eq!(failed["state"], "failed");
     assert!(!failed.to_string().contains("never-return"));
     assert_eq!(view(&s, &id).await["status"], "signIn");
-    s.accounts.reconnect(&s, &id).await.unwrap();
+    serde_json::to_value(s.accounts.reconnect(&s, &id).await.unwrap()).unwrap();
     assert_eq!(
         finish_sign_in(&s, "fixture-code").await["state"],
         "complete"
@@ -370,10 +379,13 @@ async fn sign_in_cancellation_failure_retry_identity_and_removal() {
     assert_signed_in_catalog_describes_the_models(&s).await;
 
     // The same Claude identity cannot be connected twice; another one can.
-    s.accounts
-        .add(&s, Provider::Claude, "Duplicate")
-        .await
-        .unwrap();
+    serde_json::to_value(
+        s.accounts
+            .add(&s, Provider::Claude, "Duplicate")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let duplicate = finish_sign_in(&s, "fixture-code").await;
     assert_eq!(duplicate["state"], "failed");
     assert!(
@@ -382,36 +394,24 @@ async fn sign_in_cancellation_failure_retry_identity_and_removal() {
             .unwrap()
             .contains("already connected")
     );
-    let second = s
-        .accounts
-        .reconnect(&s, duplicate["accountId"].as_str().unwrap())
-        .await
-        .unwrap();
+    let second = serde_json::to_value(
+        s.accounts
+            .reconnect(&s, duplicate["accountId"].as_str().unwrap())
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         finish_sign_in(&s, "fixture-code:work@example.test").await["state"],
         "complete"
     );
     let second = second["accountId"].as_str().unwrap().to_owned();
     assert_eq!(view(&s, &second).await["email"], "work@example.test");
-    assert_eq!(
-        s.accounts
-            .records(&s, Provider::Claude)
-            .await
-            .unwrap()
-            .len(),
-        2
-    );
+    assert_eq!(s.accounts.of(&s, Provider::Claude).await.unwrap().len(), 2);
 
     s.accounts.remove(&s, &id).await.unwrap();
     assert!(!accounts::claude::account_home(&s.config, &id).exists());
-    assert_eq!(
-        s.accounts
-            .records(&s, Provider::Claude)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(s.accounts.of(&s, Provider::Claude).await.unwrap().len(), 1);
 }
 
 fn plan(root: &TempDir, prompt: &str) -> Value {
@@ -2029,10 +2029,10 @@ async fn usage_is_sanitized_cached_and_preserved_on_failure_without_changing_con
     assert!(running["usage"]["error"].is_null());
     assert_eq!(running["activeRunIds"], json!([FIRST_RUN]));
     assert_eq!(requests(), 3);
-    s.accounts.release(&lease).await.unwrap();
+    s.accounts.release(&s, &lease).await.unwrap();
 
     s.accounts.remove(&s, &id).await.unwrap();
-    assert!(s.accounts.list(&s).await.unwrap().is_empty());
+    assert!(common::account_fixture::account_values(s.accounts.list(&s).await.unwrap()).is_empty());
 }
 
 #[tokio::test]
@@ -2063,20 +2063,20 @@ async fn an_exhausted_account_returns_once_usage_shows_capacity_again() {
     assert!(acquire(&s, FIRST_RUN, "sonnet").await.is_err());
     assert_eq!(read(0).await, "next");
     let lease = acquire(&s, FIRST_RUN, "sonnet").await.unwrap().unwrap();
-    s.accounts.release(&lease).await.unwrap();
+    s.accounts.release(&s, &lease).await.unwrap();
 
     // Without usage to compare, the account is tried again after a while.
     std::fs::write(home.join("fixture-usage.json"), "{\"fixtureError\":true}").unwrap();
     s.accounts.exhausted(&s, &id, "sonnet").await.unwrap();
-    let mut account = s.accounts.get(&s, &id).await.unwrap();
+    let mut account = serde_json::to_value(s.accounts.account(&s, &id).await.unwrap()).unwrap();
     account["usage"] = Value::Null;
     account["exhausted"]["usage"] = Value::Null;
-    s.store.put(KIND, account).await.unwrap();
+    s.store.save_account_fixture(account).await.unwrap();
     s.accounts.refresh(&s, &id).await.unwrap();
     assert_eq!(view(&s, &id).await["status"], "waiting");
-    let mut account = s.accounts.get(&s, &id).await.unwrap();
+    let mut account = serde_json::to_value(s.accounts.account(&s, &id).await.unwrap()).unwrap();
     account["exhausted"]["at"] = (now() - 16 * 60_000).into();
-    s.store.put(KIND, account).await.unwrap();
+    s.store.save_account_fixture(account).await.unwrap();
     s.accounts.refresh(&s, &id).await.unwrap();
     assert_eq!(view(&s, &id).await["status"], "next");
 }
@@ -2122,7 +2122,7 @@ async fn opus_windows_limit_every_model_that_runs_opus() {
         );
     }
     let lease = acquire(&s, FIRST_RUN, "sonnet").await.unwrap().unwrap();
-    s.accounts.release(&lease).await.unwrap();
+    s.accounts.release(&s, &lease).await.unwrap();
 }
 
 #[tokio::test]
@@ -2167,22 +2167,22 @@ async fn auto_keeps_saved_models_the_catalog_no_longer_lists_within_their_family
     for model in ["sonnet[1m]", "claude-haiku-4-5"] {
         let lease = acquire(&s, FIRST_RUN, model).await.unwrap().unwrap();
         assert_eq!(lease.account_id, spent, "{model}");
-        s.accounts.release(&lease).await.unwrap();
+        s.accounts.release(&s, &lease).await.unwrap();
     }
 
     // Auto picks the account with Opus capacity left; other families still prefer the
     // account with the most capacity.
     let open = connected(&s).await;
     read(&open, 50).await;
-    let mut account = s.accounts.get(&s, &open).await.unwrap();
+    let mut account = serde_json::to_value(s.accounts.account(&s, &open).await.unwrap()).unwrap();
     account["usage"]["windows"][0]["usedPercent"] = 80.into();
-    s.store.put(KIND, account).await.unwrap();
+    s.store.save_account_fixture(account).await.unwrap();
     let lease = acquire(&s, FIRST_RUN, "opus[1m]").await.unwrap().unwrap();
     assert_eq!(lease.account_id, open);
-    s.accounts.release(&lease).await.unwrap();
+    s.accounts.release(&s, &lease).await.unwrap();
     let lease = acquire(&s, FIRST_RUN, "sonnet").await.unwrap().unwrap();
     assert_eq!(lease.account_id, spent);
-    s.accounts.release(&lease).await.unwrap();
+    s.accounts.release(&s, &lease).await.unwrap();
 
     // An exhaustion recorded for the old alias clears once Opus capacity returns.
     s.accounts.exhausted(&s, &open, "opus[1m]").await.unwrap();
@@ -2245,9 +2245,9 @@ async fn usage_handles_partial_invalid_and_unavailable_windows() {
             "rate_limits": { "five_hour": { "utilization": "25" } },
         }),
     ] {
-        let mut account = s.accounts.get(&s, &id).await.unwrap();
+        let mut account = serde_json::to_value(s.accounts.account(&s, &id).await.unwrap()).unwrap();
         account["usage"] = Value::Null;
-        s.store.put(KIND, account).await.unwrap();
+        s.store.save_account_fixture(account).await.unwrap();
         std::fs::write(home.join("fixture-usage.json"), payload.to_string()).unwrap();
         s.accounts.refresh(&s, &id).await.unwrap();
         let account = view(&s, &id).await;
@@ -2268,21 +2268,26 @@ async fn parallel_runs_are_validated_and_lowering_them_keeps_current_runs() {
     assert_eq!(view(&s, &id).await["maxConcurrentRuns"], 4);
     for limit in [json!(0), json!(-1), json!(1.5), json!("4"), Value::Null] {
         assert!(
-            s.accounts
-                .update(&s, &id, &json!({ "maxConcurrentRuns": limit }))
-                .await
-                .is_err()
+            common::account_fixture::update_account_fixture(
+                &s,
+                &id,
+                &json!({ "maxConcurrentRuns": limit })
+            )
+            .await
+            .is_err()
         );
     }
     let mut held = Vec::new();
     for run in [FIRST_RUN, SECOND_RUN] {
         held.push(acquire(&s, run, "sonnet").await.unwrap().unwrap());
     }
-    let updated = s
-        .accounts
-        .update(&s, &id, &json!({ "maxConcurrentRuns": 1 }))
-        .await
-        .unwrap();
+    let updated = common::account_fixture::update_account_fixture(
+        &s,
+        &id,
+        &json!({ "maxConcurrentRuns": 1 }),
+    )
+    .await
+    .unwrap();
     assert_eq!(updated["maxConcurrentRuns"], 1);
     assert_eq!(updated["status"], "full");
     assert_eq!(updated["activeRunIds"].as_array().unwrap().len(), 2);
@@ -2294,7 +2299,7 @@ async fn parallel_runs_are_validated_and_lowering_them_keeps_current_runs() {
             .contains("free Claude Code account slot")
     );
     for lease in &held {
-        s.accounts.release(lease).await.unwrap();
+        s.accounts.release(&s, lease).await.unwrap();
     }
     assert!(!updated.to_string().contains("refreshToken"));
 }

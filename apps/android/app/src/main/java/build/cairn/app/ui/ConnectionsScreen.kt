@@ -10,12 +10,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.AccountInput
+import build.cairn.contracts.ListAccountsInput
+import build.cairn.contracts.OrderAccountsInput
+import build.cairn.contracts.listCodingAgentAccounts
+import build.cairn.contracts.orderCodingAgentAccounts
+import build.cairn.contracts.reconnectCodingAgentAccount
+import build.cairn.contracts.refreshCodingAgentAccounts
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.add
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
-import kotlinx.serialization.json.putJsonArray
 
 /** The accounts coding agents run on, grouped by coding agent. */
 @Composable
@@ -37,7 +41,7 @@ fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) ->
         view = next
     }
     suspend fun load() {
-        val next = vm.api.get<AccountsView>("/accounts")
+        val next = vm.api.listCodingAgentAccounts(ListAccountsInput())
         // The sheets are separate windows: their state changes on the main thread only.
         withContext(Dispatchers.Main) { show(next) }
     }
@@ -85,7 +89,7 @@ fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) ->
             IconButton(
                 onClick = {
                     vm.perform {
-                        val next = api.send<AccountsView>("POST", "/accounts/refresh")
+                        val next = api.refreshCodingAgentAccounts(ListAccountsInput())
                         withContext(Dispatchers.Main) { show(next) }
                     }
                 },
@@ -115,13 +119,8 @@ fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) ->
                     reorder = { ids ->
                         vm.perform {
                             val next =
-                                api.send<AccountsView>(
-                                    "POST",
-                                    "/accounts/order",
-                                    buildJsonObject {
-                                        put("provider", provider)
-                                        putJsonArray("ids") { ids.forEach { add(it) } }
-                                    },
+                                api.orderCodingAgentAccounts(
+                                    OrderAccountsInput(provider = provider, ids = ids)
                                 )
                             withContext(Dispatchers.Main) { show(next) }
                         }
@@ -146,7 +145,7 @@ fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) ->
                         adding = account.provider
                     } else {
                         vm.perform {
-                            api.request("POST", "/accounts/${segment(account.id)}/sign-in")
+                            api.reconnectCodingAgentAccount(AccountInput(account.id))
                             load()
                         }
                     }
