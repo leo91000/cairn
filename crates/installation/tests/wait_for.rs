@@ -476,7 +476,7 @@ async fn github_monitor_only_probes_resumable_wakeups() {
     }
     let mut chat = chat;
     chat["revision"] = f.s.conversation_boundary(&f.chat).await.unwrap()["revision"].clone();
-    f.s.store.save_conversation_boundary(chat).await.unwrap();
+    let chat = f.s.store.save_conversation_boundary(chat).await.unwrap();
 
     for (field, value) in [
         ("status", json!("running")),
