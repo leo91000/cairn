@@ -36,9 +36,10 @@ export async function prepareStorageOrigin({
     const root='/data/storage-fixture';
     http.createServer((req,res)=>{
       if(req.headers.authorization!=='Bearer fixture-storage-grant'){res.writeHead(403).end();return;}
-      if(req.url==='/internal/node-restore/renew'){res.end('{}');return;}
+      const pathname=new URL(req.url,'http://storage-fixture.test').pathname;
+      if(pathname==='/internal/node-restore/renew'){res.end('{}');return;}
       if(fs.existsSync(root+'/offline')){res.writeHead(503).end();return;}
-      const hash=req.url.split('/').at(-1);
+      const hash=pathname.split('/').at(-1);
       if(!/^(?:b3-)?[a-f0-9]{64}$/.test(hash)||!fs.existsSync(root+'/'+hash)){res.writeHead(404).end();return;}
       const delay=Number(fs.existsSync(root+'/latency')?fs.readFileSync(root+'/latency','utf8'):0);
       setTimeout(()=>{const bytes=fs.readFileSync(root+'/'+hash);

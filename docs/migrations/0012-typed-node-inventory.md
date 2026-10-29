@@ -29,3 +29,6 @@ Version 12 is committed only after conversion and foreign-key validation. Reopen
 an upgraded database performs no further migration. Earlier layouts still need
 their explicit migrations (including `0011-mixed-node-agents.sql` for version 10);
 newer layouts require a compatible release. This change supplies no downgrade.
+
+Releases with direct node storage continue through the separate
+[12 → 13 metadata migration](0013-direct-node-storage.md).

@@ -209,8 +209,12 @@ fn route(method: &str, path: &str) -> Result<()> {
         ["snapshots", id, hash] => {
             uuid(id)
                 && ((method == "GET" && super::snapshots::valid_hash(hash))
-                    || (method == "POST" && matches!(*hash, "blocks" | "publication"))
-                    || (method == "DELETE" && *hash == "discard"))
+                    || (method == "POST"
+                        && matches!(
+                            *hash,
+                            "blocks" | "publication" | "direct-upload" | "direct-reader"
+                        ))
+                    || (method == "DELETE" && matches!(*hash, "discard" | "direct-reader")))
         }
         ["runs", id] => uuid(id) && ["POST", "DELETE"].contains(&method),
         ["runs", id, operation] => {
@@ -235,6 +239,7 @@ fn route(method: &str, path: &str) -> Result<()> {
                     "snapshot",
                     "snapshot-completed",
                     "published",
+                    "publication-fence",
                     "storage-status",
                     "evict",
                 ]
@@ -250,7 +255,12 @@ fn route(method: &str, path: &str) -> Result<()> {
 
 /// How long the controller may take to answer, by operation.
 fn controller_timeout(method: &str, path: &str, native: bool) -> Duration {
-    Duration::from_secs(if method == "POST" && path.ends_with("/publication") {
+    if method == "POST" && path.ends_with("/direct-reader") {
+        return super::snapshots::DIRECT_PUBLICATION_STARTUP;
+    }
+    Duration::from_secs(if method == "POST" && path.ends_with("/direct-upload") {
+        crate::storage::direct::TRANSFER_SECONDS + 60
+    } else if method == "POST" && path.ends_with("/publication") {
         super::snapshots::PUBLICATION_STARTUP.as_secs()
     } else if path.ends_with("/restore") {
         120
@@ -332,6 +342,9 @@ async fn forward(
     let streams_snapshot_body = path.starts_with("/snapshots/")
         && (method == "GET"
             || (method == "POST" && (path.ends_with("/blocks") || path.ends_with("/publication"))));
+    // Reader heartbeats stay on acknowledged control frames. A lost manager
+    // must end their ownership within the control round-trip deadline, rather
+    // than buffering tiny heartbeat bytes in a long bulk upload.
     if command["streamBody"] == true && streams_snapshot_body {
         return stream_body(master, id, response).await;
     }

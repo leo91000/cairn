@@ -361,7 +361,12 @@ fn is_retry(call: &Call, sequence: u64) -> Result<bool> {
 
 /// How long a node may take to start answering, by operation.
 fn head_timeout(method: &str, path: &str, native: bool) -> Duration {
-    Duration::from_secs(if method == "POST" && path.ends_with("/publication") {
+    if method == "POST" && path.ends_with("/direct-reader") {
+        return super::snapshots::DIRECT_PUBLICATION_STARTUP;
+    }
+    Duration::from_secs(if method == "POST" && path.ends_with("/direct-upload") {
+        crate::storage::direct::TRANSFER_SECONDS + 60
+    } else if method == "POST" && path.ends_with("/publication") {
         super::snapshots::PUBLICATION_STARTUP.as_secs()
     } else if path.starts_with("/exclusive/") {
         150
