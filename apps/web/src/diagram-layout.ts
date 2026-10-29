@@ -1634,7 +1634,7 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     const title = titles.get(cluster.id)!
     if (title.lines.length) {
       const x = area.x + CLUSTER_PAD - 2
-      const y = graph.direction === 'BT' ? area.y + area.h - 10 - title.height / 2 : area.y + 10 + title.height / 2
+      const y = area.y + 10 + title.height / 2
       titleItems.push(
         { kind: 'path', d: roundedRect(x - 4, y - title.height / 2 - 1, title.width + 8, title.height + 2, 5), fill: cluster.style?.fill ? { color: cluster.style.fill } : { tone: 'cluster' } },
         {

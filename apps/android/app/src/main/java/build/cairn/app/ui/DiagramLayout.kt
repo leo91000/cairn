@@ -1743,9 +1743,7 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         val title = titles.getValue(cluster.id)
         if (title.lines.isNotEmpty()) {
             val x = area.x + CLUSTER_PAD - 2
-            val y =
-                if (graph.direction == Direction.BT) area.y + area.h - 10 - title.height / 2
-                else area.y + 10 + title.height / 2
+            val y = area.y + 10 + title.height / 2
             titleItems.add(
                 PathItem(
                     d =

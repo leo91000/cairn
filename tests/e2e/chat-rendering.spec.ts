@@ -824,6 +824,11 @@ test('group frames preserve membership across ranks in every direction', async (
         const errors: string[] = []
         if (groups.length !== members.length)
           errors.push('Missing group frames')
+        for (const title of [...svg.querySelectorAll('text')].filter(text => /^S\d$/.test(text.textContent ?? ''))) {
+          if (nodes.some(node => !disjoint(title.getBoundingClientRect(), node)))
+            errors.push('Group title overlaps a node')
+        }
+
         for (const [index, group] of groups.entries()) {
           for (const peer of groups.slice(index + 1)) {
             if (!disjoint(group, peer))

@@ -60,6 +60,18 @@ describe('diagrams (shared Android corpus)', () => {
 })
 
 describe('diagram layout', () => {
+  it.each(['TB', 'BT', 'LR', 'RL'])('keeps group titles away from nodes in %s', (direction) => {
+    const scene = layoutDiagram(parseDiagram(`flowchart ${direction}\nsubgraph S[Group]\nA\nB\nend\nA-->B`), measure)
+    const title = scene.items.find(item => item.kind === 'text' && item.lines[0] === 'Group')!
+    if (title.kind !== 'text')
+      throw new Error('Expected a group title')
+    const right = title.x + measure.width('Group', title.size)
+    const top = title.y - lineHeight(title.size) / 2
+    const bottom = title.y + lineHeight(title.size) / 2
+    for (const node of nodeBoxes(scene))
+      expect(right <= node.left || node.right <= title.x || bottom <= node.top || node.bottom <= top).toBe(true)
+  })
+
   it.each(['TB', 'BT', 'LR', 'RL'].flatMap(direction => [
     'subgraph S1\nN2\nN8\nend\nsubgraph S2\nN0\nN9\nend\nN3-->N8\nN3-->N7\nN10-->N0',
     'subgraph S0\nN0\nN8\nend\nsubgraph S1\nN1\nN6\nend\nsubgraph S2\nN3\nend\nS2-->S0\nS0-->N6\nN0-->N3',

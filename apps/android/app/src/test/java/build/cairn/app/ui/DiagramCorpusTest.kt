@@ -36,6 +36,25 @@ class DiagramCorpusTest {
                     .map(::bounds)
             val nodes = scene.items.filterIsInstance<PathItem>().filter { it.shadow }.map(::bounds)
             assertEquals(graph.clusters.size, groups.size)
+            for (cluster in graph.clusters) {
+                val title =
+                    scene.items.filterIsInstance<TextItem>().first {
+                        it.lines.firstOrNull() == cluster.label
+                    }
+                val width = title.lines.maxOf { measure.width(it, title.size, title.weight) }
+                val height = title.lines.size * lineHeight(title.size)
+                val caption =
+                    doubleArrayOf(
+                        title.x,
+                        title.x + width,
+                        title.y - height / 2,
+                        title.y + height / 2,
+                    )
+                for (node in nodes) assertTrue(
+                    "$name title ${cluster.id} overlaps a node",
+                    disjoint(caption, node),
+                )
+            }
             for ((index, group) in groups.withIndex()) {
                 for (peer in groups.drop(index + 1)) assertTrue(
                     "$name peer groups",
