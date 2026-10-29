@@ -579,3 +579,7 @@ pub(crate) use nodes::{NODE_OPERATIONS, NodeOperation, node_operation};
 pub(crate) mod accounts;
 
 pub(crate) use accounts::{ACCOUNT_OPERATIONS, AccountOperation, account_operation};
+
+pub(crate) mod conversations;
+
+pub(crate) use conversations::{CHAT_OPERATIONS, chat_operation};

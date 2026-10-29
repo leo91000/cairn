@@ -1,38 +1,12 @@
-import type { Provider } from './accounts'
-import type { Run } from './contracts'
 import { z } from 'zod'
-import { MAIN_AGENT_ID } from './constants'
-import { reasoningEffort, serviceSpeed } from './contracts'
 
-export const chatInput = z.object({
-  agentId: z.string().uuid().default(MAIN_AGENT_ID),
-  projectId: z.string().uuid().nullable().default(null),
-})
-export const chatMessageInput = z.object({
-  id: z.string().uuid(),
-  text: z.string().trim().max(50000).default(''),
-  attachmentIds: z.array(z.string().uuid()).max(8).default([]),
-  mode: z.enum(['queue', 'steer']).default('queue'),
-  provider: z.enum(['', 'codex', 'claude', 'opencode']).default(''),
-  // Rust's JSON Schema regex parser requires the opening bracket to be escaped.
-  // eslint-disable-next-line regexp/no-useless-escape
-  model: z.string().trim().max(120).regex(/^[\w./:\[\]-]*$/).default(''),
-  reasoning: reasoningEffort.default(''),
-  plan: z.boolean().default(false).describe('Plan turn: the agent explores and proposes an approach without changing files, using shell network access or calling tools with external effects. Send a later message without plan to implement it. Unavailable with OpenCode.'),
-  speed: serviceSpeed.default(''),
-}).refine(message => message.text.length > 0 || message.attachmentIds.length > 0, 'Write a message or attach a file')
-export interface ChatAttachment {
-  id: string
-  chatId: string
-  name: string
-  size: number
-  mediaType: string
-  kind: 'image' | 'file'
-  /** An image's pixel size as it displays; absent for files and older uploads. */
-  width?: number
-  height?: number
-}
-export type ConversationLifecycle = 'active' | 'trash' | 'purging'
+export type { Chat, Chat as ChatDetail, Chat as ChatView } from './generated/typescript/Chat'
+export type { ChatAttachment } from './generated/typescript/ChatAttachment'
+export type { ChatCompaction } from './generated/typescript/ChatCompaction'
+export type { ChatExecution } from './generated/typescript/ChatExecution'
+export type { ChatMessage } from './generated/typescript/ChatMessage'
+export type { ContextUsage } from './generated/typescript/ContextUsage'
+
 /** A condition a plugin provides, such as `github_pr_checks`, with its own fields. */
 export interface PluginCondition {
   type: string
@@ -86,99 +60,6 @@ export interface ChatWakeup {
   createdAt: number
   wakeAt: number
 }
-export interface Chat {
-  wakeup?: ChatWakeup | null
-  slug?: string
-  lifecycle?: ConversationLifecycle
-  trashedAt?: number | null
-  purgeAt?: number | null
-  restoredAt?: number
-  sessionRestartRequested?: boolean
-  canRequestNewSession?: boolean
-  lifecycleError?: string | null
-  environmentState?: 'cleaning' | 'expired' | null
-  environmentExpiredAt?: number | null
-  environmentError?: string | null
-  pendingMessages?: number
-  /** The conversation whose agent delegated this one, and its retry key. */
-  requestedBy?: { runId: string, chatId: string, requestId?: string | null } | null
-  id: string
-  title: string
-  agentId: string
-  projectId: string | null
-  runId: string | null
-  paused: boolean
-  createdAt: number
-  updatedAt: number
-}
-export interface ChatMessage {
-  attachments?: ChatAttachment[]
-  questionId?: string
-  answers?: Record<string, QuestionAnswer>
-  id: string
-  chatId: string
-  text: string
-  provider?: '' | 'codex' | 'claude' | 'opencode'
-  model: string
-  reasoning?: string
-  /** Absent on messages saved before plan turns, which were never plan turns. */
-  plan?: boolean
-  /** The Codex speed this message asked for; absent on earlier messages. */
-  speed?: string
-  mode: 'queue' | 'steer'
-  status: 'queued' | 'sending' | 'delivered' | 'cancelled'
-  createdAt: number
-}
-/**
- * How full the coding agent's context was at its latest report. `contextTokens` is what the
- * latest model request occupied, never the conversation's cumulative spend.
- */
-export interface ContextUsage {
-  contextTokens: number
-  /** The model's context window; absent when the coding agent does not report it. */
-  contextWindow: number | null
-  /** Of `contextTokens`, input read from the prompt cache, when reported. */
-  cachedTokens: number | null
-  /** A local estimate: before the session's first response, or right after a compaction. */
-  estimated: boolean
-}
-/** Whether the coding agent can compact its context now, and why not when it cannot. */
-export interface ChatCompaction {
-  /** The coding agent offers a compaction control. OpenCode does not. */
-  supported: boolean
-  running: boolean
-  available: boolean
-  reason: string | null
-}
-export interface ChatView extends Chat {
-  /** The current run's account wait, also available without loading its detail. */
-  accountWaitReason?: Run['accountWaitReason']
-  accountRequired?: Run['accountRequired']
-  codingAgentSwitch?: { provider: Provider, error: string | null } | null
-  suspendedByExclusive?: Run['suspendedByExclusive']
-  pendingQuestions: number
-  agentName: string
-  projectName: string | null
-  status: Run['status'] | 'idle'
-  /** The coding agent of the latest turn; a message may switch it from the agent's own. */
-  provider?: Provider | null
-  /** When the agent's latest turn ended. */
-  finishedAt?: number | null
-  /** Absent for older servers and before the coding agent reports it. */
-  contextUsage?: ContextUsage | null
-  compaction?: ChatCompaction
-  /** The agent finished a turn the signed-in account has not opened since. */
-  unread?: boolean
-  /** The opening of the agent's final message, while unread. */
-  preview?: string | null
-  /** The conversation that delegated this one, while it still exists. */
-  requester?: { chatId: string, title: string } | null
-}
-export interface ChatDetail extends ChatView {
-  questions: ChatQuestion[]
-  run: Run | null
-  messages: ChatMessage[]
-}
 export const questionFields = z.array(z.object({
   id: z.string().min(1).max(200),
   title: z.string().min(1).max(10000),
@@ -227,11 +108,4 @@ export function validQuestionAnswer(field: ChatQuestion['fields'][number], answe
     && answer.selected.every(id => field.options.some(option => option.id === id))
 }
 
-export interface ChatExecution {
-  attachments?: ChatAttachment[]
-  messageId: string
-  text: string
-  recovery: boolean
-  /** A plan turn, which explores and proposes without changing anything. */
-  plan?: boolean
-}
+export type { ConversationLifecycle } from './generated/typescript/ConversationLifecycle'

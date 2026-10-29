@@ -46,8 +46,26 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.SecureFlagPolicy
 import build.cairn.app.data.*
+import build.cairn.contracts.ChatInput
+import build.cairn.contracts.ChatMessageInput
+import build.cairn.contracts.ChatMessageReference
+import build.cairn.contracts.ConfirmChatInput
+import build.cairn.contracts.CreateChatInput
+import build.cairn.contracts.EditChatMessage
+import build.cairn.contracts.EditChatMessageInput
 import build.cairn.contracts.ResumeRunInput
+import build.cairn.contracts.SendChatMessageInput
+import build.cairn.contracts.SetChatPausedInput
+import build.cairn.contracts.compactChat
+import build.cairn.contracts.createChat
+import build.cairn.contracts.deleteChatMessage
+import build.cairn.contracts.editChatMessage
+import build.cairn.contracts.restartChatSession
+import build.cairn.contracts.restoreChat
 import build.cairn.contracts.resumeRun
+import build.cairn.contracts.sendChatMessage
+import build.cairn.contracts.setChatPaused
+import build.cairn.contracts.stopChat
 import java.io.File
 import java.util.UUID
 import kotlinx.serialization.json.*
@@ -207,7 +225,7 @@ internal fun ConversationList(
                                                 verticalAlignment = Alignment.CenterVertically,
                                             ) {
                                                 val working =
-                                                    chat.pendingQuestions == 0 &&
+                                                    chat.pendingQuestions == 0L &&
                                                         !chat.paused &&
                                                         !chat.exclusiveSuspended &&
                                                         chat.status == "running"
@@ -668,13 +686,8 @@ internal fun ChatPage(
             val chatId =
                 id
                     ?: createdId
-                    ?: api.send<Chat>(
-                            "POST",
-                            "/chats",
-                            buildJsonObject {
-                                put("agentId", agent)
-                                put("projectId", project.ifEmpty { null })
-                            },
+                    ?: api.createChat(
+                            CreateChatInput(agentId = agent, projectId = project.ifEmpty { null })
                         )
                         .id
                         .also { createdId = it }
@@ -709,48 +722,61 @@ internal fun ChatPage(
             }
             // The speed survives a model change, so it is inherited even with a new model.
             val selectedSpeed = speed.ifBlank { defaultSpeed }
-            val content = buildJsonObject {
-                put("text", draft.trim())
-                put("mode", mode)
-                put("provider", chosenProvider)
-                put("model", selectedModel)
-                put("reasoning", selectedReasoning)
-                put("plan", plan)
-                put("speed", selectedSpeed)
-                put(
-                    "attachmentIds",
-                    wireJson.encodeToJsonElement(attachments.map { it.attachment.id }),
+            val content =
+                EditChatMessage(
+                    text = draft.trim(),
+                    mode = mode,
+                    provider = chosenProvider,
+                    model = selectedModel,
+                    reasoning = selectedReasoning,
+                    plan = plan,
+                    speed = selectedSpeed,
+                    attachmentIds = attachments.map { it.attachment.id },
                 )
-            }
-            val key = "$chatId/${editing.orEmpty()}/$content"
+            val key = "$chatId/${editing.orEmpty()}/${wireJson.encodeToJsonElement(content)}"
             if (key != submissionKey) {
                 submissionKey = key
                 submissionId = UUID.randomUUID().toString()
             }
-            val payload = JsonObject(content + ("id" to JsonPrimitive(editing ?: submissionId)))
             if (editing == null)
                 outgoing =
                     ChatMessage(
-                        submissionId,
-                        chatId,
-                        draft.trim(),
-                        selectedModel,
-                        selectedReasoning,
-                        mode,
-                        "sending",
-                        System.currentTimeMillis(),
-                        attachments.map { it.attachment },
+                        id = submissionId,
+                        chatId = chatId,
+                        text = draft.trim(),
+                        model = selectedModel,
+                        reasoning = selectedReasoning,
+                        mode = mode,
+                        status = "sending",
+                        createdAt = System.currentTimeMillis(),
+                        attachments = attachments.map { it.attachment },
                         provider = chosenProvider,
                         plan = plan,
                         speed = selectedSpeed,
                     )
             try {
-                api.request(
-                    if (editing == null) "POST" else "PUT",
-                    "/chats/${segment(chatId)}/messages" +
-                        (editing?.let { "/${segment(it)}" } ?: ""),
-                    payload,
-                )
+                val edited = editing
+                if (edited == null)
+                    api.sendChatMessage(
+                        SendChatMessageInput(
+                            chatId = chatId,
+                            message =
+                                ChatMessageInput(
+                                    id = submissionId,
+                                    text = content.text,
+                                    mode = content.mode,
+                                    provider = content.provider,
+                                    model = content.model,
+                                    reasoning = content.reasoning,
+                                    speed = content.speed.orEmpty(),
+                                    attachmentIds = content.attachmentIds,
+                                ),
+                        )
+                    )
+                else
+                    api.editChatMessage(
+                        EditChatMessageInput(chatId = chatId, messageId = edited, message = content)
+                    )
             } catch (e: Exception) {
                 outgoing = null
                 throw e
@@ -777,7 +803,7 @@ internal fun ChatPage(
         provider = message.provider.ifBlank { currentProvider }
         model = message.model
         reasoning = message.reasoning
-        planning = message.plan
+        planning = message.plan == true
         speed = message.speed
         attachments = message.attachments.map { DraftAttachment(it) }
     }
@@ -791,33 +817,28 @@ internal fun ChatPage(
     }
     fun steerQueued(message: ChatMessage) {
         vm.perform {
-            api.request(
-                "PUT",
-                "/chats/${segment(message.chatId.ifBlank { id.orEmpty() })}/messages/${segment(message.id)}",
-                buildJsonObject {
-                    put("id", message.id)
-                    put("text", message.text)
-                    put("mode", "steer")
-                    put("provider", message.provider)
-                    put("model", message.model)
-                    put("reasoning", message.reasoning)
-                    put("plan", message.plan)
-                    put("speed", message.speed)
-                    put(
-                        "attachmentIds",
-                        wireJson.encodeToJsonElement(message.attachments.map { it.id }),
-                    )
-                },
+            api.editChatMessage(
+                EditChatMessageInput(
+                    chatId = message.chatId.ifBlank { id.orEmpty() },
+                    messageId = message.id,
+                    message =
+                        EditChatMessage(
+                            text = message.text,
+                            mode = "steer",
+                            provider = message.provider,
+                            model = message.model,
+                            reasoning = message.reasoning,
+                            plan = message.plan,
+                            speed = message.speed,
+                            attachmentIds = message.attachments.map { it.id },
+                        ),
+                )
             )
         }
     }
     fun setPaused(current: Chat, paused: Boolean) {
         vm.perform {
-            api.request(
-                "POST",
-                "/chats/${segment(current.id)}/pause",
-                buildJsonObject { put("paused", paused) },
-            )
+            api.setChatPaused(SetChatPausedInput(chatId = current.id, paused = paused))
         }
     }
     fun togglePause(current: Chat) = setPaused(current, !current.paused)
@@ -1180,7 +1201,7 @@ internal fun ChatPage(
                         {
                             chat?.let { current ->
                                 vm.perform {
-                                    api.request("POST", "/chats/${segment(current.id)}/stop")
+                                    api.stopChat(ChatInput(chatId = current.id))
                                 }
                             }
                         },
@@ -1235,7 +1256,7 @@ internal fun ChatPage(
                             Button(
                                 onClick = {
                                     vm.perform {
-                                        api.request("POST", "/chats/${segment(chat.id)}/restore")
+                                        api.restoreChat(ChatInput(chatId = chat.id))
                                     }
                                 },
                                 enabled = !state.busy,
@@ -1443,7 +1464,7 @@ internal fun ChatPage(
                                                                     ),
                                                                 "plan" to
                                                                     JsonPrimitive(
-                                                                        sending.message.plan
+                                                                        sending.message.plan == true
                                                                     ),
                                                             )
                                                         ),
@@ -1846,11 +1867,7 @@ internal fun ChatPage(
                     { newSession = false },
                 ) {
                     vm.perform {
-                        api.request(
-                            "POST",
-                            "/chats/${segment(chat.id)}/new-session",
-                            buildJsonObject { put("confirm", true) },
-                        )
+                        api.restartChatSession(ConfirmChatInput(chatId = chat.id, confirm = true))
                         newSession = false
                     }
                 }
@@ -1863,7 +1880,7 @@ internal fun ChatPage(
                     { compacting = false },
                 ) {
                     vm.perform {
-                        api.request("POST", "/chats/${segment(chat.id)}/compact")
+                        api.compactChat(ChatInput(chatId = chat.id))
                         compacting = false
                     }
                 }
@@ -1876,7 +1893,7 @@ internal fun ChatPage(
                     { stopping = false },
                 ) {
                     vm.perform {
-                        api.request("POST", "/chats/${segment(chat.id)}/stop")
+                        api.stopChat(ChatInput(chatId = chat.id))
                         stopping = false
                     }
                 }
@@ -1889,9 +1906,8 @@ internal fun ChatPage(
                     { removing = null },
                 ) {
                     vm.perform {
-                        api.request(
-                            "DELETE",
-                            "/chats/${segment(message.chatId)}/messages/${segment(message.id)}",
+                        api.deleteChatMessage(
+                            ChatMessageReference(chatId = message.chatId, messageId = message.id)
                         )
                         removing = null
                     }

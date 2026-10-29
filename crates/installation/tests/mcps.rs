@@ -964,7 +964,7 @@ async fn public_questionnaire_answers_preserve_choices_comments_and_withdrawal_a
     let mut chat = s.chat_create(json!({})).await.unwrap();
     chat["runId"] = run["id"].clone();
     let chat_id = chat["id"].as_str().unwrap().to_owned();
-    s.store.put("chats", chat).await.unwrap();
+    s.store.save_conversation_boundary(chat).await.unwrap();
     let question = "e".repeat(64);
     s.question_receive(
         run["id"].as_str().unwrap(),

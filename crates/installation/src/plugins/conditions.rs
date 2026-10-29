@@ -387,7 +387,7 @@ pub async fn poll_once(s: &Service) -> Result<()> {
         .read(|db| {
             let mut groups: BTreeMap<String, Vec<Watch>> = BTreeMap::new();
             let mut owners = db
-                .list("chats")?
+                .conversations_boundary()?
                 .into_iter()
                 .map(|record| crate::waits::Owner { chat: true, record })
                 .collect::<Vec<_>>();
@@ -586,9 +586,7 @@ mod tests {
                     "snapshot": { "agent": source }, "chatExecution": { "messageId": "message" },
                 });
                 db.add_run_fixture(&captured_run, None)?;
-                let chat = db.put(
-                    "chats",
-                    &json!({
+                let chat = db.save_conversation_boundary(&json!({
                         "id": "chat", "agentId": "00000000-0000-4000-8000-000000000011", "runId": "run",
                         "wakeup": {
                             "messageId": "message", "wakeAt": now() + 60_000,
@@ -613,7 +611,7 @@ mod tests {
                     )],
                     &Err(stale_denial),
                 )?;
-                assert_eq!(db.get("chats", "chat")?.unwrap(), chat);
+                assert_eq!(db.conversation_boundary("chat")?.unwrap(), chat);
                 assert!(db.events_fixture("run", 0, 10)?.is_empty());
 
                 let fresh = Ok(Observed {
@@ -635,7 +633,7 @@ mod tests {
                     &fresh,
                 )?;
                 assert_eq!(
-                    db.get("chats", "chat")?.unwrap()["wakeup"]["observation"]["state"],
+                    db.conversation_boundary("chat")?.unwrap()["wakeup"]["observation"]["state"],
                     "completed"
                 );
                 assert_eq!(db.events_fixture("run", 0, 10)?.len(), 1);

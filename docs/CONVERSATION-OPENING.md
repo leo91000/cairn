@@ -21,7 +21,24 @@ opens immediately; otherwise the reader waits for the stream’s first snapshot.
   the reader receives only what it lacks and keeps its history and position. Otherwise the
   behavior is unchanged: the recent window for a reader following the latest output, the
   replay for a reader of older messages.
-- History pages read the run and its events only, not the stream metadata.
+- History pages read the run and its events only, not the stream metadata. Their
+  event arrays use a 256 KiB gzip budget and at most 1,000 events, with a separate
+  4 MiB decoded ceiling. One oversized event remains readable whole so cursors
+  always advance. Backwards candidates are measured in chronological wire order;
+  unused candidates remain reachable through the next cursor. Candidates are
+  serialized once and reused for bulk gzip probes; probes at least double their
+  decoded input, and at most two proportional cuts precede a single-event
+  fallback for highly uneven rows. Pages can therefore leave budget unused.
+  HTTP still compresses the final response separately. Live SSE initial/replay windows and forward
+  batches keep their existing 100-event and raw-byte limits. Public MCP and agent-tool responses retain
+  their bounded previews and chunked full-content reads.
+- Relay requests preserve compression negotiation and encoding headers. Web and
+  Android direct channels request gzip and decode it explicitly, with the same
+  8 MB decoded-response bound as their wire bodies. Older browsers without
+  DecompressionStream request identity. Direct streaming paths, including shared
+  artifact files, request identity as well, so file contents and JSON error
+  responses remain readable through streaming frames. Live SSE
+  streams remain uncompressed.
 - Reads share one queue across four SQLite connections instead of alternating between two,
   so a slow page no longer delays the next read queued behind it.
 - New image attachments record their displayed size (the camera orientation applied),
@@ -35,10 +52,11 @@ opens immediately; otherwise the reader waits for the stream’s first snapshot.
   stream's first snapshot. The saved copy then only resumes the stream from its cursor, and
   still shows when there is no connection. The header names the conversation from the Fil.
 - « Updating… » appears only when revalidating a saved copy takes more than a second.
-- The reader relies on browser scroll anchoring and pins the end while following. Only a
+- The reader uses browser scroll anchoring and pins the end while following. Only a
   reader scrolling up pauses following; positions the feed sets and anchoring adjustments do
-  not. The previous manual offset remains for a page arriving at the very top, where
-  browsers do not anchor, and for engines without anchoring. `column-reverse` was evaluated
+  not. Before prepending history it records a visible row's pixel offset, then corrects
+  any movement the browser did not absorb. This covers large pages that suppress
+  native anchoring, the very top and engines without anchoring. `column-reverse` was evaluated
   and not used: with anchoring, both directions keep the reader's text in place in Chromium,
   WebKit and Firefox, and the normal direction keeps scroll offsets, saved reading positions
   and their tests unchanged.

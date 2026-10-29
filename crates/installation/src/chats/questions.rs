@@ -461,9 +461,12 @@ fn answer(
     chat(db, chat_id)?;
     let question = required(find_question(db, chat_id, id)?, "Question not found")?;
     let answers = serde_json::to_value(&input.answers)?;
-    let previous = find_message(db, chat_id, &input.id)?;
-    let already_sent = question.message_id.as_deref() == Some(input.id.as_str())
-        && previous.is_some_and(|message| message["answers"] == answers);
+    let message_id = input.id.clone();
+    let previous = find_message(db, chat_id, &message_id)?;
+    let already_sent = question.message_id.as_deref() == Some(message_id.as_str())
+        && previous.is_some_and(|message| {
+            serde_json::to_value(message.answers).is_ok_and(|stored| stored == answers)
+        });
     if already_sent {
         return Ok(question);
     }
@@ -494,15 +497,12 @@ fn answer(
     } else {
         "steer"
     };
-    let mut message = parse(
-        "message",
-        json!({
-            "id": input.id,
-            "mode": mode,
-            "text": "Questionnaire response",
-            "plan": plan,
-        }),
-    )?;
+    let mut message = super::parse_message(json!({
+        "id": input.id,
+        "mode": mode,
+        "text": "Questionnaire response",
+        "plan": plan,
+    }))?;
     // This generated text is bounded by the questionnaire and answer contracts,
     // independently of the 50,000-character ordinary chat-composer limit.
     message["text"] = answer_text(&question.fields, &input.answers).into();

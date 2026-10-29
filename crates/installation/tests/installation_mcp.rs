@@ -1175,6 +1175,28 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "read_run_history",
         "read_run_content",
     ]);
+    public_names.extend([
+        "get_conversation_retention",
+        "set_conversation_retention",
+        "get_chat_coding_agent_options",
+        "switch_chat_coding_agent",
+        "list_chats",
+        "get_chat",
+        "create_chat",
+        "convert_run_to_chat",
+        "send_chat_message",
+        "edit_chat_message",
+        "delete_chat_message",
+        "rename_chat",
+        "set_chat_paused",
+        "stop_chat",
+        "compact_chat",
+        "delete_chat",
+        "resume_chat",
+        "restart_chat_session",
+        "restore_chat",
+        "read_chat_content",
+    ]);
     public_names.insert(cairn_contracts::RESUME_RUN_ID);
     public_names.insert("manage_plugin");
     public_names.extend([
@@ -1821,6 +1843,7 @@ async fn installation_access_can_save_global_and_project_skills() {
     let content = "---\nname: independent-review\ndescription: Review until clean.\n---\n\nReview, fix, and repeat.\n";
     s.store
         .write(|db| {
+            db.save_conversation_boundary(&json!({ "id": "another-device" }))?;
             db.put_message(&json!({
                 "id": "skill-usage",
                 "chatId": "another-device",
@@ -2538,7 +2561,10 @@ async fn both_mcp_endpoints_list_current_chat_account_waits() {
     let (target, configuration) = active_run(&s, &main).await;
     let mut chat = s.chat_create(json!({})).await.unwrap();
     chat["runId"] = target["id"].clone();
-    s.store.put("chats", chat.clone()).await.unwrap();
+    s.store
+        .save_conversation_boundary(chat.clone())
+        .await
+        .unwrap();
     for required in [None, Some(cairn_contracts::AgentProvider::Codex)] {
         s.store
             .change_run(
@@ -2568,7 +2594,8 @@ async fn both_mcp_endpoints_list_current_chat_account_waits() {
             assert_eq!(listed["accountRequired"], detail["run"]["accountRequired"]);
             assert_eq!(listed["accountWaitReason"], detail["accountWaitReason"]);
             assert_eq!(listed["accountRequired"], detail["accountRequired"]);
-            assert!(listed.get("run").is_none());
+            assert!(listed["run"].is_null());
+            assert_eq!(listed["messages"], json!([]));
         }
     }
     s.store
@@ -2623,21 +2650,68 @@ async fn both_mcp_endpoints_manage_chat_queues_and_lifecycle() {
         )
         .await;
         assert_eq!(invalid["result"]["isError"], true);
+        let invalid = invoke(
+            "set_conversation_retention",
+            json!({ "inactivityDays": 36501 }),
+        )
+        .await;
+        assert_eq!(invalid["result"]["isError"], true);
+        let denied = public_call(
+            &s,
+            &["read"],
+            "set_conversation_retention",
+            json!({ "inactivityDays": 0 }),
+        )
+        .await;
+        assert_eq!(denied["result"]["isError"], true);
+        assert_eq!(
+            s.conversation_retention().await.unwrap()["inactivityDays"],
+            14
+        );
         let created = invoke("create_chat", json!({})).await;
         let chat_id = result(&created)["id"].as_str().unwrap();
         assert_eq!(result(&created)["agentId"], MAIN_AGENT_ID);
+        s.store
+            .set(
+                &format!("chat-error:{chat_id}"),
+                json!("Preparation requires attention"),
+                None,
+            )
+            .await
+            .unwrap();
+        let failed = invoke("get_chat", json!({ "chatId": chat_id })).await;
+        assert_eq!(
+            result(&failed)["chat"]["error"],
+            "Preparation requires attention"
+        );
+        assert_eq!(
+            s.chat_detail(chat_id).await.unwrap()["error"],
+            "Preparation requires attention"
+        );
         let pause = invoke(
             "set_chat_paused",
             json!({ "chatId": chat_id, "paused": true }),
         )
         .await;
         assert_eq!(result(&pause)["paused"], true);
-        let message_id = uuid::Uuid::new_v4().to_string();
+        let message_id = "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDE1";
+        let attachment_id = "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDE2";
+        let uploaded = invoke(
+            "upload_chat_attachment",
+            json!({
+                "chatId": chat_id, "attachmentId": attachment_id,
+                "name": "uppercase.txt", "data": "QQ==",
+            }),
+        )
+        .await;
+        assert_eq!(result(&uploaded)["id"], attachment_id);
         let args = json!({
             "chatId": chat_id,
-            "message": { "id": message_id, "text": "First message" },
+            "message": { "id": message_id, "text": "First message", "attachmentIds": [attachment_id] },
         });
         let sent = invoke("send_chat_message", args.clone()).await;
+        assert_eq!(result(&sent)["id"], message_id);
+        assert_eq!(result(&sent)["attachments"][0]["id"], attachment_id);
         assert_eq!(result(&sent)["status"], "queued");
         let retry = invoke("send_chat_message", args).await;
         assert_eq!(result(&sent), result(&retry));
@@ -2651,7 +2725,7 @@ async fn both_mcp_endpoints_manage_chat_queues_and_lifecycle() {
         assert_eq!(result(&changed)["text"], "Edited");
         let renamed = invoke(
             "rename_chat",
-            json!({ "chatId": chat_id, "title": "  Gestion Cairn  " }),
+            json!({ "chatId": chat_id, "title": "  Gestion Cairn  ", "revision": s.store.conversation_boundary(chat_id).await.unwrap().unwrap()["revision"] }),
         )
         .await;
         assert_eq!(result(&renamed)["title"], "Gestion Cairn");
@@ -2662,8 +2736,8 @@ async fn both_mcp_endpoints_manage_chat_queues_and_lifecycle() {
         let listed = invoke("list_chats", json!({ "limit": 1 })).await;
         assert_eq!(result(&listed)["chats"][0]["id"], chat_id);
         let detail = invoke("get_chat", json!({ "chatId": chat_id })).await;
-        assert_eq!(result(&detail)["messages"][0]["text"], "Edited");
-        assert!(result(&detail)["chat"].get("run").is_none());
+        assert_eq!(result(&detail)["messages"][0]["message"]["text"], "Edited");
+        assert!(result(&detail)["chat"]["run"].is_null());
         let resumed = invoke(
             "set_chat_paused",
             json!({ "chatId": chat_id, "paused": false }),
@@ -2778,7 +2852,7 @@ async fn chat_file_tools_read_private_artifacts_and_attachments_in_bounded_chunk
     let chat_id = chat["id"].as_str().unwrap();
     let mut chat = chat.clone();
     chat["runId"] = target["id"].clone();
-    s.store.put("chats", chat).await.unwrap();
+    s.store.save_conversation_boundary(chat).await.unwrap();
     let artifact_id = uuid::Uuid::new_v4().to_string();
     let data = (0..220_000).map(|i| (i % 251) as u8).collect::<Vec<_>>();
     let digest = {
@@ -2820,9 +2894,14 @@ async fn chat_file_tools_read_private_artifacts_and_attachments_in_bounded_chunk
         )
         .await
         .unwrap();
-    let mut expired = s.store.get("chats", chat_id).await.unwrap().unwrap();
+    let mut expired = s
+        .store
+        .conversation_boundary(chat_id)
+        .await
+        .unwrap()
+        .unwrap();
     expired["lastActivityAt"] = 1.into();
-    s.store.put("chats", expired).await.unwrap();
+    s.store.save_conversation_boundary(expired).await.unwrap();
     s.cleanup_conversations().await.unwrap();
     assert_eq!(
         s.chat_detail(chat_id).await.unwrap()["environmentState"],
@@ -2971,7 +3050,7 @@ async fn chat_questions_redact_private_answers_and_content_chunks_detect_changes
     let mut chat = s.chat_create(json!({})).await.unwrap();
     chat["runId"] = target["id"].clone();
     let chat_id = chat["id"].as_str().unwrap().to_owned();
-    s.store.put("chats", chat).await.unwrap();
+    s.store.save_conversation_boundary(chat).await.unwrap();
     let question_id = "a".repeat(64);
     s.question_receive(
         target["id"].as_str().unwrap(),
@@ -2992,7 +3071,7 @@ async fn chat_questions_redact_private_answers_and_content_chunks_detect_changes
     assert_eq!(result(&questions)["questions"][0]["status"], "pending");
     let answer = json!({
         "chatId": chat_id, "questionId": question_id,
-        "answer": { "id": uuid::Uuid::new_v4(), "answers": { "secret": { "selected": [], "comment": "fixture-private-answer" } } },
+        "answer": { "id": uuid::Uuid::new_v4().to_string().to_uppercase(), "answers": { "secret": { "selected": [], "comment": "fixture-private-answer" } } },
     });
     let answered = call(&s, &configuration, "answer_chat_question", answer.clone()).await;
     assert_eq!(result(&answered)["status"], "answering");
@@ -3052,7 +3131,7 @@ async fn chat_questions_redact_private_answers_and_content_chunks_detect_changes
         offset = next;
     }
     assert_eq!(messages.len(), 9);
-    assert_eq!(messages[8]["text"], "Private answer");
+    assert_eq!(messages[8]["message"]["text"], "Private answer");
     let mut offset = 0;
     let mut checksum = Value::Null;
     let mut content = String::new();
@@ -3076,7 +3155,7 @@ async fn chat_questions_redact_private_answers_and_content_chunks_detect_changes
         &s,
         &configuration,
         "rename_chat",
-        json!({ "chatId": chat_id, "title": "Changed snapshot" }),
+        json!({ "chatId": chat_id, "title": "Changed snapshot", "revision": s.store.conversation_boundary(&chat_id).await.unwrap().unwrap()["revision"] }),
     )
     .await;
     result(&renamed);
@@ -3116,7 +3195,7 @@ async fn chat_recovery_tools_preserve_confirmation_and_retention_rules() {
     let mut chat = s.chat_create(json!({})).await.unwrap();
     chat["runId"] = target["id"].clone();
     let chat_id = chat["id"].as_str().unwrap().to_owned();
-    s.store.put("chats", chat).await.unwrap();
+    s.store.save_conversation_boundary(chat).await.unwrap();
     let denied = call(
         &s,
         &configuration,
@@ -3158,9 +3237,9 @@ async fn chat_recovery_tools_preserve_confirmation_and_retention_rules() {
     )
     .await;
     assert_eq!(expired["result"]["isError"], true);
-    let mut retained = s.get("chats", &chat_id).await.unwrap();
+    let mut retained = s.conversation_boundary(&chat_id).await.unwrap();
     retained["purgeAt"] = (cairn_installation::config::now() + 60_000).into();
-    s.store.put("chats", retained).await.unwrap();
+    s.store.save_conversation_boundary(retained).await.unwrap();
     let restored = call(
         &s,
         &configuration,
@@ -3213,7 +3292,7 @@ async fn code_mode_discovers_schemas_and_composes_chat_and_artifact_reads() {
             await cairn.send_chat_message({chatId: chat.id, message: input});
             const detail = await cairn.get_chat({chatId: chat.id});
             const files = await cairn.list_chat_artifacts({chatId: chat.id});
-            return {id: chat.id, text: detail.messages[0].text, files: files.artifacts.length};
+            return {id: chat.id, text: detail.messages[0].message.text, files: files.artifacts.length};
         "#,
     })).await;
     assert_eq!(
@@ -3508,10 +3587,7 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
     )
     .await;
     s.store
-        .put(
-            "chats",
-            json!({ "id": chat, "runId": run, "agentId": profile["id"] }),
-        )
+        .save_conversation_boundary(json!({ "id": chat, "runId": run, "agentId": profile["id"] }))
         .await
         .unwrap();
     common::set_checkpoint(
@@ -3521,18 +3597,13 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
     )
     .await;
     for expired in [false, true] {
-        s.store
-            .put(
-                "chats",
-                json!({
-                    "id": chat,
-                    "runId": run,
-                    "agentId": profile["id"],
-                    "environmentState": if expired { json!("expired") } else { Value::Null },
-                }),
-            )
-            .await
-            .unwrap();
+        let mut current = s.store.conversation_boundary(&chat).await.unwrap().unwrap();
+        current["environmentState"] = if expired {
+            json!("expired")
+        } else {
+            Value::Null
+        };
+        s.store.save_conversation_boundary(current).await.unwrap();
         if expired {
             common::set_checkpoint(&s.store, &run, json!({ "completed": true })).await;
         }
@@ -3766,7 +3837,7 @@ async fn chat_compaction_matches_public_mcp_and_installation_tools() {
         let mut chat = s.chat_create(json!({})).await.unwrap();
         chat["runId"] = target["id"].clone();
         let chat_id = chat["id"].as_str().unwrap().to_owned();
-        s.store.put("chats", chat).await.unwrap();
+        s.store.save_conversation_boundary(chat).await.unwrap();
         let invoke = |name, args| {
             let s = s.clone();
             let configuration = configuration.clone();
@@ -3815,6 +3886,25 @@ async fn chat_compaction_matches_public_mcp_and_installation_tools() {
 
         let compacted = invoke("compact_chat", json!({ "chatId": chat_id })).await;
         assert_eq!(result(&compacted)["compaction"]["running"], true);
+        let saved = s
+            .store
+            .conversation_boundary(&chat_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result(&compacted)["revision"], saved["revision"]);
+        let renamed = public_call(
+            &s,
+            &["manage"],
+            "rename_chat",
+            json!({
+                "chatId": chat_id,
+                "title": "Renamed after compaction",
+                "revision": result(&compacted)["revision"],
+            }),
+        )
+        .await;
+        assert_ne!(renamed["result"]["isError"], true, "{renamed}");
         let run = s.store.run(run_id).await.unwrap();
         assert_eq!(run["status"], "queued");
         assert_eq!(run["chatExecution"]["operation"], "compact");

@@ -186,7 +186,7 @@ fn read_page(
         resume,
     } = request;
     let chat = if scope.single_chat() {
-        crate::chats::detail(db, &scope.id)?
+        crate::chats::public_detail(db, &scope.id)?
     } else {
         Value::Null
     };
@@ -204,7 +204,7 @@ fn read_page(
     let start = if reset { 0 } else { after };
     let mut tail = window && (after == 0 || reset);
     let (mut events, mut has_older) = if tail {
-        db.events_before(run_id, i64::MAX)?
+        db.live_events_between(run_id, 0, i64::MAX)?
     } else {
         (
             db.event_batch(run_id, start, PAGE_EVENTS, PAGE_BYTES)?,
@@ -217,13 +217,13 @@ fn read_page(
     // catch-up: the reader keeps its history and only receives what it lacks.
     let long_backlog = !tail && events.last().is_some_and(|event| event.id < max);
     if window && resume && long_backlog {
-        let (missing, gap) = db.events_between(run_id, start, i64::MAX)?;
+        let (missing, gap) = db.live_events_between(run_id, start, i64::MAX)?;
         if !gap {
             events = missing;
         } else if recent {
             // A viewer at the latest output skips the rest: it reopens on the recent
             // window, and older messages load from the window's boundary.
-            (events, has_older) = db.events_before(run_id, i64::MAX)?;
+            (events, has_older) = db.live_events_between(run_id, 0, i64::MAX)?;
             reset = true;
             tail = true;
         }

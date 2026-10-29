@@ -237,6 +237,22 @@ pub(crate) async fn operation(
             )
             .await;
     }
+    if name == "create_chat"
+        && let Some(input) = args.as_object_mut()
+    {
+        input
+            .entry("agentId")
+            .or_insert_with(|| run["snapshot"]["agent"]["id"].clone());
+    }
+    if let Some(op) = crate::capabilities::chat_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
     if let Some(op) = crate::capabilities::node_operation(name) {
         return op
             .invoke(

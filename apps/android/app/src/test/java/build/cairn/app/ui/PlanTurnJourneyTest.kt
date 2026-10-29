@@ -55,7 +55,7 @@ class PlanTurnJourneyTest {
             val calls = CopyOnWriteArrayList<String>()
             val chat =
                 Chat(
-                    "chat",
+                    id = "chat",
                     title = "Composeur",
                     agentId = MAIN_AGENT_ID,
                     agentName = "Agent principal",
@@ -77,7 +77,7 @@ class PlanTurnJourneyTest {
                                         ),
                                     agent = newAgent().copy(provider = "claude"),
                                 ),
-                            chatExecution = ChatExecution("plan-request", plan = true),
+                            chatExecution = ChatExecution(messageId = "plan-request", plan = true),
                         ),
                 )
             val events =

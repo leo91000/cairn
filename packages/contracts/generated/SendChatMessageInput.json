@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "ChatMessageInput": {
+      "properties": {
+        "attachmentIds": {
+          "default": [],
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "mode": {
+          "default": "queue",
+          "pattern": "^(queue|steer)$",
+          "type": "string"
+        },
+        "model": {
+          "default": "",
+          "maxLength": 120,
+          "pattern": "^[\\w./:\\[\\]-]*$",
+          "type": "string"
+        },
+        "plan": {
+          "default": false,
+          "description": "Plan turn: the agent explores and proposes an approach without changing files, using\nshell network access or calling tools with external effects. Send a later message\nwithout plan to implement it. Unavailable with OpenCode.",
+          "type": "boolean"
+        },
+        "provider": {
+          "default": "",
+          "pattern": "^(|codex|claude|opencode)$",
+          "type": "string"
+        },
+        "reasoning": {
+          "default": "",
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
+        "speed": {
+          "default": "",
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
+        "text": {
+          "default": "",
+          "maxLength": 50000,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "chatId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "message": {
+      "$ref": "#/definitions/ChatMessageInput"
+    }
+  },
+  "required": [
+    "chatId",
+    "message"
+  ],
+  "title": "SendChatMessageInput",
+  "type": "object"
+}

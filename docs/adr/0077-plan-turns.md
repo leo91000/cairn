@@ -29,7 +29,9 @@ chez les anciens clients, garde le comportement existant. Le serveur refuse un t
 de plan pour un moteur dont il ne sait pas borner les effets (OpenCode, qui n’a pas
 de bac à sable), et refuse de faire rejoindre un tour en cours qui peut déjà modifier
 les fichiers (`steer`). Les missions et les reprises planifiées ne sont jamais des
-tours de plan.
+tours de plan. Le drapeau est une colonne typée de `chat_messages`, ajoutée par la
+[migration 15 → 16](../migrations/0016-plan-requests.md), afin qu’une demande en file
+garde sa frontière après un redémarrage.
 
 Pendant un tour de plan, Cairn applique lui-même la frontière :
 

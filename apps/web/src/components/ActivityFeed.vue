@@ -191,7 +191,6 @@ let prependPending = false
 let resizeObserver: ResizeObserver | undefined
 // The browser keeps the text under the reader in place while content changes above or
 // below it (scroll anchoring); following pins the end after every change of size.
-const anchoring = CSS.supports('overflow-anchor', 'auto')
 // The position the feed set itself, whose scroll event is not the reader's.
 let assigned: number | undefined
 let lastTop = 0
@@ -276,14 +275,46 @@ function loadOlder() {
 watch([() => props.events, () => props.loadingOlder], async () => {
   if (props.loadingOlder || !prependPending)
     return
-  // Anchoring keeps the reader's text in place, except at the very top, where browsers
-  // never anchor, and in engines without it. Measure just before the page renders: the
-  // reader may have kept scrolling while the response was in flight.
+  // A large prepend can suppress native scroll anchoring. Retain a visible row's
+  // actual offset, correcting only the movement the browser did not absorb.
+  // Measure just before rendering: the reader may have scrolled during the request.
   const el = scroller.value
-  const anchor = el && !follow.value && (!anchoring || el.scrollTop < 1) && { height: el.scrollHeight, top: el.scrollTop }
+  let anchor: {
+    height: number
+    top: number
+    element?: Element
+    offset: number
+  } | undefined
+  if (el && !follow.value) {
+    const children = conversation.value?.children
+    const viewportTop = el.getBoundingClientRect().top
+    let start = 0
+    let end = children?.length ?? 0
+    // Rows are in document order; avoid measuring every loaded history row.
+    while (start < end) {
+      const middle = Math.floor((start + end) / 2)
+      if (children![middle]!.getBoundingClientRect().bottom <= viewportTop)
+        start = middle + 1
+      else
+        end = middle
+    }
+
+    const element = children?.[start]
+    anchor = {
+      height: el.scrollHeight,
+      top: el.scrollTop,
+      element,
+      offset: element?.getBoundingClientRect().top ?? 0,
+    }
+  }
+
   await nextTick()
-  if (el && anchor && !props.olderError)
-    setScroll(el, anchor.top + el.scrollHeight - anchor.height)
+  if (el && anchor && !props.olderError) {
+    const top = anchor.element?.isConnected
+      ? el.scrollTop + anchor.element.getBoundingClientRect().top - anchor.offset
+      : anchor.top + el.scrollHeight - anchor.height
+    setScroll(el, top)
+  }
 
   prependPending = false
   savePosition()
