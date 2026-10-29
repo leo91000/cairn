@@ -34,6 +34,8 @@ import androidx.compose.ui.unit.sp
 import build.cairn.app.data.*
 import build.cairn.contracts.AccountCodeInput
 import build.cairn.contracts.AccountInput
+import build.cairn.contracts.AccountProviderInput
+import build.cairn.contracts.AccountProvidersOutput
 import build.cairn.contracts.AccountSettings
 import build.cairn.contracts.ConnectAccountInput
 import build.cairn.contracts.ListAccountsInput
@@ -42,6 +44,7 @@ import build.cairn.contracts.ReplaceAccountKeyInput
 import build.cairn.contracts.cancelCodingAgentAccountSignIn
 import build.cairn.contracts.connectCodingAgentAccount
 import build.cairn.contracts.deleteCodingAgentAccount
+import build.cairn.contracts.listCodingAgentAccountProviders
 import build.cairn.contracts.reconnectCodingAgentAccount
 import build.cairn.contracts.replaceCodingAgentAccount
 import build.cairn.contracts.replaceCodingAgentAccountKey
@@ -823,7 +826,15 @@ internal fun AccountSignInSheet(
             try {
                 keyProviders =
                     withContext(Dispatchers.IO) {
-                        vm.api.get<List<ApiKeyProvider>>("/accounts/providers/${segment(provider)}")
+                        when (
+                            val result =
+                                vm.api.listCodingAgentAccountProviders(
+                                    AccountProviderInput(provider)
+                                )
+                        ) {
+                            is AccountProvidersOutput.A -> result.providers
+                            is AccountProvidersOutput.B -> error(result.message)
+                        }
                     }
                 if (keyProviders.none { it.id == modelProvider })
                     modelProvider = keyProviders.firstOrNull()?.id.orEmpty()

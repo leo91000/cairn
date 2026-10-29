@@ -13,6 +13,8 @@ import build.cairn.app.data.*
 import build.cairn.contracts.AccountInput
 import build.cairn.contracts.ListAccountsInput
 import build.cairn.contracts.OrderAccountsInput
+import build.cairn.contracts.OrderAccountsOutput
+import build.cairn.contracts.RefreshAccountsOutput
 import build.cairn.contracts.listCodingAgentAccounts
 import build.cairn.contracts.orderCodingAgentAccounts
 import build.cairn.contracts.reconnectCodingAgentAccount
@@ -89,7 +91,13 @@ fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) ->
             IconButton(
                 onClick = {
                     vm.perform {
-                        val next = api.refreshCodingAgentAccounts(ListAccountsInput())
+                        val next =
+                            when (
+                                val result = api.refreshCodingAgentAccounts(ListAccountsInput())
+                            ) {
+                                is RefreshAccountsOutput.A -> result.overview
+                                is RefreshAccountsOutput.B -> error(result.message)
+                            }
                         withContext(Dispatchers.Main) { show(next) }
                     }
                 },
@@ -119,9 +127,15 @@ fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) ->
                     reorder = { ids ->
                         vm.perform {
                             val next =
-                                api.orderCodingAgentAccounts(
-                                    OrderAccountsInput(provider = provider, ids = ids)
-                                )
+                                when (
+                                    val result =
+                                        api.orderCodingAgentAccounts(
+                                            OrderAccountsInput(provider = provider, ids = ids)
+                                        )
+                                ) {
+                                    is OrderAccountsOutput.A -> result.overview
+                                    is OrderAccountsOutput.B -> error(result.message)
+                                }
                             withContext(Dispatchers.Main) { show(next) }
                         }
                     },

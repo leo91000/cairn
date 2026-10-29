@@ -389,7 +389,7 @@ class AccountsJourneyTest {
             { request, _ ->
                 when ("${request.method} ${request.path}") {
                     "GET /api/installations/fixture/api/accounts/providers/opencode" ->
-                        """[{"id":"opencode","name":"OpenCode Zen"},{"id":"openai","name":"OpenAI"}]"""
+                        """{"kind":"available","providers":[{"id":"opencode","name":"OpenCode Zen"},{"id":"openai","name":"OpenAI"}]}"""
                     "POST /api/installations/fixture/api/accounts" -> {
                         assertEquals("fixture", request.getHeader("X-CSRF-Token"))
                         val account =

@@ -173,7 +173,12 @@ export function useAccounts() {
     loaded,
     busy,
     error,
-    refresh: () => action(async () => apply(await refreshCodingAgentAccounts(api, {}))),
+    refresh: () => action(async () => {
+      const result = await refreshCodingAgentAccounts(api, {})
+      if (result.kind === 'humanRequired')
+        throw new Error(result.message)
+      apply(result.overview)
+    }),
     add: (provider: Provider, name: string) => action(async () => {
       const result = await connectCodingAgentAccount(api, {
         provider,
@@ -183,7 +188,7 @@ export function useAccounts() {
       })
       if (result.kind === 'signIn')
         return result.signIn
-      throw new Error('Connect this account in Connections with an owner session.')
+      throw new Error(result.kind === 'connected' ? 'Connect this account in Connections with an owner session.' : result.message)
     }),
     connectKey: (provider: Provider, name: string, modelProvider: string, apiKey: string, id?: string) => action(async () => {
       const result = id
@@ -196,13 +201,13 @@ export function useAccounts() {
           })
       if (result.kind === 'connected')
         return result.account
-      throw new Error('Connect this account in Connections with an owner session.')
+      throw new Error(result.kind === 'signIn' ? 'Connect this account in Connections with an owner session.' : result.message)
     }),
     reconnect: (id: string) => action(async () => {
       const result = await reconnectCodingAgentAccount(api, { accountId: id })
       if (result.kind === 'signIn')
         return result.signIn
-      throw new Error('Reconnect this account in Connections with an owner session.')
+      throw new Error(result.kind === 'connected' ? 'Reconnect this account in Connections with an owner session.' : result.message)
     }),
     submitCode: (code: string) => action(async () => {
       await submitCodingAgentAccountCode(api, { code })
@@ -224,7 +229,12 @@ export function useAccounts() {
         },
       })
     }),
-    reorder: (provider: Provider, ids: string[]) => action(async () => apply(await orderCodingAgentAccounts(api, { provider, ids }))),
+    reorder: (provider: Provider, ids: string[]) => action(async () => {
+      const result = await orderCodingAgentAccounts(api, { provider, ids })
+      if (result.kind === 'unsupported')
+        throw new Error(result.message)
+      apply(result.overview)
+    }),
     remove: (id: string) => action(async () => {
       await deleteCodingAgentAccount(api, { accountId: id })
       return true

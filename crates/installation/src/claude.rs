@@ -525,7 +525,34 @@ pub async fn model_catalog(s: &Service) -> Result<Value> {
         None => Vec::new(),
     };
     present(&mut catalog, &cached);
-    Ok(serde_json::to_value(catalog)?)
+    let view = cairn_contracts::ModelCatalog {
+        models: catalog
+            .models
+            .into_iter()
+            .map(|row| cairn_contracts::CodingAgentModel {
+                model: row.model,
+                display_name: row.display_name.unwrap_or_default(),
+                description: row.description.unwrap_or_default(),
+                hidden: row.hidden,
+                is_default: row.is_default,
+                default_reasoning_effort: row.default_reasoning_effort,
+                supported_reasoning_efforts: row
+                    .supported_reasoning_efforts
+                    .into_iter()
+                    .map(|effort| cairn_contracts::ReasoningOption {
+                        reasoning_effort: effort.reasoning_effort,
+                        description: effort.description,
+                    })
+                    .collect(),
+                resolved_model: row.resolved_model,
+                ..Default::default()
+            })
+            .collect(),
+        checked_at: catalog.checked_at,
+        stale: catalog.stale,
+        error: catalog.error,
+    };
+    Ok(serde_json::to_value(view)?)
 }
 
 async fn stored_catalog(s: &Service) -> Result<Catalog> {

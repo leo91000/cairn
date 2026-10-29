@@ -942,12 +942,6 @@ pub(crate) async fn invoke(
         | "stop_chat"
         | "compact_chat"
         | "delete_chat" => chat_tools::invoke(s, name, args, bearer).await,
-        "list_models" => {
-            crate::provider::Provider::parse(text(&args, "provider"))?
-                .adapter()
-                .model_catalog(s)
-                .await
-        }
         "convert_run_to_chat" => {
             s.chat_from_run_authorized(text(&args, "runId"), authorize)
                 .await
