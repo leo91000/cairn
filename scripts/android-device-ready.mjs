@@ -13,6 +13,10 @@ printf '__CAIRN_SYSTEM__\\n'
 pidof system_server || true
 printf '__CAIRN_UI__\\n'
 pidof com.android.systemui || true
+printf '__CAIRN_POWER__\\n'
+dumpsys power | sed -n 's/^[[:space:]]*mWakefulness=/wakefulness=/p'
+printf '__CAIRN_KEYGUARD__\\n'
+dumpsys window policy | sed -n '/^[[:space:]]*showing=/p; /^[[:space:]]*inputRestricted=/p'
 printf '__CAIRN_CPU__\\n'
 head -n 1 /proc/stat
 printf '__CAIRN_CONFIG__\\n'
@@ -26,7 +30,7 @@ export function parseDeviceSample(stdout) {
   const sections = {}
   for (let index = 1; index < parts.length; index += 2)
     sections[parts[index]] = parts[index + 1].trim()
-  for (const name of ['BOOT', 'ANIMATION', 'SYSTEM', 'UI', 'CPU', 'CONFIG', 'PROCESSES']) {
+  for (const name of ['BOOT', 'ANIMATION', 'SYSTEM', 'UI', 'POWER', 'KEYGUARD', 'CPU', 'CONFIG', 'PROCESSES']) {
     if (!Object.hasOwn(sections, name))
       throw new Error(`Missing device readiness section: ${name}`)
   }
@@ -36,10 +40,14 @@ export function parseDeviceSample(stdout) {
   const counters = sections.CPU.split(/\s+/)
   const ticks = counters.slice(1, 9).map(Number)
   const config = /^config: (.+)$/m.exec(sections.CONFIG)?.[1]
+  const wakefulness = /^wakefulness=(\S+)$/m.exec(sections.POWER)?.[1]
+  const showing = /^\s*showing=(true|false)$/m.exec(sections.KEYGUARD)?.[1]
+  const restricted = /^\s*inputRestricted=(true|false)$/m.exec(sections.KEYGUARD)?.[1]
   const validCpu = counters[0] === 'cpu' && ticks.length === 8 && ticks.every(value => Number.isFinite(value) && value >= 0)
   const processHeader = /^NAME\s*\n/.test(`${sections.PROCESSES}\n`)
-  if (!validCpu || !config || !processHeader)
-    throw new Error('Malformed device CPU, configuration or process sample')
+  const validInteraction = wakefulness !== undefined && showing !== undefined && restricted !== undefined
+  if (!validCpu || !config || !processHeader || !validInteraction)
+    throw new Error('Malformed device CPU, configuration, interaction or process sample')
 
   const processes = sections.PROCESSES.split('\n').map(line => line.trim())
   const compilers = processes.filter(name => /(?:^|\/)(?:dex2oat(?:32|64)?|odrefresh|profman)$/.test(name))
@@ -50,6 +58,9 @@ export function parseDeviceSample(stdout) {
     system: sections.SYSTEM,
     ui: sections.UI,
     config,
+    wakefulness,
+    keyguardShowing: showing === 'true',
+    inputRestricted: restricted === 'true',
     cpu: { total: ticks.reduce((sum, value) => sum + value, 0), idle: ticks[3] },
     compilers,
   }
@@ -97,6 +108,10 @@ export async function waitForDeviceReady({
           reasons.push('Boot is not complete')
         if (!/^\d+$/.test(sample.system) || !/^\d+$/.test(sample.ui))
           reasons.push('System server or System UI is missing')
+        if (sample.wakefulness !== 'Awake')
+          reasons.push(`Device is ${sample.wakefulness}`)
+        if (sample.keyguardShowing || sample.inputRestricted)
+          reasons.push('Keyguard blocks interaction')
         if (!sameProcesses)
           reasons.push('System processes changed')
         if (!sameConfiguration)
@@ -117,7 +132,7 @@ export async function waitForDeviceReady({
         })
         if (quietSince !== null && now() - quietSince >= quietMs) {
           ready = true
-          log(`Android settled after ${((now() - started) / 1000).toFixed(1)}s (${quietMs / 1000}s quiet, CPU <= ${maxBusy * 100}%, stable configuration and System UI, no dexopt)`)
+          log(`Android settled after ${((now() - started) / 1000).toFixed(1)}s (${quietMs / 1000}s quiet, CPU <= ${maxBusy * 100}%, stable configuration and System UI, awake and unlocked, no dexopt)`)
           return
         }
       }
