@@ -203,9 +203,9 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
             .await
             .unwrap();
     }
-    let mut record = s.get("chats", &chat).await.unwrap();
+    let mut record = s.store.conversation_boundary(&chat).await.unwrap().unwrap();
     record["runId"] = chat_run.clone().into();
-    s.store.put("chats", record).await.unwrap();
+    s.store.save_conversation_boundary(record).await.unwrap();
     let settings = json!({ "name": "Review", "prompt": "Review the changes", "agentId": reviewer });
     let (_, task) = owner(&s, "POST", "/api/tasks", json!({ "settings": settings })).await;
     let run = s
@@ -527,11 +527,14 @@ async fn a_delegated_task_follows_its_requesting_conversation_until_it_is_delete
     )
     .await;
     let mut record = s
-        .get("chats", delegated["id"].as_str().unwrap())
+        .store
+        .conversation_boundary(delegated["id"].as_str().unwrap())
         .await
+        .unwrap()
         .unwrap();
-    record["requestedBy"] = json!({ "chatId": requesting["id"] });
-    s.store.put("chats", record).await.unwrap();
+    record["requestedBy"] =
+        json!({ "chatId": requesting["id"], "runId": cairn_installation::config::id() });
+    s.store.save_conversation_boundary(record).await.unwrap();
 
     let messages = format!("/api/chats/{}/messages", delegated["id"].as_str().unwrap());
     let (status, sent) = member(

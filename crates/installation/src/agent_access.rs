@@ -147,7 +147,7 @@ pub(crate) fn uses_chat(
     let Some(requester) = chat["requestedBy"]["chatId"].as_str() else {
         return Ok(false);
     };
-    match db.get("chats", requester)? {
+    match db.conversation_boundary(requester)? {
         Some(requesting) if is_active(&requesting) => {
             uses_agent(db, identity, text(&requesting, "agentId"))
         }
@@ -159,7 +159,7 @@ pub(crate) fn uses_chat(
 pub(crate) fn chat_members(db: &Db<'_>, chat: &Value) -> Result<Vec<String>> {
     let mut agents = vec![text(chat, "agentId").to_owned()];
     if let Some(requester) = chat["requestedBy"]["chatId"].as_str()
-        && let Some(requesting) = db.get("chats", requester)?
+        && let Some(requesting) = db.conversation_boundary(requester)?
         && is_active(&requesting)
     {
         agents.push(text(&requesting, "agentId").to_owned());
@@ -195,7 +195,7 @@ fn require_agent(db: &Db<'_>, identity: &InstallationIdentity, agent: &str) -> R
 }
 
 fn require_chat(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<bool> {
-    let chat = required(db.get("chats", id)?, "Chat not found")?;
+    let chat = required(db.conversation_boundary(id)?, "Chat not found")?;
     require(uses_chat(db, identity, &chat)?, member(identity))
 }
 
@@ -206,7 +206,7 @@ fn require_run(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result
     }
     let run = required(db.run(id)?, "Run not found")?;
     // An earlier run of a conversation still follows the conversation.
-    if let Some(chat) = db.get("chats", text(&run, "taskId"))? {
+    if let Some(chat) = db.conversation_boundary(text(&run, "taskId"))? {
         return require(uses_chat(db, identity, &chat)?, member(identity));
     }
     require_agent(db, identity, crate::nodes::run_agent(&run))
@@ -325,7 +325,7 @@ fn gate(
         // Deleting, and restoring what was deleted, needs the conversation's own agent, even
         // for a delegated task.
         ("DELETE", ["chats", id]) | ("POST", ["chats", id, "restore"]) => {
-            let chat = required(db.get("chats", id)?, "Chat not found")?;
+            let chat = required(db.conversation_boundary(id)?, "Chat not found")?;
             require_agent(db, identity, text(&chat, "agentId"))
         }
         ("POST", ["chats", id, "messages"])
@@ -698,14 +698,17 @@ mod tests {
             "id": crate::config::id(),
             "agentId": crate::config::MAIN_AGENT_ID,
             "lifecycle": "active",
-            "requestedBy": { "chatId": requesting["id"] },
+            "requestedBy": { "chatId": requesting["id"], "runId": crate::config::id() },
         });
-        let members = |requesting: Value, delegated: Value| {
+        let members = |mut requesting: Value, delegated: Value| {
             let s = s.clone();
             async move {
                 s.store
                     .transaction(move |db| {
-                        db.put("chats", &requesting)?;
+                        if let Some(saved) = db.conversation(text(&requesting, "id"))? {
+                            requesting["revision"] = saved.revision.into();
+                        }
+                        db.save_conversation_boundary(&requesting)?;
                         chat_members(db, &delegated)
                     })
                     .await

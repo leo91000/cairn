@@ -99,10 +99,11 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
         assert!(uuid::Uuid::parse_str(&account.revision).is_ok());
     }
     assert_eq!(store.coding_accounts().await.unwrap().len(), 3);
+    // The later account access upgrade only adds the rollout of the existing agents.
     assert_eq!(
         rows(
             &db,
-            "SELECT json_array(key,data,expires) FROM kv ORDER BY key"
+            "SELECT json_array(key,data,expires) FROM kv WHERE key<>'agent-access-rollout' ORDER BY key"
         ),
         kv
     );

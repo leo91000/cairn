@@ -579,7 +579,8 @@ fn snapshot(db: &Connection) -> Value {
         let filter = match table {
             "records" => " WHERE kind!='chats'",
             "kv" => {
-                " WHERE key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key!='conversation-expiration'"
+                // The later account access upgrade adds the rollout of the existing agents.
+                " WHERE key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key!='conversation-expiration' AND key!='agent-access-rollout'"
             }
             _ => "",
         };
