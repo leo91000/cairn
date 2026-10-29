@@ -112,6 +112,12 @@ internal object CairnIcons {
             lineTo(12f, 15f)
             lineTo(18f, 9f)
         }
+    val Left =
+        line("Left") {
+            moveTo(15f, 6f)
+            lineTo(9f, 12f)
+            lineTo(15f, 18f)
+        }
     val Right =
         line("Right") {
             moveTo(9f, 6f)

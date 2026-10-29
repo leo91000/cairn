@@ -472,7 +472,7 @@ private fun FilePreviewPage(
                 ) {
                     ActionIcon(
                         "Précédent",
-                        Icons.AutoMirrored.Filled.ArrowBack,
+                        CairnIcons.Left,
                         previous != null,
                     ) {
                         previous?.invoke()

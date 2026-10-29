@@ -3,6 +3,7 @@ import type { Account, ApiKeyProvider, Provider } from '../../../../packages/con
 import type { AccountsState } from '../accounts'
 import { computed, ref, watch } from 'vue'
 import { providers } from '../../../../packages/contracts/accounts'
+import { listCodingAgentAccountProviders } from '../../../../packages/contracts/generated/listCodingAgentAccountProviders'
 import { brands } from '../accounts'
 import { api, notify } from '../api'
 import {
@@ -55,7 +56,10 @@ watch(chosen, async (value, _previous, onCleanup) => {
   })
   loadingProviders.value = true
   try {
-    const values = await api<ApiKeyProvider[]>(`/accounts/providers/${value}`)
+    const result = await listCodingAgentAccountProviders(api, { provider: value })
+    if (result.kind === 'unsupported')
+      throw new Error(result.message)
+    const values = result.providers
     if (current) {
       keyProviders.value = values
       if (!values.some(item => item.id === modelProvider.value))

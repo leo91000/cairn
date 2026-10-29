@@ -265,7 +265,7 @@ async fn release(
     }
     if fenced
         && let Some(account) = account
-        && s.accounts.release(account).await.is_err()
+        && s.accounts.release(s, account).await.is_err()
     {
         let detail = json!({ "id": account.account_id, "runId": run_id });
         s.store.audit("account.release_failed", detail).await?;

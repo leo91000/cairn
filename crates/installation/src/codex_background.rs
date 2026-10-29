@@ -107,7 +107,7 @@ pub async fn run<T>(
         result
     }
     .await;
-    let released = s.accounts.release(&lease).await;
+    let released = s.accounts.release(s, &lease).await;
     let run = s.config.data_dir.join("runs").join(&lease_id);
     if let Err(error) = crate::accounts::remove_directory(&run).await {
         tracing::warn!(%error, "could not remove background Codex files");

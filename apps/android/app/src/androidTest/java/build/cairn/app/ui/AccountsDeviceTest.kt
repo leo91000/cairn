@@ -41,7 +41,7 @@ class AccountsDeviceTest {
                                     signIn.set(
                                         """{"accountId":"studio","provider":"claude","state":"pending","phase":"authorizing","url":"https://claude.ai/oauth/authorize?fixture=1","acceptsCode":true}"""
                                     )
-                                    signIn.get()
+                                    """{"kind":"signIn","signIn":${signIn.get()}}"""
                                 }
                                 "POST /api/installations/fixture/api/accounts/sign-in/code" -> {
                                     codes += request.body.readUtf8()
@@ -51,7 +51,7 @@ class AccountsDeviceTest {
                                     accounts.set(
                                         """{"id":"studio","provider":"claude","name":"Studio","email":"claude@example.test","state":"ready","status":"next"}"""
                                     )
-                                    "{}"
+                                    """{"kind":"completed","done":true}"""
                                 }
                                 "GET /api/installations/fixture/api/overview",
                                 "GET /api/installations/fixture/api/codex/models",

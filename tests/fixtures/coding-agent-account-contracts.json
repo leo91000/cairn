@@ -1,0 +1,10 @@
+{
+  "accounts": [
+    { "id": "00000000-0000-4000-8000-000000000001", "revision": "r1", "provider": "codex", "name": "Work", "enabled": true, "state": "ready", "status": "next", "maxConcurrentRuns": 4, "usage": { "allowed": true, "checkedAt": 1700000000000, "windows": [{ "id": "five", "label": "5-hour window", "usedPercent": 12.5, "durationMins": 300, "resetsAt": 1900000000, "models": [], "reached": false }], "resets": { "available": 2, "credits": [{ "id": "external", "expiresAt": 1900000000 }] } }, "remainingPercent": 87.5 },
+    { "id": "00000000-0000-4000-8000-000000000002", "revision": "r2", "provider": "claude", "name": "Usage unknown", "enabled": true, "state": "ready", "status": "ready", "usage": null, "maxConcurrentRuns": 9007199254740991 },
+    { "id": "00000000-0000-4000-8000-000000000003", "revision": "r3", "provider": "opencode", "name": "Go", "enabled": false, "state": "ready", "status": "paused", "modelProvider": "opencode-go", "modelProviderName": "OpenCode Go", "priority": 0, "maxConcurrentRuns": 1, "usage": { "allowed": true, "useBalance": true, "windows": [] } }
+  ],
+  "settings": [{ "name": "Work", "enabled": true, "maxConcurrentRuns": 1 }, { "name": "Work", "enabled": false, "maxConcurrentRuns": 9007199254740991 }],
+  "invalidSettings": [{ "name": "Work", "enabled": true, "maxConcurrentRuns": 0 }, { "name": "Work", "enabled": true, "maxConcurrentRuns": 9007199254740992 }, { "name": "Work", "enabled": true, "maxConcurrentRuns": 1.5 }, { "name": "Work", "enabled": true, "maxConcurrentRuns": "4" }],
+  "signIn": { "accountId": "00000000-0000-4000-8000-000000000002", "provider": "claude", "state": "pending", "phase": "authorizing", "acceptsCode": true, "url": "https://example.test/authorize", "code": null, "expiresAt": 1700000000000, "error": null }
+}

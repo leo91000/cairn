@@ -19,6 +19,18 @@ window.questionnaireHistory = (text: string) => {
   }]
 }
 
+window.questionnaireRaw = (fields: unknown) => {
+  questions.value = [{
+    id: 'question',
+    chatId: 'chat',
+    runId: 'run',
+    blocking: false,
+    status: 'pending',
+    createdAt: 1,
+    fields: fields as ChatQuestion['fields'],
+  }]
+}
+
 window.questionnaire = (fields: unknown) => {
   questions.value = [{
     id: 'question',
@@ -50,5 +62,5 @@ createApp({
   })]),
 }).mount('#app')
 declare global {
-  interface Window { questionnaireHistory: (text: string) => void, questionnaire: (fields: unknown) => void }
+  interface Window { questionnaireRaw: (fields: unknown) => void, questionnaireHistory: (text: string) => void, questionnaire: (fields: unknown) => void }
 }

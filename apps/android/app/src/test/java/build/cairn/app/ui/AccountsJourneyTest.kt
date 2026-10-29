@@ -11,6 +11,7 @@ import androidx.work.Configuration
 import androidx.work.testing.*
 import build.cairn.app.data.*
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
@@ -21,6 +22,9 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+
+private const val WORK_ACCOUNT_ID = "00000000-0000-4000-8000-000000000001"
+private const val WORK_REVISION = "00000000-0000-4000-8000-000000000002"
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36], qualifiers = "w412dp-h915dp-mdpi")
@@ -42,7 +46,7 @@ class AccountsJourneyTest {
     }
 
     private val work =
-        """{"id":"work","provider":"codex","name":"Work","email":"work@example.test","plan":"plus","state":"ready","status":"next","stale":false,"remainingPercent":82.0,"activeRunIds":["run"],"maxConcurrentRuns":4,"usage":{"checkedAt":1,"windows":[{"id":"main:primary","label":"5-hour window","usedPercent":4,"durationMins":300,"resetsAt":1893499200},{"id":"main:secondary","label":"Weekly","usedPercent":18,"durationMins":10080,"resetsAt":1894017600}],"resets":{"available":3}}}"""
+        """{"id":"$WORK_ACCOUNT_ID","revision":"$WORK_REVISION","provider":"codex","name":"Work","email":"work@example.test","plan":"plus","state":"ready","status":"next","stale":false,"remainingPercent":82.0,"activeRunIds":["run"],"maxConcurrentRuns":4,"usage":{"checkedAt":1,"windows":[{"id":"main:primary","label":"5-hour window","usedPercent":4,"durationMins":300,"resetsAt":1893499200},{"id":"main:secondary","label":"Weekly","usedPercent":18,"durationMins":10080,"resetsAt":1894017600}],"resets":{"available":3}}}"""
 
     /** A server whose accounts change with each request, recording what the app sends. */
     private class Accounts {
@@ -160,14 +164,14 @@ class AccountsJourneyTest {
                             """{"accountId":"studio","provider":"claude","state":"pending","phase":"authorizing","url":"https://claude.com/oauth/authorize?fixture=1","acceptsCode":true}"""
                         server.accounts +=
                             """{"id":"studio","provider":"claude","name":"Studio","state":"pending","status":"signIn"}"""
-                        server.signIn
+                        """{"kind":"signIn","signIn":${server.signIn}}"""
                     }
                     "POST /api/installations/fixture/api/accounts/sign-in/code" -> {
                         server.signIn =
                             """{"accountId":"studio","provider":"claude","state":"complete","phase":"verifying"}"""
                         server.accounts[1] =
                             """{"id":"studio","provider":"claude","name":"Studio","email":"studio@example.test","plan":"max","state":"ready","status":"next","stale":false,"remainingPercent":40.0,"usage":{"checkedAt":1,"windows":[{"id":"five_hour","label":"5-hour window","usedPercent":25,"durationMins":300},{"id":"seven_day","label":"Weekly","usedPercent":60,"durationMins":10080}]}}"""
-                        """{"submitted":true}"""
+                        """{"kind":"completed","done":true}"""
                     }
                     else -> null
                 }
@@ -228,9 +232,15 @@ class AccountsJourneyTest {
         journey(
             server,
             { request, payload ->
-                if (request.method == "PATCH") {
-                    assertEquals("/api/installations/fixture/api/accounts/work", request.path)
-                    val update = wireJson.parseToJsonElement(payload).jsonObject
+                if (request.method == "PUT") {
+                    assertEquals(
+                        "/api/installations/fixture/api/accounts/$WORK_ACCOUNT_ID",
+                        request.path,
+                    )
+                    val command = wireJson.parseToJsonElement(payload).jsonObject
+                    val current = wireJson.parseToJsonElement(server.accounts[0]).jsonObject
+                    assertEquals(current["revision"], command["revision"])
+                    val update = command.getValue("settings").jsonObject
                     update["maxConcurrentRuns"]?.let {
                         server.accounts[0] =
                             server.accounts[0].replace(
@@ -238,14 +248,23 @@ class AccountsJourneyTest {
                                 "\"maxConcurrentRuns\":${it.jsonPrimitive.int}",
                             )
                     }
-                    update["enabled"]?.let {
-                        server.accounts[0] =
-                            server.accounts[0].replace(
-                                "\"status\":\"next\"",
-                                "\"status\":\"paused\",\"enabled\":false",
+                    update["enabled"]
+                        ?.takeIf { !it.jsonPrimitive.boolean }
+                        ?.let {
+                            server.accounts[0] =
+                                server.accounts[0].replace(
+                                    "\"status\":\"next\"",
+                                    "\"status\":\"paused\",\"enabled\":false",
+                                )
+                        }
+                    val updated = wireJson.parseToJsonElement(server.accounts[0]).jsonObject
+                    server.accounts[0] =
+                        JsonObject(
+                                updated +
+                                    ("revision" to JsonPrimitive(UUID.randomUUID().toString()))
                             )
-                    }
-                    "{}"
+                            .toString()
+                    server.accounts[0]
                 } else null
             },
         ) {
@@ -264,14 +283,26 @@ class AccountsJourneyTest {
                 .performClick()
             compose.waitUntil(10000) {
                 server.requests.any {
-                    it.first == "PATCH /api/installations/fixture/api/accounts/work"
+                    it.first == "PUT /api/installations/fixture/api/accounts/$WORK_ACCOUNT_ID"
                 }
             }
             assertEquals(
-                """{"maxConcurrentRuns":5}""",
-                server.requests
-                    .first { it.first == "PATCH /api/installations/fixture/api/accounts/work" }
-                    .second,
+                5,
+                wireJson
+                    .parseToJsonElement(
+                        server.requests
+                            .first {
+                                it.first ==
+                                    "PUT /api/installations/fixture/api/accounts/$WORK_ACCOUNT_ID"
+                            }
+                            .second
+                    )
+                    .jsonObject
+                    .getValue("settings")
+                    .jsonObject
+                    .getValue("maxConcurrentRuns")
+                    .jsonPrimitive
+                    .int,
             )
             waitText("EN COURS · 1 SUR 5")
             compose
@@ -280,14 +311,26 @@ class AccountsJourneyTest {
                 .performClick()
             compose.waitUntil(10000) {
                 server.requests.count {
-                    it.first == "PATCH /api/installations/fixture/api/accounts/work"
+                    it.first == "PUT /api/installations/fixture/api/accounts/$WORK_ACCOUNT_ID"
                 } == 2
             }
             assertEquals(
-                """{"enabled":false}""",
-                server.requests
-                    .last { it.first == "PATCH /api/installations/fixture/api/accounts/work" }
-                    .second,
+                false,
+                wireJson
+                    .parseToJsonElement(
+                        server.requests
+                            .last {
+                                it.first ==
+                                    "PUT /api/installations/fixture/api/accounts/$WORK_ACCOUNT_ID"
+                            }
+                            .second
+                    )
+                    .jsonObject
+                    .getValue("settings")
+                    .jsonObject
+                    .getValue("enabled")
+                    .jsonPrimitive
+                    .boolean,
             )
             waitText("En pause")
         }
@@ -305,7 +348,7 @@ class AccountsJourneyTest {
             Accounts().apply {
                 accounts += work
                 signIn =
-                    """{"accountId":"work","provider":"codex","state":"pending","phase":"authorizing","code":"ABCD-12345","url":"https://auth.openai.com/codex/device"}"""
+                    """{"accountId":"$WORK_ACCOUNT_ID","provider":"codex","state":"pending","phase":"authorizing","code":"ABCD-12345","url":"https://auth.openai.com/codex/device"}"""
             }
         journey(
             server,
@@ -315,7 +358,7 @@ class AccountsJourneyTest {
                         request.path == "/api/installations/fixture/api/accounts/sign-in"
                 ) {
                     server.signIn = "null"
-                    """{"cancelled":true}"""
+                    """{"kind":"completed","done":true}"""
                 } else null
             },
         ) {
@@ -346,13 +389,13 @@ class AccountsJourneyTest {
             { request, _ ->
                 when ("${request.method} ${request.path}") {
                     "GET /api/installations/fixture/api/accounts/providers/opencode" ->
-                        """[{"id":"opencode","name":"OpenCode Zen"},{"id":"openai","name":"OpenAI"}]"""
+                        """{"kind":"available","providers":[{"id":"opencode","name":"OpenCode Zen"},{"id":"openai","name":"OpenAI"}]}"""
                     "POST /api/installations/fixture/api/accounts" -> {
                         assertEquals("fixture", request.getHeader("X-CSRF-Token"))
                         val account =
                             """{"id":"zen","provider":"opencode","name":"Zen","modelProvider":"opencode","modelProviderName":"OpenCode Zen","state":"ready","status":"next"}"""
                         server.accounts += account
-                        account
+                        """{"kind":"connected","account":$account}"""
                     }
                     else -> null
                 }
