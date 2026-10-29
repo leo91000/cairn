@@ -1300,6 +1300,77 @@ fn commit(github: &Github, commit: &str, tree: char, files: &[(&str, &str, &str)
 }
 
 #[tokio::test]
+async fn source_discovery_limits_only_selected_skill_relative_paths() {
+    for folder in ["skills/review", "a/b/c/d/e/f/g/h/skills/review"] {
+        let (api, github) = with_github().await;
+        let content = sha('a');
+        blob(&github, &content, SKILL);
+        github.respond("repos/fixture/skills", &json!({ "default_branch": "main" }));
+        let serve = |version: &str, tree: &str, files: Value| {
+            let commit = json!({
+                "sha": version,
+                "commit": {
+                    "tree": { "sha": tree },
+                    "message": "Release",
+                    "committer": { "date": "2026-10-01T10:00:00Z" },
+                },
+            });
+            github.respond("repos/fixture/skills/commits/main", &commit);
+            github.respond(&format!("repos/fixture/skills/commits/{version}"), &commit);
+            github.respond(
+                &format!("repos/fixture/skills/git/trees/{tree}?recursive=1"),
+                &json!({ "tree": files, "truncated": false }),
+            );
+        };
+        let mut files = vec![
+            json!({
+                "path": format!("{folder}/SKILL.md"),
+                "type": "blob", "mode": "100644", "sha": content, "size": SKILL.len(),
+            }),
+            json!({
+                "path": "src/a/b/c/d/e/f/g/h/Main.kt",
+                "type": "blob", "mode": "100644", "sha": sha('f'), "size": 20,
+            }),
+        ];
+        serve(&sha('1'), &sha('3'), json!(files));
+        let imported = api
+            .ok(
+                "POST",
+                "/skills/global/import",
+                Some(import(&json!({ "repository": "fixture/skills" }), None)),
+            )
+            .await;
+        assert_eq!(paths(&imported["imported"]), ["SKILL.md"]);
+        assert_eq!(imported["imported"]["source"]["folder"], folder);
+
+        // Selected files still obey bundle limits before any download starts.
+        files.push(json!({
+            "path": format!("{folder}/a/b/c/d/e/f/g/h/extra.md"),
+            "type": "blob", "mode": "100644", "sha": sha('e'), "size": 20,
+        }));
+        serve(&sha('2'), &sha('4'), json!(files));
+        let downloads = || {
+            github
+                .calls()
+                .iter()
+                .filter(|call| text(call, "path").contains("/git/blobs/"))
+                .count()
+        };
+        let before = downloads();
+        let (code, error) = api
+            .call(
+                "POST",
+                "/skills/global/import",
+                Some(import(&json!({ "repository": "fixture/skills" }), None)),
+            )
+            .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{error}");
+        assert!(error.to_string().contains("at most 8 parts"), "{error}");
+        assert_eq!(downloads(), before);
+    }
+}
+
+#[tokio::test]
 async fn github_imports_record_their_source_and_preview_updates() {
     let (api, github) = with_github().await;
     let first = sha('1');

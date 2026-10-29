@@ -212,7 +212,6 @@ async fn files(
         if !visible(&path) {
             continue;
         }
-        super::bundle::path(&path)?;
         files.push(File {
             path,
             size: raw["size"].as_u64().ok_or_else(invalid)?,
@@ -286,6 +285,9 @@ async fn fetch(s: &Service, origin: &Origin, file: &File) -> Result<Vec<u8>> {
 
 /// Downloads the files of a skill folder as writes.
 async fn download(s: &Service, origin: &Origin, files: Vec<File>) -> Result<Vec<Change>> {
+    for file in &files {
+        super::bundle::path(&file.path)?;
+    }
     if let Some(link) = files.iter().find(|file| file.link) {
         return Err(Error::bad(format!(
             "Skills must not contain symbolic links: {}",
@@ -571,6 +573,9 @@ pub(crate) async fn status(
 
     let (old, _) = files(s, &origin, &location, &record.version, folder).await?;
     let (new, _) = files(s, &origin, &location, &latest.version, folder).await?;
+    for file in old.iter().chain(&new) {
+        super::bundle::path(&file.path)?;
+    }
     check_sizes(old.iter().map(|file| file.size))?;
     check_sizes(new.iter().map(|file| file.size))?;
     let old = old
