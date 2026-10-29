@@ -21,7 +21,7 @@ it('lets the owner use every agent and members only theirs', () => {
 
 it('directs a delegated task through its requesting conversation while it exists', () => {
   const requesting = { id: 'requesting', agentId: reviewer }
-  const delegated = { agentId: writer, requestedBy: { runId: 'run', chatId: 'requesting' } }
+  const delegated = { agentId: writer, requestedBy: { runId: 'run', chatId: 'requesting', requestId: null } }
   expect(canDirectChat([reviewer], delegated, [requesting])).toBe(true)
   expect(canDirectChat([reviewer], delegated, [])).toBe(false)
   expect(canDirectChat([writer], delegated, [])).toBe(true)

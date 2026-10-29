@@ -115,7 +115,7 @@ async fn an_owner_approved_bot_can_submit_to_its_native_agent() {
     f.service.chat_tick(&HashSet::new()).await.unwrap();
     let chat = f
         .service
-        .get("chats", text(&receipt, "chatId"))
+        .conversation_boundary(text(&receipt, "chatId"))
         .await
         .unwrap();
     let run = f.service.store.run(text(&chat, "runId")).await.unwrap();
@@ -531,6 +531,12 @@ async fn converting_a_mission_retains_native_authority_and_rejects_unauthorized_
     assert_eq!(f.service.store.run(&run_id).await.unwrap(), run);
     let (status, chat) = f.call(&f.trusted, "POST", &path, json!({})).await;
     assert_eq!(status, StatusCode::OK, "{chat}");
+    assert!(chat.get("nativePrincipals").is_none());
+    let chat = f
+        .service
+        .conversation_boundary(text(&chat, "id"))
+        .await
+        .unwrap();
     assert_eq!(chat["nativePrincipals"], json!([TRUSTED]));
     assert_eq!(chat["nativeAuthorityNodes"], json!([f.node["id"]]));
     assert_eq!(chat["nativeProvenanceUnknown"], false);
@@ -631,7 +637,14 @@ async fn public_mcp_preserves_the_trusted_native_caller_and_automatic_priority()
         )
         .await;
         assert_ne!(response["result"]["isError"], true, "{backend}: {response}");
-        let chat = &response["result"]["structuredContent"]["result"];
+        let public_chat = &response["result"]["structuredContent"]["result"];
+        assert!(public_chat.get("nativePrincipals").is_none());
+        let stored = f
+            .service
+            .conversation_boundary(text(public_chat, "id"))
+            .await
+            .unwrap();
+        let chat = &stored;
         assert_eq!(
             chat["nativePrincipals"],
             json!([TRUSTED]),
@@ -646,7 +659,11 @@ async fn public_mcp_preserves_the_trusted_native_caller_and_automatic_priority()
         ).await;
         assert_ne!(response["result"]["isError"], true, "{backend}: {response}");
         f.service.chat_tick(&HashSet::new()).await.unwrap();
-        let chat = f.service.get("chats", text(chat, "id")).await.unwrap();
+        let chat = f
+            .service
+            .conversation_boundary(text(chat, "id"))
+            .await
+            .unwrap();
         let run = f.service.store.run(text(&chat, "runId")).await.unwrap();
         assert_eq!(run["nativePrincipals"], json!([TRUSTED]));
         assert_eq!(run["nativeProvenanceUnknown"], false);
@@ -684,6 +701,11 @@ async fn public_mcp_rechecks_the_native_caller_when_directing_existing_work() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{chat}");
+    let before = f
+        .service
+        .conversation_boundary(text(&chat, "id"))
+        .await
+        .unwrap();
     let args = json!({
         "chatId": chat["id"],
         "message": { "id": id(), "text": "Continue the authorized work" },
@@ -698,9 +720,13 @@ async fn public_mcp_rechecks_the_native_caller_when_directing_existing_work() {
     f.service.store.put_node_fixture(node).await.unwrap();
     let response = public_mcp_call(&f, TRUSTED, &["run"], "send_chat_message", args).await;
     assert_eq!(response["result"]["isError"], true, "{response}");
-    let saved = f.service.get("chats", text(&chat, "id")).await.unwrap();
+    let saved = f
+        .service
+        .conversation_boundary(text(&chat, "id"))
+        .await
+        .unwrap();
     assert_eq!(
-        saved, chat,
+        saved, before,
         "Rejected calls must not change the conversation"
     );
 }
@@ -961,11 +987,11 @@ async fn expired_conversations_explicitly_change_backend_without_recovering_dele
                     },
                 )?;
                 db.save_checkpoint_boundary(&rid, &json!({ "completed": true }))?;
-                let mut chat = db.get("chats", &cid)?.unwrap();
+                let mut chat = db.conversation_boundary(&cid)?.unwrap();
                 chat["environmentState"] = "expired".into();
                 chat["environmentExpiredAt"] = now().into();
                 chat["paused"] = true.into();
-                db.put("chats", &chat)?;
+                db.save_conversation_boundary(&chat)?;
                 Ok(())
             })
             .await
@@ -1084,7 +1110,7 @@ async fn expired_conversations_explicitly_change_backend_without_recovering_dele
             assert_eq!(selection["pinnedNodeId"], selected["id"]);
         }
         assert_eq!(
-            f.service.get("chats", &chat_id).await.unwrap()["paused"],
+            f.service.conversation_boundary(&chat_id).await.unwrap()["paused"],
             true
         );
         assert_eq!(
@@ -1114,7 +1140,7 @@ async fn expired_conversations_explicitly_change_backend_without_recovering_dele
             destination_backend
         );
         assert_eq!(
-            f.service.get("chats", &chat_id).await.unwrap()["runId"],
+            f.service.conversation_boundary(&chat_id).await.unwrap()["runId"],
             run_id
         );
         let admission = placement::reserve(&f.service, &continued, &id())
@@ -1432,7 +1458,7 @@ impl Fixture {
             .await;
         assert_eq!(status, StatusCode::OK, "{message}");
         self.service.chat_tick(&HashSet::new()).await.unwrap();
-        let chat = self.service.get("chats", chat_id).await.unwrap();
+        let chat = self.service.conversation_boundary(chat_id).await.unwrap();
         let run = self
             .service
             .store
@@ -1598,7 +1624,7 @@ async fn task_delegation_has_its_own_revocable_native_authority() {
     .await
     .unwrap();
     let child_id = text(&task, "chatId");
-    let child = f.service.get("chats", child_id).await.unwrap();
+    let child = f.service.conversation_boundary(child_id).await.unwrap();
     assert_eq!(child["nativeParentRunId"], parent["id"]);
     assert_eq!(child["nativeParentAccess"], "delegation");
     assert_eq!(child["nativeAuthorityNodes"], json!([f.node["id"]]));
@@ -1631,7 +1657,7 @@ async fn task_delegation_has_its_own_revocable_native_authority() {
         )
         .await
         .unwrap();
-    let continued = f.service.get("chats", child_id).await.unwrap();
+    let continued = f.service.conversation_boundary(child_id).await.unwrap();
     assert_eq!(continued["nativeParentAccess"], "delegation");
 
     let mut revoked = f.agent.clone();
@@ -1736,7 +1762,7 @@ async fn rejected_native_mutations_do_not_become_historical_directors() {
     for (method, path, body, expected) in mutations {
         let (status, response) = f.owner_call(method, &path, body).await;
         assert_eq!(status, expected, "{method} {path}: {response}");
-        let current_chat = f.service.get("chats", chat_id).await.unwrap();
+        let current_chat = f.service.conversation_boundary(chat_id).await.unwrap();
         let current_run = f.service.store.run(run_id).await.unwrap();
         for key in [
             "nativePrincipals",
@@ -1777,7 +1803,7 @@ async fn rejected_native_mutations_do_not_become_historical_directors() {
     )
     .await;
     assert_eq!(response["result"]["isError"], true, "{response}");
-    let current_chat = f.service.get("chats", chat_id).await.unwrap();
+    let current_chat = f.service.conversation_boundary(chat_id).await.unwrap();
     let current_run = f.service.store.run(run_id).await.unwrap();
     for key in [
         "nativePrincipals",
@@ -1824,7 +1850,9 @@ async fn rejected_native_mutations_do_not_become_historical_directors() {
     assert_eq!(status, StatusCode::OK, "{response}");
     let directed = f.service.store.run(run_id).await.unwrap();
     assert_eq!(directed["nativePrincipals"], json!([TRUSTED, OTHER]));
-    assert_eq!(response["nativePrincipals"], directed["nativePrincipals"]);
+    assert!(response.get("nativePrincipals").is_none());
+    let saved = f.service.conversation_boundary(chat_id).await.unwrap();
+    assert_eq!(saved["nativePrincipals"], directed["nativePrincipals"]);
     node["nativeAccounts"] = json!([TRUSTED]);
     f.service
         .store
@@ -1860,7 +1888,11 @@ async fn native_stop_controls_remain_available_without_host_admission() {
                 .await
                 .unwrap();
             chat["wakeup"] = json!({ "at": now() + 60_000, "reason": "Saved continuation" });
-            f.service.store.put("chats", chat).await.unwrap();
+            f.service
+                .store
+                .save_conversation_boundary(chat)
+                .await
+                .unwrap();
         }
         let mut node = f.node.clone();
         node["nativeEnabled"] = false.into();
@@ -1886,7 +1918,7 @@ async fn native_stop_controls_remain_available_without_host_admission() {
             .call(&f.other, "POST", &path, json!({ "paused": true }))
             .await;
         assert_eq!(status, StatusCode::OK, "{action}: {response}");
-        let chat = f.service.get("chats", &chat_id).await.unwrap();
+        let chat = f.service.conversation_boundary(&chat_id).await.unwrap();
         let run = f.service.store.run(&run_id).await.unwrap();
         assert_eq!(chat["nativePrincipals"], json!([TRUSTED]));
         assert_eq!(run["nativePrincipals"], json!([TRUSTED]));
@@ -1909,7 +1941,7 @@ async fn native_stop_controls_remain_available_without_host_admission() {
                 "unpause must still fail closed: {response}"
             );
             assert_eq!(
-                f.service.get("chats", &chat_id).await.unwrap()["paused"],
+                f.service.conversation_boundary(&chat_id).await.unwrap()["paused"],
                 true
             );
         }
@@ -1952,7 +1984,7 @@ async fn accepted_native_run_controls_retain_the_director_on_the_chat_and_run() 
         };
         let (status, response) = f.owner_call(method, &path, body).await;
         assert_eq!(status, StatusCode::OK, "{action}: {response}");
-        let chat = f.service.get("chats", chat_id).await.unwrap();
+        let chat = f.service.conversation_boundary(chat_id).await.unwrap();
         let run = f.service.store.run(run_id).await.unwrap();
         assert_eq!(
             chat["nativePrincipals"],
@@ -2790,7 +2822,13 @@ async fn a_vm_coordinator_can_delegate_only_its_traced_native_authority() {
     let f = Fixture::new().await;
     let (parent, response) = delegate(&f, true).await;
     assert_ne!(response["result"]["isError"], true, "{response}");
-    let child = &response["result"]["structuredContent"]["result"];
+    let public_child = &response["result"]["structuredContent"]["result"];
+    assert!(public_child.get("nativeParentRunId").is_none());
+    let child = f
+        .service
+        .conversation_boundary(text(public_child, "id"))
+        .await
+        .unwrap();
     assert_eq!(child["nativeParentRunId"], parent["id"], "{response}");
     assert_eq!(child["nativeAuthorityNodes"], json!([f.node["id"]]));
     let mut run = f.run();
@@ -2885,7 +2923,7 @@ async fn parent_node_grant_reductions_revoke_existing_native_delegation() {
     .await;
     assert_ne!(response["result"]["isError"], true, "{response}");
     f.service.chat_tick(&HashSet::new()).await.unwrap();
-    let chat = f.service.get("chats", chat_id).await.unwrap();
+    let chat = f.service.conversation_boundary(chat_id).await.unwrap();
     let child = f
         .service
         .store
@@ -2978,7 +3016,7 @@ async fn a_vm_coordinator_directed_by_unrelated_parents_loses_native_delegation(
     f.service.chat_tick(&HashSet::new()).await.unwrap();
     let chat = f
         .service
-        .get("chats", chat_id.as_str().unwrap())
+        .conversation_boundary(chat_id.as_str().unwrap())
         .await
         .unwrap();
     let coordinator_run = f
@@ -3022,7 +3060,7 @@ async fn a_vm_coordinator_directed_by_unrelated_parents_loses_native_delegation(
     f.service.chat_tick(&HashSet::new()).await.unwrap();
     let child_chat = f
         .service
-        .get("chats", child_id.as_str().unwrap())
+        .conversation_boundary(child_id.as_str().unwrap())
         .await
         .unwrap();
     let existing_native = f

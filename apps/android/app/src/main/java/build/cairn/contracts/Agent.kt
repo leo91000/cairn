@@ -26,7 +26,10 @@ data class Agent(
 ) {
     init {
         require(createdAt in 0L..9007199254740991L)
+        require(exclusiveNodes.size <= 100)
         java.util.UUID.fromString(id)
+        require(nodePriorities.size <= 100)
+        require(plugins.size <= 100)
         require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
         require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(reasoning))
         require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(speed))

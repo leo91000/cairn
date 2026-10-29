@@ -587,7 +587,7 @@ class SubagentsTest {
         assertEquals(SubagentState.RUNNING, team.first().state(active = false))
 
         fun follow(chat: Chat?) = team.first().followed(chat).let { it.state to it.summary(false) }
-        val chat = Chat("a", status = "running", runId = "child")
+        val chat = Chat(id = "a", status = "running", runId = "child")
         assertEquals(SubagentState.RUNNING to "En cours", follow(chat))
         assertEquals(
             SubagentState.RUNNING to "En attente d’un runner",
@@ -663,7 +663,7 @@ class SubagentsTest {
         val timeline =
             timelineEntries(listOf(user("First"), delegated("a"), user("Second")), chat = true)
         assertTrue(currentSubagents(timeline).isEmpty())
-        val followed = timeline.followingDelegations(listOf(Chat("a", status = "succeeded")))
+        val followed = timeline.followingDelegations(listOf(Chat(id = "a", status = "succeeded")))
         assertEquals(
             SubagentState.DONE,
             followed.single { it.agents.isNotEmpty() }.agents.single().state,

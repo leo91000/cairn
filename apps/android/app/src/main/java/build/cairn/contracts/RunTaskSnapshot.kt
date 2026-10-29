@@ -59,5 +59,7 @@ data class RunTaskSnapshot(
         java.util.UUID.fromString(agentId)
         java.util.UUID.fromString(id)
         projectId?.let { java.util.UUID.fromString(it) }
+        skills?.let { require(it.size <= 100) }
+        require(tags.size <= 10)
     }
 }

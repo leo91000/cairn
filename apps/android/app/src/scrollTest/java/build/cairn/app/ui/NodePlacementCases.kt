@@ -560,7 +560,7 @@ abstract class NodePlacementCases {
                 )
             val chat =
                 Chat(
-                    "chat",
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
                     title = "Conversation suspendue",
                     agentName = "Agent principal",
                     status = "running",
@@ -575,7 +575,7 @@ abstract class NodePlacementCases {
                             when (path) {
                                 "/api/installations/fixture/api/chats/stream" ->
                                     LiveState(chats = listOf(chat))
-                                "/api/installations/fixture/api/chats/chat/stream" ->
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream" ->
                                     LiveState(chat = chat)
                                 "/api/installations/fixture/api/runs/neighbor/stream" ->
                                     LiveState(run = run)
@@ -656,7 +656,14 @@ abstract class NodePlacementCases {
                 }
                 CairnTheme {
                     if (state.session.authenticated) {
-                        if (chatPage) ChatScreen(vm, state, "chat", openChat = {}, openRun = {})
+                        if (chatPage)
+                            ChatScreen(
+                                vm,
+                                state,
+                                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                                openChat = {},
+                                openRun = {},
+                            )
                         else RunScreen(vm, state, "neighbor", openRun = {})
                     }
                 }

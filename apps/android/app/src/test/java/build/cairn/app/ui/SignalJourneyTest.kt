@@ -100,16 +100,16 @@ class SignalJourneyTest {
     private val chats =
         listOf(
             Chat(
-                "question",
-                "Choisir la pagination",
+                id = "765886cd-efa2-5d30-bdce-99340ee87a3d",
+                title = "Choisir la pagination",
                 agentId = "23fd6447-79ef-5b16-9e92-4e5efcc9a72d",
                 agentName = "Designer",
                 pendingQuestions = 1,
                 updatedAt = now - 60_000,
             ),
             Chat(
-                "live",
-                "Refonte de l’application",
+                id = "451f26a2-b83b-5559-b07e-9a031e6de7cb",
+                title = "Refonte de l’application",
                 agentName = "Agent principal",
                 projectName = "Cairn",
                 status = "running",
@@ -124,8 +124,8 @@ class SignalJourneyTest {
                 updatedAt = now - 120_000,
             ),
             Chat(
-                "done",
-                "Relecture de la PR",
+                id = "a2b21257-b699-5665-82a6-6ee68c85fe62",
+                title = "Relecture de la PR",
                 agentName = "Agent principal",
                 updatedAt = now - 90_000_000,
             ),
@@ -243,7 +243,7 @@ class SignalJourneyTest {
                                 json(
                                     wireJson.encodeToString(
                                         Chat(
-                                            "created",
+                                            id = "7da5b743-0a48-5bb1-ae65-2edd832fe2ce",
                                             agentId = "23fd6447-79ef-5b16-9e92-4e5efcc9a72d",
                                         )
                                     )
@@ -259,16 +259,22 @@ class SignalJourneyTest {
                                         chat =
                                             chats.find { it.id == id }
                                                 ?: Chat(
-                                                    id,
+                                                    id = id,
                                                     agentId =
                                                         "23fd6447-79ef-5b16-9e92-4e5efcc9a72d",
                                                 )
                                     ),
-                                    if (id == "live") liveEvents else emptyList(),
+                                    if (id == "451f26a2-b83b-5559-b07e-9a031e6de7cb") liveEvents
+                                    else emptyList(),
                                 )
                             }
                             path.startsWith("/api/installations/fixture/api/chats/") &&
-                                path.endsWith("/messages") -> json("{}")
+                                path.endsWith("/messages") ->
+                                json(
+                                    wireJson.encodeToString(
+                                        ChatMessage(id = "00000000-0000-4000-8000-000000000089")
+                                    )
+                                )
                             path.startsWith("/api/installations/fixture/api/runs/") &&
                                 path.endsWith("/stream") ->
                                 stream(
@@ -349,9 +355,12 @@ class SignalJourneyTest {
                 CairnTheme("light") { CairnApp(vm = vm) }
             }
             try {
+                compose.waitUntil(30000) {
+                    vm.state.value.installation != null && !vm.state.value.busy
+                }
                 body(vm)
             } finally {
-                vm.api.closeStreams()
+                runCatching { vm.api }.getOrNull()?.closeStreams()
             }
         }
     }
@@ -402,7 +411,7 @@ class SignalJourneyTest {
             feedChats =
                 listOf(
                     Chat(
-                        id = "quota",
+                        id = "ace4e77b-1dbf-57a6-9875-4dc3aa7f563b",
                         title = "Attendre le quota",
                         status = "running",
                         accountWaitReason =
@@ -485,12 +494,12 @@ class SignalJourneyTest {
         // Pour vous: the question, then this mission; then the live conversation.
         val pager = compose.onNodeWithTag("conversation-pager")
         pager.performTouchInput { swipeLeft() }
-        waitPage("chat-page:live")
+        waitPage("chat-page:451f26a2-b83b-5559-b07e-9a031e6de7cb")
         waitDescription("Changer de conversation : Refonte de l’application")
         pager.performTouchInput { swipeRight() }
         waitPage("run-page:failed-run")
         pager.performTouchInput { swipeRight() }
-        waitPage("chat-page:question")
+        waitPage("chat-page:765886cd-efa2-5d30-bdce-99340ee87a3d")
         waitDescription("Changer de conversation : Choisir la pagination")
         // Swiping replaces nothing in the back stack: Back returns to the Fil.
         compose.onNodeWithContentDescription("Retour").performClick()
@@ -611,13 +620,17 @@ class SignalJourneyTest {
             "e11e98cf-45bf-5364-83b7-7606435a2154",
             created["projectId"]?.jsonPrimitive?.content,
         )
-        waitCall("POST", "/api/installations/fixture/api/chats/created/messages")
+        waitCall(
+            "POST",
+            "/api/installations/fixture/api/chats/7da5b743-0a48-5bb1-ae65-2edd832fe2ce/messages",
+        )
         val message =
             wireJson
                 .parseToJsonElement(
                     calls
                         .first {
-                            it.second == "/api/installations/fixture/api/chats/created/messages"
+                            it.second ==
+                                "/api/installations/fixture/api/chats/7da5b743-0a48-5bb1-ae65-2edd832fe2ce/messages"
                         }
                         .third
                 )

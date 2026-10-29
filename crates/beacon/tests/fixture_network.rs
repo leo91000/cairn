@@ -1,6 +1,6 @@
 mod common;
 
-use common::Fixture;
+use common::{Fixture, RelayedInstallation};
 use serde_json::json;
 use tokio::io::AsyncReadExt;
 
@@ -48,4 +48,24 @@ async fn fixture_client_preserves_other_localhost_url_ports() {
 
     other.close().await;
     app.close().await;
+}
+
+#[tokio::test]
+async fn relay_fixture_keeps_internal_clients_on_its_bound_loopback_address() {
+    let app = Fixture::new().await;
+    let port = reqwest::Url::parse(&app.url).unwrap().port().unwrap();
+    let unrelated = tokio::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    let unrelated_server = tokio::spawn(async move {
+        let router = axum::Router::new().fallback(|| async { reqwest::StatusCode::IM_A_TEAPOT });
+        axum::serve(unrelated, router).await.unwrap();
+    });
+
+    let relay = RelayedInstallation::with_app(axum::Router::new(), String::new(), app).await;
+    let response = relay.get("/chats").send().await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    unrelated_server.abort();
+    relay.close().await;
 }

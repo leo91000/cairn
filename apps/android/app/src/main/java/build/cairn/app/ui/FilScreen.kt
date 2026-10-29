@@ -207,7 +207,7 @@ internal fun buildFeed(
                     forYou +=
                         item(
                             FeedKind.QUESTION,
-                            if (chat.pendingQuestions == 1) "Une question vous attend"
+                            if (chat.pendingQuestions == 1L) "Une question vous attend"
                             else "${chat.pendingQuestions} questions vous attendent",
                         )
                 wait?.account != null ->

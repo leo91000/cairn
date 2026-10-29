@@ -113,7 +113,7 @@ pub(super) fn cancel(db: &Db<'_>, id: &str) -> Result<()> {
     let mut chat = chat(db, id)?;
     if chat["wakeup"].is_object() {
         chat["wakeup"] = Value::Null;
-        db.put("chats", &chat)?;
+        db.save_conversation_boundary(&chat)?;
     }
     Ok(())
 }

@@ -820,6 +820,7 @@ abstract class SkillWorkbenchCases {
                 .performTextReplacement(skillMarkdown + "\n4. Vérifier la documentation.\n")
             compose.onNodeWithTag("skill-mode-preview").performClick()
             shown(hasTestTag("skill-preview"))
+            shown(hasTestTag("skill-save") and isEnabled())
             compose.onNodeWithTag("skill-save").performClick()
             shown(hasTestTag("skill-conflict"))
             compose

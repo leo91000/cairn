@@ -1115,3 +1115,6 @@ async fn node_storage_layouts() {
 
 #[path = "project_measurement/account_measurement.rs"]
 mod account_measurement;
+
+#[path = "measurements/conversations.rs"]
+mod conversation_measurement;

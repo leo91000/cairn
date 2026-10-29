@@ -135,14 +135,6 @@ pub fn message(db: &Db<'_>, chat: &str, value: &mut Value) -> Result<()> {
     Ok(())
 }
 
-fn attachments_of(message: &Value) -> &[Value] {
-    message["attachments"].as_array().map_or(&[], Vec::as_slice)
-}
-
-pub fn same(a: &Value, b: &Value) -> bool {
-    attachments_of(a) == attachments_of(b)
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum AttachmentKind {
@@ -200,7 +192,7 @@ impl Service {
     ) -> Result<Response> {
         uuid(chat)?;
         uuid(id)?;
-        crate::conversation_lifecycle::require_active(&self.get("chats", chat).await?)?;
+        crate::conversation_lifecycle::require_active(&self.conversation_boundary(chat).await?)?;
         match request.method().as_str() {
             "PUT" => self.upload_attachment(chat, id, request).await,
             "GET" => {
@@ -342,7 +334,7 @@ impl Service {
             .store
             .transaction(move |db| {
                 authorize(db)?;
-                let chat = required(db.get("chats", &chat_id)?, "Chat not found")?;
+                let chat = required(db.conversation_boundary(&chat_id)?, "Chat not found")?;
                 crate::conversation_lifecycle::require_active(&chat)?;
                 db.set(&k, &saved, None)
             })

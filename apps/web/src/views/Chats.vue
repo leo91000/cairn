@@ -22,7 +22,16 @@ import { useRoute, useRouter } from 'vue-router'
 import { providers } from '../../../../packages/contracts/accounts'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
+import { compactChat } from '../../../../packages/contracts/generated/compactChat'
+import { createChat } from '../../../../packages/contracts/generated/createChat'
+import { deleteChatMessage } from '../../../../packages/contracts/generated/deleteChatMessage'
+import { editChatMessage } from '../../../../packages/contracts/generated/editChatMessage'
+import { restartChatSession } from '../../../../packages/contracts/generated/restartChatSession'
+import { restoreChat } from '../../../../packages/contracts/generated/restoreChat'
 import { resumeRun } from '../../../../packages/contracts/generated/resume-run'
+import { sendChatMessage } from '../../../../packages/contracts/generated/sendChatMessage'
+import { setChatPaused } from '../../../../packages/contracts/generated/setChatPaused'
+import { stopChat } from '../../../../packages/contracts/generated/stopChat'
 import { failureReason, sameReason, stopEcho } from '../activity'
 import { canDirectChat, canUseAgent, defaultAgent } from '../agent-use'
 import {
@@ -111,7 +120,7 @@ import { chatPath } from '../workspace-links'
 
 const router = useRouter()
 const route = useRoute()
-const detail = ref<(ChatDetail & { error?: string }) | null>(null)
+const detail = ref<ChatDetail | null>(null)
 const recoverable = computed(() => detail.value?.lifecycle === 'trash' && (detail.value?.purgeAt ?? 0) > Date.now())
 const inactive = computed(() => !!detail.value?.lifecycle && detail.value.lifecycle !== 'active')
 const chatId = computed(() => typeof route.params.id === 'string' ? route.params.id : undefined)
@@ -330,6 +339,8 @@ function addFiles(selected: File[]) {
       kind: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type) ? 'image' : 'file',
       mediaType: file.type,
       chatId: '',
+      digest: '',
+      createdAt: 0,
     }
     const rejected = selection.rejected[index]
     // A rejected file is shown with its reason but never uploaded.
@@ -573,7 +584,7 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
   busy.value = true
   error.value = ''
   try {
-    const chat = detail.value ?? createdChat ?? await api<Chat>('/chats', { method: 'POST', body: JSON.stringify({ agentId: agentId.value, projectId: projectId.value || null }) })
+    const chat = detail.value ?? createdChat ?? await createChat(api, { agentId: agentId.value, projectId: projectId.value || null })
     createdChat = chat
     // Items without a local file (reused or already sent records) are never uploaded again.
     const pendingUploads = attachments.value.filter(attachment => files.has(attachment.id) && !uploaded.has(attachment.id))
@@ -633,13 +644,17 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
       outgoing.value = {
         ...submission.message,
         chatId: chat.id,
+        revision: '',
         status: 'queued',
         createdAt: Date.now(),
         attachments: [...attachments.value],
       }
     }
 
-    await api(`/chats/${chat.id}/messages${editing.value ? `/${editing.value}` : ''}`, { method: editing.value ? 'PUT' : 'POST', body: JSON.stringify(submission.message) })
+    if (editing.value)
+      await editChatMessage(api, { chatId: chat.id, messageId: editing.value, message: submission.message })
+    else
+      await sendChatMessage(api, { chatId: chat.id, message: submission.message })
     // Another conversation was opened meanwhile; its composer is not this message's.
     if (chatId.value !== origin) {
       submission = undefined
@@ -672,13 +687,23 @@ const newSession = ref(false)
 const compacting = ref(false)
 const context = computed(() => contextSummary(detail.value?.contextUsage))
 
-async function action(name: 'pause' | 'stop' | 'restore' | 'new-session' | 'compact', body?: object) {
+async function action(name: 'pause' | 'stop' | 'restore' | 'new-session' | 'compact', body?: { paused?: boolean, confirm?: boolean }) {
   if (!detail.value || busy.value)
     return false
   busy.value = true
   error.value = ''
   try {
-    await api(`/chats/${detail.value.id}/${name}`, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) })
+    const chatId = detail.value.id
+    if (name === 'pause')
+      await setChatPaused(api, { chatId, paused: body?.paused ?? false })
+    else if (name === 'stop')
+      await stopChat(api, { chatId })
+    else if (name === 'restore')
+      await restoreChat(api, { chatId })
+    else if (name === 'new-session')
+      await restartChatSession(api, { chatId, confirm: body?.confirm ?? false })
+    else
+      await compactChat(api, { chatId })
     return true
   }
   catch (e) {
@@ -697,7 +722,7 @@ async function resumeQuota() {
   try {
     if (chat.run?.status === 'failed')
       await resumeRun(api, { runId: chat.run.id })
-    await api(`/chats/${chat.id}/pause`, { method: 'POST', body: JSON.stringify({ paused: false }) })
+    await setChatPaused(api, { chatId: chat.id, paused: false })
   }
   catch (e) {
     error.value = (e as Error).message
@@ -708,7 +733,11 @@ async function resumeQuota() {
 async function update(message: ChatMessage, mode?: 'steer') {
   error.value = ''
   try {
-    await api(`/chats/${detail.value!.id}/messages/${message.id}`, { method: mode ? 'PUT' : 'DELETE', ...(mode ? { body: JSON.stringify({ ...message, mode, attachmentIds: message.attachments?.map(attachment => attachment.id) ?? [] }) } : {}) })
+    const reference = { chatId: detail.value!.id, messageId: message.id }
+    if (mode)
+      await editChatMessage(api, { ...reference, message: { ...message, mode, attachmentIds: message.attachments.map(attachment => attachment.id) } })
+    else
+      await deleteChatMessage(api, reference)
   }
   catch (e) { error.value = (e as Error).message }
 }
