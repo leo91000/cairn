@@ -262,7 +262,7 @@ export class DirectChannel {
 
       const headers = new Headers(options.headers)
       // DataChannel responses bypass the browser's HTTP decompression.
-      headers.set('accept-encoding', typeof DecompressionStream !== 'undefined' ? 'gzip' : 'identity')
+      headers.set('accept-encoding', !streaming && typeof DecompressionStream !== 'undefined' ? 'gzip' : 'identity')
       if (options.body !== undefined && !headers.has('content-type'))
         headers.set('content-type', 'application/json')
       const forwarded = [...headers].filter(([name]) => ['content-type', 'accept', 'accept-encoding', 'range', 'if-none-match', 'if-modified-since', 'last-event-id', 'mcp-protocol-version', 'mcp-method'].includes(name))

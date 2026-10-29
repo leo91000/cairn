@@ -104,6 +104,84 @@ class DirectTransportTest {
     }
 
     @Test
+    fun `stream paths request identity so JSON errors remain readable`() = runTest {
+        MockWebServer().use { server ->
+            server.start()
+            lateinit var channel: DirectChannel
+            channel =
+                DirectChannel(
+                    { packet, _, _ ->
+                        val request =
+                            wireJson
+                                .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
+                                .jsonObject
+                        val type = request["type"]!!.jsonPrimitive.content
+                        if (type == "request") {
+                            assertTrue(
+                                request["headers"]!!.jsonArray.any {
+                                    it.jsonArray[0].jsonPrimitive.content == "accept-encoding" &&
+                                        it.jsonArray[1].jsonPrimitive.content == "identity"
+                                }
+                            )
+                            channel.receive(
+                                singleFramePacket(
+                                    buildJsonObject {
+                                        put("type", "stream_start")
+                                        put("id", request["id"]!!)
+                                        put("status", 400)
+                                        put(
+                                            "headers",
+                                            buildJsonArray {
+                                                add(
+                                                    buildJsonArray {
+                                                        add("content-type")
+                                                        add("application/json")
+                                                    }
+                                                )
+                                            },
+                                        )
+                                        put(
+                                            "body",
+                                            Base64.getEncoder()
+                                                .encodeToString(
+                                                    """{"error":"Invalid history version."}"""
+                                                        .toByteArray()
+                                                ),
+                                        )
+                                    }
+                                        .toString()
+                                        .toByteArray()
+                                )
+                            )
+                        } else if (type == "stream_credit") {
+                            channel.receive(
+                                singleFramePacket(
+                                    buildJsonObject {
+                                        put("type", "stream_end")
+                                        put("id", request["id"]!!)
+                                        put("failed", false)
+                                    }
+                                        .toString()
+                                        .toByteArray()
+                                )
+                            )
+                        }
+                    },
+                    {},
+                )
+            val request =
+                Request.Builder()
+                    .url(server.url("/api/installations/test/api/runs/r/stream?history=invalid"))
+                    .build()
+            channel.request(request, "/api/installations/test/api/", { false }).use {
+                assertEquals(400, it.code)
+                assertEquals("""{"error":"Invalid history version."}""", it.body.string())
+            }
+            channel.close()
+        }
+    }
+
+    @Test
     fun `a protocol mismatch is actionable and never falls back to relay`() = runBlocking {
         val packets =
             listOf(

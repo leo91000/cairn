@@ -221,6 +221,35 @@ it('requests identity when browser gzip decompression is unavailable', async () 
   expect(await response).toEqual({ events: [] })
 })
 
+it('requests identity on stream paths so JSON errors remain readable', async () => {
+  const { DirectChannel } = await import('../src/direct-channel')
+  const channel = new Channel()
+  channel.readyState = 'open'
+  const transport = new DirectChannel(channel as unknown as RTCDataChannel, { account_id: 'a', role: 'owner' }, () => {})
+  try {
+    const pending = transport.request('/api/runs/r/stream?history=invalid')
+    await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+    const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
+    expect(request.headers).toContainEqual(['accept-encoding', 'identity'])
+    reply(channel, {
+      type: 'stream_start',
+      id: request.id,
+      status: 400,
+      headers: [['content-type', 'application/json']],
+      body: '',
+    })
+    const response = await pending
+    const content = response.json()
+    await vi.waitFor(() => expect(channel.packets.length).toBe(2))
+    reply(channel, { type: 'stream_chunk', id: request.id, body: btoa('{"error":"Invalid history version."}') })
+    await vi.waitFor(() => expect(channel.packets.length).toBe(3))
+    reply(channel, { type: 'stream_end', id: request.id, failed: false })
+    expect(response.status).toBe(400)
+    expect(await content).toEqual({ error: 'Invalid history version.' })
+  }
+  finally { transport.close() }
+})
+
 it('keeps compressed HEAD heartbeat responses bodyless', async () => {
   const { DirectChannel } = await import('../src/direct-channel')
   const channel = new Channel()

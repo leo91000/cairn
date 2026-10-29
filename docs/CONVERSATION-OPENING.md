@@ -35,7 +35,9 @@ opens immediately; otherwise the reader waits for the stream’s first snapshot.
 - Relay requests preserve compression negotiation and encoding headers. Web and
   Android direct channels request gzip and decode it explicitly, with the same
   8 MB decoded-response bound as their wire bodies. Older browsers without
-  DecompressionStream request identity. Live SSE streams remain uncompressed.
+  DecompressionStream request identity. Direct stream paths request identity as
+  well, so JSON error responses are readable through streaming frames. Live SSE
+  streams remain uncompressed.
 - Reads share one queue across four SQLite connections instead of alternating between two,
   so a slow page no longer delays the next read queued behind it.
 - New image attachments record their displayed size (the camera orientation applied),

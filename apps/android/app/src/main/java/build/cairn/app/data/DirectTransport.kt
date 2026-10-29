@@ -405,7 +405,10 @@ class DirectChannel(
                     add(
                         buildJsonArray {
                             add("accept-encoding")
-                            add("gzip")
+                            add(
+                                if (path.substringBefore('?').endsWith("/stream")) "identity"
+                                else "gzip"
+                            )
                         }
                     )
                     for (name in
