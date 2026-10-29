@@ -1,4 +1,5 @@
 import type {} from '../../scripts/fixtures/chat-rendering'
+import { Buffer } from 'node:buffer'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
 import tailwindcss from '@tailwindcss/vite'
@@ -239,4 +240,43 @@ test('RGBA and HSLA author styles retain valid SVG colors', async ({ page }) => 
   const nodes = page.locator('#app figure.diagram svg path.diagram-raised')
   await expect(nodes.nth(0)).toHaveCSS('fill', 'rgba(255, 0, 0, 0.5)')
   await expect(nodes.nth(1)).toHaveCSS('fill', 'rgba(0, 0, 255, 0.5)')
+})
+
+test('large diagrams export a bounded readable PNG', async ({ page }) => {
+  const source = `flowchart LR\n${Array.from({ length: 100 }, (_, index) => `A${index}[Step ${index}] --> A${index + 1}`).join('\n')}`
+  await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)
+  await page.getByRole('button', { name: 'Open diagram' }).click()
+  const viewer = page.getByRole('dialog', { name: 'Flowchart' })
+  const downloaded = page.waitForEvent('download')
+  await viewer.getByRole('button', { name: 'PNG', exact: true }).click()
+  const stream = await (await downloaded).createReadStream()
+  const chunks: Buffer[] = []
+  for await (const chunk of stream!)
+    chunks.push(Buffer.from(chunk))
+  const png = Buffer.concat(chunks)
+  expect(png.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+  const width = png.readUInt32BE(16)
+  const height = png.readUInt32BE(20)
+  expect(width).toBeGreaterThan(0)
+  expect(height).toBeGreaterThan(0)
+  expect(Math.max(width, height)).toBeLessThanOrEqual(8192)
+  expect(width * height).toBeLessThanOrEqual(16_010_000)
+  const hasDrawing = await page.evaluate(async (data) => {
+    const image = new Image()
+    image.src = `data:image/png;base64,${data}`
+    await image.decode()
+    const canvas = document.createElement('canvas')
+    canvas.width = image.width
+    canvas.height = image.height
+    const context = canvas.getContext('2d')!
+    context.drawImage(image, 0, 0)
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data
+    for (let index = 4; index < pixels.length; index += 4) {
+      if (pixels[index] !== pixels[0] || pixels[index + 1] !== pixels[1] || pixels[index + 2] !== pixels[2] || pixels[index + 3] !== pixels[3])
+        return true
+    }
+
+    return false
+  }, png.toString('base64'))
+  expect(hasDrawing).toBe(true)
 })

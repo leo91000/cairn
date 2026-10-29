@@ -215,10 +215,11 @@ async function downloadPng() {
   image.src = URL.createObjectURL(new Blob([exportSvg()], { type: 'image/svg+xml' }))
   try {
     await image.decode()
-    const ratio = 2
+    const { width, height } = scene!
+    const ratio = Math.min(2, Math.sqrt(16_000_000 / (width * height)), 8192 / Math.max(width, height))
     const canvas = document.createElement('canvas')
-    canvas.width = scene!.width * ratio
-    canvas.height = scene!.height * ratio
+    canvas.width = Math.max(1, Math.round(width * ratio))
+    canvas.height = Math.max(1, Math.round(height * ratio))
     canvas.getContext('2d')!.drawImage(image, 0, 0, canvas.width, canvas.height)
     const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'))
     if (blob)

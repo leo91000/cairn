@@ -123,6 +123,28 @@ describe('diagram layout', () => {
     expect(loop?.kind === 'path' && loop.dash).toEqual([4, 4])
   })
 
+  it.each(['TD', 'BT', 'LR', 'RL'])('separates multiple self-loop routes and labels in %s', (direction) => {
+    const scene = layoutDiagram(parseDiagram(`flowchart ${direction}\nA -->|retry| A\nA -->|cancel<br>and stop| A`), measure)
+    const routes = scene.items.filter(item => item.kind === 'path' && !item.fill && item.stroke && 'tone' in item.stroke && item.stroke.tone === 'edge' && item.d.some(([op]) => op === 'C'))
+    expect(new Set(routes.map(item => JSON.stringify(item))).size).toBe(2)
+    const labels = scene.items.filter(item => item.kind === 'text' && ['retry', 'cancel'].includes(item.lines[0]!))
+    const boxes = labels.map((item) => {
+      if (item.kind !== 'text')
+        throw new Error('Expected a loop label')
+      const halfWidth = Math.max(...item.lines.map(line => measure.width(line, item.size))) / 2
+      const halfHeight = item.lines.length * lineHeight(item.size) / 2
+      return {
+        left: item.x - halfWidth,
+        right: item.x + halfWidth,
+        top: item.y - halfHeight,
+        bottom: item.y + halfHeight,
+      }
+    })
+    expect(boxes).toHaveLength(2)
+    const [a, b] = boxes
+    expect(a!.right <= b!.left || b!.right <= a!.left || a!.bottom <= b!.top || b!.bottom <= a!.top).toBe(true)
+  })
+
   it('wraps long labels between words and inside long words', () => {
     expect(wrapText('alpha beta gamma', 10, 400, 50, measure)).toEqual(['alpha', 'beta', 'gamma'])
     expect(wrapText('abcdefghijklmnop', 10, 400, 30, measure)).toEqual(['abcde', 'fghij', 'klmno', 'p'])

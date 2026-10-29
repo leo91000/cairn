@@ -90,13 +90,17 @@ const CLUSTER_PAD = 16
 const ARROW = 8
 const MAX_LAYOUT_NODES = 4000
 const MAX_LAYOUT_CONSTRAINTS = 10_000
+const MAX_SCENE_SIDE = 32_768
 
 export function layoutDiagram(diagram: Diagram, measure: TextMeasure): Scene {
-  if (diagram.kind === 'graph')
-    return layoutGraph(diagram, measure)
-  if (diagram.kind === 'sequence')
-    return layoutSequence(diagram, measure)
-  return layoutPie(diagram, measure)
+  const scene = diagram.kind === 'graph'
+    ? layoutGraph(diagram, measure)
+    : diagram.kind === 'sequence'
+      ? layoutSequence(diagram, measure)
+      : layoutPie(diagram, measure)
+  if (scene.width > MAX_SCENE_SIDE || scene.height > MAX_SCENE_SIDE)
+    throw new DiagramError('This diagram is too large to draw.')
+  return scene
 }
 
 /** Break on explicit newlines, then between words to fit `max`, then inside long words. */
@@ -531,6 +535,8 @@ interface LNode {
   y: number
   /** Extra room on the right for self loops. */
   extra: number
+  /** Extra space along the rank axis for tall/wide loop labels, without moving shape ports. */
+  rankPadding?: number
   node?: GraphNode
   box?: NodeBox
 }
@@ -707,18 +713,26 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     index: number
     node: LNode
     label?: TextBlock
+    reach: number
   }[] = []
+  const nextLoopReach = new Map<string, number>()
   graph.edges.forEach((edge, index) => {
     const label = edge.label ? textBlock(edge.label, LABEL_FONT, 500, 160, measure) : undefined
     if (edge.from === edge.to) {
       const node = nodes.get(edge.from)
       if (node) {
-        node.extra = Math.max(node.extra, 30 + (label ? label.width + 12 : 0))
+        const reach = nextLoopReach.get(node.key) ?? 24 + Math.min(node.h, 40) / 2
+        const labelExtent = label ? horizontal ? label.height : label.width : 0
+        const rankExtent = label ? horizontal ? label.width : label.height : 0
+        nextLoopReach.set(node.key, reach + Math.max(32, (labelExtent + 16) / 0.75))
+        node.extra = Math.max(node.extra, reach + 12, reach * 0.75 + labelExtent + 18)
+        node.rankPadding = Math.max(node.rankPadding ?? 0, (rankExtent - node.h) / 2 + 6)
         loops.push({
           edge,
           index,
           node,
           label,
+          reach,
         })
       }
 
@@ -1302,7 +1316,7 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
   }
 
   // Vertical positions: rank gaps grow where clusters open or close.
-  const rankHeight = layers.map(layer => Math.max(0, ...layer.map(node => node.h)))
+  const rankHeight = layers.map(layer => Math.max(0, ...layer.map(node => node.h + (node.rankPadding ?? 0) * 2)))
   const opening = Array.from<number>({ length: rankCount }).fill(0)
   const closing = Array.from<number>({ length: rankCount }).fill(0)
   for (const layer of layers) {
@@ -1345,8 +1359,8 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     for (const node of nodes.values()) {
       if (node.kind === 'left' || node.kind === 'right' || !chainOf(node.cluster).includes(cluster.id))
         continue
-      top = Math.min(top, node.y - node.h / 2)
-      bottom = Math.max(bottom, node.y + node.h / 2)
+      top = Math.min(top, node.y - node.h / 2 - (node.rankPadding ?? 0))
+      bottom = Math.max(bottom, node.y + node.h / 2 + (node.rankPadding ?? 0))
     }
 
     for (const child of graph.clusters) {
@@ -1375,7 +1389,7 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
   for (const node of nodes.values()) {
     minX = Math.min(minX, node.x - node.w / 2)
     maxX = Math.max(maxX, node.x + node.w / 2 + node.extra)
-    maxY = Math.max(maxY, node.y + node.h / 2)
+    maxY = Math.max(maxY, node.y + node.h / 2 + (node.rankPadding ?? 0))
   }
 
   for (const box of boxes.values()) {
@@ -1600,13 +1614,14 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
   for (const loop of loops) {
     const { node, edge } = loop
     const right = node.x + node.w / 2
-    const reach = 24 + Math.min(node.h, 40) / 2
+    const reach = loop.reach
+    const bend = (24 + Math.min(node.h, 40) / 2) * 0.7
     const top = node.y - Math.min(node.h / 4, 10)
     const bottom = node.y + Math.min(node.h / 4, 10)
     const inset = headInset(edge.end)
     const d: PathCommand[] = [
       ['M', ...transform([right + headInset(edge.start), top])],
-      ['C', ...transform([right + reach, top - reach * 0.7]), ...transform([right + reach, bottom + reach * 0.7]), ...transform([right + inset, bottom])],
+      ['C', ...transform([right + reach, top - bend]), ...transform([right + reach, bottom + bend]), ...transform([right + inset, bottom])],
     ]
     const paint = edgePaint(edge)
     const width = edgeWidth(edge)
@@ -1623,7 +1638,7 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
       edgeItems.push(...headPaths(edge.end, transform([right, bottom]), [x1 - x0, y1 - y0], paint, width))
       edgeItems.push(...headPaths(edge.start, transform([right, top]), [x1 - x0, y1 - y0], paint, width))
       if (loop.label) {
-        const at = transform([right + reach * 0.75 + (horizontal ? 0 : loop.label.width / 2 + 6), horizontal ? node.y + node.h / 2 + loop.label.height / 2 + 6 : node.y])
+        const at = transform([right + reach * 0.75 + (horizontal ? loop.label.height : loop.label.width) / 2 + 6, node.y])
         labelItems.push(...edgeLabel(loop.label, at))
       }
     }

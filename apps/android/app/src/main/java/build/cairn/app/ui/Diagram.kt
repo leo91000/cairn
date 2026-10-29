@@ -87,7 +87,7 @@ internal class GraphEdge(
     var style: DiagramStyle? = null
 }
 
-internal class GraphCluster(val id: String, val label: String) {
+internal class GraphCluster(val id: String, var label: String) {
     var parent: String? = null
     var style: DiagramStyle? = null
 }
@@ -1232,7 +1232,11 @@ private fun parseState(source: String): GraphDiagram {
         throw DiagramError("Unexpected “$line”.")
     }
 
-    for ((id, labels) in descriptions) builder.nodes[id]?.label = labels.joinToString("\n")
+    for ((id, labels) in descriptions) {
+        val cluster = builder.clusters[id]
+        if (cluster != null) cluster.label = labels.joinToString("\n")
+        else builder.nodes[id]?.label = labels.joinToString("\n")
+    }
 
     return builder.build(statements.title, dir)
 }

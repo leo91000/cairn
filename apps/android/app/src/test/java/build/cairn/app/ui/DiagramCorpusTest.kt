@@ -179,6 +179,44 @@ class DiagramCorpusTest {
     }
 
     @Test
+    fun `separates multiple self-loop routes and labels in every direction`() {
+        for (direction in listOf("TD", "BT", "LR", "RL")) {
+            val scene =
+                layoutDiagram(
+                    parseDiagram(
+                        "flowchart $direction\nA -->|retry| A\nA -->|cancel<br>and stop| A"
+                    ),
+                    measure,
+                )
+            val routes =
+                scene.items.filterIsInstance<PathItem>().filter { item ->
+                    item.fill == null &&
+                        item.stroke == DiagramPaint.Tone("edge") &&
+                        item.d.any { it is PathCommand.Cubic }
+                }
+            assertEquals(direction, 2, routes.map { it.d }.distinct().size)
+            val boxes =
+                scene.items
+                    .filterIsInstance<TextItem>()
+                    .filter { it.lines.first() in listOf("retry", "cancel") }
+                    .map { item ->
+                        val halfWidth =
+                            item.lines.maxOf { measure.width(it, item.size, item.weight) } / 2
+                        val halfHeight = item.lines.size * lineHeight(item.size) / 2
+                        doubleArrayOf(
+                            item.x - halfWidth,
+                            item.x + halfWidth,
+                            item.y - halfHeight,
+                            item.y + halfHeight,
+                        )
+                    }
+            assertEquals(2, boxes.size)
+            val (a, b) = boxes
+            assertTrue(direction, a[1] <= b[0] || b[1] <= a[0] || a[3] <= b[2] || b[3] <= a[2])
+        }
+    }
+
+    @Test
     fun `wraps long labels between words and inside long words`() {
         assertEquals(
             listOf("alpha", "beta", "gamma"),

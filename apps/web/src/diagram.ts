@@ -1130,9 +1130,9 @@ function parseState(source: string): GraphDiagram {
   }
 
   for (const [id, lines] of descriptions) {
-    const node = builder.nodes.get(id)
-    if (node)
-      node.label = lines.join('\n')
+    const target = builder.clusters.get(id) ?? builder.nodes.get(id)
+    if (target)
+      target.label = lines.join('\n')
   }
 
   return builder.build(title, dir)

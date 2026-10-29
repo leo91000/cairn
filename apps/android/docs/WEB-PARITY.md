@@ -18,7 +18,8 @@ linked node pans without opening it. This is presentation of existing message te
 `cairn_installation` are unchanged: agents already read and write the Mermaid source.
 
 Platform differences: web labels in English, Android in French (« Logigramme »,
-« Diagramme d’états »…). The web viewer downloads SVG or PNG; Android shares a PNG. A failed
+« Diagramme d’états »…). The web viewer downloads SVG or PNG; Android shares a PNG. Both PNG paths bound the image
+to 16 megapixels and 8192 pixels per side. A failed
 diagram's source can be hidden on web and is always shown on Android. Android draws a fence
 inside a list item or quote at full width, and also draws a fence implicitly closed by the
 end of its list item or quote, which the web keeps as code.

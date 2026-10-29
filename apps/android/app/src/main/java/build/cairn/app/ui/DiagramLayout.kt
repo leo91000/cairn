@@ -100,13 +100,19 @@ private const val CLUSTER_PAD = 16.0
 private const val ARROW = 8.0
 internal const val MAX_LAYOUT_NODES = 4000
 private const val MAX_LAYOUT_CONSTRAINTS = 10000
+private const val MAX_SCENE_SIDE = 32768
 
-internal fun layoutDiagram(diagram: Diagram, measure: TextMeasure): Scene =
-    when (diagram) {
-        is GraphDiagram -> layoutGraph(diagram, measure)
-        is SequenceDiagram -> layoutSequence(diagram, measure)
-        is PieDiagram -> layoutPie(diagram, measure)
-    }
+internal fun layoutDiagram(diagram: Diagram, measure: TextMeasure): Scene {
+    val scene =
+        when (diagram) {
+            is GraphDiagram -> layoutGraph(diagram, measure)
+            is SequenceDiagram -> layoutSequence(diagram, measure)
+            is PieDiagram -> layoutPie(diagram, measure)
+        }
+    if (scene.width > MAX_SCENE_SIDE || scene.height > MAX_SCENE_SIDE)
+        throw DiagramError("This diagram is too large to draw.")
+    return scene
+}
 
 private val WORDS = Regex("$SPACE+")
 
@@ -600,6 +606,8 @@ private class LNode(
     var y = 0.0
     /** Extra room on the right for self loops. */
     var extra = 0.0
+    /** Extra space along the rank axis for tall/wide loop labels, without moving shape ports. */
+    var rankPadding = 0.0
 }
 
 private class LEdge(
@@ -621,7 +629,12 @@ private class Link(val edge: GraphEdge, val index: Int, val label: TextBlock?) {
     var back = false
 }
 
-private class SelfLoop(val edge: GraphEdge, val node: LNode, val label: TextBlock?)
+private class SelfLoop(
+    val edge: GraphEdge,
+    val node: LNode,
+    val label: TextBlock?,
+    val reach: Double,
+)
 
 private class Neighbors {
     val up = mutableListOf<LNode>()
@@ -833,6 +846,7 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         if (clusters.containsKey(id)) members.getValue(id) else listOf(id)
     val links = mutableListOf<Link>()
     val loops = mutableListOf<SelfLoop>()
+    val nextLoopReach = mutableMapOf<String, Double>()
     graph.edges.forEachIndexed { index, edge ->
         val label =
             if (edge.label.isNotEmpty()) textBlock(edge.label, LABEL_FONT, 500, 160.0, measure)
@@ -840,8 +854,15 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         if (edge.from == edge.to) {
             val node = nodes[edge.from]
             if (node != null) {
-                node.extra = max(node.extra, 30 + (if (label != null) label.width + 12 else 0.0))
-                loops.add(SelfLoop(edge, node, label))
+                val reach = nextLoopReach[node.key] ?: (24 + min(node.h, 40.0) / 2)
+                val labelExtent =
+                    if (label != null) (if (horizontal) label.height else label.width) else 0.0
+                val rankExtent =
+                    if (label != null) (if (horizontal) label.width else label.height) else 0.0
+                nextLoopReach[node.key] = reach + max(32.0, (labelExtent + 16) / 0.75)
+                node.extra = max(node.extra, max(reach + 12, reach * 0.75 + labelExtent + 18))
+                node.rankPadding = max(node.rankPadding, (rankExtent - node.h) / 2 + 6)
+                loops.add(SelfLoop(edge, node, label, reach))
             }
 
             return@forEachIndexed
@@ -1379,7 +1400,7 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
 
     // Vertical positions: rank gaps grow where clusters open or close.
     val rankHeight = layers.map { layer ->
-        layer.fold(0.0) { tallest, node -> max(tallest, node.h) }
+        layer.fold(0.0) { tallest, node -> max(tallest, node.h + node.rankPadding * 2) }
     }
     val opening = DoubleArray(rankCount)
     val closing = DoubleArray(rankCount)
@@ -1430,8 +1451,8 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
                     !chainOf(node.cluster).contains(cluster.id)
             )
                 continue
-            top = min(top, node.y - node.h / 2)
-            bottom = max(bottom, node.y + node.h / 2)
+            top = min(top, node.y - node.h / 2 - node.rankPadding)
+            bottom = max(bottom, node.y + node.h / 2 + node.rankPadding)
         }
 
         for (child in graph.clusters) {
@@ -1456,7 +1477,7 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     for (node in nodes.values) {
         minX = min(minX, node.x - node.w / 2)
         maxX = max(maxX, node.x + node.w / 2 + node.extra)
-        maxY = max(maxY, node.y + node.h / 2)
+        maxY = max(maxY, node.y + node.h / 2 + node.rankPadding)
     }
 
     for (box in boxes.values) {
@@ -1726,13 +1747,14 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         val node = loop.node
         val edge = loop.edge
         val right = node.x + node.w / 2
-        val reach = 24 + min(node.h, 40.0) / 2
+        val reach = loop.reach
+        val bend = (24 + min(node.h, 40.0) / 2) * 0.7
         val top = node.y - min(node.h / 4, 10.0)
         val bottom = node.y + min(node.h / 4, 10.0)
         val inset = headInset(edge.end)
         val start = transform(Pt(right + headInset(edge.start), top))
-        val control1 = transform(Pt(right + reach, top - reach * 0.7))
-        val control2 = transform(Pt(right + reach, bottom + reach * 0.7))
+        val control1 = transform(Pt(right + reach, top - bend))
+        val control2 = transform(Pt(right + reach, bottom + bend))
         val end = transform(Pt(right + inset, bottom))
         val d =
             listOf(
@@ -1779,9 +1801,9 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
                         Pt(
                             right +
                                 reach * 0.75 +
-                                (if (horizontal) 0.0 else loop.label.width / 2 + 6),
-                            if (horizontal) node.y + node.h / 2 + loop.label.height / 2 + 6
-                            else node.y,
+                                (if (horizontal) loop.label.height else loop.label.width) / 2 +
+                                6,
+                            node.y,
                         )
                     )
                 labelItems.addAll(edgeLabel(loop.label, at))
