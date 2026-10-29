@@ -54,8 +54,10 @@ suspend fun CairnApi.listAccountMethods(): ListAccountMethodsOutput =
 `)
 
 // Project calls use the same Rust exports and Kotlin generation as the B1 pilot.
-const projectClients = ['account-clients.json', 'chat-clients.json', 'project-clients.json', 'agent-clients.json', 'mission-clients.json', 'mcp-clients.json', 'plugin-clients.json', 'run-clients.json', 'node-clients.json', 'settings-clients.json'].flatMap(file => JSON.parse(readFileSync(path.join(generated, file), 'utf8')))
+const projectClients = ['skill-clients.json', 'account-clients.json', 'chat-clients.json', 'project-clients.json', 'agent-clients.json', 'mission-clients.json', 'mcp-clients.json', 'plugin-clients.json', 'run-clients.json', 'node-clients.json', 'settings-clients.json'].flatMap(file => JSON.parse(readFileSync(path.join(generated, file), 'utf8')))
 for (const client of projectClients) {
+  const tsOutput = client.array ? `${client.output}[]` : client.output
+  const ktOutput = client.array ? `List<${client.output}>` : client.output
   const hasBody = ['POST', 'PUT'].includes(client.method) || client.name === 'deleteChat'
 
   const queryFields = client.query ?? []
@@ -67,8 +69,8 @@ for (const client of projectClients) {
 import type { ${client.input} } from './typescript/${client.input}'
 ${client.output === client.input ? '' : `import type { ${client.output} } from './typescript/${client.output}'`}
 
-export function ${client.name}(request: <T>(path: string, options: RequestInit) => Promise<T>, ${!client.path.includes('{') && !hasBody && !queryFields.length ? '_input' : 'input'}: ${client.input}): Promise<${client.output}> {
-  return request<${client.output}>(\`${tsPath}\`, { method: '${client.method}'${hasBody ? `, body: JSON.stringify(input${client.bodyField ? `.${client.bodyField}` : ''})` : ''} })
+export function ${client.name}(request: <T>(path: string, options: RequestInit) => Promise<T>, ${!client.path.includes('{') && !hasBody && !queryFields.length ? '_input' : 'input'}: ${client.input}): Promise<${tsOutput}> {
+  return request<${tsOutput}>(\`${tsPath}\`, { method: '${client.method}'${hasBody ? `, body: JSON.stringify(input${client.bodyField ? `.${client.bodyField}` : ''})` : ''} })
 }
 `)
 
@@ -81,7 +83,7 @@ package build.cairn.contracts
 
 import build.cairn.app.data.CairnApi${client.path.includes('{') || queryFields.length ? '\nimport build.cairn.app.data.segment' : ''}
 ${client.deferred ? 'import build.cairn.app.data.wireJson\n' : ''}${client.deferred ? 'import build.cairn.app.data.pluginOperation\nimport kotlinx.serialization.json.decodeFromJsonElement\n' : ''}${hasBody ? 'import kotlinx.serialization.json.encodeToJsonElement\n' : ''}
-suspend fun CairnApi.${client.name}(input: ${client.input}): ${client.output} =
+suspend fun CairnApi.${client.name}(input: ${client.input}): ${ktOutput} =
     ${client.deferred ? `wireJson.decodeFromJsonElement(pluginOperation("${ktPath}", contractJson.encodeToJsonElement(input), method = "${client.method}"))` : `send("${client.method}", "${ktPath}"${hasBody ? `, contractJson.encodeToJsonElement(input${client.bodyField ? `.${client.bodyField}` : ''})` : ''})`}
 `)
 }

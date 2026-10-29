@@ -170,3 +170,72 @@ mod tests {
         }
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportProjectInput {
+    #[schemars(length(max = 100))]
+    pub plugin_id: String,
+    #[schemars(length(max = 100))]
+    pub source: String,
+    #[schemars(length(max = 100))]
+    pub instance: String,
+    #[schemars(length(max = 200))]
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub base_branch: Option<String>,
+
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListSourceProjectsInput {
+    #[schemars(length(max = 100))]
+    pub plugin_id: String,
+    #[schemars(length(max = 100))]
+    pub source: String,
+    #[schemars(length(max = 100))]
+    pub instance: String,
+    #[serde(default = "first_page")]
+    pub page: u32,
+    #[serde(default)]
+    #[schemars(length(max = 200))]
+    pub query: String,
+
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginProject {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub project_name: Option<String>,
+    pub description: String,
+    pub default_branch: String,
+    pub badges: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub url: Option<String>,
+    pub imported: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginProjectPage {
+    pub items: Vec<PluginProject>,
+    pub next_page: Option<u32>,
+}
+
+fn first_page() -> u32 { 1 }

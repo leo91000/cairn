@@ -188,11 +188,13 @@ mod models;
 pub use models::*;
 
 mod conversations;
+mod skills;
 mod questions;
 
 pub use questions::*;
 
 pub use conversations::*;
+pub use skills::*;
 
 mod waits;
 
