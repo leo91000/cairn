@@ -63,7 +63,7 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
     );
     let other = rows(
         &db,
-        "SELECT json_array(id,kind,data,updated_at) FROM records WHERE kind!='agentAccounts' ORDER BY id",
+        "SELECT json_array(id,kind,data,updated_at) FROM records WHERE kind NOT IN ('agentAccounts','chats') ORDER BY id",
     );
     let timestamps = rows(
         &db,
@@ -112,6 +112,14 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
             "SELECT json_array(id,kind,data,updated_at) FROM records ORDER BY id"
         ),
         other
+    );
+    assert_eq!(
+        store
+            .conversation_boundary("retained-chat")
+            .await
+            .unwrap()
+            .unwrap()["accountId"],
+        ACCOUNT
     );
     assert_eq!(
         rows(
