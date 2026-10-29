@@ -260,8 +260,8 @@ CLI-update images rebuild the embedded guest root as well. Tag deployment migrat
 Coolify's stored Compose configuration, preserving generated network names and
 labels. `/health` only succeeds once the Firecracker runner is ready.
 
-The next release requires the operator's
-[complete reinstallation](PRODUCTION-CAIRN.md#réinstallation-complète).
+Existing version-11 manager databases support the
+[data-preserving upgrade](PRODUCTION-CAIRN.md#data-preserving-upgrades).
 Manager, runner, nodes and guests use the same release.
 
 Controller restarts fence its container PID namespace. Interrupted attempts are

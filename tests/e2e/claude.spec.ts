@@ -106,18 +106,23 @@ for (const initial of ['unavailable', 'error'] as const) {
     await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.accountWaitReason, { timeout: 30000 }).toContain('Usage exhausted.')
     await useRelayForHttpMocks(page)
     let attempts = 0
-    let releaseFirstRead: () => void = () => {}
-    const firstRead = new Promise<void>((resolve) => {
-      releaseFirstRead = resolve
+    let alternativesAvailable = false
+    let releaseInitialReads: () => void = () => {}
+    const initialReads = new Promise<void>((resolve) => {
+      releaseInitialReads = resolve
     })
     await page.route(`**/chats/${chat.id}/coding-agent`, async (route) => {
       attempts++
-      if (attempts > 1) {
+      const offerAlternatives = alternativesAvailable
+
+      // A stream refresh may abort a read. Its replacement needs the same initial response.
+      await initialReads
+
+      if (offerAlternatives) {
         await route.continue()
         return
       }
 
-      await firstRead
       if (initial === 'error') {
         await route.fulfill({ status: 500, json: { error: 'Alternatives temporarily unavailable.' } })
         return
@@ -131,14 +136,33 @@ for (const initial of ['unavailable', 'error'] as const) {
       await authenticateWorkspace(page)
       const card = page.getByRole('status', { name: 'Coding agent quota reached' })
       await expect(card).toBeVisible()
+      await expect.poll(() => attempts).toBeGreaterThan(0)
+
+      // Replace an in-flight read while the quota snapshot refreshes.
+      const readsBeforeRefresh = attempts
+      const detail = await workspace.api(`/api/chats/${chat.id}`)
+      workspace.service.store.event(detail.run.id, 'diagnostic', 'Quota alternatives fixture refresh')
+      await expect.poll(() => attempts).toBeGreaterThan(readsBeforeRefresh)
       await expect(card.getByText('Checking alternatives…')).toBeVisible()
-      releaseFirstRead()
+      releaseInitialReads()
+
+      if (initial === 'error') {
+        await expect(card.getByRole('alert')).toHaveText('Alternatives temporarily unavailable.')
+      }
+      else {
+        await expect(card.getByText('Checking alternatives…')).toBeHidden()
+        await expect(card.getByRole('button', { name: 'Continue with Codex', exact: true })).toHaveCount(0)
+        await expect(card.getByRole('alert')).toHaveCount(0)
+      }
+
+      const initialRequests = attempts
+      alternativesAvailable = true
       await expect(card.getByRole('button', { name: 'Continue with Codex', exact: true })).toBeVisible({ timeout: 15000 })
-      expect(attempts).toBeGreaterThan(1)
+      expect(attempts).toBeGreaterThan(initialRequests)
       await expect(card.getByRole('alert')).toHaveCount(0)
     }
     finally {
-      releaseFirstRead()
+      releaseInitialReads()
       await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
     }
   })
@@ -248,7 +272,7 @@ for (const state of ['queued', 'failed'] as const) {
     if (state === 'queued') {
       const accounts = await workspace.api('/api/accounts')
       for (const claude of accounts.accounts.filter((a: { provider: string }) => a.provider === 'claude'))
-        workspace.service.store.put('agentAccounts', { ...workspace.service.store.get('agentAccounts', claude.id), exhausted: { at: Date.now(), model: '', usage: null } })
+        workspace.service.store.saveAccountFixture({ ...workspace.service.store.accountFixture(claude.id), exhausted: { at: Date.now(), model: '', usage: null } })
     }
 
     const messageId = crypto.randomUUID()
@@ -276,7 +300,7 @@ for (const state of ['queued', 'failed'] as const) {
     await workspace.api(endpoint, 'POST', request)
     await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.snapshot.agent.provider, { timeout: 30000 }).toBe('codex')
     await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
-    await workspace.api(`/api/accounts/${codex.id}`, 'PATCH', { enabled: false })
+    await workspace.api(`/api/accounts/${codex.id}`, 'PUT', { revision: codex.revision, settings: { name: codex.name, enabled: false, maxConcurrentRuns: codex.maxConcurrentRuns } })
     await workspace.api(endpoint, 'POST', request)
     const after = await workspace.api(`/api/chats/${chat.id}`)
     expect(after.run.id).toBe(before.id)

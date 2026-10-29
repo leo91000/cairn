@@ -700,15 +700,16 @@ test('following the latest output resumes a long backlog on the recent window, w
 
 test('recent history loads older pages without moving the reader and survives a blocked reconnect', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
-  // Earlier chaining fixtures contain noisy tool output. Keep this cache roundtrip
-  // within the decoded cache budget rather than inheriting their retained prefix.
-  const original = workspace.service.store.runs()[0]!
+
+  // Other journeys append to the shared fixture run. Keep this history bounded.
+  const original = workspace.service.store.runs().find(run => run.status === 'succeeded')!
   const run = workspace.service.store.addRun({
     ...original,
     id: randomUUID(),
     taskId: randomUUID(),
-    trigger: 'history-cache-fixture',
+    trigger: 'history-fixture',
   })
+
   for (let i = 0; i < 350; i++) {
     const text = `Paged line ${String(i).padStart(3, '0')}. A paragraph to retain a stable reading position.`
     workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `page-${i}`, type: 'agent_message', text } })
@@ -747,7 +748,7 @@ test('recent history loads older pages without moving the reader and survives a 
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 050' })).toBeAttached()
   await scroller.evaluate(el => el.scrollTop = 0)
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 000' })).toBeAttached()
-  // The run also has fixture events before line 000: load that unread prefix before
+  // Wait for the complete history and pagination boundary to reach disk before
   // asserting that reopening needs no history requests at all.
   await expect.poll(async () => {
     await scroller.evaluate(el => el.scrollTop = 0)

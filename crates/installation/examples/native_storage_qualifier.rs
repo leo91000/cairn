@@ -155,13 +155,15 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
         }
         "purge" => {
             publication::purge(s, run_id).await?;
-            // Only the isolated fixture skips the normal orphan grace period.
+            // Advance only this isolated fixture's GC grace and issued PUT expiry.
+            // Production must retain objects while a capability can recreate them.
             s.store
                 .transaction(|db| {
                     db.0.execute(
                         "UPDATE shared_objects SET unused_at=0 WHERE unused_at IS NOT NULL",
                         [],
                     )?;
+                    db.0.execute("UPDATE direct_storage_grants SET expires_at=0", [])?;
                     Ok(())
                 })
                 .await?;

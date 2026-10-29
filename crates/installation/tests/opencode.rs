@@ -1,11 +1,9 @@
+use common::account_fixture::AccountFixtures;
+
 mod common;
 
 use cairn_installation::{
-    accounts::{KIND, broker},
-    config::Config,
-    opencode,
-    provider::Provider,
-    service::Service,
+    accounts::broker, config::Config, opencode, provider::Provider, service::Service,
     validation::text,
 };
 use serde_json::{Value, json};
@@ -27,10 +25,13 @@ async fn service(root: &TempDir) -> std::sync::Arc<Service> {
 }
 
 async fn connect(s: &Service) -> Value {
-    s.accounts
-        .connect_api_key(s, Provider::Opencode, "Zen", "opencode", KEY, None)
-        .await
-        .unwrap()
+    serde_json::to_value(
+        s.accounts
+            .connect_api_key(s, Provider::Opencode, "Zen", "opencode", KEY, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap()
 }
 
 #[tokio::test]
@@ -38,10 +39,13 @@ async fn incompatible_model_routes_are_not_reported_as_exhausted_usage_or_busy_s
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let account = connect(&s).await;
-    s.accounts
-        .update(&s, text(&account, "id"), &json!({ "maxConcurrentRuns": 1 }))
-        .await
-        .unwrap();
+    common::account_fixture::update_account_fixture(
+        &s,
+        text(&account, "id"),
+        &json!({ "maxConcurrentRuns": 1 }),
+    )
+    .await
+    .unwrap();
     let lease = s
         .accounts
         .acquire(&s, "busy-zen", Provider::Opencode, MODEL)
@@ -61,7 +65,7 @@ async fn incompatible_model_routes_are_not_reported_as_exhausted_usage_or_busy_s
     assert!(error.message.contains("supports"), "{}", error.message);
     assert!(!error.message.contains("available usage"));
     assert!(!error.message.contains("free OpenCode account slot"));
-    s.accounts.release(&lease).await.unwrap();
+    s.accounts.release(&s, &lease).await.unwrap();
 }
 
 #[tokio::test]
@@ -73,7 +77,7 @@ async fn api_keys_are_private_provider_bound_and_fenced_against_live_replacement
     assert_eq!(account["modelProviderName"], "OpenCode Zen");
     assert!(!account.to_string().contains(KEY));
     assert!(
-        !serde_json::to_string(&s.store.list(KIND).await.unwrap())
+        !serde_json::to_string(&s.store.account_fixtures().await.unwrap())
             .unwrap()
             .contains(KEY)
     );
@@ -129,18 +133,21 @@ async fn api_keys_are_private_provider_bound_and_fenced_against_live_replacement
             .is_err()
     );
     drop(broker);
-    s.accounts.release(&lease).await.unwrap();
-    s.accounts
-        .connect_api_key(
-            &s,
-            Provider::Opencode,
-            "Zen",
-            "opencode",
-            "replacement-key",
-            Some(id),
-        )
-        .await
-        .unwrap();
+    s.accounts.release(&s, &lease).await.unwrap();
+    serde_json::to_value(
+        s.accounts
+            .connect_api_key(
+                &s,
+                Provider::Opencode,
+                "Zen",
+                "opencode",
+                "replacement-key",
+                Some(id),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     s.accounts.remove(&s, id).await.unwrap();
     assert!(
         s.vault
@@ -189,7 +196,7 @@ async fn run(s: &Service, plan: Value) -> (cairn_installation::error::Result<()>
     .await
     .expect("native turn must finish or fail without hanging");
     drop(broker);
-    s.accounts.release(&lease).await.unwrap();
+    s.accounts.release(s, &lease).await.unwrap();
     (result, output.await.unwrap())
 }
 
@@ -212,6 +219,56 @@ async fn disk_notice_is_submitted_without_user_delivery_receipts_including_repla
     for _ in 0..2 {
         let (result, events) = run(&s, input.clone()).await;
         result.unwrap();
+        assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["type"] == "chat.delivered"
+                    && event["messageId"] == "disk-notice")
+        );
+    }
+    let receipt = tokio::fs::read_to_string(root.path().join("result.opencode-receipt.json"))
+        .await
+        .unwrap();
+    assert!(
+        !serde_json::from_str::<Value>(&receipt).unwrap()["delivered"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("disk-notice"))
+    );
+}
+
+#[tokio::test]
+async fn later_submissions_settle_when_their_assistant_response_was_created_first() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s).await;
+    tokio::fs::create_dir_all(root.path().join("inbox"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        root.path().join("inbox/disk-notice.json"),
+        json!({ "id": "disk-notice", "operationalNotice": true, "text": "Runtime disk pressure" })
+            .to_string(),
+    )
+    .await
+    .unwrap();
+    let mut input = plan(&root, "Build the status panel");
+    input["opencodeConfig"] = json!({ "fixtureReversePromptCompletion": true });
+    for _ in 0..2 {
+        let (result, events) = run(&s, input.clone()).await;
+        result.unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(root.path().join("result.md"))
+                .await
+                .unwrap(),
+            "Runtime disk pressure"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event["type"] == "chat.delivered" && event["messageId"] == "initial")
+        );
         assert!(events.iter().any(|event| event["type"] == "turn.completed"));
         assert!(
             !events
@@ -314,10 +371,13 @@ async fn persisted_usage_errors_do_not_poison_the_replacement_provider() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     connect(&s).await;
-    s.accounts
-        .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", "go-key", None)
-        .await
-        .unwrap();
+    serde_json::to_value(
+        s.accounts
+            .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", "go-key", None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let mut first = plan(&root, "fixture:opencode-limit Build the status panel.");
     first["model"] = "opencode-go/ling-3.1-flash-free".into();
     let (result, events) = run(&s, first.clone()).await;
@@ -518,10 +578,13 @@ async fn native_cli_lists_providers_and_models() {
         );
     }
     // Connecting checks the provider against the same native catalog.
-    s.accounts
-        .connect_api_key(&s, Provider::Opencode, "OpenAI", "openai", KEY, None)
-        .await
-        .unwrap();
+    serde_json::to_value(
+        s.accounts
+            .connect_api_key(&s, Provider::Opencode, "OpenAI", "openai", KEY, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let models = s.opencode.models(&s).await.unwrap();
     assert_eq!(models["error"], "", "{models}");
     assert!(!models["models"].as_array().unwrap().is_empty(), "{models}");
@@ -539,17 +602,19 @@ async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
     let binary = std::env::var("OPENCODE_NATIVE_BIN").expect("set OPENCODE_NATIVE_BIN");
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
-    let account = s
-        .accounts
-        .connect_api_key(&s, Provider::Opencode, "Local model", "openai", KEY, None)
-        .await
-        .unwrap();
+    let account = serde_json::to_value(
+        s.accounts
+            .connect_api_key(&s, Provider::Opencode, "Local model", "openai", KEY, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     // Keep the public API restricted to built-in providers. This test's custom
     // local provider avoids the native OpenAI-specific Responses loader.
     let id = text(&account, "id");
-    let mut stored = s.store.get(KIND, id).await.unwrap().unwrap();
+    let mut stored = s.store.account_fixture(id).await.unwrap().unwrap();
     stored["modelProvider"] = "fixture".into();
-    s.store.put(KIND, stored).await.unwrap();
+    s.store.save_account_fixture(stored).await.unwrap();
     s.vault
         .set(
             &format!("opencode-account:{id}"),
@@ -777,7 +842,10 @@ async fn key_replacement_keeps_concurrent_account_edits() {
     updated.name = "Paused Zen".into();
     updated.enabled = false;
     updated.max_concurrent_runs = Some(1);
-    s.store.put(KIND, updated.to_value()).await.unwrap();
+    s.store
+        .save_account_fixture(updated.to_value())
+        .await
+        .unwrap();
     drop(update_guard);
 
     tokio::time::timeout(Duration::from_secs(5), replace)
@@ -802,11 +870,13 @@ async fn connection_order_waits_for_in_flight_account_updates() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let zen = text(&connect(&s).await, "id").to_owned();
-    let go = s
-        .accounts
-        .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", "go-key", None)
-        .await
-        .unwrap();
+    let go = serde_json::to_value(
+        s.accounts
+            .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", "go-key", None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let go = text(&go, "id").to_owned();
 
     // A refresh or edit holds this lock while saving its account snapshot.
@@ -821,7 +891,10 @@ async fn connection_order_waits_for_in_flight_account_updates() {
         "ordering must wait for the account update to finish"
     );
     updating.name = "Updated Zen".into();
-    s.store.put(KIND, updating.to_value()).await.unwrap();
+    s.store
+        .save_account_fixture(updating.to_value())
+        .await
+        .unwrap();
     drop(update_guard);
 
     tokio::time::timeout(Duration::from_secs(5), reorder)
@@ -830,11 +903,8 @@ async fn connection_order_waits_for_in_flight_account_updates() {
         .unwrap();
     let zen = s.accounts.account(&s, &zen).await.unwrap();
     assert_eq!(zen.name, "Updated Zen");
-    assert_eq!(zen.extra["priority"], 1);
-    assert_eq!(
-        s.accounts.account(&s, &go).await.unwrap().extra["priority"],
-        0
-    );
+    assert_eq!(zen.priority, Some(1));
+    assert_eq!(s.accounts.account(&s, &go).await.unwrap().priority, Some(0));
 }
 
 #[tokio::test]
@@ -842,11 +912,13 @@ async fn auto_models_follow_the_connection_order_and_fall_back_when_one_is_exhau
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let zen = text(&connect(&s).await, "id").to_owned();
-    let go = s
-        .accounts
-        .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", "go-key", None)
-        .await
-        .unwrap();
+    let go = serde_json::to_value(
+        s.accounts
+            .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", "go-key", None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let go = text(&go, "id").to_owned();
     assert!(
         s.accounts
@@ -855,10 +927,13 @@ async fn auto_models_follow_the_connection_order_and_fall_back_when_one_is_exhau
             .is_err(),
         "an order must list every account"
     );
-    s.accounts
-        .reorder(&s, Provider::Opencode, &[go.clone(), zen.clone()])
-        .await
-        .unwrap();
+    serde_json::to_value(
+        s.accounts
+            .reorder(&s, Provider::Opencode, &[go.clone(), zen.clone()])
+            .await
+            .unwrap(),
+    )
+    .unwrap();
 
     let auto = "auto/ling-3-1-flash-free";
     let models = s.opencode.models(&s).await.unwrap();
@@ -881,7 +956,7 @@ async fn auto_models_follow_the_connection_order_and_fall_back_when_one_is_exhau
         .unwrap()
         .unwrap();
     assert_eq!(first.account_id, go);
-    s.accounts.release(&first).await.unwrap();
+    s.accounts.release(&s, &first).await.unwrap();
     s.accounts.exhausted(&s, &go, auto).await.unwrap();
     let next = s
         .accounts
@@ -890,7 +965,7 @@ async fn auto_models_follow_the_connection_order_and_fall_back_when_one_is_exhau
         .unwrap()
         .unwrap();
     assert_eq!(next.account_id, zen);
-    s.accounts.release(&next).await.unwrap();
+    s.accounts.release(&s, &next).await.unwrap();
 
     // A pinned route never moves to another provider.
     let pinned = s

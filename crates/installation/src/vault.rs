@@ -22,6 +22,13 @@ pub struct Vault {
 }
 
 impl Vault {
+    /// A storage incarnation receives only its own derived key, never the Vault key.
+    pub(crate) fn storage_object_key(&self, scope: &str) -> [u8; 32] {
+        let mut material = self.key.to_vec();
+        material.extend_from_slice(scope.as_bytes());
+        blake3::derive_key("Cairn immutable storage object key v3", &material)
+    }
+
     pub fn new(store: Store, directory: &Path) -> Result<Self> {
         let file = directory.join("mcp-encryption-key");
         let mut key = [0; 32];

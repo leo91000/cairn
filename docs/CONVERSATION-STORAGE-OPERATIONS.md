@@ -2,7 +2,7 @@
 
 ## Current disk publication
 
-Conversation disks synchronize to S3 in the background. Acknowledged writes are durable in the local journal; the default remote publication target is 60 seconds, with execution paused after 5 minutes of unsynchronized work. This is not synchronous remote durability.
+Conversation disks synchronize to S3 in the background. Acknowledged writes are durable in the local journal; the default remote publication target is 60 seconds. After five minutes of unsynchronized work the execution reports overdue synchronization and continues while its local disk is safe. Integrity, free-space and unavailable cold-read protections remain active. This is not synchronous remote durability: losing the node can lose its unpublished work. See [direct storage transfers](DIRECT-STORAGE-TRANSFERS.md).
 
 Configure `STORAGE_S3_BUCKET`, optionally `STORAGE_S3_ENDPOINT` (HTTPS) and `STORAGE_S3_REGION`, or a server-owned `DATA_DIR/storage-s3.json` with `bucket`, `endpoint`, and `region`. Credentials remain server-side via AWS configuration or a workload role. `AWS_*`, `STORAGE_S3_*` and legacy `ARCHIVE_*` variables are removed from agent subprocesses.
 
