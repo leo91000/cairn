@@ -328,6 +328,11 @@ pub(crate) const AGENT_OPERATIONS: &[AgentOperation] = &[
         description: "Whether avatar generation is configured; no account details are returned.",
     },
     AgentOperation {
+        name: "list_agent_accounts",
+        scope: "read",
+        description: "List the member accounts the owner allowed to use an agent; the owner uses every agent. Only the owner gives or removes this access, from the apps.",
+    },
+    AgentOperation {
         name: "generate_agent_avatar",
         scope: "manage",
         description: "Schedule an agent portrait. Read get_agent for generation status.",
@@ -373,6 +378,10 @@ impl AgentOperation {
             "get_agent_avatar_configuration" => (
                 schema_for::<ListAgentsInput>(Contract::Deserialize),
                 schema_for::<AvatarConfiguration>(Contract::Serialize),
+            ),
+            "list_agent_accounts" => (
+                schema_for::<AgentInput>(Contract::Deserialize),
+                schema_for::<ListAgentAccountsOutput>(Contract::Serialize),
             ),
             _ => (
                 schema_for::<AgentInput>(Contract::Deserialize),
@@ -469,6 +478,22 @@ impl AgentOperation {
                     })
                     .await?;
                 Ok(serde_json::to_value(DeleteAgentOutput { deleted: true })?)
+            }
+            "list_agent_accounts" => {
+                let input: AgentInput = decode(input)?;
+                s.store
+                    .read(move |db| {
+                        let tx = rusqlite::Transaction::new_unchecked(
+                            db.0,
+                            rusqlite::TransactionBehavior::Deferred,
+                        )?;
+                        let db = Db(&tx);
+                        authorize(&db)?;
+                        let output = crate::agent_access::list(&db, input.agent_id)?;
+                        tx.commit()?;
+                        Ok(serde_json::to_value(output)?)
+                    })
+                    .await
             }
             name => {
                 let agent_id = if name == "get_agent" {

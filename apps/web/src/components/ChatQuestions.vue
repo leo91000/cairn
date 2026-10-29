@@ -15,6 +15,8 @@ const props = defineProps<{
   active: boolean
   suspended?: boolean
   highlighted?: string
+  // Only people who may use the agent answer its questions (ADR-0075).
+  readOnly?: boolean
 }>()
 const emit = defineEmits<{ answered: [] }>()
 const pending = computed(() => props.questions.filter(question => question.status === 'pending'))
@@ -133,15 +135,21 @@ async function withdraw() {
 <template>
   <div v-if="question" class="mb-3 flex items-center gap-3 rounded-xl border border-accent/30 bg-accent/8 px-3 py-3" role="status">
     <span class="grid size-8 shrink-0 place-items-center rounded-lg bg-accent text-on-brand"><Icon :name="MessageCircleQuestion" :size="16" /></span>
-    <button class="min-w-0 flex-1 text-left" aria-label="Answer pending questions" @click="open = true">
-      <span class="mb-0.5 block text-[10px] font-semibold text-accent">{{ pending.length > 1 ? `${pending.length} questions` : 'Your input' }} · {{ question.blocking && active ? 'Waiting for you' : 'Answer when ready' }}</span>
+    <div v-if="readOnly" class="min-w-0 flex-1">
+      <span class="mb-0.5 block text-[10px] font-semibold text-accent">{{ pending.length > 1 ? `${pending.length} questions` : 'Question' }} · Waiting for someone with access to this agent</span>
       <span class="block truncate text-xs font-medium">{{ question.fields[0]?.title }}</span>
-    </button>
-    <UiButton size="small" @click="open = true">
-      Answer
-    </UiButton>
+    </div>
+    <template v-else>
+      <button class="min-w-0 flex-1 text-left" aria-label="Answer pending questions" @click="open = true">
+        <span class="mb-0.5 block text-[10px] font-semibold text-accent">{{ pending.length > 1 ? `${pending.length} questions` : 'Your input' }} · {{ question.blocking && active ? 'Waiting for you' : 'Answer when ready' }}</span>
+        <span class="block truncate text-xs font-medium">{{ question.fields[0]?.title }}</span>
+      </button>
+      <UiButton size="small" @click="open = true">
+        Answer
+      </UiButton>
+    </template>
   </div>
-  <Modal v-if="open && question" title="Your input" @close="open = false">
+  <Modal v-if="open && question && !readOnly" title="Your input" @close="open = false">
     <form class="space-y-5 p-6 phone:p-4" @submit.prevent="send">
       <div class="flex items-center justify-between gap-3">
         <span class="inline-flex items-center gap-1.5 rounded-full bg-accent/10 px-2.5 py-1 text-[11px] font-medium text-accent"><span class="size-1.5 rounded-full bg-accent" />{{ question.blocking && active ? 'Agent is waiting' : active && suspended ? exclusiveSuspensionLabel : active ? 'Agent keeps working' : 'Continue the conversation' }}</span>

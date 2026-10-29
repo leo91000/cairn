@@ -450,6 +450,8 @@ internal fun ChatPage(
             )
         }
     val chats = conversations.state?.chats
+    // A member without access to the conversation's agent follows it without directing it.
+    val readOnly = chat != null && !canDirectChat(state.usableAgents, chat, chats.orEmpty())
     val timeline =
         remember(history, live.events, chats) {
             quotaTimeline(history, live.events).followingDelegations(chats)
@@ -1291,7 +1293,11 @@ internal fun ChatPage(
                                     if (id == null)
                                         item(key = "new-conversation") {
                                             NewConversationIntro(
-                                                state.agents,
+                                                // Members start conversations only with the
+                                                // agents the owner lets them use.
+                                                state.agents.filter {
+                                                    canUseAgent(state.usableAgents, it.id)
+                                                },
                                                 agent,
                                                 projects,
                                                 project,
@@ -1451,7 +1457,13 @@ internal fun ChatPage(
                                 openedSubagent = null
                             }
                         }
-                        if (questions.isNotEmpty())
+                        if (questions.isNotEmpty() && readOnly)
+                            Notice(
+                                "${questions.size} ${if (questions.size == 1) "question attend" else "questions attendent"} une personne ayant accès à cet agent.",
+                                Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                                icon = CairnIcons.Hourglass,
+                            )
+                        else if (questions.isNotEmpty())
                             Surface(
                                 onClick = { asking = questions.first() },
                                 modifier =
@@ -1477,6 +1489,15 @@ internal fun ChatPage(
                                     )
                                 }
                             }
+                        if (!fullscreen && readOnly)
+                            Notice(
+                                "Seules les personnes ayant accès à ${chat?.agentName?.ifBlank { null } ?: "son agent"} peuvent la poursuivre, répondre à ses questions ou la supprimer. Vous pouvez toujours la mettre en pause ou l’arrêter. Demandez l’accès au propriétaire de l’installation.",
+                                Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                                    .testTag("conversation-read-only"),
+                                title = "Vous pouvez suivre cette conversation",
+                                icon = CairnIcons.Shield,
+                                maxLines = 4,
+                            )
                         if (!fullscreen)
                             Surface(
                                 Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
@@ -1604,14 +1625,16 @@ internal fun ChatPage(
                                             SkillMentionHighlight(skillNames, skillMentionStyle()),
                                         lineLimits =
                                             TextFieldLineLimits.MultiLine(maxHeightInLines = 4),
-                                        enabled = !state.busy,
+                                        enabled = !state.busy && !readOnly,
                                         decorator = { inner ->
                                             Box {
                                                 if (draft.isEmpty())
                                                     Text(
                                                         // Any message cancels a pending wait,
                                                         // paused or not.
-                                                        if (chat?.paused == true)
+                                                        if (readOnly)
+                                                            "Réservé aux personnes ayant accès à cet agent"
+                                                        else if (chat?.paused == true)
                                                             if (liveWakeup(chat) != null)
                                                                 "Ajouter à la file — annule l’attente"
                                                             else "Ajouter à la file…"
@@ -1675,6 +1698,7 @@ internal fun ChatPage(
                                         }
                                         val canSend =
                                             !state.busy &&
+                                                !readOnly &&
                                                 rejected.isEmpty() &&
                                                 uploadProgress.isEmpty() &&
                                                 (draft.isNotBlank() || attachments.isNotEmpty()) &&

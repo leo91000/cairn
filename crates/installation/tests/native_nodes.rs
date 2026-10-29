@@ -536,6 +536,32 @@ async fn converting_a_mission_retains_native_authority_and_rejects_unauthorized_
     assert_eq!(chat["nativeProvenanceUnknown"], false);
 }
 
+/// These members may use every agent: native authority is checked on its own, after
+/// account access to agents (ADR-0075), with the memberships of the native evidence.
+async fn members_use_every_agent(service: &Service) {
+    members_use_agents(service, &[(TRUSTED, "one"), (OTHER, "two")]).await;
+}
+
+async fn members_use_agents(service: &Service, members: &[(&str, &'static str)]) {
+    for agent in service.store.agents().await.unwrap() {
+        for &(account, access) in members {
+            common::relay_fixture::add_member(service, account, access).await;
+            let (agent, account) = (agent.id.to_string(), account.to_owned());
+            service
+                .store
+                .transaction(move |db| {
+                    db.0.execute(
+                        "INSERT OR IGNORE INTO agent_account_access VALUES(?1,?2,?3,0)",
+                        [agent, account, access.to_owned()],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    }
+}
+
 struct Fixture {
     _root: tempfile::TempDir,
     service: Arc<Service>,
@@ -1361,6 +1387,7 @@ impl Fixture {
         body: Value,
         owner: bool,
     ) -> (StatusCode, Value) {
+        members_use_every_agent(&self.service).await;
         let mut request = session
             .authorize(
                 Request::builder()
@@ -3164,6 +3191,7 @@ async fn editing_a_vm_task_cannot_replace_its_authors_with_a_native_trusted_edit
         .agent_fixture(json!({ "name": "VM task agent" }), None)
         .await
         .unwrap();
+    members_use_agents(&f.service, &[(OTHER, "two")]).await;
     let task = f
         .service
         .task_as_fixture(
@@ -3223,6 +3251,7 @@ async fn native_tasks_retain_previous_directing_editors_and_current_author_right
     let author =
         auth::InstallationIdentity::trusted(auth::InstallationRole::Member, "fixture-owner");
     let editor = auth::InstallationIdentity::trusted(auth::InstallationRole::Owner, TRUSTED);
+    members_use_agents(&f.service, &[("fixture-owner", "fixture-owner")]).await;
     let task = f
         .service
         .task_as_fixture(

@@ -19,7 +19,7 @@ pub(crate) use storage::SCHEMA;
 
 #[derive(Default)]
 pub struct Missions {
-    authors: tokio::sync::Mutex<()>,
+    pub(crate) authors: tokio::sync::Mutex<()>,
 }
 
 pub(crate) enum Actor {
@@ -233,6 +233,12 @@ impl Missions {
                     crate::native::policy::task_grant(db, &wire, previous_wire.as_ref(), &origin)?
                 };
                 apply_native(&mut mission, grant)?;
+                if let Some(policy) = &policy
+                    && mission.settings.cron.is_some()
+                    && crate::agent_access::suspended(db, &mission, policy)?
+                {
+                    mission.schedule_wait_reason = Some(crate::agent_access::SUSPENDED.to_owned());
+                }
                 if mission.settings.scheduled() {
                     if mission.author_removed {
                         return Err(Error::conflict(
@@ -280,17 +286,19 @@ impl Missions {
             .await
     }
 
-    async fn observe(&self, s: &Service) -> Result<Option<TaskAuthorPolicy>> {
+    /// Callers hold `authors`.
+    pub(crate) async fn observe(&self, s: &Service) -> Result<Option<TaskAuthorPolicy>> {
         let policy = crate::relay::task_author_policy(s).await?;
-        if let Some(policy) = &policy {
-            let grants: std::collections::HashMap<_, _> = policy
-                .members
-                .iter()
-                .chain(std::iter::once(&policy.owner))
-                .map(|g| (g.account_id.clone(), g.access_id.clone()))
-                .collect();
-            s.store
-                .transaction(move |db| {
+        let observed = policy.clone();
+        s.store
+            .transaction(move |db| {
+                if let Some(policy) = &observed {
+                    let grants: std::collections::HashMap<_, _> = policy
+                        .members
+                        .iter()
+                        .chain(std::iter::once(&policy.owner))
+                        .map(|g| (g.account_id.clone(), g.access_id.clone()))
+                        .collect();
                     for mut mission in db.missions()? {
                         let eligible = mission
                             .author_id
@@ -311,14 +319,16 @@ impl Missions {
                             db.audit("task.author_reconciled", &json!({"taskId":mission.id}))?;
                         }
                     }
-                    Ok(())
-                })
-                .await?;
-        }
+                }
+
+                // Account access to agents follows the same memberships.
+                crate::agent_access::reconcile(db, observed.as_ref())
+            })
+            .await?;
         Ok(policy)
     }
 
-    async fn require_author(&self, s: &Service, mission: &Mission) -> Result<()> {
+    async fn require_author(&self, s: &Service, mission: &Mission) -> Result<TaskAuthorPolicy> {
         let policy = self.observe(s).await?.ok_or_else(|| {
             Error::unauthorized(
                 "Installation is not claimed. Run cairn claim before scheduling work.",
@@ -332,7 +342,20 @@ impl Missions {
         if !eligible || mission.author_removed {
             return Err(Error::conflict("The task author's access ended."));
         }
-        Ok(())
+        Ok(policy)
+    }
+
+    /// Whether the author may no longer use the task's agent; the task then waits for access.
+    async fn suspended(
+        &self,
+        s: &Service,
+        mission: &Mission,
+        policy: TaskAuthorPolicy,
+    ) -> Result<bool> {
+        let mission = mission.clone();
+        s.store
+            .read(move |db| crate::agent_access::suspended(db, &mission, &policy))
+            .await
     }
 
     pub(crate) async fn enqueue_scheduled(
@@ -343,7 +366,10 @@ impl Missions {
     ) -> Result<Value> {
         let _authors = self.authors.lock().await;
         let mission: Mission = serde_json::from_value(run["snapshot"]["task"].clone())?;
-        self.require_author(s, &mission).await?;
+        let policy = self.require_author(s, &mission).await?;
+        if self.suspended(s, &mission, policy).await? {
+            return Err(Error::conflict(crate::agent_access::SUSPENDED));
+        }
         s.queue_run(run, dedupe, None).await
     }
 
@@ -432,15 +458,26 @@ impl Service {
             let prepared = self.prepare_run(&mission.id.to_string(), "schedule").await;
             let admission = match prepared {
                 Ok(run) => {
-                    if let Err(error) = self.missions.require_author(self, &mission).await {
-                        if error.status != 409 {
-                            self.schedule_wait(&mission, Some(error.message)).await?;
+                    let policy = match self.missions.require_author(self, &mission).await {
+                        Ok(policy) => policy,
+                        Err(error) => {
+                            if error.status != 409 {
+                                self.schedule_wait(&mission, Some(error.message)).await?;
+                            }
+                            continue;
                         }
-                        continue;
+                    };
+
+                    // A suspended task skips this occurrence without recording a failure.
+                    if self.missions.suspended(self, &mission, policy).await? {
+                        let reason = crate::agent_access::SUSPENDED.to_owned();
+                        self.schedule_wait(&mission, Some(reason)).await?;
+                        Err(Error::conflict(crate::agent_access::SUSPENDED))
+                    } else {
+                        self.schedule_wait(&mission, None).await?;
+                        let dedupe = Some(format!("{}:{}", mission.id, mission.next_run.unwrap()));
+                        self.queue_run(run, dedupe, None).await
                     }
-                    self.schedule_wait(&mission, None).await?;
-                    let dedupe = Some(format!("{}:{}", mission.id, mission.next_run.unwrap()));
-                    self.queue_run(run, dedupe, None).await
                 }
                 Err(error) => {
                     self.schedule_wait(&mission, None).await?;

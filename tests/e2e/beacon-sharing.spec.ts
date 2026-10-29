@@ -146,7 +146,7 @@ test('owner shares an installation and member works without management controls'
     await expect(member).toHaveURL(installationUrl)
     const apiRoot = `${url}/api/installations/${memberSession.installations[0].id}/api`
     const { agents } = await (await member.request.get(`${apiRoot}/agents`)).json()
-    const taskResponse = await member.request.post(`${apiRoot}/tasks`, {
+    const commitment = {
       headers: { 'origin': url, 'x-csrf-token': memberSession.csrf },
       data: {
         settings: {
@@ -158,7 +158,26 @@ test('owner shares an installation and member works without management controls'
           enabled: true,
         },
       },
-    })
+    }
+    // A new member uses no agent until the owner gives access from the agent page.
+    expect((await (await member.request.get(`${apiRoot}/usable-agents`)).json()).agentIds).toEqual([])
+    expect((await member.request.post(`${apiRoot}/tasks`, commitment)).status()).toBe(403)
+    await page.goto(`${installationUrl}agents/${agents[0].id}`)
+    const peopleCard = page.getByRole('region', { name: 'Who can use it' })
+    await expect(peopleCard.getByText('Only you', { exact: true }).first()).toBeVisible()
+    await peopleCard.getByRole('button', { name: /People/ }).click()
+    await expect(page.getByRole('heading', { name: 'Who can use it', exact: true })).toBeVisible()
+    await expect(page.getByText('The agent acts as a role.', { exact: true })).toBeVisible()
+    const people = page.getByRole('list', { name: 'People who can use this agent' })
+    await expect(people.getByText(`${ownerEmail} · Owner`, { exact: true })).toBeVisible()
+    const access = people.getByRole('switch', { name: `Allow ${memberEmail} to use ${agents[0].name}`, exact: true })
+    await expect(access).not.toBeChecked()
+    await access.check()
+    await expect(people.getByText('Can use this agent', { exact: true })).toBeVisible()
+    await page.reload()
+    await expect(page.getByRole('list', { name: 'People who can use this agent' }).getByRole('switch', { name: `Allow ${memberEmail} to use ${agents[0].name}`, exact: true })).toBeChecked()
+    expect((await (await member.request.get(`${apiRoot}/usable-agents`)).json()).agentIds).toEqual([agents[0].id])
+    const taskResponse = await member.request.post(`${apiRoot}/tasks`, commitment)
     expect(taskResponse.status()).toBe(200)
     const task = await taskResponse.json()
     expect(task.authorId).toBe(memberSession.account.id)
@@ -272,8 +291,22 @@ test('owner shares an installation and member works without management controls'
     await expect(memberSharing.getByRole('button', { name: 'Disable public link', exact: true })).toHaveCount(0)
     await member.getByRole('button', { name: 'Close viewer', exact: true }).click()
     await member.goto(conversationUrl)
-    await page.goto(installationUrl)
     expect(forbidden).toEqual([])
+
+    // Without access, the member follows the conversation without directing it.
+    await page.goto(`${installationUrl}agents/${agents[0].id}?section=people`)
+    await page.getByRole('list', { name: 'People who can use this agent' }).getByRole('switch', { name: `Allow ${memberEmail} to use ${agents[0].name}`, exact: true }).uncheck()
+    await expect(page.getByRole('list', { name: 'People who can use this agent' }).getByText('No access', { exact: true })).toBeVisible()
+    await member.reload()
+    await expect(member.getByRole('heading', { name: 'Shared conversation', exact: true })).toBeVisible()
+    await expect(member.getByRole('note').filter({ hasText: 'You can follow this conversation' })).toBeVisible()
+    await expect(member.getByRole('textbox', { name: 'Message', exact: true })).toBeDisabled()
+    await page.goto(`${installationUrl}tasks?task=${task.id}`)
+    await expect(page.getByText('Schedule waiting: Its author no longer has access to this agent. It resumes once the owner gives access again.')).toBeVisible()
+    await page.goto(`${installationUrl}agents/${agents[0].id}?section=people`)
+    await page.getByRole('list', { name: 'People who can use this agent' }).getByRole('switch', { name: `Allow ${memberEmail} to use ${agents[0].name}`, exact: true }).check()
+    await expect(page.getByRole('list', { name: 'People who can use this agent' }).getByText('Can use this agent', { exact: true })).toBeVisible()
+    await page.goto(installationUrl)
     await page.reload()
     await page.getByRole('button', { name: 'Installation settings', exact: true }).click()
     await page.getByRole('button', { name: 'Share installation', exact: true }).click()
@@ -288,6 +321,8 @@ test('owner shares an installation and member works without management controls'
     await member.goto(`${url}/?invitations=1`)
     await member.getByRole('button', { name: 'Accept invitation', exact: true }).click()
     await expect(member).toHaveURL(/\/installations\/[^/]+\/$/)
+    // Access belonged to the previous membership: a new invitation does not restore it.
+    await expect.poll(async () => (await (await member.request.get(`${apiRoot}/usable-agents`)).json()).agentIds).toEqual([])
     await member.getByRole('button', { name: 'Installation settings', exact: true }).click()
     await member.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Sensitive zone', exact: true }).click()
     await member.getByRole('button', { name: 'Leave installation', exact: true }).click()

@@ -23,6 +23,28 @@ Reference: web commit `2e9868233295af713eede804c7d70b9f514df04b` (v0.21.12).
 This audit compares user actions and information, with native Android presentation.
 It does not assert pixel equality between a browser and Material components.
 
+## Account access to agents (ADR-0075)
+
+The owner chooses which members may use each agent from a **Who can use it** /
+« Qui peut l’utiliser » section of the agent page, on web and Android: the owner row
+is fixed (« Toujours »), every member has a switch that applies at once (outside the
+profile draft), and the section explains that the agent acts as a role and warns
+when the agent manages the whole installation. Members come from the Beacon's
+sharing list; the installation keeps, per agent, the accounts allowed in their
+current membership. Loading, empty and unavailable states match; the overview shows
+« Vous seul » / “Only you” or the member count. A new agent is the owner's alone.
+Members see only the agents they may use when starting a conversation or a mission;
+a conversation they cannot direct shows a read-only notice, a disabled composer and
+questions waiting for someone with access. Unknown access (an older installation)
+offers every agent and the installation decides.
+
+Platform differences: web labels are English and Android labels French; Android
+shows the switches in a Material card list. Per AGENTS.md, giving and removing access
+is owner-only on web/Android and excluded from public MCP and `cairn_installation`;
+both tool surfaces read it through `list_agent_accounts`. Validation: the
+`agent_access` Rust suite, browser `beacon-sharing` journey, web `agent-use` unit
+tests, Android `AgentPeopleTest` and `AgentPageCases` (JVM and device).
+
 ## Node priority drag and drop
 
 Both apps let owners drag a node priority handle onto another row, then save the

@@ -476,7 +476,7 @@ private fun WorkspaceApp(
                                     null,
                                     initialAgent =
                                         entry.arguments?.getString("agent")?.ifBlank { null }
-                                            ?: MAIN_AGENT_ID,
+                                            ?: defaultAgent(state.usableAgents, state.agents),
                                     initialProject =
                                         entry.arguments?.getString("project").orEmpty(),
                                     openChat = { nav.navigate("chat/$it") { popUpTo("fil") } },

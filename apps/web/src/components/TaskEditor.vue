@@ -7,10 +7,10 @@ import {
   ref,
   watch,
 } from 'vue'
-import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { createMission } from '../../../../packages/contracts/generated/createMission'
 import { previewSchedule } from '../../../../packages/contracts/generated/previewSchedule'
 import { replaceMission } from '../../../../packages/contracts/generated/replaceMission'
+import { canUseAgent, defaultAgent } from '../agent-use'
 import {
   api,
   notify,
@@ -37,7 +37,7 @@ const emit = defineEmits<{ close: [], saved: [task: Task] }>()
 const form = ref<MissionSettings>({
   name: props.task?.name ?? '',
   prompt: props.task?.prompt ?? '',
-  agentId: props.task?.agentId ?? MAIN_AGENT_ID,
+  agentId: props.task?.agentId ?? defaultAgent(state.usableAgents, state.agents),
   projectId: props.task?.projectId ?? null,
   skills: props.task?.skills ?? null,
   tags: props.task?.tags ?? [],
@@ -49,7 +49,10 @@ const form = ref<MissionSettings>({
   worktree: props.task?.worktree ?? true,
 })
 const cadence = ref(props.task?.cron ? 'custom' : 'once')
-const agents = computed(() => state.agents.map(agent => ({ value: agent.id, label: agent.name, description: agent.description || `${agent.model || 'Codex default'} · ${agent.reasoning || 'default'} reasoning` })))
+// Members schedule only the agents they may use; an edited task keeps showing its own agent.
+const agents = computed(() => state.agents
+  .filter(agent => canUseAgent(state.usableAgents, agent.id) || agent.id === form.value.agentId)
+  .map(agent => ({ value: agent.id, label: agent.name, description: agent.description || `${agent.model || 'Codex default'} · ${agent.reasoning || 'default'} reasoning` })))
 const selectedAgent = computed(() => state.agents.find(agent => agent.id === form.value.agentId))
 const allowedProjects = computed(() => state.projects.filter(project => selectedAgent.value?.access?.projects === null || selectedAgent.value?.access.projects?.includes(project.id)))
 const projects = computed(() => [{ value: '', label: 'Let the agent choose', description: 'Work across its allowed projects' }, ...allowedProjects.value.map(project => ({ value: project.id, label: project.name, description: project.path }))])

@@ -12,6 +12,7 @@ export type AgentDraft = import('../../../packages/contracts/generated/typescrip
 export type SectionId
   = | 'identity'
     | 'model'
+    | 'people'
     | 'projects'
     | 'skills'
     | 'mcps'

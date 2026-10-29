@@ -39,7 +39,7 @@ pub struct TaskAuthorGrant {
     pub access_id: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TaskAuthorPolicy {
     pub owner: TaskAuthorGrant,
     pub members: Vec<TaskAuthorGrant>,

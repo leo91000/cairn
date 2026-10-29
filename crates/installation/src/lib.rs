@@ -1,4 +1,5 @@
 pub mod accounts;
+pub(crate) mod agent_access;
 pub mod agent_avatars;
 pub mod agent_grants;
 mod agent_merge;

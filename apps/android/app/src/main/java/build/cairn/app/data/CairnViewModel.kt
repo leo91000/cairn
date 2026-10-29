@@ -12,6 +12,7 @@ import build.cairn.contracts.listAgents
 import build.cairn.contracts.listMcps
 import build.cairn.contracts.listMissions
 import build.cairn.contracts.listProjects
+import build.cairn.contracts.listUsableAgents
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -54,6 +55,8 @@ data class Workspace(
     /** The workspace could not be reached; cleared on its own once a request succeeds again. */
     val connectionLost: Boolean = false,
     val agents: List<Agent> = emptyList(),
+    /** Agents a member may use; null for the owner, who uses every agent (ADR-0075). */
+    val usableAgents: List<String>? = null,
     val projects: List<Project> = emptyList(),
     val tasks: List<Task> = emptyList(),
     val skills: List<Skill> = emptyList(),
@@ -781,6 +784,18 @@ constructor(
         val mcps = async {
             if (owner) target.listMcps(build.cairn.contracts.ListMcpsInput()).mcps else emptyList()
         }
+        // Unknown (an older installation, a failed read) offers every agent: the server decides.
+        val usable = async {
+            if (owner) null
+            else
+                try {
+                    target.listUsableAgents(build.cairn.contracts.ListAgentsInput()).agentIds
+                } catch (e: Exception) {
+                    if (e is CancellationException || (e is ApiException && e.status == 401))
+                        throw e
+                    null
+                }
+        }
         val catalogs = codingAgents.associate { agent ->
             agent.provider to
                 async {
@@ -807,6 +822,7 @@ constructor(
                 skills = skills.await(),
                 overview = overview.await(),
                 mcps = mcps.await(),
+                usableAgents = usable.await(),
                 modelCatalogs = catalogs.mapValues { (_, catalog) -> catalog.await() },
             )
         if (connection === target && state.value.session.authenticated)
@@ -818,9 +834,17 @@ constructor(
                     skills = updated.skills,
                     overview = updated.overview,
                     mcps = updated.mcps,
+                    usableAgents = updated.usableAgents,
                     modelCatalogs = updated.modelCatalogs,
                 )
             }
+    }
+
+    /** The installation's members, which the Beacon lists to its owner only. */
+    suspend fun installationMembers(): List<InstallationMember> {
+        val installation = checkNotNull(state.value.installation) { "Aucune installation ouverte." }
+        return api.get<InstallationSharing>("/installations/${segment(installation.id)}/sharing")
+            .members
     }
 
     suspend fun refreshSkills() {

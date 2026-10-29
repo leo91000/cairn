@@ -11,7 +11,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Recheck under the write lock: another startup may have completed the upgrade.
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 12 {
+    if matches!(version, 12..=14) {
         return Ok(());
     }
     if version != 11 {

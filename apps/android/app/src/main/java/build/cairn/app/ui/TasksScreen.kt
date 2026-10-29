@@ -45,7 +45,7 @@ internal fun TaskEditor(
                 ?: MissionSettings(
                     name = "",
                     prompt = "",
-                    agentId = MAIN_AGENT_ID,
+                    agentId = defaultAgent(state.usableAgents, state.agents),
                     skills = null,
                     timezone = java.time.ZoneId.systemDefault().id,
                 )
@@ -170,7 +170,12 @@ internal fun TaskEditor(
     ) {
         Field("Nom", form.name, { form = form.copy(name = it) })
         Field("Mission et critères de réussite", form.prompt, { form = form.copy(prompt = it) }, 6)
-        Choice("Agent", form.agentId, state.agents.map { it.id to it.name }) {
+        // Members schedule only the agents they may use; an edited task keeps showing its own.
+        val agents =
+            state.agents.filter {
+                canUseAgent(state.usableAgents, it.id) || it.id == form.agentId
+            }
+        Choice("Agent", form.agentId, agents.map { it.id to it.name }) {
             val nextAccess =
                 state.agents.find { agent -> agent.id == it }?.access
                     ?: AccessPolicy(

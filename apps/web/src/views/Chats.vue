@@ -24,6 +24,7 @@ import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { resumeRun } from '../../../../packages/contracts/generated/resume-run'
 import { failureReason, sameReason, stopEcho } from '../activity'
+import { canDirectChat, canUseAgent, defaultAgent } from '../agent-use'
 import {
   api,
   apiUpload,
@@ -82,6 +83,7 @@ import {
   KeyRound,
   Layers,
   LoaderCircle,
+  Lock,
   Maximize2,
   Menu,
   MoreHorizontal,
@@ -268,7 +270,7 @@ watch(() => [visibleError.value, detail.value?.id, detail.value?.run?.finishedAt
 const busy = ref(false)
 const submitting = ref(false)
 const editing = ref<string | null>(null)
-const agentId = ref(typeof route.query.agent === 'string' ? route.query.agent : MAIN_AGENT_ID)
+const agentId = ref(typeof route.query.agent === 'string' ? route.query.agent : defaultAgent(state.usableAgents, state.agents))
 const projectId = ref(typeof route.query.project === 'string' ? route.query.project : '')
 const attachments = ref<ChatAttachment[]>([])
 const previews = ref<Record<string, string>>({})
@@ -280,7 +282,9 @@ const dragging = ref(0)
 const hasDraft = computed(() => !!draft.value.trim() || attachments.value.length > 0)
 // Rejected files must be removed before sending; nothing is sent while a file uploads.
 const attachmentsBlocked = computed(() => Object.values(attachmentStates.value).some(item => item.status === 'rejected' || item.status === 'uploading'))
-const canSend = computed(() => !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
+// A member without access to the conversation's agent reads it but cannot direct it.
+const readOnly = computed(() => !!detail.value && !canDirectChat(state.usableAgents, detail.value, chats.value))
+const canSend = computed(() => !readOnly.value && !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
 
 function removeAttachment(id: string) {
   if (previews.value[id])
@@ -436,12 +440,17 @@ watch(events, (items) => {
     outgoing.value = null
 })
 const selectedAgent = computed(() => state.agents.find(agent => agent.id === (detail.value?.agentId || agentId.value)))
-const agents = computed(() => state.agents.map(agent => ({
+// Members only start conversations with the agents the owner lets them use.
+const agents = computed(() => state.agents.filter(agent => canUseAgent(state.usableAgents, agent.id)).map(agent => ({
   value: agent.id,
   label: agent.name,
   icon: Bot,
   description: agent.id === MAIN_AGENT_ID ? 'Full access' : agent.description,
 })))
+watch(() => state.usableAgents, (usable) => {
+  if (!route.params.id && !canUseAgent(usable, agentId.value))
+    agentId.value = defaultAgent(usable, state.agents)
+})
 const currentProvider = computed(() => detail.value?.run?.snapshot.agent.provider || selectedAgent.value?.provider || 'codex')
 const chosenProvider = computed({
   get: () => provider.value || currentProvider.value,
@@ -534,7 +543,7 @@ function newConversation() {
   model.value = ''
   reasoning.value = ''
   speed.value = ''
-  agentId.value = MAIN_AGENT_ID
+  agentId.value = defaultAgent(state.usableAgents, state.agents)
   projectId.value = ''
   createdChat = undefined
   submission = undefined
@@ -732,7 +741,7 @@ watch(chatId, (id) => {
   if (outgoing.value?.chatId !== destinationId)
     outgoing.value = null
   if (!id) {
-    agentId.value = typeof route.query.agent === 'string' ? route.query.agent : MAIN_AGENT_ID
+    agentId.value = typeof route.query.agent === 'string' ? route.query.agent : defaultAgent(state.usableAgents, state.agents)
     projectId.value = typeof route.query.project === 'string' ? route.query.project : ''
   }
 
@@ -1147,7 +1156,20 @@ function key(event: KeyboardEvent) {
               :active="active"
               :suspended="suspended"
               :highlighted="typeof route.query.question === 'string' ? route.query.question : undefined"
+              :read-only="readOnly"
             />
+            <UiNotice
+              v-if="readOnly"
+              role="note"
+              class="mb-3"
+              tone="info"
+              :icon="Lock"
+              title="You can follow this conversation"
+            >
+              <p>
+                Only people with access to {{ selectedAgent?.name || 'its agent' }} can continue it, answer its questions or delete it. You can still pause or stop its work. Ask the installation owner for access.
+              </p>
+            </UiNotice>
             <section
               v-if="openCodeRegionBlocked && !dismissedError"
               role="alert"
@@ -1332,7 +1354,8 @@ function key(event: KeyboardEvent) {
                   v-model="draft"
                   :skills="skills"
                   aria-label="Message"
-                  :placeholder="liveWait?.wakeup ? (detail?.paused ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
+                  :disabled="readOnly"
+                  :placeholder="readOnly ? 'Only people with access to this agent can write here' : liveWait?.wakeup ? (detail?.paused ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
                   rows="2"
                   maxlength="50000"
                   @keydown="key"
