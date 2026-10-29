@@ -141,29 +141,44 @@ describe('node health', () => {
     expect(nodeHealth(node({ local: true, status: 'local', lastSeen: null }), 0, 120_000).state).toBe('ready')
   })
 
-  it('finds a lone stale runner when its contact stops changing, without shortening other ages', () => {
-    // The device clock is an hour ahead of the server: only elapsed time matters.
+  it('finds a lone stale runner when its contact stops changing across listings, without shortening other ages', () => {
+    // The device clock is an hour ahead of the server: only elapsed time between listings matters.
     const fresh = [node({ local: true, status: 'local', lastSeen: 1_000 })]
     const seen = observeRunner(fresh, null, 3_600_000)!
-    expect(seen).toEqual({ lastSeen: 1_000, observedAt: 3_600_000, refreshed: false })
+    expect(seen).toEqual({
+      lastSeen: 1_000,
+      observedAt: 3_600_000,
+      checkedAt: 3_600_000,
+      refreshed: false,
+    })
     expect(nodeHealth(fresh[0], 3_600_000, null, seen).state).toBe('ready')
-    // Refreshed contacts restart the count; an unchanged one goes stale after a minute on this device.
+    // Refreshed contacts restart the count; an unchanged one goes stale after a minute of successful listings.
     const refreshed = [node({ local: true, status: 'local', lastSeen: 11_000 })]
-    expect(observeRunner(refreshed, seen, 3_610_000)).toEqual({ lastSeen: 11_000, observedAt: 3_610_000, refreshed: true })
-    expect(observeRunner(fresh, seen, 3_700_000)).toBe(seen)
-    expect(nodeHealth(fresh[0], 3_659_000, null, seen).state).toBe('ready')
-    expect(nodeHealth(fresh[0], 3_660_000, null, seen)).toEqual({ state: 'attention', label: 'Needs attention', detail: 'No usable report for over a minute' })
-    expect(nodeDiagnostics(fresh[0], 3_660_000, null, seen)[0]).toContain('no usable report for over a minute')
+    expect(observeRunner(refreshed, seen, 3_610_000)).toEqual({
+      lastSeen: 11_000,
+      observedAt: 3_610_000,
+      checkedAt: 3_610_000,
+      refreshed: true,
+    })
+    const later = observeRunner(fresh, seen, 3_659_000)!
+    expect(later).toEqual({ ...seen, checkedAt: 3_659_000 })
+    expect(nodeHealth(fresh[0], 3_659_000, null, later).state).toBe('ready')
+    const silent = observeRunner(fresh, later, 3_660_000)!
+    expect(nodeHealth(fresh[0], 3_660_000, null, silent)).toEqual({ state: 'attention', label: 'Needs attention', detail: 'No usable report for over a minute' })
+    expect(nodeDiagnostics(fresh[0], 3_660_000, null, silent)[0]).toContain('no usable report for over a minute')
+    // Failed listings leave the observation as it was: the page's connectivity is not blamed on the runner.
+    expect(nodeHealth(fresh[0], 9_999_999, null, later).state).toBe('ready')
     expect(observeRunner([node({ local: true, status: 'local', lastSeen: null })], seen)).toBeNull()
     // A runner that was already stale when the page opened does not slow the clock used for other ages.
     const fleet = [node({ local: true, status: 'local', lastSeen: 0 }), node({ id: 'remote', status: 'offline', lastSeen: 0 })]
     const stale = observeRunner(fleet, null, 7_200_000)
     expect(fleetClock(fleet)).toBeNull()
-    expect(nodeHealth(fleet[1], 7_200_000, fleetClock(fleet, stale, 7_200_000), stale).detail).toBe('Last contact 2 h ago')
+    expect(nodeHealth(fleet[1], 7_200_000, fleetClock(fleet, stale), stale).detail).toBe('Last contact 2 h ago')
     // A contact that changed while watched is server time: it dates other machines without the device clock.
-    const watched = observeRunner(refreshed, seen, 3_610_000)
-    expect(fleetClock(refreshed, watched, 3_670_000)).toBe(71_000)
-    expect(nodeHealth(node({ id: 'remote', status: 'offline', lastSeen: 0 }), 99_999_999, fleetClock(refreshed, watched, 3_670_000)).detail).toBe('Last contact 1 min ago')
+    const watched = observeRunner(refreshed, seen, 3_610_000)!
+    const checked = observeRunner(refreshed, watched, 3_670_000)
+    expect(fleetClock(refreshed, checked)).toBe(71_000)
+    expect(nodeHealth(node({ id: 'remote', status: 'offline', lastSeen: 0 }), 99_999_999, fleetClock(refreshed, checked)).detail).toBe('Last contact 1 min ago')
   })
 
   it('asks for native activation before a native node takes work', () => {

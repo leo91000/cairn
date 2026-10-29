@@ -142,27 +142,34 @@ class NodesTest {
             nodeHealth(runner.copy(lastSeen = 120_000), 900_000, 125_000).state,
         )
         assertEquals(NodeHealthState.READY, nodeHealth(runner, 900_000).state)
-        // A lone runner goes stale when its contact stops changing for a minute on this device.
+        // A lone runner goes stale when its contact stays unchanged for a minute of successful
+        // listings; failed listings do not count.
         val alone = runner.copy(lastSeen = 1_000)
         val seen = observeRunner(listOf(alone), null, 3_600_000)!!
-        assertEquals(RunnerObservation(1_000, 3_600_000), seen)
-        assertEquals(seen, observeRunner(listOf(alone), seen, 3_700_000))
+        assertEquals(RunnerObservation(1_000, 3_600_000, 3_600_000), seen)
         assertEquals(
-            RunnerObservation(11_000, 3_610_000, refreshed = true),
+            RunnerObservation(11_000, 3_610_000, 3_610_000, refreshed = true),
             observeRunner(listOf(runner.copy(lastSeen = 11_000)), seen, 3_610_000),
         )
-        assertEquals(NodeHealthState.READY, nodeHealth(alone, 3_659_000, null, seen).state)
+        val later = observeRunner(listOf(alone), seen, 3_659_000)!!
+        assertEquals(seen.copy(checkedAt = 3_659_000), later)
+        assertEquals(NodeHealthState.READY, nodeHealth(alone, 3_659_000, null, later).state)
+        assertEquals(NodeHealthState.READY, nodeHealth(alone, 9_999_999, null, later).state)
         assertEquals(
             NodeHealth(
                 NodeHealthState.ATTENTION,
                 "À vérifier",
                 "Aucun rapport exploitable depuis plus d’une minute",
             ),
-            nodeHealth(alone, 3_660_000, null, seen),
+            nodeHealth(alone, 3_660_000, null, observeRunner(listOf(alone), later, 3_660_000)),
         )
         // A contact that changed while watched is server time: it dates other machines.
-        val watched = observeRunner(listOf(runner.copy(lastSeen = 11_000)), seen, 3_610_000)
-        assertEquals(71_000L, fleetClock(listOf(alone), watched, 3_670_000))
+        val refreshedRunner = listOf(runner.copy(lastSeen = 11_000))
+        val watched = observeRunner(refreshedRunner, seen, 3_610_000)
+        assertEquals(
+            71_000L,
+            fleetClock(refreshedRunner, observeRunner(refreshedRunner, watched, 3_670_000)),
+        )
         // Free slots follow the runtime pool, as placement does.
         assertEquals(
             1L,

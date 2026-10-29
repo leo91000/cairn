@@ -206,7 +206,7 @@ fun NodesScreen(
                         )
                     }
                     Text(
-                        "${node.availableSlots} slots libres sur ${node.slots} · ${node.occupiedSlots} occupés"
+                        "${freeSlots(node)} slots libres sur ${node.slots} · ${node.occupiedSlots} occupés"
                     )
                     node.diskAccounting?.let { disk ->
                         Text("Capacité disque", style = MaterialTheme.typography.titleSmall)

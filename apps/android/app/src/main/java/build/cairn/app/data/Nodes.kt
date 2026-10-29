@@ -175,19 +175,15 @@ private const val HEARTBEAT_TIMEOUT_MS = 60_000L
  * The server's clock as seen in an inventory: the latest contact of a machine the server reports
  * online. Device clocks can drift from the server's, so staleness is judged against this.
  */
-fun fleetClock(
-    nodes: List<ExecutionNode>,
-    runner: RunnerObservation? = null,
-    now: Long = System.currentTimeMillis(),
-): Long? {
+fun fleetClock(nodes: List<ExecutionNode>, runner: RunnerObservation? = null): Long? {
     val seen =
         nodes
             .filter { !it.local && !it.revoked && it.status == "online" }
             .mapNotNull { it.lastSeen }
-    // A runner contact that changed while this device watched was server time then; device time
-    // has elapsed since.
+    // A runner contact that changed while this device watched was server time then; the device
+    // time elapsed until the latest successful listing has passed since.
     val watched =
-        runner?.takeIf { it.refreshed }?.let { it.lastSeen + maxOf(0, now - it.observedAt) }
+        runner?.takeIf { it.refreshed }?.let { it.lastSeen + it.checkedAt - it.observedAt }
     return (seen + listOfNotNull(watched)).maxOrNull()
 }
 
@@ -204,6 +200,8 @@ fun freeSlots(node: ExecutionNode): Long {
 data class RunnerObservation(
     val lastSeen: Long,
     val observedAt: Long,
+    /** The latest successful listing that still showed this contact. */
+    val checkedAt: Long = observedAt,
     /** The contact changed while this device watched: it was fresh when observed. */
     val refreshed: Boolean = false,
 )
@@ -215,8 +213,8 @@ fun observeRunner(
     now: Long = System.currentTimeMillis(),
 ): RunnerObservation? {
     val seen = nodes.firstOrNull { it.local && !it.revoked }?.lastSeen ?: return null
-    if (previous?.lastSeen == seen) return previous
-    return RunnerObservation(seen, now, refreshed = previous != null)
+    if (previous?.lastSeen == seen) return previous.copy(checkedAt = now)
+    return RunnerObservation(seen, now, now, refreshed = previous != null)
 }
 
 /** How long the built-in runner's contact is known to lag server time, if it is. */
@@ -226,20 +224,18 @@ private fun runnerLag(node: ExecutionNode, clock: Long?): Long? =
 /**
  * The built-in runner always reports "local". Listing refreshes its contact (every refresh, 10 s)
  * only when it answers with usable health, so it is stale when it lags the server clock by the
- * heartbeat timeout, or when its contact has not changed for that long on this device. Neither
- * depends on the device clock's offset; a runner already stale when the screen opens is found after
- * a minute at most. The failure may be no answer, a mismatched version or missing capabilities.
+ * heartbeat timeout, or when its contact has not changed for that long across successful listings.
+ * Neither depends on the device clock's offset; a runner already stale when the screen opens is
+ * found after a minute at most. The failure may be no answer, a mismatched version or missing
+ * capabilities.
  */
-fun runnerStale(
-    node: ExecutionNode,
-    clock: Long?,
-    runner: RunnerObservation? = null,
-    now: Long = System.currentTimeMillis(),
-): Boolean {
+fun runnerStale(node: ExecutionNode, clock: Long?, runner: RunnerObservation? = null): Boolean {
     if (!node.local || node.revoked || node.lastSeen == null) return false
     val lag = runnerLag(node, clock)
     if (lag != null && lag >= HEARTBEAT_TIMEOUT_MS) return true
-    return runner?.lastSeen == node.lastSeen && now - runner.observedAt >= HEARTBEAT_TIMEOUT_MS
+    // Failed listings do not count: they say nothing about the runner.
+    return runner?.lastSeen == node.lastSeen &&
+        runner.checkedAt - runner.observedAt >= HEARTBEAT_TIMEOUT_MS
 }
 
 /**
@@ -271,7 +267,7 @@ fun nodeHealth(
             node.lastSeen?.let { "Dernier contact ${relativeAge(it, maxOf(reference, it))}" }
                 ?: "Jamais connectée",
         )
-    if (runnerStale(node, clock, runner, now))
+    if (runnerStale(node, clock, runner))
         return NodeHealth(
             NodeHealthState.ATTENTION,
             "À vérifier",
@@ -394,7 +390,7 @@ fun nodeDiagnostics(
     if (node.revoked) return emptyList()
     val reasons = mutableListOf<String>()
     val reference = clock ?: now
-    if (runnerStale(node, clock, runner, now))
+    if (runnerStale(node, clock, runner))
         reasons +=
             "Le runner du master n’envoie plus de rapport exploitable ${runnerSilence(node, clock)?.let { "depuis ${it.removePrefix("il y a ")}" } ?: "depuis plus d’une minute"} : vérifiez qu’il tourne, à la même version que le serveur."
     if (!node.local && node.status == "offline")

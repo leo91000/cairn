@@ -107,13 +107,14 @@ const HEARTBEAT_TIMEOUT_MS = 60_000
  * The server's clock as seen in an inventory: the latest contact of a machine the server reports online.
  * Device clocks can drift from the server's, so staleness is judged against this rather than `Date.now()`.
  */
-export function fleetClock(nodes: ExecutionNode[], runner: RunnerObservation | null = null, now = Date.now()): number | null {
+export function fleetClock(nodes: ExecutionNode[], runner: RunnerObservation | null = null): number | null {
   const seen = nodes
     .filter(node => !node.local && !node.revoked && node.status === 'online' && node.lastSeen != null)
     .map(node => node.lastSeen!)
-  // A runner contact that changed while this device watched was server time then; device time has elapsed since.
+  // A runner contact that changed while this device watched was server time then; the device time elapsed
+  // until the latest successful listing has passed since.
   if (runner?.refreshed)
-    seen.push(runner.lastSeen + Math.max(0, now - runner.observedAt))
+    seen.push(runner.lastSeen + runner.checkedAt - runner.observedAt)
   return seen.length ? Math.max(...seen) : null
 }
 
@@ -121,6 +122,8 @@ export function fleetClock(nodes: ExecutionNode[], runner: RunnerObservation | n
 export interface RunnerObservation {
   lastSeen: number
   observedAt: number
+  // The latest successful listing that still showed this contact: only listings confirm it is unchanged.
+  checkedAt: number
   // The contact changed while this device watched: it was fresh when observed. A first observation may be old.
   refreshed: boolean
 }
@@ -131,8 +134,13 @@ export function observeRunner(nodes: ExecutionNode[], previous: RunnerObservatio
   if (runner?.lastSeen == null)
     return null
   if (previous?.lastSeen === runner.lastSeen)
-    return previous
-  return { lastSeen: runner.lastSeen, observedAt: now, refreshed: previous != null }
+    return { ...previous, checkedAt: now }
+  return {
+    lastSeen: runner.lastSeen,
+    observedAt: now,
+    checkedAt: now,
+    refreshed: previous != null,
+  }
 }
 
 /** How long the built-in runner's contact is known to lag server time, if it is. */
@@ -143,17 +151,18 @@ function runnerLag(node: ExecutionNode, clock: number | null) {
 /**
  * The built-in runner always reports "local". Listing refreshes its contact (every page refresh, 10 s)
  * only when it answers with usable health, so it is stale when it lags the server clock by the heartbeat
- * timeout, or when its contact has not changed for that long on this device. Neither depends on the
+ * timeout, or when its contact has not changed for that long across successful listings. Neither depends on the
  * device clock's offset; a runner already stale when the page opens is found after a minute at most.
  * The failure may be no answer, a mismatched version or missing capabilities.
  */
-export function runnerStale(node: ExecutionNode, clock: number | null, runner: RunnerObservation | null = null, now = Date.now()) {
+export function runnerStale(node: ExecutionNode, clock: number | null, runner: RunnerObservation | null = null) {
   if (!node.local || node.revoked || node.lastSeen == null)
     return false
   const lag = runnerLag(node, clock)
   if (lag != null && lag >= HEARTBEAT_TIMEOUT_MS)
     return true
-  return runner?.lastSeen === node.lastSeen && now - runner.observedAt >= HEARTBEAT_TIMEOUT_MS
+  // Failed listings do not count: they say nothing about the runner.
+  return runner?.lastSeen === node.lastSeen && runner.checkedAt - runner.observedAt >= HEARTBEAT_TIMEOUT_MS
 }
 
 /** The stale runner's age when a server reference shows it; otherwise only its lower bound is known. */
@@ -174,7 +183,7 @@ export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number 
   const reference = clock ?? now
   if (!node.local && node.status === 'offline')
     return { state: 'offline', label: 'Offline', detail: node.lastSeen != null ? `Last contact ${relativeAge(node.lastSeen, Math.max(reference, node.lastSeen))}` : 'Never connected' }
-  if (runnerStale(node, clock, runner, now)) {
+  if (runnerStale(node, clock, runner)) {
     const silence = runnerSilence(node, clock)
     return { state: 'attention', label: 'Needs attention', detail: silence ? `Last usable report ${silence}` : 'No usable report for over a minute' }
   }
@@ -237,7 +246,7 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now(), clock: nu
     return []
   const reasons: string[] = []
   const reference = clock ?? now
-  if (runnerStale(node, clock, runner, now)) {
+  if (runnerStale(node, clock, runner)) {
     const silence = runnerSilence(node, clock)
     reasons.push(`The built-in runner has sent no usable report ${silence ? `since ${silence}` : 'for over a minute'}: check that it is running, at the same version as the server.`)
   }

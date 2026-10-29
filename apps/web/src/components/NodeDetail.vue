@@ -347,7 +347,7 @@ const reserve = computed(() => {
             <h3
               id="node-native"
               ref="nativeHeading"
-              class="eyebrow mb-3.5 outline-none"
+              class="eyebrow mb-3.5 rounded focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
               tabindex="-1"
             >
               Native execution
