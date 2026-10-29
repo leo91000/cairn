@@ -1181,3 +1181,53 @@ test('a silent built-in runner needs attention, and rows open and return focus f
   await expect(panel).toHaveCount(0)
   await expect(row).toBeFocused()
 })
+
+test('listings slower than the refresh interval still show the machines', async ({ page, workspace: _workspace }) => {
+  test.setTimeout(60000)
+  await useRelayForHttpMocks(page)
+  const machine = {
+    id: randomUUID(),
+    name: 'Slow host',
+    revision: 'fixture',
+    local: false,
+    accepting: true,
+    revoked: false,
+    status: 'online',
+    executionReady: true,
+    tags: [],
+    systemTags: [],
+    slots: 2,
+    occupiedSlots: 0,
+    availableSlots: 2,
+    agents: [{ id: 'builder', name: 'Builder', allNodes: true }],
+    exclusiveAgents: [],
+    staleDisks: { count: 0, diskMiB: 0 },
+    storage: {
+      cacheMiB: 102400,
+      memoryCacheMiB: 256,
+      reserveMiB: 10240,
+      reservePercent: 5,
+      backupSeconds: 60,
+      maxDirtySeconds: 300,
+    },
+    limits: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 },
+    capabilities: {
+      os: 'linux',
+      arch: 'x86_64',
+      backend: 'firecracker',
+      kvm: true,
+      cpu: 4,
+      memoryMiB: 8192,
+      diskMiB: 65536,
+    },
+    lastSeen: Date.now(),
+  }
+  // Each answer arrives after the next poll has started.
+  await page.route('**/api/nodes', async (route) => {
+    await new Promise(resolve => setTimeout(resolve, 11000))
+    await route.fulfill({ json: [machine] }).catch(() => {})
+  })
+  await page.goto(workspacePath('/nodes'))
+  await authenticateWorkspace(page)
+  await expect(nodeRow(page, 'Slow host')).toBeVisible({ timeout: 30000 })
+})

@@ -121,6 +121,16 @@ const unready = ref<UnreadyObservations>({})
 const summary = computed(() => fleetSummary(nodes.value, Date.now(), clock.value, runner.value, unready.value))
 let timer: ReturnType<typeof setInterval> | undefined
 
+// A machine that leaves the listing while its panel is open closes it; focus returns to the list.
+watch(opened, async (now, before) => {
+  if (!before || now || openedId.value !== before.id)
+    return
+  openedId.value = null
+  await nextTick()
+  if (!document.activeElement || document.activeElement === document.body)
+    machinesHeading.value?.focus()
+})
+
 // A dialog opens on a clean slate: errors from earlier actions are not its own.
 watch(() => [adding.value, editing.value?.id, grantingId.value, cleaning.value?.id, revoking.value?.id, retiring.value?.previous.id, recovery.value !== null], (current, previous) => {
   if (current.some((value, index) => value && !previous?.[index])) {
@@ -131,15 +141,18 @@ watch(() => [adding.value, editing.value?.id, grantingId.value, cleaning.value?.
 // The newly enrolled native node whose "Who can use it?" step follows its configuration.
 let grantAfterConfigure: string | null = null
 
-// Polls and post-action refreshes can overlap: only the latest request's answer is kept.
-let listing = 0
+// Polls and post-action refreshes can overlap: an answer older than one already applied is dropped.
+// Slow answers still apply when nothing newer arrived first, so slow listings keep the page current.
+let started = 0
+let applied = 0
 
 async function load() {
-  const request = ++listing
+  const request = ++started
   try {
     const listed = await api<ExecutionNode[]>('/nodes')
-    if (request !== listing)
+    if (request < applied)
       return
+    applied = request
     nodes.value = listed
     runner.value = observeRunner(nodes.value, runner.value)
     unready.value = observeUnready(nodes.value, unready.value, Date.now(), fleetClock(nodes.value, runner.value), runner.value)
@@ -147,7 +160,7 @@ async function load() {
     refreshError.value = ''
   }
   catch (e) {
-    if (request === listing)
+    if (request > applied)
       refreshError.value = (e as Error).message
     return
   }

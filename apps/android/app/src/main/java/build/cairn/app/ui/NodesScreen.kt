@@ -70,12 +70,14 @@ fun NodesScreen(
     var cleaning by remember { mutableStateOf<ExecutionNode?>(null) }
     var advanced by remember { mutableStateOf(false) }
     var showRevoked by remember { mutableStateOf(false) }
-    // Polls and post-action refreshes can overlap: only the latest request's answer is kept.
-    val listing = remember { java.util.concurrent.atomic.AtomicInteger() }
+    // Polls and post-action refreshes can overlap: an answer older than one already applied is
+    // dropped; slow answers still apply when nothing newer arrived first.
+    val started = remember { java.util.concurrent.atomic.AtomicInteger() }
+    val applied = remember { java.util.concurrent.atomic.AtomicInteger() }
     suspend fun load() {
-        val request = listing.incrementAndGet()
+        val request = started.incrementAndGet()
         val listed: List<ExecutionNode> = vm.api.get("/nodes")
-        if (request != listing.get()) return
+        if (applied.accumulateAndGet(request) { last, next -> maxOf(last, next) } != request) return
         nodes = listed
         runner = observeRunner(nodes, runner)
         unready = observeUnready(nodes, unready, clock = fleetClock(nodes, runner), runner = runner)
