@@ -21,7 +21,8 @@ runtime fallback or second writer.
 Conversation identities, immutable readable slugs, existing revisions and record
 ordering timestamps are retained. Historical agent/project assignment IDs remain
 even if their resource was removed; live references use nullable foreign keys.
-Current run references are checked. Message IDs, delivery states, text, selections,
+Current run references are checked. Historical account references are retained
+without selecting an account or owning its lifetime. Message IDs, delivery states, text, selections,
 private answer maps, equal-timestamp row order and attachment order are retained.
 UUID spelling is preserved in persisted identities and typed commands, so retained
 uppercase message IDs and attachment keys keep their retry/edit/delete semantics.
@@ -37,9 +38,19 @@ decoding diagnostics contain no message contents, answers or native provenance.
 Reopening version 15 performs no further migration. There is no downgrade path
 from a successfully committed version 15; failure rollback leaves version 14 intact.
 
-Tests reconstruct the affected version-14 DDL from pre-conversion main `57855b96`,
-seed persisted conversations, retained/deleted resource references, private answers,
-ordered attachments and credentials, then open through the production startup
-path. They verify preservation, repeat opens and complete schema rollback after a
-late malformed message or broken run reference. Engine-switch tests exercise
-multiple receipts and a pending current switch with independent lifetimes.
+`crates/installation/tests/fixtures/conversations-v14.sql` is a dump produced by
+previous main `57855b96` through its real `Store::open`, legacy conversation writer
+and account lease writer. Its account data starts from the real v13 fixture of
+migration 0014 and is upgraded by the previous manager. All identities and
+credentials are synthetic; the fixture vault uses the fixed test key `[42; 32]`.
+It retains three providers, current/exhausted usage, ordered windows/models,
+reset credits, one lease, encrypted credentials, historical account references,
+private answers, equal-timestamp message order, attachment order, direct-storage
+metadata and the audit sequence. It is not reconstructed by undoing candidate DDL.
+
+A complete-fixture test verifies both domains and decrypts the synthetic vault
+secret after startup and repeated opens. Focused scenarios replace only the
+fixture's conversation inputs before exercising rollback, retained/deleted resource
+references, revisions, UUID spelling, multiple switch receipts and independent
+lifetimes. Node/direct-storage chain tests keep their existing preceding-version
+fixtures and continue through the account and conversation migrations.
