@@ -83,7 +83,7 @@ pub(crate) async fn task_author_policy(
         .map_err(|_| Error::unavailable("Task-author check unavailable."))
 }
 
-/// Recheck the originating public grant before a pending plugin command publishes.
+/// Recheck the originating owner-issued public manage grant before a pending command publishes.
 pub(crate) async fn authorize_plugin_mcp(
     service: &crate::service::Service,
     credential_digest: &str,

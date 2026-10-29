@@ -247,7 +247,9 @@ impl Execution<'_> {
     async fn mark_running(&mut self) -> Result<()> {
         let s = self.s;
         let account_name = match self.account.as_ref() {
-            Some(account) => s.accounts.get(s, &account.account_id).await?["name"].clone(),
+            Some(account) => {
+                serde_json::to_value(s.accounts.account(s, &account.account_id).await?.name)?
+            }
             None => Value::Null,
         };
         let mut patch = crate::runs::RunChanges {
@@ -1091,7 +1093,7 @@ impl Execution<'_> {
         s.accounts
             .exhausted(s, &previous.account_id, &model)
             .await?;
-        s.accounts.release(&previous).await?;
+        s.accounts.release(s, &previous).await?;
         let patch = crate::runs::RunChanges {
             account_wait_reason: Some(Some(
                 (format!("Usage exhausted. Waiting for an available {label} account to resume."))
@@ -1117,7 +1119,7 @@ impl Execution<'_> {
             .await?;
         self.sensitive
             .extend(s.accounts.redactions(s, account).await?);
-        let name = s.accounts.get(s, &account.account_id).await?["name"].clone();
+        let name = serde_json::to_value(s.accounts.account(s, &account.account_id).await?.name)?;
         let patch = crate::runs::RunChanges {
             account_wait_reason: Some(None),
             account_id: Some(Some((account.account_id).to_owned())),

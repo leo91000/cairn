@@ -229,7 +229,7 @@ impl Worker {
             Ok(true) => {}
             result => {
                 if let Some(account) = account {
-                    s.accounts.release(&account).await?;
+                    s.accounts.release(s, &account).await?;
                 }
                 return result.map(|_| ());
             }
@@ -331,8 +331,11 @@ async fn run_to_completion(
     // disk/database failure must not strand a running record or
     // launch a second process before the previous one is fenced.
     loop {
-        let lease = s.accounts.lease(&run_id).await;
-        match requeue_after_error(&s.store, &run_id, lease).await {
+        let result = match s.accounts.lease(s, &run_id).await {
+            Ok(lease) => requeue_after_error(&s.store, &run_id, lease).await,
+            Err(error) => Err(error),
+        };
+        match result {
             Ok(()) => break,
             Err(error) => {
                 tracing::warn!(run_id = %run_id, error = %error, "Could not requeue run after a worker error");
@@ -595,6 +598,8 @@ use crate::run_fixture::DbRunFixture;
 
 #[cfg(test)]
 mod tests {
+    use crate::account_fixture::AccountFixtures;
+
     use super::*;
     use crate::agent_fixture::AgentFixture;
     use std::{future::Future, task::Poll};
@@ -930,11 +935,14 @@ mod tests {
     async fn deletion_during_account_preparation_leaves_no_orphan_files() {
         let (_root, service, chat_id, run_id, workspace) = fixture().await;
         service.accounts.initialize(&service).await.unwrap();
-        let mut account = service
-            .accounts
-            .create(&service, Provider::Codex, "Ready")
-            .await
-            .unwrap();
+        let mut account = serde_json::to_value(
+            service
+                .accounts
+                .create(&service, Provider::Codex, "Ready")
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         account["state"] = "ready".into();
         account["usage"] = json!({
             "allowed": true,
@@ -944,7 +952,7 @@ mod tests {
         });
         service
             .store
-            .put(crate::accounts::KIND, account.clone())
+            .save_account_fixture(account.clone())
             .await
             .unwrap();
         let account_guard = service.accounts.lock(text(&account, "id")).await;
@@ -990,7 +998,14 @@ mod tests {
         drop(account_guard);
         admission.await.unwrap();
         assert!(service.worker.active.lock().await.is_empty());
-        assert!(service.accounts.lease(&run_id).await.is_none());
+        assert!(
+            service
+                .accounts
+                .lease(&service, &run_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
         service.cleanup_conversations().await.unwrap();
         assert!(
             service

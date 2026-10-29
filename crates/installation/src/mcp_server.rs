@@ -519,6 +519,11 @@ pub(crate) fn operations() -> Vec<Value> {
             .iter()
             .map(crate::capabilities::McpOperation::descriptor),
     );
+    operations.extend(
+        crate::capabilities::ACCOUNT_OPERATIONS
+            .iter()
+            .map(crate::capabilities::AccountOperation::descriptor),
+    );
     operations.push(crate::capabilities::RESUME_RUN.descriptor());
     operations.push(crate::capabilities::MANAGE_PLUGIN.descriptor());
     operations.extend(
@@ -631,6 +636,18 @@ pub(crate) async fn operation(
             .await;
     }
     if let Some(op) = crate::capabilities::agent_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::account_operation(name) {
         return op
             .invoke(
                 s,
