@@ -181,6 +181,8 @@ async fn storage_policy(broker: &Broker, request: Request) -> Result<Response> {
 #[serde(deny_unknown_fields)]
 struct BlockBatch {
     hashes: Vec<String>,
+    #[serde(default)]
+    diagnostic: Option<crate::performance::publication::Request>,
 }
 
 async fn snapshot_file(
@@ -193,6 +195,7 @@ async fn snapshot_file(
     let directory = broker.state.join("snapshots").join(snapshot);
     if request.method() == "DELETE" && hash == "discard" {
         tokio::fs::remove_dir_all(directory).await?;
+        crate::performance::publication::discard_snapshot(snapshot);
         return json_response(json!({ "ok": true }));
     }
     if request.method() == "POST" && matches!(hash, "blocks" | "publication") {
@@ -205,7 +208,13 @@ async fn snapshot_file(
         let batch: BlockBatch = serde_json::from_slice(&bytes)
             .map_err(|_| Error::bad("Invalid snapshot block batch."))?;
         let (length, blocks) = if hash == "publication" {
-            crate::nodes::snapshots::served_publication(&directory, batch.hashes).await?
+            crate::nodes::snapshots::served_publication_observed(
+                &directory,
+                batch.hashes,
+                batch.diagnostic,
+                snapshot,
+            )
+            .await?
         } else {
             crate::nodes::snapshots::served_batch(&directory, batch.hashes).await?
         };

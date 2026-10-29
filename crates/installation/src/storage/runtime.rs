@@ -315,8 +315,12 @@ async fn blocking<T: Send + 'static>(
     operation: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
     static IO: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+    let admission = crate::performance::publication::start(
+        crate::performance::publication::Stage::NodeIoAdmission,
+    );
     let permit = IO.acquire().await.map_err(Error::internal)?;
-    tokio::task::spawn_blocking(move || {
+    admission.finish(0);
+    crate::performance::publication::blocking(move || {
         let _permit = permit;
         operation()
     })
@@ -341,7 +345,11 @@ async fn load_with_wait(directory: &Path, wait: std::time::Duration) -> Result<A
         }
         // Release both the registry lock and the bounded I/O permit while the
         // previous readers drain; another disk must still be able to open.
+        let waiting = crate::performance::publication::start(
+            crate::performance::publication::Stage::NodeOpenRetry,
+        );
         tokio::time::sleep(remaining.min(std::time::Duration::from_millis(20))).await;
+        waiting.finish(0);
     }
 }
 

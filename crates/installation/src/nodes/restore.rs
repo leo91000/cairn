@@ -111,7 +111,15 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
         let Some(block) = super::snapshots::find_block(&manifest, hash) else {
             continue;
         };
-        let bytes = super::publication::read_manifest_block(s, &backup, block).await?;
+        let metrics = crate::performance::publication::restore_context(
+            request.headers(),
+            text(&grant, "runId"),
+        );
+        let bytes = crate::performance::publication::scope(
+            metrics,
+            super::publication::read_manifest_block(s, &backup, block),
+        )
+        .await?;
         return Ok((
             [("content-length", bytes.len().to_string())],
             Body::from(bytes),
