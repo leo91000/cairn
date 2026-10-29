@@ -108,6 +108,27 @@ test('raw HTML retains parser normalization for SVG, MathML and raw text contain
   }
 })
 
+test('raw SVG links retain Markdown link handling and diagram labels retain their text', async ({ page }) => {
+  const apiPath = '/apps/web/src/api.ts'
+  await page.evaluate(async (path) => {
+    const { state } = await import(path)
+    state.installationId = 'fixture'
+  }, apiPath)
+  const source = '<figure class="diagram"><svg width="400" height="100"><a href="https://example.test/docs"><text y="30">Docs</text></a></svg></figure>\n\n<svg width="400" height="100"><a href="/api/runs/r/artifacts/a"><text y="30">/api/runs/r/artifacts/a</text></a></svg>'
+  await page.evaluate(text => window.chatRendering.markdown(text, true), source)
+  const links = page.locator('#app .markdown svg a')
+  await expect(links).toHaveCount(2)
+  for (const link of await links.all()) {
+    await expect(link).toHaveAttribute('target', '_blank')
+    await expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+  }
+
+  await expect(links.nth(1)).toHaveAttribute('href', '/api/installations/fixture/api/runs/r/artifacts/a')
+  await expect(links.nth(1)).toHaveText('View file')
+  await page.evaluate(text => window.chatRendering.markdown(text, true), '\`\`\`mermaid\nflowchart TD\nA[https://example.test/docs]\nclick A "https://example.test/docs"\n\`\`\`')
+  await expect(page.locator('#app figure.diagram svg a text')).toHaveText('https://example.test/docs')
+})
+
 test('Mermaid fences draw once closed, keep their source view while streaming and open a zoomable viewer', async ({ page, browserName }) => {
   const fence = '```mermaid\nflowchart LR\n  A[Start] -->|go| B{Ready?}\n  B --> C((Done))'
   await page.evaluate(text => window.chatRendering.markdown(text), `Plan:\n\n${fence}`)
@@ -202,6 +223,7 @@ test('cyclic and unsupported composite semantics preserve readable source', asyn
     ['sequenceDiagram\nparticipant A\ncreate participant B\nA->>B: work', 'Participant creation and destruction are not supported.'],
     ['sequenceDiagram\nparticipant A\ncreate actor B\nA->>B: work', 'Participant creation and destruction are not supported.'],
     ['sequenceDiagram\nparticipant A\ndestroy A\nA->>B: work', 'Participant creation and destruction are not supported.'],
+    ['sequenceDiagram\nbox Internal APIs\nparticipant A\nparticipant B\nend\nA->>B: work', 'Sequence participant groups are not supported.'],
   ]
   for (const [source, explanation] of cases) {
     await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)

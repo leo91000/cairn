@@ -7464,6 +7464,14 @@
     {
       "name": "sequence-destroy-participant",
       "source": "sequenceDiagram\nparticipant A\ndestroy A\nA->>B: work"
+    },
+    {
+      "name": "sequence-participant-group",
+      "source": "sequenceDiagram\nbox Internal APIs\nparticipant A\nparticipant B\nend\nA->>B: work"
+    },
+    {
+      "name": "sequence-colored-participant-group",
+      "source": "sequenceDiagram\nbox rgba(100,100,100,0.1) Internal APIs\nparticipant A\nparticipant B\nend\nA->>B: work"
     }
   ],
   "unsupported": [

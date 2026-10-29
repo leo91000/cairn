@@ -864,14 +864,12 @@ private suspend fun shareDiagramImage(
         withContext(Dispatchers.Default) {
             val bitmap = diagramImage(context, scene, colors)
             try {
-                File(context.cacheDir, "cairn-files")
-                    .apply { mkdirs() }
-                    .resolve(name)
-                    .also { file ->
-                        file.outputStream().use {
-                            bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
-                        }
+                val directory = File(context.cacheDir, "cairn-files").apply { mkdirs() }
+                File.createTempFile("${kind.fileName()}-", ".png", directory).also { file ->
+                    file.outputStream().use {
+                        bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
                     }
+                }
             } finally {
                 bitmap.recycle()
             }

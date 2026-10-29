@@ -144,6 +144,10 @@ describe('diagram layout', () => {
     expect(endpoints.filter(node => node.parent === 'root')).toHaveLength(2)
   })
 
+  it.each(['box Internal APIs', 'box rgba(100,100,100,0.1) Internal APIs'])('retains unsupported participant group %s as source', (group) => {
+    expect(() => parseDiagram(`sequenceDiagram\n${group}\nparticipant A\nparticipant B\nend\nA->>B: work`)).toThrow(DiagramError)
+  })
+
   it.each(['create participant B', 'create actor B', 'destroy A'])('retains unsupported lifecycle directive %s as source', (directive) => {
     expect(() => parseDiagram(`sequenceDiagram\nparticipant A\n${directive}\nA->>B: work`)).toThrow(DiagramError)
   })

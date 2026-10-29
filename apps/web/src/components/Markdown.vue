@@ -164,6 +164,8 @@ const html = computed(() => {
     diagrams.beginRender()
   }
 
+  const diagramFigures = new Set<Element>()
+
   for (const code of container.querySelectorAll('pre code')) {
     const language = [...code.classList].find(name => name.startsWith('language-'))?.slice(9)
     const source = (code.textContent || '').replace(/\n$/, '')
@@ -171,6 +173,7 @@ const html = computed(() => {
     code.parentElement!.removeAttribute(closedFenceAttribute)
     const figure = isDiagramLanguage(language) && closed && diagramFigure(source, diagrams, sourceViews.has(source))
     if (figure) {
+      diagramFigures.add(figure)
       code.parentElement!.replaceWith(figure)
       continue
     }
@@ -191,7 +194,9 @@ const html = computed(() => {
     const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
     const nodes: Text[] = []
     while (walker.nextNode()) {
-      if (!walker.currentNode.parentElement?.closest('a, code, pre, figure.diagram'))
+      const parent = walker.currentNode.parentElement
+      const figure = parent?.closest('figure.diagram')
+      if (!parent?.closest('a, code, pre') && (!figure || !diagramFigures.has(figure)))
         nodes.push(walker.currentNode as Text)
     }
 
@@ -215,13 +220,15 @@ const html = computed(() => {
     }
   }
 
-  for (const link of container.querySelectorAll('a[href]:not(svg a)')) {
+  for (const link of container.querySelectorAll('a[href]')) {
     link.setAttribute('target', '_blank')
     link.setAttribute('rel', 'noopener noreferrer')
     const href = link.getAttribute('href')!
     if (artifactLink(href, window.location.origin))
       link.setAttribute('href', apiResourceUrl(href))
-    if (props.compactLinks && link.textContent === href) {
+    const figure = link.closest('figure.diagram')
+    const generated = figure !== null && diagramFigures.has(figure)
+    if (props.compactLinks && !generated && link.textContent === href) {
       try {
         const url = new URL(href, window.location.href)
         if (!['https:', 'http:'].includes(url.protocol))

@@ -1227,7 +1227,7 @@ function parseSequence(source: string): SequenceDiagram {
   let autonumber: number | undefined
   let increment = 100
   // Boxes group participant columns; they open and close like blocks but draw nothing here.
-  const open: ('block' | 'box')[] = []
+  const open: 'block'[] = []
 
   const participant = (raw: string) => {
     const id = raw.trim()
@@ -1315,10 +1315,8 @@ function parseSequence(source: string): SequenceDiagram {
       }
     }
 
-    if (keyword === 'box') {
-      open.push('box')
-      continue
-    }
+    if (keyword === 'box')
+      throw new DiagramError('Sequence participant groups are not supported.')
 
     if (['loop', 'alt', 'opt', 'par', 'par_over', 'critical', 'break', 'rect'].includes(keyword)) {
       const kind = (keyword === 'par_over' ? 'par' : keyword) as BlockKind

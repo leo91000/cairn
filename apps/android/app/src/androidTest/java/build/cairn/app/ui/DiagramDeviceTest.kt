@@ -145,8 +145,47 @@ class DiagramDeviceTest {
                 assertTrue(bitmap.width > 0 && bitmap.height > 0)
                 bitmap.recycle()
             }
+            val firstImage = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
             compose.onNodeWithContentDescription("Fermer").performClick()
             stage.assertDoesNotExist()
+            compose.runOnIdle { content = "" }
+            compose.waitUntil(20000) {
+                compose.onAllNodesWithTag("diagram").fetchSemanticsNodes().isEmpty()
+            }
+            compose.runOnIdle {
+                content = "```mermaid\nflowchart TD\nA[A different private diagram]\n```"
+            }
+            compose.waitUntil(20000) {
+                compose.onAllNodesWithTag("diagram").fetchSemanticsNodes().size == 1
+            }
+            compose.onNodeWithContentDescription("Agrandir").performClick()
+            compose.onNodeWithContentDescription("Partager l’image").performClick()
+            compose.waitUntil(20000) { intents.count { it.action == Intent.ACTION_CHOOSER } == 2 }
+            val secondChooser = intents.last { it.action == Intent.ACTION_CHOOSER }
+            val secondSend =
+                secondChooser.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)!!
+            val secondUri =
+                secondSend.getParcelableExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)!!
+            assertNotEquals("Each export must have its own grantable URI", uri, secondUri)
+            assertArrayEquals(
+                firstImage,
+                context.contentResolver.openInputStream(uri)!!.use { it.readBytes() },
+            )
+            val secondImage =
+                context.contentResolver.openInputStream(secondUri)!!.use { it.readBytes() }
+            assertFalse(
+                "The second export must contain its own image",
+                firstImage.contentEquals(secondImage),
+            )
+            context.contentResolver.query(secondUri, null, null, null, null)!!.use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(
+                    "organigramme.png",
+                    cursor.getString(
+                        cursor.getColumnIndexOrThrow(android.provider.OpenableColumns.DISPLAY_NAME)
+                    ),
+                )
+            }
         } finally {
             instrumentation.removeMonitor(monitor)
         }
@@ -215,6 +254,10 @@ class DiagramDeviceTest {
                         "A->>A: abcdefghijabcdefghijabcdefghij",
                     "pie\n\"A\" : 1\n\"B\" : 2",
                 )) {
+                compose.runOnIdle { content = "" }
+                compose.waitUntil(20000) {
+                    compose.onAllNodesWithTag("diagram").fetchSemanticsNodes().isEmpty()
+                }
                 compose.runOnIdle {
                     theme = mode
                     content = "```mermaid\n$source\n```"
@@ -243,10 +286,14 @@ class DiagramDeviceTest {
                 "sequenceDiagram\nparticipant A\ncreate participant B\nA->>B: work",
                 "sequenceDiagram\nparticipant A\ncreate actor B\nA->>B: work",
                 "sequenceDiagram\nparticipant A\ndestroy A\nA->>B: work",
+                "sequenceDiagram\nbox Internal APIs\nparticipant A\nparticipant B\nend\nA->>B: work",
             )) {
             compose.runOnIdle { content = "```mermaid\n$source\n```" }
             compose.waitUntil(20000) {
-                compose.onAllNodesWithTag("diagram-source").fetchSemanticsNodes().size == 1
+                compose
+                    .onAllNodes(hasTestTag("diagram-source") and hasText(source))
+                    .fetchSemanticsNodes()
+                    .size == 1
             }
             compose.onNodeWithTag("diagram-source").assertTextEquals(source)
             compose

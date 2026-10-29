@@ -1455,10 +1455,7 @@ private fun parseSequence(source: String): SequenceDiagram {
             }
         }
 
-        if (keyword == "box") {
-            open.add(false)
-            continue
-        }
+        if (keyword == "box") throw DiagramError("Sequence participant groups are not supported.")
 
         if (keyword in BLOCK_KEYWORDS) {
             val kind =
