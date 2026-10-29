@@ -219,8 +219,8 @@ supprimer sa règle, et le propriétaire n’importe laquelle ; supprimer une r
 ses déclenchements en cours. Comme les tâches
 ([ADR-0029](0029-sharing-whole-installations.md)), une règle appartient à une
 adhésion, et, pour un membre, un déclenchement exige une adhésion vérifiée récemment,
-de nouveau avant toute action qui suit une attente ; si elle ne peut pas l’être, il
-attend.
+de nouveau avant toute action qui suit une attente ; un déclenchement qui ne peut pas
+la vérifier pendant sept jours échoue ; si elle ne peut pas l’être, il attend.
 
 Une règle ne se déclenche que si rien ne l’en empêche. Chaque empêchement se lève
 indépendamment des autres :
@@ -233,18 +233,20 @@ indépendamment des autres :
 | Droits perdus | le créateur perd l’accès à l’agent d’exécution ou à un agent que la règle démarre, ou l’agent d’exécution perd le hook de plugin écouté | le retour du droit, de lui-même, ou le créateur qui modifie la règle (autre agent d’exécution ou autre agent démarré) ; arrête les déclenchements en cours |
 | Adhésion terminée | le créateur est retiré, part ou est supprimé ; le réinviter n’y change rien | jamais : il reste à dupliquer ; arrête les déclenchements en cours |
 
-Un agent qui a l’accès à l’installation n’écrit des règles que dans un tour lancé par
-une entrée de cette personne, et dans une conversation dont toutes les entrées, depuis
-sa création, ont été écrites par une même personne sur le web, Android ou le MCP
-public : messages, orientations, réponses aux questions, et modifications d’un message
-en attente, qui comptent comme une entrée de celui qui modifie. Une conversation
-qu’une règle, un agent, `cairn_installation` ou une autre personne a atteinte (lire le
-rapport d’une tâche déléguée compte comme une entrée d’agent), une tâche (planifiée,
-lancée à la main ou déléguée) et une mission ne le permettent jamais, même plus tard ;
-pas plus qu’une conversation dont l’agent a vu ses instructions ou ses skills
-modifiées, depuis sa création, par un autre que cette personne (une skill importée
-d’une source compte comme écrite par celui qui l’importe, risque résiduel accepté
-comme ci-dessous), ou dont l’agent suit des instructions ou des skills qu’un agent a
+Un agent qui a l’accès à l’installation n’écrit des règles que pour une personne qui
+reste, au moment où il écrit, propriétaire ou membre ayant accès à l’agent de la
+conversation. Le tour doit avoir été lancé par une entrée de cette personne, et toutes
+les entrées de la conversation, depuis la création de celle-ci, doivent avoir été
+écrites par elle sur le web, Android ou le MCP public : messages, orientations,
+réponses aux questions, et modifications d’un message en attente, qui comptent comme
+une entrée de celui qui modifie. Une conversation qu’une règle, un agent,
+`cairn_installation` ou une autre personne a atteinte (lire le rapport d’une tâche
+déléguée compte comme une entrée d’agent), une tâche (planifiée, lancée à la main ou
+déléguée) et une mission ne le permettent jamais, même plus tard ; pas plus qu’une
+conversation dont l’agent a vu ses instructions ou ses skills modifiées, depuis la
+création de la conversation, par un autre que cette personne (une skill importée d’une
+source compte comme écrite par celui qui l’importe, risque résiduel accepté comme
+ci-dessous), ou dont l’agent suit des instructions ou des skills qu’un agent a
 écrites, à quelque moment que ce soit (les instructions d’un plugin comptent comme
 écrites par le propriétaire qui l’a accordé, y compris pour les droits antérieurs à
 cette décision, que seul le propriétaire pouvait donner). Il écrit au nom de cette
@@ -289,10 +291,10 @@ inconnus qui les orientaient ; une conversation déplacée vers un autre agent 
 plus d’écrire de règles. Les accès des comptes à l’agent fusionné ne passent pas à
 l’agent qui le reçoit : seul le propriétaire les accorde.
 
-### Budget du moteur
+### Budget du moteur de règles
 
-Le moteur est borné pour qu’une boucle (une action qui déclenche le hook qui l’a
-lancée) s’arrête d’elle-même. Cairn ne peut pas toujours relier un appel d’outil à
+Le moteur de règles est borné pour qu’une boucle (une action qui déclenche le hook qui
+l’a lancée) s’arrête d’elle-même. Cairn ne peut pas toujours relier un appel d’outil à
 l’événement qu’il provoque en retour chez le service ; le budget est donc porté par
 chaque règle : un plafond de déclenchements et un plafond de conversations démarrées
 ou orientées par heure, avec des valeurs par défaut que le créateur peut changer sous
@@ -321,8 +323,8 @@ hooks : par choix du propriétaire, les membres peuvent donc écouter dès la m
 place les instances que leurs agents utilisent, jusqu’à ce qu’il réduise ces droits.
 L’instance qui fournit aujourd’hui les identifiants de run d’un agent devient
 l’instance choisie pour eux. Cairn enregistre désormais qui écrit chaque entrée d’une
-conversation, ses instructions et ses skills ; ce qui existait avant n’a pas cette
-trace.
+conversation, ainsi que les instructions et les skills des agents ; ce qui existait
+avant n’a pas cette trace.
 
 ## Options écartées
 
@@ -362,14 +364,14 @@ faisait l’assistant des bots
 
 Avant qu’un droit élargisse un agent (des droits de plugin, des connexions MCP,
 plusieurs projets, l’écriture de fichiers ou l’exécution de commandes, le pouvoir de
-déléguer, l’exécution native ou l’accès à l’installation), la revue du propriétaire
-liste, sur le web et Android, les comptes qui ont accès à cet agent, et partout, MCP
-public compris, les règles de tous les comptes qui le démarrent, l’utilisent comme
-agent d’exécution ou, quand leur créateur a des clés rattachées à ses conversations,
-orientent des conversations ou répondent à leurs questions par une clé ; l’approbation
-d’une mise à jour de plugin montre de même les agents en accès complet, leurs comptes
-et leurs règles qui reçoivent ses nouvelles contributions ; ce que l’agent peut alors
-faire pour des inconnus est ainsi visible au moment de l’accorder.
+déléguer, l’exécution native ou l’accès à l’installation), la revue du propriétaire,
+sur le web, Android et le MCP public, liste les comptes qui ont accès à cet agent et
+les règles de tous les comptes qui le démarrent, l’utilisent comme agent d’exécution
+ou, quand leur créateur a des clés rattachées à ses conversations, orientent des
+conversations ou répondent à leurs questions par une clé ; l’approbation d’une mise à
+jour de plugin montre de même les agents en accès complet, leurs comptes et leurs
+règles qui reçoivent ses nouvelles contributions ; ce que l’agent peut alors faire
+pour des inconnus est ainsi visible au moment de l’accorder.
 
 Les risques d’un droit trop large relèvent du propriétaire ; Cairn doit en revanche
 rendre ces droits lisibles et n’en accorder aucun par défaut. Les capacités d’un
