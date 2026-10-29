@@ -82,6 +82,9 @@ pub struct Conversation {
     pub environment_error: Option<String>,
     #[serde(default)]
     pub environment_retry_after: Option<i64>,
+    /// Retained historical account reference; it does not select an account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 /// A8 still owns questionnaire delivery and answer validation. Its temporary
@@ -156,6 +159,7 @@ CREATE TABLE conversations(
     environment_expired_at INTEGER CHECK(environment_expired_at BETWEEN 0 AND 9007199254740991),
     environment_error TEXT,
     environment_retry_after INTEGER CHECK(environment_retry_after BETWEEN 0 AND 9007199254740991),
+    account_id TEXT,
     persisted_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX conversations_run ON conversations(run_id) WHERE run_id IS NOT NULL;
@@ -197,7 +201,7 @@ CREATE TABLE message_attachments(
 ) WITHOUT ROWID;
 ";
 
-const COLUMNS: &str = "id,slug,title,agent_id,project_id,run_id,paused,lifecycle,created_at,updated_at,last_activity_at,revision,trashed_at,purge_at,restored_at,retry_after,lifecycle_error,previous_lifecycle,session_restart_requested,cancelled_by_deletion,agent_name,project_name,requested_by,wakeup,native_principals,native_authority_nodes,native_parent_run_id,native_parent_access,native_provenance_unknown,native_plugin_grants,environment_state,environment_expired_at,environment_error,environment_retry_after";
+const COLUMNS: &str = "id,slug,title,agent_id,project_id,run_id,paused,lifecycle,created_at,updated_at,last_activity_at,revision,trashed_at,purge_at,restored_at,retry_after,lifecycle_error,previous_lifecycle,session_restart_requested,cancelled_by_deletion,agent_name,project_name,requested_by,wakeup,native_principals,native_authority_nodes,native_parent_run_id,native_parent_access,native_provenance_unknown,native_plugin_grants,environment_state,environment_expired_at,environment_error,environment_retry_after,account_id";
 
 fn decode<T: serde::de::DeserializeOwned>(
     row: &rusqlite::Row<'_>,
@@ -255,6 +259,7 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation> {
         environment_expired_at: r.get(31)?,
         environment_error: r.get(32)?,
         environment_retry_after: r.get(33)?,
+        account_id: r.get(34)?,
     })
 }
 
@@ -362,7 +367,7 @@ impl Db<'_> {
             c.slug = self.new_conversation_slug()?;
         }
         c.revision = id();
-        self.0.prepare_cached("INSERT INTO conversations(id,slug,title,agent_id,project_id,run_id,paused,lifecycle,created_at,updated_at,last_activity_at,revision,trashed_at,purge_at,restored_at,retry_after,lifecycle_error,previous_lifecycle,session_restart_requested,cancelled_by_deletion,agent_name,project_name,requested_by,wakeup,native_principals,native_authority_nodes,native_parent_run_id,native_parent_access,native_provenance_unknown,native_plugin_grants,environment_state,environment_expired_at,environment_error,environment_retry_after,persisted_at,live_agent_id,live_project_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,(SELECT id FROM agents WHERE id=?),(SELECT id FROM projects WHERE id=?)) ON CONFLICT(id) DO UPDATE SET slug=excluded.slug,title=excluded.title,agent_id=excluded.agent_id,project_id=excluded.project_id,run_id=excluded.run_id,paused=excluded.paused,lifecycle=excluded.lifecycle,created_at=excluded.created_at,updated_at=excluded.updated_at,last_activity_at=excluded.last_activity_at,revision=excluded.revision,trashed_at=excluded.trashed_at,purge_at=excluded.purge_at,restored_at=excluded.restored_at,retry_after=excluded.retry_after,lifecycle_error=excluded.lifecycle_error,previous_lifecycle=excluded.previous_lifecycle,session_restart_requested=excluded.session_restart_requested,cancelled_by_deletion=excluded.cancelled_by_deletion,agent_name=excluded.agent_name,project_name=excluded.project_name,requested_by=excluded.requested_by,wakeup=excluded.wakeup,native_principals=excluded.native_principals,native_authority_nodes=excluded.native_authority_nodes,native_parent_run_id=excluded.native_parent_run_id,native_parent_access=excluded.native_parent_access,native_provenance_unknown=excluded.native_provenance_unknown,native_plugin_grants=excluded.native_plugin_grants,environment_state=excluded.environment_state,environment_expired_at=excluded.environment_expired_at,environment_error=excluded.environment_error,environment_retry_after=excluded.environment_retry_after,persisted_at=excluded.persisted_at,live_agent_id=excluded.live_agent_id,live_project_id=excluded.live_project_id")?.execute(params![
+        self.0.prepare_cached("INSERT INTO conversations(id,slug,title,agent_id,project_id,run_id,paused,lifecycle,created_at,updated_at,last_activity_at,revision,trashed_at,purge_at,restored_at,retry_after,lifecycle_error,previous_lifecycle,session_restart_requested,cancelled_by_deletion,agent_name,project_name,requested_by,wakeup,native_principals,native_authority_nodes,native_parent_run_id,native_parent_access,native_provenance_unknown,native_plugin_grants,environment_state,environment_expired_at,environment_error,environment_retry_after,account_id,persisted_at,live_agent_id,live_project_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,(SELECT id FROM agents WHERE id=?),(SELECT id FROM projects WHERE id=?)) ON CONFLICT(id) DO UPDATE SET slug=excluded.slug,title=excluded.title,agent_id=excluded.agent_id,project_id=excluded.project_id,run_id=excluded.run_id,paused=excluded.paused,lifecycle=excluded.lifecycle,created_at=excluded.created_at,updated_at=excluded.updated_at,last_activity_at=excluded.last_activity_at,revision=excluded.revision,trashed_at=excluded.trashed_at,purge_at=excluded.purge_at,restored_at=excluded.restored_at,retry_after=excluded.retry_after,lifecycle_error=excluded.lifecycle_error,previous_lifecycle=excluded.previous_lifecycle,session_restart_requested=excluded.session_restart_requested,cancelled_by_deletion=excluded.cancelled_by_deletion,agent_name=excluded.agent_name,project_name=excluded.project_name,requested_by=excluded.requested_by,wakeup=excluded.wakeup,native_principals=excluded.native_principals,native_authority_nodes=excluded.native_authority_nodes,native_parent_run_id=excluded.native_parent_run_id,native_parent_access=excluded.native_parent_access,native_provenance_unknown=excluded.native_provenance_unknown,native_plugin_grants=excluded.native_plugin_grants,environment_state=excluded.environment_state,environment_expired_at=excluded.environment_expired_at,environment_error=excluded.environment_error,environment_retry_after=excluded.environment_retry_after,account_id=excluded.account_id,persisted_at=excluded.persisted_at,live_agent_id=excluded.live_agent_id,live_project_id=excluded.live_project_id")?.execute(params![
             c.id,
             c.slug,
             c.title,
@@ -397,6 +402,7 @@ impl Db<'_> {
             c.environment_expired_at,
             c.environment_error,
             c.environment_retry_after,
+            c.account_id,
             now(), c.agent_id, c.project_id
         ])?;
         Ok(c)

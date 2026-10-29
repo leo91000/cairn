@@ -20,10 +20,22 @@ CREATE TABLE kv(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%'),data
 PRAGMA user_version=14;").unwrap();
 }
 
-async fn database(root: &std::path::Path) -> Connection {
-    drop(Store::open(root).unwrap());
+// Dump produced by the previous main's real Store and domain writers.
+const PREVIOUS: &str = include_str!("../../../tests/fixtures/conversations-v14.sql");
+
+fn previous(root: &std::path::Path) -> Connection {
     let db = Connection::open(root.join("manager.db")).unwrap();
-    version14(&db);
+    db.execute_batch(PREVIOUS).unwrap();
+    std::fs::write(root.join("mcp-encryption-key"), [42_u8; 32]).unwrap();
+    db
+}
+
+async fn database(root: &std::path::Path) -> Connection {
+    let db = previous(root);
+    // Each focused scenario supplies its own conversation/message/switch inputs.
+    // The account pool and its other persisted domains stay populated.
+    db.execute_batch("DELETE FROM chat_messages; DELETE FROM records WHERE kind='chats';
+DELETE FROM kv WHERE key LIKE 'chat-coding-agent:%' OR key LIKE 'chat-coding-agent-request:%' OR key='conversation-expiration';").unwrap();
     db
 }
 
@@ -528,4 +540,150 @@ async fn receipts_left_by_an_old_purge_do_not_resurrect_work_or_block_startup() 
         .unwrap(),
         0
     );
+}
+
+fn snapshot(db: &Connection) -> Value {
+    let mut state = serde_json::Map::new();
+    for table in [
+        "coding_agent_accounts",
+        "account_usage",
+        "account_usage_windows",
+        "account_exhaustion",
+        "account_leases",
+        "shared_objects",
+        "shared_publications",
+        "shared_references",
+        "direct_storage_grants",
+        "direct_read_authorizations",
+        "direct_journal_acknowledgements",
+        "direct_object_quarantines",
+        "runs",
+        "run_checkpoints",
+        "audit",
+        "sqlite_sequence",
+        "kv",
+        "records",
+    ] {
+        let columns: Vec<String> = db
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let fields = columns
+            .iter()
+            .map(|c| format!("quote({c})"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let filter = match table {
+            "records" => " WHERE kind!='chats'",
+            "kv" => {
+                " WHERE key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key!='conversation-expiration'"
+            }
+            _ => "",
+        };
+        let rows: Vec<String> = db
+            .prepare(&format!(
+                "SELECT json_array({fields}) FROM {table}{filter} ORDER BY 1"
+            ))
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        state.insert(table.into(), json!(rows));
+    }
+    Value::Object(state)
+}
+
+#[tokio::test]
+async fn actual_version14_preserves_conversations_accounts_leases_and_credentials() {
+    let root = tempfile::tempdir().unwrap();
+    let db = previous(root.path());
+    let chats = Db(&db)
+        .json_rows(
+            "SELECT data FROM records WHERE kind='chats' ORDER BY id",
+            [],
+        )
+        .unwrap();
+    let mut old_messages = Vec::new();
+    for chat in &chats {
+        let id = chat["id"].as_str().unwrap();
+        old_messages.push((
+            id.to_owned(),
+            Db(&db)
+                .json_rows(
+                    "SELECT data FROM chat_messages WHERE chat_id=? ORDER BY created_at,rowid",
+                    [id],
+                )
+                .unwrap(),
+        ));
+    }
+    let retained = snapshot(&db);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM coding_agent_accounts", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM account_leases", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(
+        db.query_row("SELECT count(*) FROM account_usage_windows", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap()
+            > 1
+    );
+    for _ in 0..2 {
+        let store = Store::open(root.path()).unwrap();
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            15
+        );
+        assert_eq!(snapshot(&db), retained);
+        for before in &chats {
+            let after = Db(&db)
+                .conversation_boundary(before["id"].as_str().unwrap())
+                .unwrap()
+                .unwrap();
+            assert_subset(before, &after);
+        }
+        for (chat, messages) in &old_messages {
+            assert_subset(&json!(messages), &json!(Db(&db).messages(chat).unwrap()));
+        }
+        assert_eq!(
+            db.query_row(
+                "SELECT inactivity_days FROM conversation_retention",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            19
+        );
+        let vault = crate::vault::Vault::new(store.clone(), root.path()).unwrap();
+        assert_eq!(
+            vault
+                .get("synthetic:00000000-0000-4000-8000-000000000001")
+                .await
+                .unwrap(),
+            Some(json!({"token":"synthetic-only-do-not-use"}))
+        );
+        assert!(
+            !db.prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        );
+        assert_eq!(
+            db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+    }
 }
