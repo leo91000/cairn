@@ -274,6 +274,7 @@ pub struct Mounted {
     mounted: bool,
     completed: bool,
     aborted: bool,
+    flush_failed: bool,
 
     device: Arc<std::sync::Mutex<storage::ublk::MountedDisk>>,
     _owner: Option<environment::OwnerLease>,
@@ -283,7 +284,17 @@ pub struct Mounted {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Completion {
     Flushed,
-    CrashPrefix,
+    Aborted,
+    FailedFlush,
+}
+
+impl Completion {
+    pub fn exit_code(self, previous: i32) -> i32 {
+        if self == Self::FailedFlush {
+            return crate::runner::CONTROLLER_FAILED;
+        }
+        previous
+    }
 }
 
 pub async fn mount(
@@ -410,6 +421,7 @@ pub async fn mount(
             retained_usage: None,
             completed: false,
             aborted,
+            flush_failed: false,
             device,
             _owner: Some(owner),
             _physical: Some(physical),
@@ -552,6 +564,7 @@ impl Mounted {
                     Ok(()) => self.retained_usage = used_bytes(&self.target).ok(),
                     Err(error) if matches!(error.raw_os_error(), Some(libc::EROFS | libc::EIO)) => {
                         tracing::error!(%error, "Native filesystem flush failed; retaining a crash prefix after fencing");
+                        self.flush_failed = true;
                         self.abort_io().await?;
                     }
                     Err(error) => return Err(error.into()),
@@ -600,8 +613,10 @@ impl Mounted {
         }
         // No mount or backend can still use this controller-private attachment.
         retire_attachment(&self.jail).await?;
-        Ok(if self.aborted {
-            Completion::CrashPrefix
+        Ok(if self.flush_failed {
+            Completion::FailedFlush
+        } else if self.aborted {
+            Completion::Aborted
         } else {
             Completion::Flushed
         })
@@ -1094,6 +1109,20 @@ pub fn used_bytes(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_close_preserves_cancellation_without_a_flush_failure() {
+        for (completion, previous, expected) in [
+            (Completion::Flushed, 0, 0),
+            (Completion::Flushed, 143, 143),
+            (Completion::Aborted, 143, 143),
+            (Completion::Aborted, 70, 70),
+            (Completion::FailedFlush, 0, 70),
+            (Completion::FailedFlush, 143, 70),
+        ] {
+            assert_eq!(completion.exit_code(previous), expected);
+        }
+    }
 
     #[tokio::test]
     async fn native_disks_resume_with_current_tools_and_keep_the_platform_boundary() {

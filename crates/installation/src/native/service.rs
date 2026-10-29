@@ -476,10 +476,11 @@ impl Controller {
                         }
                         .await;
                         match result {
-                            Ok(block::Completion::Flushed) => break,
-                            Ok(block::Completion::CrashPrefix) => {
-                                code = crate::runner::CONTROLLER_FAILED;
-                                let _ = controller.append(&id, true, b"Native filesystem could not be flushed; the durable crash prefix was retained.\n").await;
+                            Ok(completion) => {
+                                code = completion.exit_code(code);
+                                if completion == block::Completion::FailedFlush {
+                                    let _ = controller.append(&id, true, b"Native filesystem could not be flushed; the durable crash prefix was retained.\n").await;
+                                }
                                 break;
                             }
                             Err(error) => {
