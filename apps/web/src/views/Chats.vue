@@ -241,6 +241,8 @@ function switcherAnchor() {
   return [historyButton.value, tabletHistoryButton.value, detailsButton.value].find(button => button?.getClientRects().length)
 }
 
+// A member without access to the conversation's agent reads it but cannot direct it.
+const readOnly = computed(() => !!detail.value && !canDirectChat(state.usableAgents, detail.value, chats.value))
 const error = ref('')
 const dismissedError = ref(false)
 const quota = computed(() => chatQuota(detail.value?.run, events.value))
@@ -251,7 +253,7 @@ const visibleError = computed(() => {
   if (quota.value && (!chatError || isQuotaMessage(chatError) || chatError === quota.value.message))
     return ''
   const failedRun = detail.value?.run?.status === 'failed' ? detail.value.run : null
-  return chatError || (failedRun ? failedRun.error || 'The response stopped before finishing. Resume the conversation to continue.' : '')
+  return chatError || (failedRun ? failedRun.error || (readOnly.value ? 'The response stopped before finishing.' : 'The response stopped before finishing. Resume the conversation to continue.') : '')
 })
 const openCodeRegionBlocked = computed(() => visibleError.value.startsWith('OpenCode Go requires Global regions for this model.'))
 // The conversation already shows a failed run's reason as its failure card.
@@ -289,8 +291,6 @@ const dragging = ref(0)
 const hasDraft = computed(() => !!draft.value.trim() || attachments.value.length > 0)
 // Rejected files must be removed before sending; nothing is sent while a file uploads.
 const attachmentsBlocked = computed(() => Object.values(attachmentStates.value).some(item => item.status === 'rejected' || item.status === 'uploading'))
-// A member without access to the conversation's agent reads it but cannot direct it.
-const readOnly = computed(() => !!detail.value && !canDirectChat(state.usableAgents, detail.value, chats.value))
 // A member the owner has not yet given any agent cannot start a conversation.
 const noAgent = computed(() => !route.params.id && state.usableAgents !== null && !state.usableAgents.length)
 const canSend = computed(() => !readOnly.value && !noAgent.value && !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
@@ -311,7 +311,8 @@ function clearAttachments() {
 }
 
 function addFiles(selected: File[]) {
-  if (busy.value)
+  // Files only go with a message, which needs access to the agent.
+  if (busy.value || readOnly.value || noAgent.value)
     return
   const selection = validateSelection(attachments.value.map(attachment => ({ size: attachment.size, rejected: attachmentStates.value[attachment.id]?.status === 'rejected' })), selected)
   if (selection.error) {
@@ -1336,7 +1337,7 @@ function key(event: KeyboardEvent) {
                 <hr class="mx-3 border-line">
               </template>
               <div class="px-3 pt-2 pb-2">
-                <div v-if="dragging" class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-accent bg-surface/95 text-sm font-semibold text-accent">
+                <div v-if="dragging && !readOnly && !noAgent" class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-accent bg-surface/95 text-sm font-semibold text-accent">
                   <Icon :name="Paperclip" :size="20" />Drop files here
                 </div>
                 <!-- A new conversation chooses its agent and project; one still opening does not. -->
@@ -1393,7 +1394,7 @@ function key(event: KeyboardEvent) {
                   <div class="flex min-w-0 flex-1 items-center gap-1">
                     <AttachMenu
                       :trigger-class="iconButton"
-                      :disabled="busy || attachments.length >= MAX_ATTACHMENTS"
+                      :disabled="busy || readOnly || noAgent || attachments.length >= MAX_ATTACHMENTS"
                       @files="addFiles"
                     />
                     <AssistantPicker
@@ -1407,7 +1408,7 @@ function key(event: KeyboardEvent) {
                       :default-speed="inheritedAssistant?.speed || ''"
                       :default-source="inheritConversation ? 'conversation' : 'agent'"
                       :switching="switchingProvider"
-                      :disabled="busy"
+                      :disabled="busy || readOnly || noAgent"
                     />
                   </div>
                   <!-- As on Android: steer while typing during a reply, stop when the field is empty, otherwise send. -->

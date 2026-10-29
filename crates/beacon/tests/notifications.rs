@@ -442,6 +442,27 @@ async fn invite(relay: &common::RelayedInstallation, email: &str) -> (String, Va
     (cookie, session)
 }
 
+/// The owner lets a member use Main, the agent of the fixture's conversations (ADR-0075).
+async fn allow_main(relay: &common::RelayedInstallation, member_session: &Value) {
+    let member = member_session["account"]["id"].as_str().unwrap();
+    let base = relay.base.strip_prefix(&relay.app.url).unwrap();
+    let granted = request(
+        &relay.app,
+        &relay.cookie,
+        &relay.session,
+        Method::PUT,
+        &format!(
+            "{base}/agents/{}/accounts/{member}",
+            cairn_installation::config::MAIN_AGENT_ID
+        ),
+    )
+    .json(&json!({}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(granted.status(), StatusCode::OK);
+}
+
 async fn chat_run(relay: &common::RelayedInstallation) -> (String, String) {
     let response = request(
         &relay.app,
@@ -524,9 +545,17 @@ async fn relayed_questions_and_alerts_target_only_current_installation_accounts(
     )
     .await;
     let (chat, run) = chat_run(&relay).await;
+
+    // A member who cannot use the conversation's agent is not asked to answer it.
+    question(&relay, &run, &"9".repeat(64)).await;
+    wait_pushes(&mail, 1).await;
+    assert_eq!(mail.messages.lock().unwrap()[0].0, owner);
+    allow_main(&relay, &member_session).await;
+    let member_id = member_session["account"]["id"].as_str().unwrap();
+
     question(&relay, &run, &"a".repeat(64)).await;
-    wait_pushes(&mail, 2).await;
-    let sent = mail.messages.lock().unwrap().clone();
+    wait_pushes(&mail, 3).await;
+    let sent = mail.messages.lock().unwrap()[1..].to_vec();
     let mut endpoints: Vec<_> = sent.iter().map(|entry| entry.0.as_str()).collect();
     endpoints.sort();
     assert_eq!(endpoints, vec![member, owner]);
@@ -537,7 +566,6 @@ async fn relayed_questions_and_alerts_target_only_current_installation_accounts(
         assert_eq!(payload["questionId"], "a".repeat(64));
         assert!(!payload.to_string().contains("Private question content"));
     }
-    let member_id = member_session["account"]["id"].as_str().unwrap();
     assert_eq!(
         request(
             &relay.app,
@@ -553,8 +581,8 @@ async fn relayed_questions_and_alerts_target_only_current_installation_accounts(
         StatusCode::NO_CONTENT
     );
     question(&relay, &run, &"b".repeat(64)).await;
-    wait_pushes(&mail, 3).await;
-    assert_eq!(mail.messages.lock().unwrap()[2].0, owner);
+    wait_pushes(&mail, 4).await;
+    assert_eq!(mail.messages.lock().unwrap()[3].0, owner);
     cairn_installation::nodes::alerts::raise(
         &relay.installation,
         &run,
@@ -564,8 +592,8 @@ async fn relayed_questions_and_alerts_target_only_current_installation_accounts(
     )
     .await
     .unwrap();
-    wait_pushes(&mail, 4).await;
-    let alert = mail.messages.lock().unwrap()[3].clone();
+    wait_pushes(&mail, 5).await;
+    let alert = mail.messages.lock().unwrap()[4].clone();
     assert_eq!(alert.0, owner);
     assert_eq!(alert.1["title"], "Node unavailable");
     assert_eq!(alert.1["installationId"], installation);
@@ -1172,6 +1200,7 @@ async fn removing_a_member_waits_for_an_admitted_send_and_prevents_the_next_send
     });
     let relay = common::RelayedInstallation::with_push(push.clone()).await;
     let (member_cookie, member_session) = invite(&relay, "member@example.test").await;
+    allow_main(&relay, &member_session).await;
     register(&relay.app, &member_cookie, &member_session, endpoint).await;
     register(
         &relay.app,
@@ -1640,6 +1669,7 @@ async fn native_push_reuses_current_membership_and_drops_removed_members_immedia
     let mail = std::sync::Arc::new(PushMailbox::default());
     let relay = common::RelayedInstallation::with_push(mail.clone()).await;
     let (member_cookie, member_session) = invite(&relay, "native-member@example.test").await;
+    allow_main(&relay, &member_session).await;
     for (cookie, session, token) in [
         (&relay.cookie, &relay.session, "fixture-native-owner"),
         (&member_cookie, &member_session, "fixture-native-member"),
@@ -1794,6 +1824,7 @@ async fn one_android_device_receives_both_installations_without_installation_sub
             kind: NotificationKind::Question {
                 question_id: "e".repeat(64),
             },
+            members: None,
         });
         socket
             .send(Message::Text(serde_json::to_string(&event).unwrap().into()))

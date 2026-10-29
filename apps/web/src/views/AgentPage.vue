@@ -1013,7 +1013,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
             <AgentPeopleSection
               :agent-name="saved.name"
               :is-new="isNew"
-              :installation="access.installation"
+              :installation="saved.access.installation || access.installation"
               :rows="people.rows.value"
               :loading="people.loading.value"
               :loaded="people.loaded.value"

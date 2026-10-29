@@ -117,6 +117,16 @@ const filBadge = computed(() => needsYou.value || toRead.value)
 const filBadgeLabel = computed(() => [needsYou.value ? `${needsYou.value} need you` : '', toRead.value ? `${toRead.value} to read` : ''].filter(Boolean).join(' · '))
 const missionRunning = computed(() => fil.value.live.some(item => item.taskId && item.kind === 'running'))
 
+// The owner may give or remove access to agents at any time: a member's open tab follows
+// within a short delay, and at once when it comes back into view.
+const USABLE_REFRESH_MS = 30_000
+let usableTimer = 0
+
+function visible() {
+  if (!document.hidden && state.authenticated)
+    void refreshUsableAgents()
+}
+
 onMounted(async () => {
   try {
     if (state.authenticated)
@@ -129,17 +139,13 @@ onMounted(async () => {
 
   document.addEventListener('keydown', key)
   document.addEventListener('visibilitychange', visible)
+  usableTimer = window.setInterval(visible, USABLE_REFRESH_MS)
 })
 onBeforeUnmount(() => {
   document.removeEventListener('keydown', key)
   document.removeEventListener('visibilitychange', visible)
+  window.clearInterval(usableTimer)
 })
-
-// The owner may have given or removed access to agents while this tab was away.
-function visible() {
-  if (!document.hidden && state.authenticated)
-    void refreshUsableAgents()
-}
 
 watch(() => route.fullPath, () => {
   paletteOpen.value = false

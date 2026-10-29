@@ -21,7 +21,8 @@ fn enqueue_event(db: &Db<'_>, event: &NotificationEvent) -> Result<()> {
     Ok(())
 }
 
-pub fn enqueue(db: &Db<'_>, question: &Question) -> Result<()> {
+/// A question reaches only the people who may answer it (ADR-0075).
+pub fn enqueue(db: &Db<'_>, chat: &Value, question: &Question) -> Result<()> {
     enqueue_event(
         db,
         &NotificationEvent {
@@ -30,6 +31,7 @@ pub fn enqueue(db: &Db<'_>, question: &Question) -> Result<()> {
             kind: NotificationKind::Question {
                 question_id: question.id.clone(),
             },
+            members: Some(crate::agent_access::chat_members(db, chat)?),
         },
     )
 }
@@ -45,6 +47,7 @@ pub fn enqueue_alert(db: &Db<'_>, alert: &Value) -> Result<()> {
                 title: text(alert, "title").chars().take(120).collect(),
                 body: text(alert, "body").chars().take(300).collect(),
             },
+            members: None,
         },
     )
 }

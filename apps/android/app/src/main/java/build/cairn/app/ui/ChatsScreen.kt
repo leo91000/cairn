@@ -1685,10 +1685,15 @@ internal fun ChatPage(
                                         Modifier.fillMaxWidth(),
                                         verticalAlignment = Alignment.CenterVertically,
                                     ) {
+                                        // Files and the assistant only go with a message, which
+                                        // needs access to the agent.
                                         ActionIcon(
                                             "Joindre",
                                             CairnIcons.Plus,
-                                            !state.busy && attachments.size < 8,
+                                            !state.busy &&
+                                                !readOnly &&
+                                                !noAgent &&
+                                                attachments.size < 8,
                                         ) {
                                             attaching = true
                                         }
@@ -1710,7 +1715,7 @@ internal fun ChatPage(
                                                 defaultReasoning,
                                                 inherit = inheritedAssistant != null,
                                                 conversationDefault = inheritConversation,
-                                                enabled = !state.busy,
+                                                enabled = !state.busy && !readOnly && !noAgent,
                                                 refresh = { vm.refreshModels(chosenProvider) },
                                                 provider = chosenProvider,
                                                 changeProvider = ::chooseProvider,

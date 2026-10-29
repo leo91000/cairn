@@ -30,6 +30,21 @@ import org.robolectric.annotation.GraphicsMode
 class MemberConversationTest {
     @get:Rule val compose = createComposeRule()
 
+    @org.junit.Before
+    fun initializeWork() {
+        androidx.work.testing.WorkManagerTestInitHelper.initializeTestWorkManager(
+            ApplicationProvider.getApplicationContext<Application>(),
+            androidx.work.Configuration.Builder()
+                .setExecutor(androidx.work.testing.SynchronousExecutor())
+                .build(),
+        )
+    }
+
+    @org.junit.After
+    fun closeWork() {
+        androidx.work.testing.WorkManagerTestInitHelper.closeWorkDatabase()
+    }
+
     private val chat =
         Chat(
             "shared",
@@ -114,12 +129,17 @@ class MemberConversationTest {
                 compose
                     .onNodeWithText("Vous pouvez suivre cette conversation", substring = true)
                     .assertExists()
+                // The composer offers no editing, only the reason.
                 compose
-                    .onNode(
+                    .onAllNodes(
                         hasSetTextAction() and hasAnyAncestor(hasTestTag("conversation-composer"))
                     )
-                    .assertIsNotEnabled()
+                    .assertCountEquals(0)
+                compose
+                    .onNodeWithText("Réservé aux personnes ayant accès à cet agent")
+                    .assertExists()
                 compose.onNodeWithTag("conversation-send").assertIsNotEnabled()
+                compose.onNodeWithContentDescription("Joindre").assertIsNotEnabled()
 
                 // Resuming needs access; pausing and reading do not.
                 compose.onNodeWithContentDescription("Options de la conversation").performClick()

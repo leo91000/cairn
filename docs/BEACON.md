@@ -607,6 +607,11 @@ transient failures or tunnel loss retry without interrupting agent execution.
 Delivery is at least once: interruption after a provider accepted a push can
 repeat it. Notification tags include the installation and event identifiers.
 Question payloads contain generic text and identifiers, never question fields.
+A question event names the members who may answer it, those with access to the
+conversation's agent or to its requesting conversation's agent
+([ADR-0075](adr/0075-plugin-hooks-rules-and-scoped-grants.md)): Beacon sends it to
+the owner and to those current members only. Events without that list, such as
+alerts or events from older installations, reach the owner and every member.
 
 Successful deliveries are remembered per event and current device registration
 in process memory, across tunnel reconnects. An unavailable device therefore

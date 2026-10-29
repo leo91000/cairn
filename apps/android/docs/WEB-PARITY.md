@@ -35,8 +35,11 @@ current membership. Loading, empty and unavailable states match; the overview sh
 « Vous seul » / “Only you” or the member count. A new agent is the owner's alone.
 Members see only the agents they may use when starting a conversation or a mission;
 a conversation they cannot direct shows a read-only notice, a disabled composer and
-questions waiting for someone with access. Unknown access (an older installation)
-offers every agent and the installation decides.
+questions waiting for someone with access; attachments and the assistant picker are
+disabled there too. Both apps reload a member's usable agents every 30 seconds while
+shown, when they come back to the foreground and after a refused change. Question
+notifications reach only the owner and the members who may answer them. Unknown
+access (an older installation) offers every agent and the installation decides.
 
 Platform differences: web labels are English and Android labels French; Android
 shows the switches in a Material card list. Per AGENTS.md, giving and removing access
@@ -45,7 +48,8 @@ both tool surfaces read it through `list_agent_accounts`. The apps' `GET /usable
 only shapes what a member is offered; it has no tool equivalent because the public MCP
 and `cairn_installation` act with the owner's reach. Validation: the
 `agent_access` Rust suite, browser `beacon-sharing` journey, web `agent-use` unit
-tests, Android `AgentPeopleTest` and `AgentPageCases` (JVM and device).
+tests, Android `AgentPeopleTest`, `MemberConversationTest` and `AgentPageCases` (JVM
+and device), and the Beacon `notifications` suite.
 
 ## Node priority drag and drop
 

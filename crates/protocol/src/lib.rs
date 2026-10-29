@@ -87,6 +87,10 @@ pub struct NotificationEvent {
     pub chat_id: String,
     #[serde(flatten)]
     pub kind: NotificationKind,
+    /// The only members to notify besides the owner, who is always notified. Absent from
+    /// older installations and for events meant for everyone; older Beacons ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<Vec<String>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

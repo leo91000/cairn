@@ -476,7 +476,7 @@ pub(super) async fn deliver(
     for (id,) in devices {
         let mut transaction = service.push_pool.begin().await?;
         let current: Option<(String,)> = query_as(
-            "SELECT id FROM installations
+            "SELECT owner_id FROM installations
              WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL
              FOR SHARE",
         )
@@ -484,9 +484,9 @@ pub(super) async fn deliver(
         .bind(token_digest)
         .fetch_optional(&mut *transaction)
         .await?;
-        if current.is_none() {
+        let Some((owner,)) = current else {
             return Ok(true);
-        }
+        };
 
         let device: Option<(String, String, String, String)> = query_as(&device_query)
             .bind(installation)
@@ -497,6 +497,13 @@ pub(super) async fn deliver(
         let Some((account, endpoint, p256dh, auth)) = device else {
             continue;
         };
+        // The installation names the members who may act on the event (ADR-0075).
+        if let Some(members) = &event.members
+            && account != owner
+            && !members.contains(&account)
+        {
+            continue;
+        }
 
         let subscription = PushSubscription {
             endpoint,

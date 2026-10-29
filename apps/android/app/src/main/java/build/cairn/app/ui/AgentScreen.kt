@@ -507,7 +507,8 @@ private fun AgentPage(
                             agentId,
                             baseline.name,
                             creating,
-                            draft.agent.access.installation,
+                            // Access applies at once to the saved agent: warn for either state.
+                            baseline.access.installation || draft.agent.access.installation,
                             powerColors(),
                             retry = { peopleAttempt++ },
                         )

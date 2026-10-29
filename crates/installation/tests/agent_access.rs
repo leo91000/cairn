@@ -248,6 +248,26 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
         let (status, refused) = member(&s, method, path, body.clone()).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {refused}");
     }
+
+    // Stopping, pausing and archiving stay open to everyone.
+    let task_id = task["id"].as_str().unwrap();
+    let reductions = [
+        ("POST", format!("/api/runs/{run}/cancel"), json!({})),
+        (
+            "POST",
+            format!("/api/chats/{chat}/pause"),
+            json!({ "paused": true }),
+        ),
+        (
+            "POST",
+            format!("/api/tasks/{task_id}/state"),
+            json!({ "taskId": task_id, "revision": task["revision"], "enabled": false, "archived": true }),
+        ),
+    ];
+    for (method, path, body) in &reductions {
+        let (status, reduced) = member(&s, method, path, body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{method} {path}: {reduced}");
+    }
     assert_eq!(owner(&s, "PUT", &grant, json!({})).await.0, StatusCode::OK);
     for (method, path, body) in &routes {
         let (status, _) = member(&s, method, path, body.clone()).await;

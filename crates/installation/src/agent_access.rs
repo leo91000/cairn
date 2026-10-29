@@ -35,7 +35,10 @@ CREATE TABLE agent_account_access(
 CREATE INDEX agent_account_access_account ON agent_account_access(account_id);
 ";
 
-/// Agents that existed before account access: their members keep using them.
+/// Agents that existed before account access: the members of the first membership check
+/// after the upgrade keep using them. The installation keeps no list of members, so someone
+/// invited between the upgrade and that check, which only a Beacon outage can delay before
+/// any member reaches the installation again, counts as an existing member.
 const ROLLOUT: &str = "agent-access-rollout";
 
 /// Shown on a scheduled task whose author cannot use its agent; it runs again once they can.
@@ -150,6 +153,28 @@ pub(crate) fn uses_chat(
         }
         _ => Ok(false),
     }
+}
+
+/// The members who may direct a conversation, by the same rule as [`uses_chat`].
+pub(crate) fn chat_members(db: &Db<'_>, chat: &Value) -> Result<Vec<String>> {
+    let mut agents = vec![text(chat, "agentId").to_owned()];
+    if let Some(requester) = chat["requestedBy"]["chatId"].as_str()
+        && let Some(requesting) = db.get("chats", requester)?
+        && is_active(&requesting)
+    {
+        agents.push(text(&requesting, "agentId").to_owned());
+    }
+    let mut members = Vec::new();
+    for agent in agents {
+        members.extend(
+            db.agent_accounts(&agent)?
+                .into_iter()
+                .map(|entry| entry.account_id),
+        );
+    }
+    members.sort_unstable();
+    members.dedup();
+    Ok(members)
 }
 
 /// Allowed requests report whether a member's entry allowed them.

@@ -29,6 +29,7 @@ import build.cairn.app.data.*
 import build.cairn.app.diagnostics.PerfConnection
 import build.cairn.app.diagnostics.PerfScreen
 import build.cairn.app.diagnostics.Performance
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** Top-level destinations reached from the dock; everything else is a pushed screen. */
@@ -111,11 +112,17 @@ private fun CairnAppContent(
     }
     val pushReenrollmentRequired by
         vm.notifications.nativeReenrollmentRequired.collectAsStateWithLifecycle(false)
-    // The owner may have given or removed access to agents while the app was away.
+    // The owner may give or remove access to agents at any time: a member's app follows within a
+    // short delay while it is shown, and at once when it comes back.
     val lifecycleScope = rememberCoroutineScope()
     LifecycleStartEffect(state.installation?.id) {
-        lifecycleScope.launch { vm.refreshUsableAgents() }
-        onStopOrDispose {}
+        val refreshing = lifecycleScope.launch {
+            while (true) {
+                vm.refreshUsableAgents()
+                delay(30_000)
+            }
+        }
+        onStopOrDispose { refreshing.cancel() }
     }
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(state.notice) {
