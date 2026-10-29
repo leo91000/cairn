@@ -147,7 +147,7 @@ _À éviter_ : tier, mode rapide (sauf pour nommer le niveau Fast de Codex).
 Une demande de réponse adressée à une personne par un agent dans une conversation Cairn ; une règle de hook peut aussi y répondre. Elle peut proposer des choix ou laisser la personne s’exprimer librement.
 
 **Questionnaire d’un agent** :
-Un ensemble d’une ou plusieurs questions d’un agent auxquelles une personne répond en un seul envoi. Il reste disponible dans la conversation pendant l’attente des réponses.
+Un ensemble d’une ou plusieurs questions d’un agent auxquelles une personne, ou une règle de hook, répond en un seul envoi. Il reste disponible dans la conversation pendant l’attente des réponses.
 
 **Commentaire de réponse** :
 Le texte libre qu’une personne ajoute aux choix retenus pour une question d’un agent, afin de préciser sa réponse.
@@ -271,7 +271,7 @@ Ce sur quoi portent les hooks et les outils d’un plugin, et que le plugin sait
 un serveur ou un salon Discord, une personne, un dépôt GitHub. Le droit d’un agent sur
 un outil, une commande ou un hook peut être limité à certaines ressources et à ce
 qu’elles contiennent.
-_Avoid_ : scope, portée
+_Avoid_ : scope, portée, ressources d’une node (voir Réservation de ressources)
 
 **Clé de conversation** :
 L’identifiant externe, tiré d’un hook, auquel une règle rattache une conversation, par

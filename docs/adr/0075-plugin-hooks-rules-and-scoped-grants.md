@@ -77,9 +77,9 @@ désigne l’entrée ou la payload doit se trouver sous une ressource couverte, 
 hiérarchie que Cairn résout lui-même (un fil de `#general` est refusé quand seul
 `#support` est accordé). Les autres types restent libres : restreindre le hook
 `message` à `#support` n’empêche pas son auteur d’être n’importe qui. Une entrée ou
-une payload qui ne désigne aucune ressource identifiable d’un type restreint, ou des
-ressources contradictoires, ou dont Cairn ne peut pas résoudre la hiérarchie, est
-refusée.
+une payload qui ne désigne aucune ressource identifiable d’un type restreint ou d’un
+de ses types descendants, ou des ressources contradictoires, ou dont Cairn ne peut pas
+résoudre la hiérarchie, est refusée.
 
 Les identifiants de run, les instructions ajoutées au prompt et les conditions
 d’attente s’accordent aussi un par un, sans restriction de ressource ; les conditions
@@ -144,9 +144,10 @@ qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l’arbre.
 
 - **Agent d’exécution** : la règle désigne l’agent dont les droits encadrent le hook
   de plugin qu’elle écoute et les outils qu’elle appelle elle-même ; son créateur doit
-  y avoir accès. Un membre ne peut donc pas écouter une instance que ses agents n’ont
-  pas le droit d’écouter. Les droits sur les hooks de plugin et les outils n’existent
-  que sur les agents.
+  y avoir accès. Le désigner ne le fait pas travailler : cela n’exige pas d’autorité
+  native, même si sa politique autorise l’exécution native. Un membre ne peut donc pas
+  écouter une instance que ses agents n’ont pas le droit d’écouter. Les droits sur les
+  hooks de plugin et les outils n’existent que sur les agents.
 - **Blocs** : si / sinon imbriqués et boucles.
 - **Conditions** : un éditeur structuré de groupes ET / OU imbriqués, d’opérateurs sur
   tout champ de la payload (égal, contient, expression régulière, dans une liste,
@@ -156,9 +157,11 @@ qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l’arbre.
 - **Formules** : toute valeur d’une action ou d’une condition peut être une formule en
   [CEL](https://cel.dev) (Common Expression Language), complétée par des fonctions de
   Cairn (tronquer, découper en morceaux, formater une date…). Une formule est pure,
-  sans effet de bord ni boucle non bornée, et son coût d’évaluation est borné. L’agent
-  qu’une action démarre, et l’outil et l’instance qu’elle appelle, sont choisis dans
-  la règle, jamais calculés par une formule.
+  sans effet de bord ni boucle non bornée, et son coût d’évaluation est borné. Une
+  valeur textuelle peut aussi être un modèle de texte où `{{…}}` insère le résultat
+  d’une expression CEL (`discord:{{threadId}}`). L’agent qu’une action démarre, et
+  l’outil et l’instance qu’elle appelle, sont choisis dans la règle, jamais calculés
+  par une formule.
 - **Actions** : démarrer un agent, orienter une conversation, appeler un outil de
   plugin (jamais un outil de Cairn comme `cairn_installation` ou la délégation),
   annuler la conversation d’une clé, répondre à la question d’un agent, mémoriser une
@@ -173,9 +176,11 @@ qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l’arbre.
   la règle : deux membres qui utilisent la même clé désignent deux conversations
   différentes, et une règle n’atteint que les clés de son créateur. Une clé se libère
   quand sa conversation est supprimée ; une conversation terminée garde la sienne et
-  peut être orientée de nouveau. Orienter, annuler, répondre à une question ou
-  mémoriser une valeur sur la conversation d’une clé exige en plus que le créateur ait
-  accès à l’agent de cette conversation.
+  peut être orientée de nouveau, mais orienter une conversation en pause ou archivée,
+  ou répondre à ses questions, échoue tant qu’une personne ne l’a pas reprise.
+  Orienter, annuler, répondre à une question ou mémoriser une valeur sur la
+  conversation d’une clé exige en plus que le créateur ait accès à l’agent de cette
+  conversation.
 - **Valeurs mémorisées** : soit sur une conversation, par sa clé, partagées par les
   règles qui la touchent et supprimées avec elle, soit propres à la règle.
 - **Hooks de Cairn** : Cairn émet quatre hooks pour les conversations rattachées à une
@@ -220,8 +225,8 @@ supprimer sa règle, et le propriétaire n’importe laquelle ; supprimer une r
 ses déclenchements en cours. Comme les tâches
 ([ADR-0029](0029-sharing-whole-installations.md)), une règle appartient à une
 adhésion, et, pour un membre, un déclenchement exige une adhésion vérifiée récemment,
-de nouveau avant toute action qui suit une attente ; un déclenchement qui ne peut pas
-la vérifier pendant sept jours échoue ; si elle ne peut pas l’être, il attend.
+de nouveau avant toute action qui suit une attente. Si elle ne peut pas être vérifiée,
+le déclenchement attend, et échoue au bout de sept jours sans vérification.
 
 Une règle ne se déclenche que si rien ne l’en empêche. Chaque empêchement se lève
 indépendamment des autres :
@@ -263,9 +268,9 @@ d’exécution, la règle d’un autre compte que cette personne (le propriétai
 membre dont l’adhésion dure), ressources comprises et quel que soit l’état de la
 règle ; hors d’une conversation qui remplit ces conditions, cela vaut pour les règles
 de tous les comptes. Une conversation, des instructions ou des skills dont Cairn n’a
-pas enregistré qui les a écrits, comme tout ce qui précède cette décision, ne
-permettent jamais d’écrire des règles. Une règle créée par le MCP public a pour
-créateur le propriétaire qui a autorisé ce client.
+pas enregistré qui les a écrits, comme tout ce qui précède cette décision hors
+instructions de plugin, ne permettent jamais d’écrire des règles. Une règle créée par
+le MCP public a pour créateur le propriétaire qui a autorisé ce client.
 
 Une règle n’atteint un agent dont la politique autorise l’exécution native, ou une
 conversation qui s’exécute en natif, que si son créateur détenait l’autorité native
