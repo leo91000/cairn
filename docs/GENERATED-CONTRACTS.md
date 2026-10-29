@@ -636,7 +636,7 @@ model-provider binding and both current/exhausted usage. Relations reference the
 account; lease deletion is restricted while a slot is held. The lease run key also
 supports background title/avatar work without fabricating a retained run. Startup
 invalidates runtime leases before new admission, keeping the existing credential
-recovery and recovering-run exclusion. The one-time startup migration from v12
+recovery and recovering-run exclusion. The one-time startup migration from v13
 preserves all account state and encrypted credentials transactionally; see
 [migration 0014](migrations/0014-typed-account-pool.md). There is no runtime legacy
 reader or records mirror. The existing Driver and worker still own connection, refresh/reset,

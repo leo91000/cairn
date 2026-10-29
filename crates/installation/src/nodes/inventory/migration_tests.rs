@@ -16,7 +16,7 @@ async fn version11(root: &std::path::Path) -> Connection {
         .unwrap();
     drop(store);
     let db = Connection::open(root.join("manager.db")).unwrap();
-    db.execute_batch("DROP TABLE direct_journal_acknowledgements; DROP TABLE direct_object_quarantines; DROP TABLE direct_storage_grants; DROP TABLE direct_read_authorizations;
+    db.execute_batch("DROP TABLE account_leases; DROP TABLE account_usage_windows; DROP TABLE account_usage; DROP TABLE account_exhaustion; DROP TABLE coding_agent_accounts; DROP TABLE direct_journal_acknowledgements; DROP TABLE direct_object_quarantines; DROP TABLE direct_storage_grants; DROP TABLE direct_read_authorizations;
 DROP TABLE node_reviewed_agents; DROP TABLE node_trusted_accounts; DROP TABLE node_tags; DROP TABLE nodes;
 DROP TABLE records;
 CREATE TABLE records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);

@@ -2,9 +2,9 @@ use crate::{accounts::migration, store::Store, vault::Vault};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
-// Dump produced by the real Store/Account/Vault at 4af96bbe (SQLite v12),
+// Dump produced by the real Store/Account/Vault at cb2309ba (SQLite v13), upgraded from the real v12 fixture,
 // not by undoing the candidate schema. All credentials and identities are synthetic.
-const PREVIOUS: &str = include_str!("../../../tests/fixtures/account-pool-v12.sql");
+const PREVIOUS: &str = include_str!("../../../tests/fixtures/account-pool-v13.sql");
 const ACCOUNT: &str = "00000000-0000-4000-8000-000000000001";
 
 fn previous(root: &std::path::Path) -> Connection {
@@ -23,6 +23,21 @@ fn rows(db: &Connection, sql: &str) -> Vec<String> {
         .unwrap()
 }
 
+fn direct_metadata(db: &Connection) -> Vec<Vec<String>> {
+    [
+        "SELECT json_array(id,run_id) FROM shared_publications ORDER BY id",
+        "SELECT json_array(id,destination,hash,size,location,state,unused_at,retry_at) FROM shared_objects ORDER BY id",
+        "SELECT json_array(publication,object) FROM shared_references ORDER BY publication,object",
+        "SELECT json_array(object,expires_at,settled) FROM direct_storage_grants ORDER BY object",
+        "SELECT json_array(grant_id,object,hash,run_id) FROM direct_read_authorizations ORDER BY grant_id,object",
+        "SELECT json_array(publication,run_id,node_id,retired) FROM direct_journal_acknowledgements ORDER BY publication",
+        "SELECT object FROM direct_object_quarantines ORDER BY object",
+    ]
+    .into_iter()
+    .map(|sql| rows(db, sql))
+    .collect()
+}
+
 fn preserved(before: &Value, after: &Value) {
     if let Some(fields) = before.as_object() {
         for (key, value) in fields {
@@ -35,7 +50,7 @@ fn preserved(before: &Value, after: &Value) {
 }
 
 #[tokio::test]
-async fn real_version12_database_preserves_accounts_usage_secrets_and_references() {
+async fn real_version13_database_preserves_accounts_usage_secrets_and_references() {
     let root = tempfile::tempdir().unwrap();
     let mut db = previous(root.path());
     let old = rows(
@@ -59,7 +74,9 @@ async fn real_version12_database_preserves_accounts_usage_secrets_and_references
         &db,
         "SELECT json_array(run_id,state) FROM run_checkpoints ORDER BY run_id",
     );
+    let direct = direct_metadata(&db);
     let store = Store::open(root.path()).unwrap();
+    assert_eq!(direct_metadata(&db), direct);
     assert_eq!(
         rows(&db, "SELECT json_array(id,data) FROM runs ORDER BY id"),
         runs
@@ -117,7 +134,7 @@ async fn real_version12_database_preserves_accounts_usage_secrets_and_references
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        13
+        14
     );
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
@@ -173,6 +190,7 @@ async fn invalid_later_account_rolls_back_schema_data_secrets_and_version_then_r
             [value.to_string()],
         )
         .unwrap();
+        let direct = direct_metadata(&db);
         let schema = rows(
             &db,
             "SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name",
@@ -187,10 +205,11 @@ async fn invalid_later_account_rolls_back_schema_data_secrets_and_version_then_r
         );
         let error = Store::open(root.path()).err().unwrap();
         assert!(!error.message.contains("private-invalid-value"));
+        assert_eq!(direct_metadata(&db), direct);
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            12
+            13
         );
         assert_eq!(
             rows(
@@ -229,7 +248,7 @@ async fn invalid_later_account_rolls_back_schema_data_secrets_and_version_then_r
 }
 
 #[tokio::test]
-async fn empty_version12_pool_upgrades_and_unrelated_foreign_key_failure_rolls_back() {
+async fn empty_version13_pool_upgrades_and_unrelated_foreign_key_failure_rolls_back() {
     let root = tempfile::tempdir().unwrap();
     let db = previous(root.path());
     db.execute("DELETE FROM records WHERE kind='agentAccounts'", [])
@@ -245,10 +264,26 @@ async fn empty_version12_pool_upgrades_and_unrelated_foreign_key_failure_rolls_b
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        12
+        13
     );
     assert!(!db.table_exists(None, "account_leases").unwrap());
     db.execute("DELETE FROM agent_node_priorities", []).unwrap();
     let store = Store::open(root.path()).unwrap();
     assert!(store.coding_accounts().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn real_version12_database_completes_both_atomic_upgrades() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Connection::open(root.path().join("manager.db")).unwrap();
+    db.execute_batch(include_str!("../../../tests/fixtures/account-pool-v12.sql"))
+        .unwrap();
+    let store = Store::open(root.path()).unwrap();
+    assert_eq!(store.coding_accounts().await.unwrap().len(), 3);
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        14
+    );
+    assert_eq!(direct_metadata(&db), vec![Vec::<String>::new(); 7]);
 }
