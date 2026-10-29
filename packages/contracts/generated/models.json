@@ -129,15 +129,44 @@
       "type": "object"
     },
     "AccountMutationOutput": {
-      "properties": {
-        "done": {
-          "type": "boolean"
+      "oneOf": [
+        {
+          "properties": {
+            "done": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "completed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "done"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "humanRequired",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message",
+            "path"
+          ],
+          "type": "object"
         }
-      },
-      "required": [
-        "done"
-      ],
-      "type": "object"
+      ]
     },
     "AccountProviderInput": {
       "additionalProperties": false,
@@ -151,6 +180,54 @@
         "provider"
       ],
       "type": "object"
+    },
+    "AccountProvidersOutput": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "available",
+              "type": "string"
+            },
+            "providers": {
+              "items": {
+                "$ref": "#/definitions/ApiKeyProvider"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "providers"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "capability": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "unsupported",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "provider": {
+              "pattern": "^(codex|claude|opencode)$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "provider",
+            "capability",
+            "message"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "AccountResets": {
       "properties": {
@@ -273,6 +350,51 @@
         "id",
         "kind",
         "label"
+      ],
+      "type": "object"
+    },
+    "AccountSignInProgress": {
+      "description": "Progress of an owner-started sign-in, never its challenge or credential.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "phase": {
+          "pattern": "^(starting|authorizing|verifying)$",
+          "type": "string"
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        },
+        "state": {
+          "pattern": "^(pending|complete|failed|cancelled)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "provider",
+        "state",
+        "phase"
+      ],
+      "type": "object"
+    },
+    "AccountSignInProgressOutput": {
+      "properties": {
+        "signIn": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountSignInProgress"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "signIn"
       ],
       "type": "object"
     },
@@ -1101,6 +1223,75 @@
       },
       "type": "object"
     },
+    "CodingAgentModel": {
+      "properties": {
+        "defaultReasoningEffort": {
+          "default": "",
+          "type": "string"
+        },
+        "defaultServiceTier": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "displayName": {
+          "default": "",
+          "type": "string"
+        },
+        "hidden": {
+          "default": false,
+          "type": "boolean"
+        },
+        "isDefault": {
+          "default": false,
+          "type": "boolean"
+        },
+        "model": {
+          "default": "",
+          "type": "string"
+        },
+        "resolvedModel": {
+          "default": null,
+          "description": "Claude's resolved model behind a subscription alias.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "routes": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/ModelRoute"
+          },
+          "type": "array"
+        },
+        "serviceTiers": {
+          "default": null,
+          "description": "None means unknown, distinct from a known empty speed list.",
+          "items": {
+            "$ref": "#/definitions/ServiceTier"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "supportedReasoningEfforts": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/ReasoningOption"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "ConnectAccountInput": {
       "additionalProperties": false,
       "properties": {
@@ -1187,6 +1378,31 @@
             "kind",
             "message",
             "path"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "capability": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "unsupported",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "provider": {
+              "pattern": "^(codex|claude|opencode)$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "provider",
+            "capability",
+            "message"
           ],
           "type": "object"
         }
@@ -1838,6 +2054,20 @@
       },
       "required": [
         "tasks"
+      ],
+      "type": "object"
+    },
+    "ListModelsInput": {
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "default": "codex",
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider"
       ],
       "type": "object"
     },
@@ -3350,6 +3580,67 @@
       ],
       "type": "object"
     },
+    "ModelCatalog": {
+      "properties": {
+        "checkedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "error": {
+          "default": "",
+          "type": "string"
+        },
+        "models": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/CodingAgentModel"
+          },
+          "type": "array"
+        },
+        "stale": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ModelRoute": {
+      "properties": {
+        "billing": {
+          "default": "key",
+          "pattern": "^(subscription|credits|key)$",
+          "type": "string"
+        },
+        "hidden": {
+          "default": false,
+          "type": "boolean"
+        },
+        "model": {
+          "default": "",
+          "type": "string"
+        },
+        "provider": {
+          "default": "",
+          "type": "string"
+        },
+        "providerName": {
+          "default": "",
+          "type": "string"
+        },
+        "supportedReasoningEfforts": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/ReasoningOption"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "NativeAffectedAgent": {
       "properties": {
         "id": {
@@ -4136,6 +4427,51 @@
         "ids"
       ],
       "type": "object"
+    },
+    "OrderAccountsOutput": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "ordered",
+              "type": "string"
+            },
+            "overview": {
+              "$ref": "#/definitions/CodingAgentAccounts"
+            }
+          },
+          "required": [
+            "kind",
+            "overview"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "capability": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "unsupported",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "provider": {
+              "pattern": "^(codex|claude|opencode)$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "provider",
+            "capability",
+            "message"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "PackageVersion": {
       "additionalProperties": false,
@@ -6277,6 +6613,59 @@
       ],
       "type": "object"
     },
+    "ReasoningOption": {
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "RefreshAccountsOutput": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "refreshed",
+              "type": "string"
+            },
+            "overview": {
+              "$ref": "#/definitions/CodingAgentAccounts"
+            }
+          },
+          "required": [
+            "kind",
+            "overview"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "humanRequired",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message",
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ReplaceAccountInput": {
       "additionalProperties": false,
       "properties": {
@@ -7775,6 +8164,27 @@
       "required": [
         "occurrences"
       ],
+      "type": "object"
+    },
+    "ServiceTier": {
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "limited": {
+          "default": false,
+          "type": "boolean"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        }
+      },
       "type": "object"
     },
     "SetAgentAvatarInput": {

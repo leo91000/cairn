@@ -27,6 +27,17 @@ test.beforeEach(async ({ workspace }) => {
 })
 
 test.afterEach(async ({ workspace }) => {
+  // Stop new foreground and background admission before waiting for existing
+  // leases. A title request can otherwise take a Codex slot between the poll
+  // and account removal.
+  const createdAccounts = (await workspace.api('/api/accounts')).accounts.filter((account: { id: string }) => !existingAccountIds.has(account.id))
+  for (const account of createdAccounts) {
+    await workspace.api(`/api/accounts/${account.id}`, 'PUT', {
+      revision: account.revision,
+      settings: { name: account.name, enabled: false, maxConcurrentRuns: account.maxConcurrentRuns },
+    })
+  }
+
   // The application is worker-scoped, but these accounts and requests belong to
   // one scenario. Stop its pending work before releasing its account leases.
   for (const chat of workspace.service.store.list('chats')) {

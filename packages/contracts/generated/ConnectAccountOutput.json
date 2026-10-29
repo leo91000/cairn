@@ -387,6 +387,31 @@
         "path"
       ],
       "type": "object"
+    },
+    {
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "unsupported",
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "provider",
+        "capability",
+        "message"
+      ],
+      "type": "object"
     }
   ],
   "title": "ConnectAccountOutput"
