@@ -23,6 +23,11 @@ sourceSets.test {
 }
 
 tasks.test {
+    inputs.file(rootProject.file("../../tests/fixtures/model-contracts.json"))
+    val codingAgentAccounts =
+        rootProject.file("../../tests/fixtures/coding-agent-account-contracts.json")
+    inputs.file(codingAgentAccounts)
+    systemProperty("cairn.codingAgentAccountFixtures", codingAgentAccounts.absolutePath)
     val accountMethods = rootProject.file("../../tests/fixtures/account-methods-contracts.json")
     inputs.file(accountMethods)
     systemProperty("cairn.accountMethodsFixtures", accountMethods.absolutePath)

@@ -27,6 +27,17 @@ test.beforeEach(async ({ workspace }) => {
 })
 
 test.afterEach(async ({ workspace }) => {
+  // Stop new foreground and background admission before waiting for existing
+  // leases. A title request can otherwise take a Codex slot between the poll
+  // and account removal.
+  const createdAccounts = (await workspace.api('/api/accounts')).accounts.filter((account: { id: string }) => !existingAccountIds.has(account.id))
+  for (const account of createdAccounts) {
+    await workspace.api(`/api/accounts/${account.id}`, 'PUT', {
+      revision: account.revision,
+      settings: { name: account.name, enabled: false, maxConcurrentRuns: account.maxConcurrentRuns },
+    })
+  }
+
   // The application is worker-scoped, but these accounts and requests belong to
   // one scenario. Stop its pending work before releasing its account leases.
   for (const chat of workspace.service.store.list('chats')) {
@@ -272,7 +283,7 @@ for (const state of ['queued', 'failed'] as const) {
     if (state === 'queued') {
       const accounts = await workspace.api('/api/accounts')
       for (const claude of accounts.accounts.filter((a: { provider: string }) => a.provider === 'claude'))
-        workspace.service.store.put('agentAccounts', { ...workspace.service.store.get('agentAccounts', claude.id), exhausted: { at: Date.now(), model: '', usage: null } })
+        workspace.service.store.saveAccountFixture({ ...workspace.service.store.accountFixture(claude.id), exhausted: { at: Date.now(), model: '', usage: null } })
     }
 
     const messageId = crypto.randomUUID()
@@ -300,7 +311,7 @@ for (const state of ['queued', 'failed'] as const) {
     await workspace.api(endpoint, 'POST', request)
     await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.snapshot.agent.provider, { timeout: 30000 }).toBe('codex')
     await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
-    await workspace.api(`/api/accounts/${codex.id}`, 'PATCH', { enabled: false })
+    await workspace.api(`/api/accounts/${codex.id}`, 'PUT', { revision: codex.revision, settings: { name: codex.name, enabled: false, maxConcurrentRuns: codex.maxConcurrentRuns } })
     await workspace.api(endpoint, 'POST', request)
     const after = await workspace.api(`/api/chats/${chat.id}`)
     expect(after.run.id).toBe(before.id)

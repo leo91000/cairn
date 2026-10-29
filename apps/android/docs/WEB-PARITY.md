@@ -172,6 +172,12 @@ coverage used, not a claim that every production account/provider was exercised.
 
 ## Platform equivalents
 
+- File browsing uses matching left/right chevrons on both clients (including web
+  PDF pagination and attachment browsing). Web uses Lucide chevrons; Android uses
+  its shared outline icons and keeps text buttons for PDF pages. Back-to-parent
+  actions retain their back arrows. This is a presentation change to existing
+  navigation; public MCP and `cairn_installation` capabilities are unchanged.
+
 - Quota exhaustion appears once as an inline conversation card on both clients.
   The compact neutral surface uses a small amber marker, a short status and a
   prominent alternative-agent action; account management and technical details
@@ -322,3 +328,28 @@ human management URL for agents; status never consumes another session's callbac
 PKCE, refresh and private-network/metadata protection remain in the existing
 protocol implementations. The shared corpus qualifies Rust/TS/Kotlin; browser MCP
 journeys and `McpJourneyCases` (JVM/device) cover the clients.
+
+
+A15 account contracts: Connections on web and Android use generated Rust account,
+usage, sign-in and command models. Renaming, pause and parallel limits send complete
+settings with the current revision, and a stale save reports its conflict before
+reload. Native sheets, usage windows, device-code/browser steps and OpenCode order
+are preserved. Both tools expose the same registry with account policies; agents
+never obtain human sign-in challenges or credential-management authority from an
+installation grant. Existing AccountsJourneyTest / AccountsDeviceTest and browser
+accounts/OpenCode/Claude journeys qualify the corresponding native presentations.
+
+Manual account refresh retains the authenticated owner policy on both apps: it can
+refresh credentials and redeem a banked reset. Agent tools expose the same operation
+with an explicit human-required refusal; automatic usage remains readable.
+
+B2 (#417) : les 11 opérations de comptes utilisent le registre commun et ses clients
+générés, y compris les fournisseurs de clés, l'ordre et le refresh. Les catalogues
+Codex/Claude/OpenCode remplacent les modèles manuels des deux apps par les contrats
+Rust générés ; présentation et choix natifs conservés. Les capacités absentes d'un
+fournisseur renvoient `unsupported`. Le MCP public et `cairn_installation` lisent les
+mêmes catalogues et un suivi `accountId/provider/state/phase` d'une connexion déjà
+lancée par le propriétaire, sans URL ni code. Connexion, remplacement de clé,
+code, annulation, suppression et refresh manuel renvoient `humanRequired` aux
+agents ; les apps gardent leur preuve de propriétaire. Aucun flux de confirmation
+ponctuelle du propriétaire n'est ajouté.

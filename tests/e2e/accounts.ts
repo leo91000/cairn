@@ -11,6 +11,7 @@ export async function seedCodexAccount(workspace: Workspace, name: string, limit
   const id = randomUUID()
   const account = {
     id,
+    revision: randomUUID(),
     provider: 'codex' as Provider,
     name,
     enabled: options.enabled ?? true,
@@ -27,7 +28,7 @@ export async function seedCodexAccount(workspace: Workspace, name: string, limit
     maxConcurrentRuns: options.maxConcurrentRuns ?? 4,
   }
   const { store, vault } = workspace.service
-  store.put('agentAccounts', account)
+  store.saveAccountFixture(account)
   store.set('codex-accounts-enabled', true)
   vault.set(`codex-account:${id}`, credential(id))
   await workspace.setAccountUsage(id, limits)
@@ -56,7 +57,7 @@ export async function connectClaude(workspace: Workspace, name = 'Claude', code 
   for (let attempt = 0; attempt < 200; attempt++) {
     const { signIn } = await workspace.api('/api/accounts')
     if (signIn?.state !== 'pending')
-      return { id: started.accountId as string, state: signIn?.state as string }
+      return { id: started.signIn.accountId as string, state: signIn?.state as string }
     await new Promise(resolve => setTimeout(resolve, 50))
   }
 

@@ -157,7 +157,8 @@ impl Fixture {
         } else {
             tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()
         };
-        let url = format!("http://localhost:{}", listener.local_addr().unwrap().port());
+        let address = listener.local_addr().unwrap();
+        let url = format!("http://localhost:{}", address.port());
         let browser_origin = if subdomains {
             url.replace("localhost", "cairn.localhost")
         } else {
@@ -187,7 +188,12 @@ impl Fixture {
         Self {
             url,
             browser_origin,
-            client: Client::new(),
+            // Preserve localhost origins/cookies while targeting this IPv4 listener.
+            // Another process can own the same port on IPv6 loopback.
+            client: Client::builder()
+                .resolve("localhost", std::net::SocketAddr::new(address.ip(), 0))
+                .build()
+                .unwrap(),
             mail,
             pool,
             admin,

@@ -1,8 +1,8 @@
 //! Codex: ChatGPT sign-in through the app-server device code, credentials in the encrypted
 //! vault, usage from `account/rateLimits/read`, and banked resets redeemed at 2% remaining.
 use super::{
-    Account, AccountState, Driver, KIND, Lease, Login, broker, lenient, remove_directory,
-    remove_file, save,
+    Account, AccountState, Driver, Lease, Login, broker, lenient, remove_directory, remove_file,
+    save,
     usage::{self, Resets, Usage},
 };
 use crate::{
@@ -346,7 +346,7 @@ async fn with_session<T>(
 
 pub async fn discover_models(s: &Service, id: &str) -> Result<Value> {
     let _guard = s.accounts.lock(id).await;
-    s.accounts.get(s, id).await?;
+    s.accounts.account(s, id).await?;
     if s.accounts.busy(s, id).await? {
         return Err(Error::conflict(
             "Account sign-in or recovery is in progress.",
@@ -677,10 +677,10 @@ async fn import_host_login(s: &Service) -> Result<()> {
         return Ok(());
     }
     let account = Account::new(Provider::Codex, "Primary account", AccountState::Ready);
-    let imported = account.to_value();
+    let imported = account.clone();
     s.store
         .transaction(move |db| {
-            db.put(KIND, &imported)?;
+            db.save_coding_account(&imported)?;
             Codex.added(db)
         })
         .await?;
@@ -774,10 +774,15 @@ impl Driver for Codex {
     }
 
     async fn due(&self, s: &Service, account: &Account, attempted: i64) -> Result<bool> {
-        let model = s.accounts.active(&account.id).await.first().map_or_else(
-            || account.exhausted_model("").to_owned(),
-            |l| l.model.clone(),
-        );
+        let model = s
+            .accounts
+            .active(s, &account.id)
+            .await?
+            .first()
+            .map_or_else(
+                || account.exhausted_model("").to_owned(),
+                |l| l.model.clone(),
+            );
         let pending = s.store.kv(&reset_key(&account.id)).await?.is_some();
         let usage = account.usage();
         let attention = account.exhausted.is_some()

@@ -35,7 +35,7 @@ async fn dispatch_inner(s: &Arc<Service>, input: &Input) -> Result<Value> {
         return crate::nodes::admin(s, input).await;
     }
     if under(&input.path, "/api/accounts") {
-        return crate::accounts::routes(s, input).await;
+        return crate::capabilities::accounts::routes(s, input).await;
     }
     if under(&input.path, "/api/plugins") {
         return crate::plugins::routes(s, input).await;
@@ -253,9 +253,14 @@ async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result
                 .await?
         }
         ("GET", [provider, "models"]) => {
-            crate::provider::Provider::parse(provider)?
-                .adapter()
-                .model_catalog(s)
+            let provider = crate::provider::Provider::parse(provider)?;
+            crate::capabilities::account_operation("list_models")
+                .expect("registered model catalog")
+                .invoke(
+                    s,
+                    json!({ "provider": provider }),
+                    crate::capabilities::ResumeContext::http(input)?,
+                )
                 .await?
         }
         _ => return Ok(None),

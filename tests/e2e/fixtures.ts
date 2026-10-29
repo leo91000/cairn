@@ -347,10 +347,10 @@ export const test = base.extend<object, { workspace: Workspace }>({
         setOpenCodeGoUsage: (id, apiKey, value) => {
           goUsage.set(apiKey, value)
           // Let the next explicit refresh poll the fixture without waiting a minute.
-          const account = service.store.get('agentAccounts', id)
+          const account = service.store.accountFixture(id)
           if (account.usage)
             account.usage.attemptedAt = Date.now() - 60001
-          service.store.put('agentAccounts', account)
+          service.store.saveAccountFixture(account)
         },
       })
     }

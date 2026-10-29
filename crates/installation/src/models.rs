@@ -319,15 +319,15 @@ impl Models {
         s.accounts.initialize(s).await?;
         let accounts = s
             .accounts
-            .records(s, Provider::Codex)
+            .of(s, Provider::Codex)
             .await?
             .into_iter()
-            .filter(|a| a["enabled"] == true)
+            .filter(|a| a.enabled)
             .collect::<Vec<_>>();
         let sources = if accounts.is_empty() && !Provider::Codex.driver().managed(s).await? {
             vec![String::new()]
         } else {
-            accounts.iter().map(|a| text(a, "id").to_owned()).collect()
+            accounts.iter().map(|a| a.id.clone()).collect()
         };
         let mut models = BTreeMap::<String, Value>::new();
         let mut catalogs = Vec::new();
@@ -359,10 +359,8 @@ impl Models {
                 }
             }
             // Only accounts a run can land on decide whether a speed is confirmed.
-            let signed_in = source.is_empty()
-                || accounts
-                    .iter()
-                    .any(|a| text(a, "id") == source && a["state"] == "ready");
+            let signed_in =
+                source.is_empty() || accounts.iter().any(|a| a.id == *source && a.is_ready());
             if signed_in {
                 catalogs.push(cached);
             }
@@ -480,11 +478,11 @@ async fn account_offers_speed(
     if own.is_some_and(|cached| offers_tier(&cached, model, speed) == Some(true)) {
         return Ok(true);
     }
-    for source in s.accounts.records(s, Provider::Codex).await? {
-        if source["enabled"] != true || text(&source, "id") == account {
+    for source in s.accounts.of(s, Provider::Codex).await? {
+        if !source.enabled || source.id == account {
             continue;
         }
-        let key = format!("codex-models:{}", text(&source, "id"));
+        let key = format!("codex-models:{}", source.id.as_str());
         if let Some(catalog) = s.store.kv(&key).await?
             && offers_tier(&catalog, model, speed) == Some(true)
         {
@@ -559,13 +557,13 @@ async fn account_offers_model(s: &Service, account: &str, model: &str) -> Result
     }
     // Preserve provider aliases absent from every catalog. Restrict routing only
     // for a model actually discovered on another enabled account.
-    for source in s.accounts.records(s, Provider::Codex).await? {
-        if source["enabled"] != true {
+    for source in s.accounts.of(s, Provider::Codex).await? {
+        if !source.enabled {
             continue;
         }
         if let Some(catalog) = s
             .store
-            .kv(&format!("codex-models:{}", text(&source, "id")))
+            .kv(&format!("codex-models:{}", source.id.as_str()))
             .await?
             && catalog["checkedAt"]
                 .as_i64()

@@ -1,0 +1,93 @@
+[
+  {
+    "input": "ListModelsInput",
+    "method": "GET",
+    "name": "listModels",
+    "output": "ModelCatalog",
+    "path": "/{provider}/models"
+  },
+  {
+    "input": "AccountProviderInput",
+    "method": "GET",
+    "name": "listCodingAgentAccountProviders",
+    "output": "AccountProvidersOutput",
+    "path": "/accounts/providers/{provider}"
+  },
+  {
+    "input": "ListAccountsInput",
+    "method": "GET",
+    "name": "getCodingAgentAccountSignIn",
+    "output": "AccountSignInProgressOutput",
+    "path": "/accounts/sign-in"
+  },
+  {
+    "input": "ListAccountsInput",
+    "method": "GET",
+    "name": "listCodingAgentAccounts",
+    "output": "CodingAgentAccounts",
+    "path": "/accounts"
+  },
+  {
+    "input": "ListAccountsInput",
+    "method": "POST",
+    "name": "refreshCodingAgentAccounts",
+    "output": "RefreshAccountsOutput",
+    "path": "/accounts/refresh"
+  },
+  {
+    "input": "ConnectAccountInput",
+    "method": "POST",
+    "name": "connectCodingAgentAccount",
+    "output": "ConnectAccountOutput",
+    "path": "/accounts"
+  },
+  {
+    "input": "AccountInput",
+    "method": "POST",
+    "name": "reconnectCodingAgentAccount",
+    "output": "ConnectAccountOutput",
+    "path": "/accounts/{accountId}/sign-in"
+  },
+  {
+    "input": "ReplaceAccountKeyInput",
+    "method": "POST",
+    "name": "replaceCodingAgentAccountKey",
+    "output": "ConnectAccountOutput",
+    "path": "/accounts/{accountId}/api-key"
+  },
+  {
+    "input": "ReplaceAccountInput",
+    "method": "PUT",
+    "name": "replaceCodingAgentAccount",
+    "output": "CodingAgentAccount",
+    "path": "/accounts/{accountId}"
+  },
+  {
+    "input": "OrderAccountsInput",
+    "method": "POST",
+    "name": "orderCodingAgentAccounts",
+    "output": "OrderAccountsOutput",
+    "path": "/accounts/order"
+  },
+  {
+    "input": "AccountInput",
+    "method": "DELETE",
+    "name": "deleteCodingAgentAccount",
+    "output": "AccountMutationOutput",
+    "path": "/accounts/{accountId}"
+  },
+  {
+    "input": "AccountCodeInput",
+    "method": "POST",
+    "name": "submitCodingAgentAccountCode",
+    "output": "AccountMutationOutput",
+    "path": "/accounts/sign-in/code"
+  },
+  {
+    "input": "ListAccountsInput",
+    "method": "DELETE",
+    "name": "cancelCodingAgentAccountSignIn",
+    "output": "AccountMutationOutput",
+    "path": "/accounts/sign-in"
+  }
+]

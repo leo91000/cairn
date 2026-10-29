@@ -6,6 +6,10 @@ on:
     - cron: '17 2 * * *'
   workflow_dispatch:
     inputs:
+      backend-only:
+        description: Run backend tests and doctests without release resolution or image jobs
+        type: boolean
+        default: false
       browser-workers:
         description: Workers per browser group for performance comparisons
         type: choice
@@ -22,6 +26,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
 jobs:
   resolve:
+    if: inputs.backend-only != true
     runs-on: ubuntu-latest
     timeout-minutes: 42
     permissions:
@@ -168,7 +173,7 @@ jobs:
           --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     needs: resolve
-    if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
+    if: always() && !cancelled() && (inputs.backend-only == true || (needs.resolve.result == 'success' && (needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -196,6 +201,7 @@ jobs:
       - name: Check Rust documentation examples
         run: node scripts/test-backend.mjs --doc
       - name: Qualify the resolved OpenCode release against its native adapter
+        if: inputs.backend-only != true
         env:
           OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
           SERVED_OPENCODE: ${{ needs.resolve.outputs.served-opencode }}
@@ -230,6 +236,7 @@ jobs:
             qualify "$resolved" "$served"
           fi
       - name: Qualify the resolved Claude Code release against its native adapter
+        if: inputs.backend-only != true
         env:
           CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
           SERVED_CLAUDE: ${{ needs.resolve.outputs.served-claude }}
