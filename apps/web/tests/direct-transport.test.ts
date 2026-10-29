@@ -221,13 +221,13 @@ it('requests identity when browser gzip decompression is unavailable', async () 
   expect(await response).toEqual({ events: [] })
 })
 
-it('requests identity on stream paths so JSON errors remain readable', async () => {
+it.each(['/api/runs/r/stream?history=invalid', '/api/shared-artifacts/a/file'])('requests identity on streamed route %s so JSON errors remain readable', async (path) => {
   const { DirectChannel } = await import('../src/direct-channel')
   const channel = new Channel()
   channel.readyState = 'open'
   const transport = new DirectChannel(channel as unknown as RTCDataChannel, { account_id: 'a', role: 'owner' }, () => {})
   try {
-    const pending = transport.request('/api/runs/r/stream?history=invalid')
+    const pending = transport.request(path)
     await vi.waitFor(() => expect(channel.packets.length).toBe(1))
     const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
     expect(request.headers).toContainEqual(['accept-encoding', 'identity'])

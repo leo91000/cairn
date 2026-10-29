@@ -392,6 +392,8 @@ class DirectChannel(
             "/api/" +
                 request.url.encodedPath.removePrefix(prefix) +
                 (request.url.encodedQuery?.let { "?$it" } ?: "")
+        val route = path.substringBefore('?')
+        val streamedRoute = route.endsWith("/stream") || route.startsWith("/api/shared-artifacts/")
         val frame = buildJsonObject {
             put("type", "request")
             put("id", id)
@@ -405,10 +407,7 @@ class DirectChannel(
                     add(
                         buildJsonArray {
                             add("accept-encoding")
-                            add(
-                                if (path.substringBefore('?').endsWith("/stream")) "identity"
-                                else "gzip"
-                            )
+                            add(if (streamedRoute) "identity" else "gzip")
                         }
                     )
                     for (name in

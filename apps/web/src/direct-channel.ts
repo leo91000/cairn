@@ -219,7 +219,8 @@ export class DirectChannel {
   request(path: string, options: RequestInit = {}, onSent = () => {}) {
     if (this.closed || this.channel.readyState !== 'open')
       return Promise.reject(new TransportNotSent())
-    const streaming = path.split('?')[0].endsWith('/stream')
+    const route = path.split('?')[0]
+    const streaming = route.endsWith('/stream') || route.startsWith('/api/shared-artifacts/')
     const streams = [...this.pending.values()].filter(value => value.streaming).length
     if (this.pending.size >= 32 || (streaming && streams >= 8))
       return Promise.reject(new TransportNotSent())
