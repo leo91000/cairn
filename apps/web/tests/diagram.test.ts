@@ -172,6 +172,16 @@ describe('diagram layout', () => {
     expect(graph.kind === 'graph' && graph.edges.map(edge => [edge.from, edge.to])).toEqual([['A', 'B'], ['B', 'C']])
   })
 
+  it('orders whole subgraphs beyond 400 member constraints', () => {
+    const source = corpus.parse.find(item => item.name === 'full-cluster-constraints')!.source
+    const scene = layoutDiagram(parseDiagram(source), measure)
+    const clusters = scene.items.filter((item): item is PathItem => item.kind === 'path' && !!item.fill && 'tone' in item.fill && item.fill.tone === 'cluster' && !!item.stroke)
+    expect(clusters).toHaveLength(2)
+    const sourceBottom = Math.max(...points(clusters[0]!).map(([, y]) => y))
+    const targetTop = Math.min(...points(clusters[1]!).map(([, y]) => y))
+    expect(sourceBottom).toBeLessThan(targetTop)
+  })
+
   it('wraps long labels between words and inside long words', () => {
     expect(wrapText('alpha beta gamma', 10, 400, 50, measure)).toEqual(['alpha', 'beta', 'gamma'])
     expect(wrapText('abcdefghijklmnop', 10, 400, 30, measure)).toEqual(['abcde', 'fghij', 'klmno', 'p'])

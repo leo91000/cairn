@@ -634,6 +634,8 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
   // Layout nodes, in layout space: x across ranks, y along them.
   const nodes = new Map<string, LNode>()
   const add = (node: LNode) => {
+    if (!nodes.has(node.key) && nodes.size >= MAX_LAYOUT_NODES)
+      throw new DiagramError('This diagram is too large to draw.')
     nodes.set(node.key, node)
     return node
   }
@@ -781,10 +783,9 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
 
   for (const link of links) {
     const [from, to] = link.back ? [link.edge.to, link.edge.from] : [link.edge.from, link.edge.to]
-    let count = 0
     for (const u of ends(from)) {
       for (const v of ends(to)) {
-        if (u !== v && count++ < 400) {
+        if (u !== v) {
           if (constraints.length >= MAX_LAYOUT_CONSTRAINTS)
             throw new DiagramError('This diagram has too many expanded links to draw.')
           constraints.push({ u, v, minlen: link.edge.length * 2 })
@@ -967,10 +968,6 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
       }
     }
   }
-
-  // Long links through many ranks multiply layout work; such drawings would not be legible.
-  if (nodes.size > MAX_LAYOUT_NODES)
-    throw new DiagramError('This diagram is too large to draw.')
 
   const rankCount = Math.max(0, ...[...nodes.values()].map(node => node.rank)) + 1
   const layers: LNode[][] = Array.from({ length: rankCount }, () => [])

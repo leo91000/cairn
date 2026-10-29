@@ -253,6 +253,25 @@ class DiagramCorpusTest {
     }
 
     @Test
+    fun `orders whole subgraphs beyond 400 member constraints`() {
+        val source =
+            cases("parse")
+                .first { it.getValue("name").jsonPrimitive.content == "full-cluster-constraints" }
+                .getValue("source")
+                .jsonPrimitive
+                .content
+        val scene = layoutDiagram(parseDiagram(source), measure)
+        val clusters =
+            scene.items.filterIsInstance<PathItem>().filter {
+                it.fill == DiagramPaint.Tone("cluster") && it.stroke != null
+            }
+        assertEquals(2, clusters.size)
+        val sourceBottom = points(clusters[0]).maxOf { it.second }
+        val targetTop = points(clusters[1]).minOf { it.second }
+        assertTrue(sourceBottom < targetTop)
+    }
+
+    @Test
     fun `wraps long labels between words and inside long words`() {
         assertEquals(
             listOf("alpha", "beta", "gamma"),

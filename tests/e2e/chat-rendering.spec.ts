@@ -310,3 +310,13 @@ test('centering subgraphs preserves separation from unrelated nodes', async ({ p
     expect(separated).toBe(true)
   }
 })
+
+test('links between larger subgraphs preserve their whole-group ordering', async ({ page }) => {
+  const source = `flowchart TB\nsubgraph S\n${Array.from({ length: 20 }, (_, index) => `A${index}-->A${index + 1}\n`).join('')}end\nsubgraph T\n${Array.from({ length: 21 }, (_, index) => `B${index}\n`).join('')}end\nS-->|group edge|T`
+  await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)
+  const ordered = await page.locator('#app figure.diagram svg').evaluate((svg) => {
+    const frames = [...svg.querySelectorAll('path')].filter(path => path.style.fill === 'var(--dg-cluster)' && path.style.stroke === 'var(--dg-cluster-line)')
+    return frames.length === 2 && frames[0]!.getBoundingClientRect().bottom < frames[1]!.getBoundingClientRect().top
+  })
+  expect(ordered).toBe(true)
+})

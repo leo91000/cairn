@@ -3533,6 +3533,474 @@
         "height": 348,
         "items": 14
       }
+    },
+    {
+      "name": "full-cluster-constraints",
+      "source": "flowchart TB\nsubgraph S\nA0-->A1\nA1-->A2\nA2-->A3\nA3-->A4\nA4-->A5\nA5-->A6\nA6-->A7\nA7-->A8\nA8-->A9\nA9-->A10\nA10-->A11\nA11-->A12\nA12-->A13\nA13-->A14\nA14-->A15\nA15-->A16\nA16-->A17\nA17-->A18\nA18-->A19\nA19-->A20\nend\nsubgraph T\nB0\nB1\nB2\nB3\nB4\nB5\nB6\nB7\nB8\nB9\nB10\nB11\nB12\nB13\nB14\nB15\nB16\nB17\nB18\nB19\nB20\nend\nS-->|group edge|T",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A0",
+            "label": "A0",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A1",
+            "label": "A1",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A2",
+            "label": "A2",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A3",
+            "label": "A3",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A4",
+            "label": "A4",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A5",
+            "label": "A5",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A6",
+            "label": "A6",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A7",
+            "label": "A7",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A8",
+            "label": "A8",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A9",
+            "label": "A9",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A10",
+            "label": "A10",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A11",
+            "label": "A11",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A12",
+            "label": "A12",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A13",
+            "label": "A13",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A14",
+            "label": "A14",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A15",
+            "label": "A15",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A16",
+            "label": "A16",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A17",
+            "label": "A17",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A18",
+            "label": "A18",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A19",
+            "label": "A19",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "A20",
+            "label": "A20",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "B0",
+            "label": "B0",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B1",
+            "label": "B1",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B2",
+            "label": "B2",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B3",
+            "label": "B3",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B4",
+            "label": "B4",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B5",
+            "label": "B5",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B6",
+            "label": "B6",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B7",
+            "label": "B7",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B8",
+            "label": "B8",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B9",
+            "label": "B9",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B10",
+            "label": "B10",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B11",
+            "label": "B11",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B12",
+            "label": "B12",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B13",
+            "label": "B13",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B14",
+            "label": "B14",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B15",
+            "label": "B15",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B16",
+            "label": "B16",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B17",
+            "label": "B17",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B18",
+            "label": "B18",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B19",
+            "label": "B19",
+            "shape": "rect",
+            "parent": "T"
+          },
+          {
+            "id": "B20",
+            "label": "B20",
+            "shape": "rect",
+            "parent": "T"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A0",
+            "to": "A1",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A1",
+            "to": "A2",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A2",
+            "to": "A3",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A3",
+            "to": "A4",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A4",
+            "to": "A5",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A5",
+            "to": "A6",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A6",
+            "to": "A7",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A7",
+            "to": "A8",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A8",
+            "to": "A9",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A9",
+            "to": "A10",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A10",
+            "to": "A11",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A11",
+            "to": "A12",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A12",
+            "to": "A13",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A13",
+            "to": "A14",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A14",
+            "to": "A15",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A15",
+            "to": "A16",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A16",
+            "to": "A17",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A17",
+            "to": "A18",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A18",
+            "to": "A19",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A19",
+            "to": "A20",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "S",
+            "to": "T",
+            "label": "group edge",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "S",
+            "label": "S"
+          },
+          {
+            "id": "T",
+            "label": "T"
+          }
+        ]
+      },
+      "layout": {
+        "width": 1977,
+        "height": 2171,
+        "items": 134
+      }
     }
   ],
   "errors": [
@@ -3595,6 +4063,10 @@
     {
       "name": "cluster-count-limit",
       "source": "flowchart TB\nsubgraph S0\nend\nsubgraph S1\nend\nsubgraph S2\nend\nsubgraph S3\nend\nsubgraph S4\nend\nsubgraph S5\nend\nsubgraph S6\nend\nsubgraph S7\nend\nsubgraph S8\nend\nsubgraph S9\nend\nsubgraph S10\nend\nsubgraph S11\nend\nsubgraph S12\nend\nsubgraph S13\nend\nsubgraph S14\nend\nsubgraph S15\nend\nsubgraph S16\nend\nsubgraph S17\nend\nsubgraph S18\nend\nsubgraph S19\nend\nsubgraph S20\nend\nsubgraph S21\nend\nsubgraph S22\nend\nsubgraph S23\nend\nsubgraph S24\nend\nsubgraph S25\nend\nsubgraph S26\nend\nsubgraph S27\nend\nsubgraph S28\nend\nsubgraph S29\nend\nsubgraph S30\nend\nsubgraph S31\nend\nsubgraph S32\nend\nsubgraph S33\nend\nsubgraph S34\nend\nsubgraph S35\nend\nsubgraph S36\nend\nsubgraph S37\nend\nsubgraph S38\nend\nsubgraph S39\nend\nsubgraph S40\nend\nsubgraph S41\nend\nsubgraph S42\nend\nsubgraph S43\nend\nsubgraph S44\nend\nsubgraph S45\nend\nsubgraph S46\nend\nsubgraph S47\nend\nsubgraph S48\nend\nsubgraph S49\nend\nsubgraph S50\nend\nsubgraph S51\nend\nsubgraph S52\nend\nsubgraph S53\nend\nsubgraph S54\nend\nsubgraph S55\nend\nsubgraph S56\nend\nsubgraph S57\nend\nsubgraph S58\nend\nsubgraph S59\nend\nsubgraph S60\nend\nsubgraph S61\nend\nsubgraph S62\nend\nsubgraph S63\nend\nsubgraph S64\nend\nsubgraph S65\nend\nsubgraph S66\nend\nsubgraph S67\nend\nsubgraph S68\nend\nsubgraph S69\nend\nsubgraph S70\nend\nsubgraph S71\nend\nsubgraph S72\nend\nsubgraph S73\nend\nsubgraph S74\nend\nsubgraph S75\nend\nsubgraph S76\nend\nsubgraph S77\nend\nsubgraph S78\nend\nsubgraph S79\nend\nsubgraph S80\nend\nsubgraph S81\nend\nsubgraph S82\nend\nsubgraph S83\nend\nsubgraph S84\nend\nsubgraph S85\nend\nsubgraph S86\nend\nsubgraph S87\nend\nsubgraph S88\nend\nsubgraph S89\nend\nsubgraph S90\nend\nsubgraph S91\nend\nsubgraph S92\nend\nsubgraph S93\nend\nsubgraph S94\nend\nsubgraph S95\nend\nsubgraph S96\nend\nsubgraph S97\nend\nsubgraph S98\nend\nsubgraph S99\nend\nsubgraph S100\nend\nsubgraph S101\nend\nsubgraph S102\nend\nsubgraph S103\nend\nsubgraph S104\nend\nsubgraph S105\nend\nsubgraph S106\nend\nsubgraph S107\nend\nsubgraph S108\nend\nsubgraph S109\nend\nsubgraph S110\nend\nsubgraph S111\nend\nsubgraph S112\nend\nsubgraph S113\nend\nsubgraph S114\nend\nsubgraph S115\nend\nsubgraph S116\nend\nsubgraph S117\nend\nsubgraph S118\nend\nsubgraph S119\nend\nsubgraph S120\nend\nsubgraph S121\nend\nsubgraph S122\nend\nsubgraph S123\nend\nsubgraph S124\nend\nsubgraph S125\nend\nsubgraph S126\nend\nsubgraph S127\nend\nsubgraph S128\nend\n"
+    },
+    {
+      "name": "long-edge-node-budget",
+      "source": "flowchart TB\nA0----->A1\nA1----->A2\nA2----->A3\nA3----->A4\nA4----->A5\nA5----->A6\nA6----->A7\nA7----->A8\nA8----->A9\nA9----->A10\nA10----->A11\nA11----->A12\nA12----->A13\nA13----->A14\nA14----->A15\nA15----->A16\nA16----->A17\nA17----->A18\nA18----->A19\nA19----->A20\nA20----->A21\nA21----->A22\nA22----->A23\nA23----->A24\nA24----->A25\nA25----->A26\nA26----->A27\nA27----->A28\nA28----->A29\nA29----->A30\nA30----->A31\nA31----->A32\nA32----->A33\nA33----->A34\nA34----->A35\nA35----->A36\nA36----->A37\nA37----->A38\nA38----->A39\nA39----->A40\nA40----->A41\nA41----->A42\nA42----->A43\nA43----->A44\nA44----->A45\nA45----->A46\nA46----->A47\nA47----->A48\nA48----->A49\nA49----->A50\nA50----->A51\nA51----->A52\nA52----->A53\nA53----->A54\nA54----->A55\nA55----->A56\nA56----->A57\nA57----->A58\nA58----->A59\nA59----->A60\nA60----->A61\nA61----->A62\nA62----->A63\nA63----->A64\nA64----->A65\nA65----->A66\nA66----->A67\nA67----->A68\nA68----->A69\nA69----->A70\nA70----->A71\nA71----->A72\nA72----->A73\nA73----->A74\nA74----->A75\nA75----->A76\nA76----->A77\nA77----->A78\nA78----->A79\nA79----->A80\nA80----->A81\nA81----->A82\nA82----->A83\nA83----->A84\nA84----->A85\nA85----->A86\nA86----->A87\nA87----->A88\nA88----->A89\nA89----->A90\nA90----->A91\nA91----->A92\nA92----->A93\nA93----->A94\nA94----->A95\nA95----->A96\nA96----->A97\nA97----->A98\nA98----->A99\nA99----->A100\nA100----->A101\nA101----->A102\nA102----->A103\nA103----->A104\nA104----->A105\nA105----->A106\nA106----->A107\nA107----->A108\nA108----->A109\nA109----->A110\nA110----->A111\nA111----->A112\nA112----->A113\nA113----->A114\nA114----->A115\nA115----->A116\nA116----->A117\nA117----->A118\nA118----->A119\nA119----->A120\nA120----->A121\nA121----->A122\nA122----->A123\nA123----->A124\nA124----->A125\nA125----->A126\nA126----->A127\nA127----->A128\nA128----->A129\nA129----->A130\nA130----->A131\nA131----->A132\nA132----->A133\nA133----->A134\nA134----->A135\nA135----->A136\nA136----->A137\nA137----->A138\nA138----->A139\nA139----->A140\nA140----->A141\nA141----->A142\nA142----->A143\nA143----->A144\nA144----->A145\nA145----->A146\nA146----->A147\nA147----->A148\nA148----->A149\nA149----->A150\nA150----->A151\nA151----->A152\nA152----->A153\nA153----->A154\nA154----->A155\nA155----->A156\nA156----->A157\nA157----->A158\nA158----->A159\nA159----->A160\nA160----->A161\nA161----->A162\nA162----->A163\nA163----->A164\nA164----->A165\nA165----->A166\nA166----->A167\nA167----->A168\nA168----->A169\nA169----->A170\nA170----->A171\nA171----->A172\nA172----->A173\nA173----->A174\nA174----->A175\nA175----->A176\nA176----->A177\nA177----->A178\nA178----->A179\nA179----->A180\nA180----->A181\nA181----->A182\nA182----->A183\nA183----->A184\nA184----->A185\nA185----->A186\nA186----->A187\nA187----->A188\nA188----->A189\nA189----->A190\nA190----->A191\nA191----->A192\nA192----->A193\nA193----->A194\nA194----->A195\nA195----->A196\nA196----->A197\nA197----->A198\nA198----->A199\nA199----->A200\nA200----->A201\nA201----->A202\nA202----->A203\nA203----->A204\nA204----->A205\nA205----->A206\nA206----->A207\nA207----->A208\nA208----->A209\nA209----->A210\nA210----->A211\nA211----->A212\nA212----->A213\nA213----->A214\nA214----->A215\nA215----->A216\nA216----->A217\nA217----->A218\nA218----->A219\nA219----->A220\nA220----->A221\nA221----->A222\nA222----->A223\nA223----->A224\nA224----->A225\nA225----->A226\nA226----->A227\nA227----->A228\nA228----->A229\nA229----->A230\nA230----->A231\nA231----->A232\nA232----->A233\nA233----->A234\nA234----->A235\nA235----->A236\nA236----->A237\nA237----->A238\nA238----->A239\nA239----->A240\nA240----->A241\nA241----->A242\nA242----->A243\nA243----->A244\nA244----->A245\nA245----->A246\nA246----->A247\nA247----->A248\nA248----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\n"
     }
   ],
   "unsupported": [

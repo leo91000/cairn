@@ -794,6 +794,8 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     // Layout nodes, in layout space: x across ranks, y along them.
     val nodes = LinkedHashMap<String, LNode>()
     fun add(node: LNode): LNode {
+        if (!nodes.containsKey(node.key) && nodes.size >= MAX_LAYOUT_NODES)
+            throw DiagramError("This diagram is too large to draw.")
         nodes[node.key] = node
         return node
     }
@@ -882,10 +884,9 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     for (link in links) {
         val from = if (link.back) link.edge.to else link.edge.from
         val to = if (link.back) link.edge.from else link.edge.to
-        var count = 0
         for (u in ends(from)) {
             for (v in ends(to)) {
-                if (u != v && count++ < 400) {
+                if (u != v) {
                     if (constraints.size >= MAX_LAYOUT_CONSTRAINTS)
                         throw DiagramError("This diagram has too many expanded links to draw.")
                     constraints.add(Constraint(u, v, link.edge.length * 2))
@@ -1046,9 +1047,6 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
             }
         }
     }
-
-    // Long links through many ranks multiply layout work; such drawings would not be legible.
-    if (nodes.size > MAX_LAYOUT_NODES) throw DiagramError("This diagram is too large to draw.")
 
     val rankCount = max(0, nodes.values.maxOfOrNull { it.rank } ?: 0) + 1
     var layers: MutableList<List<LNode>> = MutableList(rankCount) { emptyList() }
