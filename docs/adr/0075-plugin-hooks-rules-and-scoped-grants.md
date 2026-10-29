@@ -109,7 +109,8 @@ propre agent.
 Un membre ne démarre, ne poursuit, n’oriente, ne lance à la main, ne répond aux
 questions et n’utilise comme agent d’exécution d’une règle que les agents auxquels il
 a accès, ni ne crée ou ne modifie de tâche sur un autre agent ; mettre en pause,
-archiver ou arrêter un travail reste permis à tous, alors que supprimer une
+archiver ou arrêter une conversation ou une tâche reste permis à tous (une règle ne se
+met en pause que comme le décrit le tableau ci-dessous), alors que supprimer une
 conversation exige l’accès à son agent ; il continue de voir toutes les conversations
 ([ADR-0029](0029-sharing-whole-installations.md)). Ses tâches planifiées sur un agent
 auquel il n’a pas ou plus accès, y compris après une modification par le propriétaire,
@@ -216,8 +217,9 @@ tous les droits qu’elle utilise, le duplicata leur appartenant. Le créateur p
 supprimer sa règle, et le propriétaire n’importe laquelle ; supprimer une règle arrête
 ses déclenchements en cours. Comme les tâches
 ([ADR-0029](0029-sharing-whole-installations.md)), une règle appartient à une
-adhésion, et, pour un membre, un déclenchement exige une adhésion vérifiée récemment ;
-si elle ne peut pas l’être, il attend.
+adhésion, et, pour un membre, un déclenchement exige une adhésion vérifiée récemment,
+de nouveau avant toute action qui démarre ou oriente un agent après une attente ; si
+elle ne peut pas l’être, il attend.
 
 Une règle ne se déclenche que si rien ne l’en empêche. Chaque empêchement se lève
 indépendamment des autres :
@@ -230,35 +232,36 @@ indépendamment des autres :
 | Droits perdus | le créateur perd l’accès à l’agent d’exécution ou à un agent que la règle démarre, ou l’agent d’exécution perd le hook de plugin écouté | le retour du droit, de lui-même, ou le créateur qui modifie la règle (autre agent d’exécution ou autre agent démarré) |
 | Adhésion terminée | le créateur est retiré, part ou est supprimé ; le réinviter n’y change rien | jamais : il reste à dupliquer |
 
-Un agent qui a l’accès à l’installation n’écrit des règles que dans une conversation
-dont toutes les entrées, depuis sa création, ont été écrites par une même personne sur
-le web, Android ou le MCP public : messages, orientations, réponses aux questions, et
-modifications d’un message en attente, qui comptent comme une entrée de celui qui
-modifie. Une conversation qu’une règle, un agent, `cairn_installation` ou une autre
-personne a atteinte, une tâche (planifiée, lancée à la main ou déléguée) et une
-mission ne le permettent jamais, même plus tard ; pas plus qu’une conversation dont
-l’agent a vu ses instructions ou ses skills modifiées, depuis sa création, par un
-autre que cette personne (une skill importée d’une source compte comme écrite par
-celui qui l’importe, risque résiduel accepté comme ci-dessous), ou dont l’agent suit
-des instructions ou des skills qu’un agent a écrites, à quelque moment que ce soit
-(les instructions d’un plugin comptent comme écrites par le propriétaire qui l’a
-accordé, y compris pour les droits antérieurs à cette décision, que seul le
-propriétaire pouvait donner). Il écrit au nom de cette personne : il crée des règles à
-son nom, et ne modifie, désactive, réactive ou supprime que les règles de ce compte.
-Tant qu’une règle de cette personne est en pause d’urgence ou au budget épuisé, il
-n’écrit aucune de ses règles : ni création, ni duplication, ni modification, ni
-réactivation, ni suppression, seule la désactivation restant permise ; il ne lève
-jamais ces empêchements et ne duplique la règle en pause ou au budget épuisé de
-personne. Il n’accorde de droits à aucun agent ni à aucun compte, et ne touche pas à
-la règle d’un autre compte. Enfin, dans toute conversation, il ne réduit pas un droit
-sur un hook ou un outil qu’utilise, sur son agent d’exécution, la règle d’un autre
-compte que cette personne (le propriétaire, ou un membre dont l’adhésion dure),
-ressources comprises et quel que soit l’état de la règle ; hors d’une conversation qui
-remplit ces conditions, cela vaut pour les règles de tous les comptes. Une
-conversation, des instructions ou des skills dont Cairn n’a pas enregistré qui les a
-écrits, comme tout ce qui précède cette décision, ne permettent jamais d’écrire des
-règles. Une règle créée par le MCP public a pour créateur le propriétaire qui a
-autorisé ce client.
+Un agent qui a l’accès à l’installation n’écrit des règles que dans un tour lancé par
+une entrée de cette personne, et dans une conversation dont toutes les entrées, depuis
+sa création, ont été écrites par une même personne sur le web, Android ou le MCP
+public : messages, orientations, réponses aux questions, et modifications d’un message
+en attente, qui comptent comme une entrée de celui qui modifie. Une conversation
+qu’une règle, un agent, `cairn_installation` ou une autre personne a atteinte (lire le
+rapport d’une tâche déléguée compte comme une entrée d’agent), une tâche (planifiée,
+lancée à la main ou déléguée) et une mission ne le permettent jamais, même plus tard ;
+pas plus qu’une conversation dont l’agent a vu ses instructions ou ses skills
+modifiées, depuis sa création, par un autre que cette personne (une skill importée
+d’une source compte comme écrite par celui qui l’importe, risque résiduel accepté
+comme ci-dessous), ou dont l’agent suit des instructions ou des skills qu’un agent a
+écrites, à quelque moment que ce soit (les instructions d’un plugin comptent comme
+écrites par le propriétaire qui l’a accordé, y compris pour les droits antérieurs à
+cette décision, que seul le propriétaire pouvait donner). Il écrit au nom de cette
+personne : il crée des règles à son nom, et ne modifie, désactive, réactive ou
+supprime que les règles de ce compte. Tant qu’une règle de cette personne est en pause
+d’urgence ou au budget épuisé, il n’écrit aucune de ses règles : ni création, ni
+duplication, ni modification, ni réactivation, ni suppression, seule la désactivation
+restant permise ; il ne lève jamais ces empêchements et ne duplique la règle en pause
+ou au budget épuisé de personne. Il n’accorde de droits à aucun agent ni à aucun
+compte, et ne touche pas à la règle d’un autre compte. Enfin, dans toute conversation,
+il ne réduit pas un droit sur un hook ou un outil qu’utilise, sur son agent
+d’exécution, la règle d’un autre compte que cette personne (le propriétaire, ou un
+membre dont l’adhésion dure), ressources comprises et quel que soit l’état de la
+règle ; hors d’une conversation qui remplit ces conditions, cela vaut pour les règles
+de tous les comptes. Une conversation, des instructions ou des skills dont Cairn n’a
+pas enregistré qui les a écrits, comme tout ce qui précède cette décision, ne
+permettent jamais d’écrire des règles. Une règle créée par le MCP public a pour
+créateur le propriétaire qui a autorisé ce client.
 
 Une règle n’atteint un agent dont la politique autorise l’exécution native, ou une
 conversation qui s’exécute en natif, que si son créateur détenait l’autorité native
@@ -380,9 +383,9 @@ comptes : un agent qui répond à un salon public ne devrait pas l’avoir. De 
 un tour qu’une personne a lancé, un agent qui lit un contenu externe par un outil (un
 salon, une issue), ou les fichiers d’instructions d’un dépôt (`AGENTS.md`, skills d’un
 projet, qui sont du contenu de projet et non des instructions de Cairn), peut être
-poussé à écrire une règle durable au nom de cette personne ; ce risque résiduel est
-accepté, et l’historique d’une règle montre dans quelle conversation elle a été
-écrite.
+poussé à écrire une règle durable au nom de cette personne ; il en va de même des
+descriptions d’outils d’une connexion MCP ; ce risque résiduel est accepté, et les
+versions d’une règle montrent dans quelle conversation chacune a été écrite.
 
 Comme toute capacité de l’interface, les règles (éditeur compris) et les droits par
 ressource arrivent sur le web, Android, le MCP public et `cairn_installation` en même
