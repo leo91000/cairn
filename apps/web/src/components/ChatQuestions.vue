@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { ChatQuestion } from '../../../../packages/contracts/chats'
 import { computed, ref, watch } from 'vue'
-import { validQuestionAnswer } from '../../../../packages/contracts/chats'
+import { questionFields, validQuestionAnswer } from '../../../../packages/contracts/chats'
 import { api, state } from '../api'
 import { ChevronDown, MessageCircleQuestion, Send } from '../icons'
 import { exclusiveSuspensionLabel } from '../run-status'
@@ -21,6 +21,12 @@ const pending = computed(() => props.questions.filter(question => question.statu
 const open = ref(false)
 const selected = ref('')
 const question = computed(() => pending.value.find(question => question.id === selected.value) ?? pending.value[0])
+const fields = computed(() => {
+  const parsed = questionFields.safeParse(question.value?.fields)
+  if (!parsed.success || parsed.data.some(field => new Set(field.options.map(option => option.id)).size !== field.options.length))
+    return null
+  return parsed.data
+})
 const answers = ref<Record<string, Record<string, string[]>>>({})
 const custom = ref<Record<string, Record<string, string>>>({})
 const busy = ref(false)
@@ -41,7 +47,7 @@ watch(() => [props.highlighted, pending.value.length], () => {
     open.value = true
   }
 }, { immediate: true })
-const ready = computed(() => question.value?.fields.every(field => validQuestionAnswer(field, {
+const ready = computed(() => fields.value?.every(field => validQuestionAnswer(field, {
   selected: answers.value[question.value!.id]?.[field.id] ?? [],
   comment: custom.value[question.value!.id]?.[field.id] ?? '',
 })))
@@ -80,12 +86,12 @@ function selectionFeedback(field: ChatQuestion['fields'][number]) {
 
 async function send() {
   const current = question.value
-  if (!current || !ready.value || busy.value)
+  if (!current || !fields.value || !ready.value || busy.value)
     return
   busy.value = true
   error.value = ''
   try {
-    const values = Object.fromEntries(current.fields.map(field => [field.id, {
+    const values = Object.fromEntries(fields.value.map(field => [field.id, {
       selected: field.options.filter(option => answers.value[current.id]?.[field.id]?.includes(option.id)).map(option => option.id),
       comment: custom.value[current.id]?.[field.id]?.trim() ?? '',
     }]))
@@ -159,13 +165,16 @@ async function withdraw() {
           </button>
         </div>
       </div>
-      <fieldset v-for="field in question.fields" :key="`${question.id}:${field.id}`" class="min-w-0 space-y-2.5">
+      <UiAlert v-if="!fields">
+        This question uses an unsupported format. Update the Cairn installation, then ask the agent to ask again. You can withdraw this question below.
+      </UiAlert>
+      <fieldset v-for="field in fields ?? []" :key="`${question.id}:${field.id}`" class="min-w-0 space-y-2.5">
         <legend class="mb-3 text-base! leading-relaxed! font-semibold! text-ink! break-words">
           {{ field.title }}
         </legend>
         <label
-          v-for="(option, index) in field.options"
-          :key="index"
+          v-for="option in field.options"
+          :key="option.id"
           class="flex! flex-row! cursor-pointer items-start gap-3 rounded-xl border p-3.5 transition-colors hover:border-accent/50"
           :class="answers[question.id]?.[field.id]?.includes(option.id) ? 'border-accent bg-accent/8' : 'border-line bg-surface'"
         >

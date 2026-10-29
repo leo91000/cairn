@@ -1910,6 +1910,7 @@ internal fun QuestionDialog(
     select: (ChatQuestion) -> Unit,
     close: () -> Unit,
 ) {
+    val supported = question.fields.isNotEmpty() && question.fields.all { it.supportsAnswers }
     // Private answers never enter SavedState or on-disk drafts.
     var answers by remember(question.id) { mutableStateOf<Map<String, String>>(emptyMap()) }
     var selected by remember(question.id) { mutableStateOf<Map<String, List<String>>>(emptyMap()) }
@@ -1947,109 +1948,118 @@ internal fun QuestionDialog(
                             ) { key ->
                                 select(questions.first { it.id == key })
                             }
-                        question.fields.forEach { field ->
-                            Text(field.title, style = MaterialTheme.typography.titleMedium)
-                            field.options.forEach { option ->
-                                val checked = selected[field.id].orEmpty().contains(option.id)
-                                val toggle = {
-                                    val current = selected[field.id].orEmpty()
-                                    val next =
-                                        if (field.mode == "single") listOf(option.id)
-                                        else if (checked) current - option.id
-                                        else current + option.id
-                                    selected = selected + (field.id to next)
-                                }
-                                OutlinedCard(
-                                    onClick = toggle,
-                                    modifier = Modifier.fillMaxWidth(),
-                                    colors =
-                                        CardDefaults.outlinedCardColors(
-                                            containerColor =
-                                                if (checked)
-                                                    MaterialTheme.colorScheme.secondaryContainer
-                                                else MaterialTheme.colorScheme.surface
-                                        ),
-                                ) {
-                                    Row(
-                                        Modifier.padding(12.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
+                        if (!supported)
+                            Text(
+                                "Cette question utilise un format non pris en charge. Mettez à jour l’installation Cairn, puis demandez à l’agent de reposer la question. Vous pouvez retirer cette demande ci-dessous.",
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        if (supported)
+                            question.fields.forEach { field ->
+                                Text(field.title, style = MaterialTheme.typography.titleMedium)
+                                field.options.forEach { option ->
+                                    val checked = selected[field.id].orEmpty().contains(option.id)
+                                    val toggle = {
+                                        val current = selected[field.id].orEmpty()
+                                        val next =
+                                            if (field.mode == "single") listOf(option.id)
+                                            else if (checked) current - option.id
+                                            else current + option.id
+                                        selected = selected + (field.id to next)
+                                    }
+                                    OutlinedCard(
+                                        onClick = toggle,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors =
+                                            CardDefaults.outlinedCardColors(
+                                                containerColor =
+                                                    if (checked)
+                                                        MaterialTheme.colorScheme.secondaryContainer
+                                                    else MaterialTheme.colorScheme.surface
+                                            ),
                                     ) {
-                                        if (field.mode == "multiple")
-                                            Checkbox(checked, { toggle() })
-                                        else RadioButton(checked, toggle)
-                                        Column {
-                                            Text(option.label)
-                                            if (option.recommended)
-                                                Text(
-                                                    "Recommandé",
-                                                    color = MaterialTheme.colorScheme.primary,
-                                                )
-                                            if (option.description.isNotBlank())
-                                                Text(
-                                                    option.description,
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                )
+                                        Row(
+                                            Modifier.padding(12.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            if (field.mode == "multiple")
+                                                Checkbox(checked, { toggle() })
+                                            else RadioButton(checked, toggle)
+                                            Column {
+                                                Text(option.label)
+                                                if (option.recommended)
+                                                    Text(
+                                                        "Recommandé",
+                                                        color = MaterialTheme.colorScheme.primary,
+                                                    )
+                                                if (option.description.isNotBlank())
+                                                    Text(
+                                                        option.description,
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                    )
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            if (field.options.isNotEmpty()) {
-                                val minimum = field.minChoices ?: 1
-                                val maximum =
-                                    if (field.mode == "single") 1
-                                    else field.maxChoices ?: field.options.size
-                                val range =
-                                    if (minimum == maximum) "$minimum" else "$minimum à $maximum"
-                                Text(
-                                    if (field.mode == "multiple")
-                                        "Choisissez $range options, ou répondez en texte libre."
-                                    else "Choisissez une option, ou répondez en texte libre.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                                if (field.mode == "multiple") {
-                                    val count = selected[field.id].orEmpty().size
-                                    val detail =
-                                        when {
-                                            count > maximum -> " · Retirez ${count - maximum} choix"
-                                            count in 1 until minimum ->
-                                                " · Encore ${minimum - count} choix"
-                                            else -> ""
-                                        }
+                                if (field.options.isNotEmpty()) {
+                                    val minimum = field.minChoices ?: 1
+                                    val maximum =
+                                        if (field.mode == "single") 1
+                                        else field.maxChoices ?: field.options.size
+                                    val range =
+                                        if (minimum == maximum) "$minimum"
+                                        else "$minimum à $maximum"
                                     Text(
-                                        "Choix sélectionnés : $count$detail",
+                                        if (field.mode == "multiple")
+                                            "Choisissez $range options, ou répondez en texte libre."
+                                        else "Choisissez une option, ou répondez en texte libre.",
                                         style = MaterialTheme.typography.bodySmall,
-                                        color =
-                                            if (detail.isNotEmpty()) MaterialTheme.colorScheme.error
-                                            else MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
-                                }
-                                if (selected[field.id].orEmpty().isNotEmpty())
-                                    TextButton(
-                                        onClick = {
-                                            selected = selected + (field.id to emptyList())
-                                        }
-                                    ) {
-                                        Text("Effacer les choix")
+                                    if (field.mode == "multiple") {
+                                        val count = selected[field.id].orEmpty().size
+                                        val detail =
+                                            when {
+                                                count > maximum ->
+                                                    " · Retirez ${count - maximum} choix"
+                                                count in 1 until minimum ->
+                                                    " · Encore ${minimum - count} choix"
+                                                else -> ""
+                                            }
+                                        Text(
+                                            "Choix sélectionnés : $count$detail",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color =
+                                                if (detail.isNotEmpty())
+                                                    MaterialTheme.colorScheme.error
+                                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
                                     }
+                                    if (selected[field.id].orEmpty().isNotEmpty())
+                                        TextButton(
+                                            onClick = {
+                                                selected = selected + (field.id to emptyList())
+                                            }
+                                        ) {
+                                            Text("Effacer les choix")
+                                        }
+                                }
+                                if (field.secret)
+                                    OutlinedTextField(
+                                        answers[field.id].orEmpty(),
+                                        { answers = answers + (field.id to it.take(10000)) },
+                                        Modifier.fillMaxWidth(),
+                                        label = { Text("Réponse privée") },
+                                        visualTransformation = PasswordVisualTransformation(),
+                                        keyboardOptions = InputKeyboards.Password,
+                                    )
+                                else
+                                    Field(
+                                        if (field.options.isEmpty()) "Réponse"
+                                        else "Commentaire ou réponse libre",
+                                        answers[field.id].orEmpty(),
+                                        { answers = answers + (field.id to it.take(10000)) },
+                                        2,
+                                    )
                             }
-                            if (field.secret)
-                                OutlinedTextField(
-                                    answers[field.id].orEmpty(),
-                                    { answers = answers + (field.id to it.take(10000)) },
-                                    Modifier.fillMaxWidth(),
-                                    label = { Text("Réponse privée") },
-                                    visualTransformation = PasswordVisualTransformation(),
-                                    keyboardOptions = InputKeyboards.Password,
-                                )
-                            else
-                                Field(
-                                    if (field.options.isEmpty()) "Réponse"
-                                    else "Commentaire ou réponse libre",
-                                    answers[field.id].orEmpty(),
-                                    { answers = answers + (field.id to it.take(10000)) },
-                                    2,
-                                )
-                        }
                         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                         TextButton(
                             onClick = {
@@ -2113,6 +2123,7 @@ internal fun QuestionDialog(
                         },
                         enabled =
                             !state.busy &&
+                                supported &&
                                 question.fields.all {
                                     it.accepts(selected[it.id].orEmpty(), answers[it.id].orEmpty())
                                 },

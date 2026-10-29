@@ -68,6 +68,7 @@ class ChatJourneyTest {
                                         QuestionOption(
                                             "Application entière",
                                             "Inclure le client Android et le serveur",
+                                            id = "application",
                                         )
                                     ),
                             )
@@ -470,7 +471,7 @@ class ChatJourneyTest {
                     .parseToJsonElement(calls.first { it.second.endsWith("/answer") }.third)
                     .jsonObject
             assertEquals(
-                "Application entière",
+                "application",
                 answer["answers"]!!
                     .jsonObject["scope"]!!
                     .jsonObject["selected"]!!
