@@ -197,3 +197,46 @@ test('cyclic subgraphs fall back to readable source without blocking the page', 
   await expect(page.locator('#app .diagram-error')).toContainText('Subgraphs cannot contain themselves.')
   await expect(page.locator('#app .diagram-source')).toContainText('subgraph S')
 })
+
+test('full-screen node links remain clickable after zoom and pan without navigating on a drag', async ({ page }) => {
+  await page.evaluate(text => window.chatRendering.markdown(text), '\`\`\`mermaid\nflowchart TD\nA[Documentation]\nclick A "https://example.test/docs"\n\`\`\`')
+  await page.getByRole('button', { name: 'Open diagram' }).click()
+  const viewer = page.getByRole('dialog', { name: 'Flowchart' })
+  const label = viewer.locator('svg a text')
+  await expect(label).toBeVisible()
+  await page.evaluate(() => {
+    document.addEventListener('click', (event) => {
+      const anchor = event.target instanceof Element ? event.target.closest('a[href]') : null
+      if (anchor) {
+        document.body.dataset.viewerLink = anchor.getAttribute('href')!
+        event.preventDefault()
+      }
+    })
+  })
+  const center = () => label.evaluate((element) => {
+    const bounds = element.getBoundingClientRect()
+    return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }
+  })
+  let point = await center()
+  await page.mouse.click(point.x, point.y)
+  await expect(page.locator('body')).toHaveAttribute('data-viewer-link', 'https://example.test/docs')
+  await page.evaluate(() => delete document.body.dataset.viewerLink)
+  await viewer.getByRole('button', { name: 'Zoom in' }).click()
+  point = await center()
+  await page.mouse.move(point.x, point.y)
+  await page.mouse.down()
+  await page.mouse.move(point.x + 80, point.y + 50, { steps: 5 })
+  await page.mouse.up()
+  await expect(page.locator('body')).not.toHaveAttribute('data-viewer-link')
+  const moved = await center()
+  expect(moved.x - point.x).toBeGreaterThan(60)
+  await page.mouse.click(moved.x, moved.y)
+  await expect(page.locator('body')).toHaveAttribute('data-viewer-link', 'https://example.test/docs')
+})
+
+test('RGBA and HSLA author styles retain valid SVG colors', async ({ page }) => {
+  await page.evaluate(text => window.chatRendering.markdown(text), '\`\`\`mermaid\nflowchart LR\nA[Red] --> B[Blue]\nstyle A fill:rgba(255,0,0,0.5),stroke:navy\nstyle B fill:hsla(240,100%,50%,0.5),stroke:red\n\`\`\`')
+  const nodes = page.locator('#app figure.diagram svg path.diagram-raised')
+  await expect(nodes.nth(0)).toHaveCSS('fill', 'rgba(255, 0, 0, 0.5)')
+  await expect(nodes.nth(1)).toHaveCSS('fill', 'rgba(0, 0, 255, 0.5)')
+})

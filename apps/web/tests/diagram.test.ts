@@ -115,6 +115,14 @@ describe('diagram layout', () => {
     expect(label?.kind === 'text' && label.fill).toEqual({ color: ink })
   })
 
+  it('preserves both self-loop arrowheads and author dash styles', () => {
+    const one = layoutDiagram(parseDiagram('flowchart TD\nA --> A'), measure)
+    const both = layoutDiagram(parseDiagram('flowchart TD\nA <--> A\nlinkStyle 0 stroke-dasharray:4 2'), measure)
+    expect(both.items.length).toBe(one.items.length + 1)
+    const loop = both.items.find(item => item.kind === 'path' && item.d.some(([op]) => op === 'C') && item.stroke && 'tone' in item.stroke && item.stroke.tone === 'edge')
+    expect(loop?.kind === 'path' && loop.dash).toEqual([4, 4])
+  })
+
   it('wraps long labels between words and inside long words', () => {
     expect(wrapText('alpha beta gamma', 10, 400, 50, measure)).toEqual(['alpha', 'beta', 'gamma'])
     expect(wrapText('abcdefghijklmnop', 10, 400, 30, measure)).toEqual(['abcde', 'fghij', 'klmno', 'p'])

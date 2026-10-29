@@ -45,8 +45,10 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -565,7 +567,8 @@ internal fun DiagramFigure(
         }
     }
 
-    if (viewing && scene != null) DiagramViewer(diagram, scene, close = { viewing = false })
+    if (viewing && scene != null)
+        DiagramViewer(diagram, scene, openLink, close = { viewing = false })
 }
 
 /**
@@ -629,7 +632,12 @@ private const val MAX_ZOOM = 6f
 
 /** Full-screen view: pinch to zoom, drag to move, double tap to fit, share as an image. */
 @Composable
-private fun DiagramViewer(diagram: DiagramRender, scene: Scene, close: () -> Unit) {
+private fun DiagramViewer(
+    diagram: DiagramRender,
+    scene: Scene,
+    openLink: (String) -> Unit,
+    close: () -> Unit,
+) {
     val context = LocalContext.current
     val density = LocalDensity.current.density
     val colors = diagramColors()
@@ -736,10 +744,35 @@ private fun DiagramViewer(diagram: DiagramRender, scene: Scene, close: () -> Uni
                             fitted = false
                         }
                     }
-                    .pointerInput(Unit) { detectTapGestures(onDoubleTap = { fit() }) }
+                    .pointerInput(scene) {
+                        detectTapGestures(
+                            onDoubleTap = { fit() },
+                            onTap = { position ->
+                                val x = (position.x - offset.x) / (scale * density)
+                                val y = (position.y - offset.y) / (scale * density)
+                                drawing.links
+                                    .firstOrNull { (bounds, _) -> bounds.contains(x, y) }
+                                    ?.let { (_, link) -> openLink(link) }
+                            },
+                        )
+                    }
                     .testTag("diagram-stage")
             ) {
-                Canvas(Modifier.fillMaxSize().semantics { contentDescription = scene.label }) {
+                Canvas(
+                    Modifier.fillMaxSize().semantics {
+                        contentDescription = scene.label
+                        customActions =
+                            drawing.links
+                                .map { it.second }
+                                .distinct()
+                                .map { link ->
+                                    CustomAccessibilityAction("Ouvrir $link") {
+                                        openLink(link)
+                                        true
+                                    }
+                                }
+                    }
+                ) {
                     drawIntoCanvas { canvas ->
                         canvas.nativeCanvas.withTranslation(offset.x, offset.y) {
                             scale(scale * density, scale * density)

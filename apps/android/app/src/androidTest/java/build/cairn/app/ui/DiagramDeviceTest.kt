@@ -97,6 +97,8 @@ class DiagramDeviceTest {
             compose.onNodeWithContentDescription("Agrandir").performClick()
             val stage = compose.onNodeWithTag("diagram-stage")
             stage.assertIsDisplayed()
+            stage.performTouchInput { click(center) }
+            compose.waitUntil(10000) { intents.count { it.action == Intent.ACTION_VIEW } == 2 }
             fun zoom() =
                 compose
                     .onAllNodesWithContentDescription("Ajuster à l’écran")
@@ -122,6 +124,8 @@ class DiagramDeviceTest {
             assertFalse("Panning must move the actual drawing", beforePan.sameAs(afterPan))
             beforePan.recycle()
             afterPan.recycle()
+            stage.performTouchInput { click(center + Offset(80f, 50f)) }
+            compose.waitUntil(10000) { intents.count { it.action == Intent.ACTION_VIEW } == 3 }
             stage.performTouchInput { doubleClick(center) }
             compose.waitForIdle()
             assertEquals(fitted, zoom())

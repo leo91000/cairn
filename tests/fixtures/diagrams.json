@@ -2229,6 +2229,246 @@
         "height": 206,
         "items": 9
       }
+    },
+    {
+      "name": "self-loop-TD",
+      "source": "flowchart TD\nA -->|retry| A",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "retry",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 155,
+        "height": 108,
+        "items": 6
+      }
+    },
+    {
+      "name": "self-loop-BT",
+      "source": "flowchart BT\nA -->|retry| A",
+      "diagram": {
+        "kind": "graph",
+        "direction": "BT",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "retry",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 155,
+        "height": 108,
+        "items": 6
+      }
+    },
+    {
+      "name": "self-loop-LR",
+      "source": "flowchart LR\nA -->|retry| A",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "retry",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 131,
+        "height": 141,
+        "items": 6
+      }
+    },
+    {
+      "name": "self-loop-RL",
+      "source": "flowchart RL\nA -->|retry| A",
+      "diagram": {
+        "kind": "graph",
+        "direction": "RL",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "retry",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 131,
+        "height": 141,
+        "items": 6
+      }
+    },
+    {
+      "name": "self-loop-multiline",
+      "source": "flowchart TD\nA -->|one<br>two<br>three<br>four<br>five<br>six<br>seven| A",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "one\ntwo\nthree\nfour\nfive\nsix\nseven",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 155,
+        "height": 147,
+        "items": 6
+      }
+    },
+    {
+      "name": "self-loop-styled",
+      "source": "flowchart TD\nA <--> A\nlinkStyle 0 stroke-dasharray:4 2",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "",
+            "line": "solid",
+            "start": "arrow",
+            "end": "arrow",
+            "length": 1,
+            "style": {
+              "dashed": true
+            }
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 125,
+        "height": 108,
+        "items": 5
+      }
+    },
+    {
+      "name": "alpha-colors",
+      "source": "flowchart LR\nA[Red] --> B[Blue]\nstyle A fill:rgba(255,0,0,0.5),stroke:navy\nstyle B fill:hsla(240,100%,50%,0.5),stroke:red",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Red",
+            "shape": "rect",
+            "style": {
+              "fill": "rgba(255,0,0,0.5)",
+              "stroke": "navy"
+            }
+          },
+          {
+            "id": "B",
+            "label": "Blue",
+            "shape": "rect",
+            "style": {
+              "fill": "hsla(240,100%,50%,0.5)",
+              "stroke": "red"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 195,
+        "height": 66,
+        "items": 6
+      }
     }
   ],
   "errors": [

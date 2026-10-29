@@ -349,13 +349,12 @@ private val COLOR =
         "(?:#[0-9A-Fa-f]{3,8}|(?:[Rr][Gg][Bb][Aa]?|[Hh][Ss][Ll][Aa]?)\\([0-9$SPACE_CHARS.,%/-]+\\)|[A-Za-z]{3,20})"
     )
 private val IMPORTANT = Regex("![Ii][Mm][Pp][Oo][Rr][Tt][Aa][Nn][Tt]")
-private val STYLE_SEPARATOR = Regex("[,;]")
 
 internal fun isDiagramColor(value: String) = COLOR.matches(value)
 
 private fun parseStyle(value: String): DiagramStyle? {
     var style = DiagramStyle()
-    for (part in value.split(STYLE_SEPARATOR)) {
+    for (part in splitStyle(value)) {
         val separator = part.indexOf(':')
         if (separator < 0) continue
         val key = jsTrim(part.substring(0, separator)).lowercase()
@@ -380,11 +379,24 @@ private fun parseStyle(value: String): DiagramStyle? {
     return style.takeUnless { it.isEmpty }
 }
 
-private val PARENTHESES = Regex("\\(([^)]*)\\)")
-
-// Mermaid's rgb()/rgba() can contain commas, which the property split above must keep together.
-private fun splitStyle(value: String) =
-    PARENTHESES.replace(value) { "(${it.groupValues[1].replace(',', ' ')})" }
+// Split properties outside color functions, preserving valid legacy and modern CSS syntax.
+private fun splitStyle(value: String): List<String> {
+    val parts = mutableListOf<String>()
+    var start = 0
+    var depth = 0
+    for ((index, character) in value.withIndex()) {
+        when {
+            character == '(' -> depth++
+            character == ')' -> depth = maxOf(0, depth - 1)
+            depth == 0 && (character == ',' || character == ';') -> {
+                parts.add(value.substring(start, index))
+                start = index + 1
+            }
+        }
+    }
+    parts.add(value.substring(start))
+    return parts
+}
 
 private fun mergeStyle(vararg styles: DiagramStyle?): DiagramStyle? {
     var merged = DiagramStyle()
@@ -508,7 +520,7 @@ private class GraphBuilder {
         if (keyword == "classDef" || keyword == "style" || keyword == "linkStyle") {
             val (target, body) = head(rest)
             if (body.isEmpty()) return false
-            val style = parseStyle(splitStyle(body))
+            val style = parseStyle(body)
             if (keyword == "classDef") {
                 for (name in target.split(',')) classes[jsTrim(name)] =
                     mergeStyle(classes[jsTrim(name)], style) ?: DiagramStyle()

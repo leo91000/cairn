@@ -274,7 +274,7 @@ const COLOR = /^(?:#[\da-f]{3,8}|(?:rgba?|hsla?)\([\d\s.,%/-]+\)|[a-z]{3,20})$/i
 
 function parseStyle(value: string): DiagramStyle | undefined {
   const style: DiagramStyle = {}
-  for (const part of value.split(/[,;]/)) {
+  for (const part of splitStyle(value)) {
     const separator = part.indexOf(':')
     if (separator < 0)
       continue
@@ -302,9 +302,27 @@ function parseStyle(value: string): DiagramStyle | undefined {
   return Object.keys(style).length ? style : undefined
 }
 
-// Mermaid's rgb()/rgba() can contain commas, which the property split above must keep together.
+// Split properties outside color functions, preserving valid legacy and modern CSS syntax.
 function splitStyle(value: string) {
-  return value.replace(/\(([^)]*)\)/g, (_, inner: string) => `(${inner.replaceAll(',', ' ')})`)
+  const parts: string[] = []
+  let start = 0
+  let depth = 0
+  for (let index = 0; index < value.length; index++) {
+    const character = value[index]
+    if (character === '(') {
+      depth++
+    }
+    else if (character === ')') {
+      depth = Math.max(0, depth - 1)
+    }
+    else if (!depth && (character === ',' || character === ';')) {
+      parts.push(value.slice(start, index))
+      start = index + 1
+    }
+  }
+
+  parts.push(value.slice(start))
+  return parts
 }
 
 function mergeStyle(...styles: (DiagramStyle | undefined)[]) {
@@ -427,7 +445,7 @@ class GraphBuilder {
       const [target, body] = head(rest)
       if (!body)
         return false
-      const style = parseStyle(splitStyle(body))
+      const style = parseStyle(body)
       if (keyword === 'classDef') {
         for (const name of target.split(','))
           this.classes.set(name.trim(), mergeStyle(this.classes.get(name.trim()), style) ?? {})

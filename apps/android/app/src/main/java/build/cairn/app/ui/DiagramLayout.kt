@@ -677,6 +677,87 @@ private fun <T> backLinks(
     return back
 }
 
+/** Include every drawn primitive, including loop labels that extend beyond ranked nodes. */
+private fun fitScene(scene: Scene, measure: TextMeasure): Scene {
+    var left = 0.0
+    var top = 0.0
+    var right = scene.width
+    var bottom = scene.height
+    fun include(x: Double, y: Double) {
+        if (x < 0) left = min(left, x - MARGIN)
+        if (y < 0) top = min(top, y - MARGIN)
+        if (x > scene.width) right = max(right, x + MARGIN)
+        if (y > scene.height) bottom = max(bottom, y + MARGIN)
+    }
+    for (item in scene.items) {
+        when (item) {
+            is PathItem -> {
+                val stroke = (item.width ?: 0.0) / 2
+                fun point(x: Double, y: Double) {
+                    include(x - stroke, y - stroke)
+                    include(x + stroke, y + stroke)
+                }
+                for (command in item.d) {
+                    when (command) {
+                        is PathCommand.Move -> point(command.x, command.y)
+                        is PathCommand.Line -> point(command.x, command.y)
+                        is PathCommand.Cubic -> {
+                            point(command.x1, command.y1)
+                            point(command.x2, command.y2)
+                            point(command.x, command.y)
+                        }
+                        PathCommand.Close -> Unit
+                    }
+                }
+            }
+            is TextItem -> {
+                val width =
+                    item.lines.maxOfOrNull { measure.width(it, item.size, item.weight) } ?: 0.0
+                val x =
+                    item.x -
+                        when (item.anchor) {
+                            TextAnchor.MIDDLE -> width / 2
+                            TextAnchor.END -> width
+                            TextAnchor.START -> 0.0
+                        }
+                val height = item.lines.size * lineHeight(item.size)
+                include(x, item.y - height / 2)
+                include(x + width, item.y + height / 2)
+            }
+        }
+    }
+    if (left == 0.0 && top == 0.0 && right == scene.width && bottom == scene.height) return scene
+    val items =
+        scene.items.map { item ->
+            when (item) {
+                is TextItem -> item.copy(x = item.x - left, y = item.y - top)
+                is PathItem ->
+                    item.copy(
+                        d =
+                            item.d.map { command ->
+                                when (command) {
+                                    is PathCommand.Move ->
+                                        PathCommand.Move(command.x - left, command.y - top)
+                                    is PathCommand.Line ->
+                                        PathCommand.Line(command.x - left, command.y - top)
+                                    is PathCommand.Cubic ->
+                                        PathCommand.Cubic(
+                                            command.x1 - left,
+                                            command.y1 - top,
+                                            command.x2 - left,
+                                            command.y2 - top,
+                                            command.x - left,
+                                            command.y - top,
+                                        )
+                                    PathCommand.Close -> PathCommand.Close
+                                }
+                            }
+                    )
+            }
+        }
+    return Scene(ceil(right - left), ceil(bottom - top), items, scene.label)
+}
+
 internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     if (graph.nodes.isEmpty() && graph.clusters.isEmpty())
         throw DiagramError("This diagram has nothing to draw.")
@@ -1649,7 +1730,7 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         val top = node.y - min(node.h / 4, 10.0)
         val bottom = node.y + min(node.h / 4, 10.0)
         val inset = headInset(edge.end)
-        val start = transform(Pt(right, top))
+        val start = transform(Pt(right + headInset(edge.start), top))
         val control1 = transform(Pt(right + reach, top - reach * 0.7))
         val control2 = transform(Pt(right + reach, bottom + reach * 0.7))
         val end = transform(Pt(right + inset, bottom))
@@ -1666,7 +1747,10 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
                     d = d,
                     stroke = paint,
                     width = strokeWidth,
-                    dash = if (edge.line == EdgeLine.DOTTED) listOf(4.0, 4.0) else null,
+                    dash =
+                        if (edge.line == EdgeLine.DOTTED || edge.style?.dashed == true)
+                            listOf(4.0, 4.0)
+                        else null,
                 )
             )
             val origin = transform(Pt(0.0, 0.0))
@@ -1675,6 +1759,15 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
                 headPaths(
                     edge.end,
                     transform(Pt(right, bottom)),
+                    Pt(back.x - origin.x, back.y - origin.y),
+                    paint,
+                    strokeWidth,
+                )
+            )
+            edgeItems.addAll(
+                headPaths(
+                    edge.start,
+                    transform(Pt(right, top)),
                     Pt(back.x - origin.x, back.y - origin.y),
                     paint,
                     strokeWidth,
@@ -1765,11 +1858,14 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     items.addAll(labelItems)
     items.addAll(nodeItems)
     val count = graph.nodes.size
-    return Scene(
-        width,
-        height,
-        items,
-        graph.title ?: "Flowchart with $count ${if (count == 1) "node" else "nodes"}",
+    return fitScene(
+        Scene(
+            width,
+            height,
+            items,
+            graph.title ?: "Flowchart with $count ${if (count == 1) "node" else "nodes"}",
+        ),
+        measure,
     )
 }
 

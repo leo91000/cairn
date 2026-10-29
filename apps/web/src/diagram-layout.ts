@@ -553,6 +553,58 @@ interface Box {
   h: number
 }
 
+/** Include every drawn primitive, including loop labels that extend beyond ranked nodes. */
+function fitScene(scene: Scene, measure: TextMeasure): Scene {
+  let left = 0
+  let top = 0
+  let right = scene.width
+  let bottom = scene.height
+  const include = (x: number, y: number) => {
+    if (x < 0)
+      left = Math.min(left, x - MARGIN)
+    if (y < 0)
+      top = Math.min(top, y - MARGIN)
+    if (x > scene.width)
+      right = Math.max(right, x + MARGIN)
+    if (y > scene.height)
+      bottom = Math.max(bottom, y + MARGIN)
+  }
+
+  for (const item of scene.items) {
+    if (item.kind === 'path') {
+      const stroke = (item.width ?? 0) / 2
+      for (const [, ...values] of item.d) {
+        for (let index = 0; index < values.length; index += 2) {
+          include(values[index]! - stroke, values[index + 1]! - stroke)
+          include(values[index]! + stroke, values[index + 1]! + stroke)
+        }
+      }
+    }
+    else {
+      const width = Math.max(0, ...item.lines.map(line => measure.width(line, item.size, item.weight)))
+      const x = item.x - (item.anchor === 'middle' ? width / 2 : item.anchor === 'end' ? width : 0)
+      const height = item.lines.length * lineHeight(item.size)
+      include(x, item.y - height / 2)
+      include(x + width, item.y + height / 2)
+    }
+  }
+
+  if (!left && !top && right === scene.width && bottom === scene.height)
+    return scene
+  const items = scene.items.map((item): SceneItem => {
+    if (item.kind === 'text')
+      return { ...item, x: item.x - left, y: item.y - top }
+    const d = item.d.map(([op, ...values]) => [op, ...values.map((value, index) => value - (index % 2 ? top : left))]) as PathCommand[]
+    return { ...item, d }
+  })
+  return {
+    ...scene,
+    width: Math.ceil(right - left),
+    height: Math.ceil(bottom - top),
+    items,
+  }
+}
+
 export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
   if (!graph.nodes.length && !graph.clusters.length)
     throw new DiagramError('This diagram has nothing to draw.')
@@ -1553,7 +1605,7 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     const bottom = node.y + Math.min(node.h / 4, 10)
     const inset = headInset(edge.end)
     const d: PathCommand[] = [
-      ['M', ...transform([right, top])],
+      ['M', ...transform([right + headInset(edge.start), top])],
       ['C', ...transform([right + reach, top - reach * 0.7]), ...transform([right + reach, bottom + reach * 0.7]), ...transform([right + inset, bottom])],
     ]
     const paint = edgePaint(edge)
@@ -1564,11 +1616,12 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         d,
         stroke: paint,
         width,
-        ...(edge.line === 'dotted' ? { dash: [4, 4] } : {}),
+        ...(edge.line === 'dotted' || edge.style?.dashed ? { dash: [4, 4] } : {}),
       })
       const [x0, y0] = transform([0, 0])
       const [x1, y1] = transform([-1, 0])
       edgeItems.push(...headPaths(edge.end, transform([right, bottom]), [x1 - x0, y1 - y0], paint, width))
+      edgeItems.push(...headPaths(edge.start, transform([right, top]), [x1 - x0, y1 - y0], paint, width))
       if (loop.label) {
         const at = transform([right + reach * 0.75 + (horizontal ? 0 : loop.label.width / 2 + 6), horizontal ? node.y + node.h / 2 + loop.label.height / 2 + 6 : node.y])
         labelItems.push(...edgeLabel(loop.label, at))
@@ -1630,12 +1683,12 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
 
   items.push(...backgrounds, ...edgeItems, ...titleItems, ...labelItems, ...nodeItems)
   const count = graph.nodes.length
-  return {
+  return fitScene({
     width,
     height,
     items,
     label: graph.title ?? `Flowchart with ${count} ${count === 1 ? 'node' : 'nodes'}`,
-  }
+  }, measure)
 }
 
 /**

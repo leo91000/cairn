@@ -13,7 +13,8 @@ same scene, drawn as SVG on web and on a Compose canvas on Android with one ligh
 palette. A fence stays code until its closing fence arrives, so streaming never flickers;
 unsupported types (gantt, class…) keep the code block, and invalid sources show their code
 with a short note. Each drawing has a source toggle, copy and a full-screen viewer with
-zoom and pan. This is presentation of existing message text, so public MCP and
+zoom and pan. Node links remain usable in the card and the full-screen viewer; dragging a
+linked node pans without opening it. This is presentation of existing message text, so public MCP and
 `cairn_installation` are unchanged: agents already read and write the Mermaid source.
 
 Platform differences: web labels in English, Android in French (« Logigramme »,

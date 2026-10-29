@@ -163,6 +163,22 @@ class DiagramCorpusTest {
     }
 
     @Test
+    fun `preserves both self-loop arrowheads and author dash styles`() {
+        val one = layoutDiagram(parseDiagram("flowchart TD\nA --> A"), measure)
+        val both =
+            layoutDiagram(
+                parseDiagram("flowchart TD\nA <--> A\nlinkStyle 0 stroke-dasharray:4 2"),
+                measure,
+            )
+        assertEquals(one.items.size + 1, both.items.size)
+        val loop =
+            both.items.filterIsInstance<PathItem>().first { item ->
+                item.d.any { it is PathCommand.Cubic } && item.stroke == DiagramPaint.Tone("edge")
+            }
+        assertEquals(listOf(4.0, 4.0), loop.dash)
+    }
+
+    @Test
     fun `wraps long labels between words and inside long words`() {
         assertEquals(
             listOf("alpha", "beta", "gamma"),

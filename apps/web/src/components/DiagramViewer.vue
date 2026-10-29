@@ -39,7 +39,8 @@ const x = ref(0)
 const y = ref(0)
 const copied = ref(false)
 const percent = computed(() => `${Math.round(scale.value * 100)}%`)
-const pointers = new Map<number, { x: number, y: number }>()
+const pointers = new Map<number, { x: number, y: number, dragging: boolean }>()
+let suppressClick = false
 let pinch: { distance: number, scale: number } | undefined
 let observer: ResizeObserver | undefined
 let fitted = true
@@ -91,11 +92,24 @@ function onWheel(event: WheelEvent) {
 }
 
 function onPointerDown(event: PointerEvent) {
-  stage.value!.setPointerCapture(event.pointerId)
-  pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+  if (event.button !== 0)
+    return
+  if (!pointers.size)
+    suppressClick = false
+  const link = event.target instanceof Element && event.target.closest('a[href]')
+  // Keep an ordinary anchor tap targeted at the anchor. Capture it only once it becomes a drag.
+  if (!link)
+    stage.value!.setPointerCapture(event.pointerId)
+  pointers.set(event.pointerId, { x: event.clientX, y: event.clientY, dragging: false })
   if (pointers.size === 2) {
+    suppressClick = true
+    for (const [id, pointer] of pointers) {
+      pointer.dragging = true
+      stage.value!.setPointerCapture(id)
+    }
+
     const [a, b] = [...pointers.values()]
-    pinch = { distance: Math.hypot(a!.x - b!.x, a!.y - b!.y), scale: scale.value }
+    pinch = { distance: Math.max(1, Math.hypot(a!.x - b!.x, a!.y - b!.y)), scale: scale.value }
   }
 }
 
@@ -103,7 +117,13 @@ function onPointerMove(event: PointerEvent) {
   const previous = pointers.get(event.pointerId)
   if (!previous)
     return
-  const current = { x: event.clientX, y: event.clientY }
+  const current = { x: event.clientX, y: event.clientY, dragging: previous.dragging }
+  if (!current.dragging && Math.hypot(current.x - previous.x, current.y - previous.y) <= 5)
+    return
+  current.dragging = true
+  suppressClick = true
+  stage.value!.setPointerCapture(event.pointerId)
+  event.preventDefault()
   pointers.set(event.pointerId, current)
   if (pinch && pointers.size === 2) {
     const [a, b] = [...pointers.values()]
@@ -122,6 +142,15 @@ function onPointerUp(event: PointerEvent) {
   pointers.delete(event.pointerId)
   if (pointers.size < 2)
     pinch = undefined
+}
+
+function onStageClick(event: MouseEvent) {
+  if (suppressClick && event.detail > 0) {
+    event.preventDefault()
+    event.stopPropagation()
+  }
+
+  suppressClick = false
 }
 
 function onKey(event: KeyboardEvent) {
@@ -205,6 +234,9 @@ onMounted(async () => {
     return
   const svg = sceneSvg(scene)
   drawing.value!.append(svg)
+  window.addEventListener('pointermove', onPointerMove, { passive: false })
+  window.addEventListener('pointerup', onPointerUp)
+  window.addEventListener('pointercancel', onPointerUp)
   await nextTick()
   fit()
   observer = new ResizeObserver(() => {
@@ -216,6 +248,9 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   observer?.disconnect()
+  window.removeEventListener('pointermove', onPointerMove)
+  window.removeEventListener('pointerup', onPointerUp)
+  window.removeEventListener('pointercancel', onPointerUp)
   clearTimeout(copiedTimer)
 })
 </script>
@@ -292,9 +327,8 @@ onBeforeUnmount(() => {
         aria-label="Diagram canvas. Drag to move, scroll or pinch to zoom."
         @wheel="onWheel"
         @pointerdown="onPointerDown"
-        @pointermove="onPointerMove"
-        @pointerup="onPointerUp"
-        @pointercancel="onPointerUp"
+        @click.capture="onStageClick"
+        @dragstart.prevent
         @dblclick="fit"
         @keydown="onKey"
       >
