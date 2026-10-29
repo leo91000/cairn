@@ -324,6 +324,35 @@ class DiagramCorpusTest {
     }
 
     @Test
+    fun `fits deep activations and leaves neighboring lifelines and frames clear`() {
+        val sources =
+            listOf(
+                "sequenceDiagram\nparticipant A\n" + "activate A\n".repeat(20),
+                "sequenceDiagram\nparticipant A\nparticipant B\n" + "activate A\n".repeat(80),
+                "sequenceDiagram\nparticipant A\nloop Nested\n" + "activate A\n".repeat(80) + "end",
+            )
+        for (source in sources) {
+            val scene = layoutDiagram(parseDiagram(source), measure)
+            val bars =
+                scene.items.filterIsInstance<PathItem>().filter {
+                    it.fill == DiagramPaint.Tone("data")
+                }
+            val right = bars.maxOf { bar ->
+                points(bar).maxOf { it.first } + (bar.width ?: 0.0) / 2
+            }
+            assertTrue(right < scene.width)
+            val peer =
+                scene.items.filterIsInstance<TextItem>().find { it.lines.firstOrNull() == "B" }
+            if (peer != null) assertTrue(right < peer.x)
+            val frame =
+                scene.items.filterIsInstance<PathItem>().find {
+                    it.stroke == DiagramPaint.Tone("cluster-line") && it.dash == null
+                }
+            if (frame != null) assertTrue(right < points(frame).maxOf { it.first })
+        }
+    }
+
+    @Test
     fun `orders whole subgraphs beyond 400 member constraints`() {
         val source =
             cases("parse")

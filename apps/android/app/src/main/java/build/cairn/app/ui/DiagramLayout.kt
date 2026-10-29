@@ -2102,14 +2102,33 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
         }
     val headHeight = heads.fold(0.0) { tallest, head -> max(tallest, head.h) }
 
+    val depths = IntArray(diagram.participants.size)
+    val peakDepths = IntArray(diagram.participants.size)
+    fun changeDepth(participant: String, delta: Int) {
+        val column = index.getValue(participant)
+        depths[column] = max(0, depths[column] + delta)
+        peakDepths[column] = max(peakDepths[column], depths[column])
+    }
+    for (item in diagram.items) when (item) {
+        is SequenceActivation -> changeDepth(item.participant, if (item.active) 1 else -1)
+        is SequenceMessage -> {
+            if (item.activate) changeDepth(item.to, 1)
+            if (item.deactivate) changeDepth(item.from, -1)
+        }
+        else -> Unit
+    }
+    val activationReach = peakDepths.map { if (it > 0) (it - 1) * 4 + 5.5 else 0.0 }
+
     // Column gaps grow until every message and note fits between its participants.
     val gaps =
         heads
             .drop(1)
-            .mapIndexed { position, head -> (heads[position].w + head.w) / 2 + ACTOR_GAP }
+            .mapIndexed { position, head ->
+                max(heads[position].w / 2, activationReach[position]) + head.w / 2 + ACTOR_GAP
+            }
             .toMutableList()
     var leftRoom = 0.0
-    var rightRoom = 0.0
+    var rightRoom = max(0.0, activationReach.last() - heads.last().w / 2)
     fun need(from: Int, to: Int, distance: Double) {
         if (from == to) return
         val a = min(from, to)
@@ -2222,12 +2241,20 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
     }
 
     fun activate(column: Int, at: Double) {
+        val x = centers[column] + active[column].size * 4
+        touch(column)
+        extend(x - 5.5, x + 5.5)
         active[column].add(at)
     }
 
     fun deactivate(column: Int, at: Double) {
         val start = active[column].removeLastOrNull()
-        if (start != null) activations.add(Activation(column, start, at, active[column].size))
+        if (start != null) {
+            val x = centers[column] + active[column].size * 4
+            touch(column)
+            extend(x - 5.5, x + 5.5)
+            activations.add(Activation(column, start, at, active[column].size))
+        }
     }
 
     fun edgeX(column: Int, toward: Double): Double {
@@ -2697,12 +2724,15 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
     items.addAll(rows)
     items.addAll(participants)
     val count = diagram.participants.size
-    return Scene(
-        width,
-        ceil(bottomTop + headHeight + MARGIN),
-        items,
-        diagram.title
-            ?: "Sequence diagram with $count ${if (count == 1) "participant" else "participants"}",
+    return fitScene(
+        Scene(
+            width,
+            ceil(bottomTop + headHeight + MARGIN),
+            items,
+            diagram.title
+                ?: "Sequence diagram with $count ${if (count == 1) "participant" else "participants"}",
+        ),
+        measure,
     )
 }
 

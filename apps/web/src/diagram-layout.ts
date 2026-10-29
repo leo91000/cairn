@@ -1861,10 +1861,32 @@ export function layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): 
   })
   const headHeight = Math.max(0, ...heads.map(head => head.h))
 
+  const depths = diagram.participants.map(() => 0)
+  const peakDepths = diagram.participants.map(() => 0)
+  const changeDepth = (participant: string, delta: number) => {
+    const column = index.get(participant)!
+    depths[column] = Math.max(0, depths[column]! + delta)
+    peakDepths[column] = Math.max(peakDepths[column]!, depths[column]!)
+  }
+
+  for (const item of diagram.items) {
+    if (item.type === 'activate' || item.type === 'deactivate') {
+      changeDepth(item.participant, item.type === 'activate' ? 1 : -1)
+    }
+    else if (item.type === 'message') {
+      if (item.activate)
+        changeDepth(item.to, 1)
+      if (item.deactivate)
+        changeDepth(item.from, -1)
+    }
+  }
+
+  const activationReach = peakDepths.map(depth => depth ? (depth - 1) * 4 + 5.5 : 0)
+
   // Column gaps grow until every message and note fits between its participants.
-  const gaps = heads.slice(1).map((head, position) => (heads[position]!.w + head.w) / 2 + ACTOR_GAP)
+  const gaps = heads.slice(1).map((head, position) => Math.max(heads[position]!.w / 2, activationReach[position]!) + head.w / 2 + ACTOR_GAP)
   let leftRoom = 0
-  let rightRoom = 0
+  let rightRoom = Math.max(0, activationReach.at(-1)! - heads.at(-1)!.w / 2)
   const need = (from: number, to: number, distance: number) => {
     if (from === to)
       return
@@ -2000,12 +2022,18 @@ export function layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): 
   }
 
   const activate = (column: number, at: number) => {
+    const x = centers[column]! + active[column]!.length * 4
+    touch(column)
+    extend(x - 5.5, x + 5.5)
     active[column]!.push(at)
   }
 
   const deactivate = (column: number, at: number) => {
     const start = active[column]!.pop()
     if (start !== undefined) {
+      const x = centers[column]! + active[column]!.length * 4
+      touch(column)
+      extend(x - 5.5, x + 5.5)
       activations.push({
         column,
         start,
@@ -2394,12 +2422,12 @@ export function layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): 
 
   items.push(...frames.filter(item => item.kind === 'path' && item.opacity !== undefined), ...lifelines, ...bars, ...frames.filter(item => !(item.kind === 'path' && item.opacity !== undefined)), ...rows, ...participants)
   const count = diagram.participants.length
-  return {
+  return fitScene({
     width,
     height: Math.ceil(bottomTop + headHeight + MARGIN),
     items,
     label: diagram.title ?? `Sequence diagram with ${count} ${count === 1 ? 'participant' : 'participants'}`,
-  }
+  }, measure)
 }
 
 function messageText(block: TextBlock, x: number, y: number, anchor: 'start' | 'middle'): SceneItem[] {

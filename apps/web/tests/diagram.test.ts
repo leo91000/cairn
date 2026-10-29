@@ -136,6 +136,26 @@ describe('diagram layout', () => {
     expect(endpoints.filter(node => node.parent === 'root')).toHaveLength(2)
   })
 
+  it('fits deep activations and leaves neighboring lifelines and frames clear', () => {
+    const sources = [
+      `sequenceDiagram\nparticipant A\n${'activate A\n'.repeat(20)}`,
+      `sequenceDiagram\nparticipant A\nparticipant B\n${'activate A\n'.repeat(80)}`,
+      `sequenceDiagram\nparticipant A\nloop Nested\n${'activate A\n'.repeat(80)}end`,
+    ]
+    for (const source of sources) {
+      const scene = layoutDiagram(parseDiagram(source), measure)
+      const bars = scene.items.filter((item): item is PathItem => item.kind === 'path' && !!item.fill && 'tone' in item.fill && item.fill.tone === 'data')
+      const right = Math.max(...bars.flatMap(item => points(item).map(([x]) => x + (item.width ?? 0) / 2)))
+      expect(right).toBeLessThan(scene.width)
+      const peer = scene.items.find(item => item.kind === 'text' && item.lines[0] === 'B')
+      if (peer?.kind === 'text')
+        expect(right).toBeLessThan(peer.x)
+      const frame = scene.items.find((item): item is PathItem => item.kind === 'path' && !!item.stroke && 'tone' in item.stroke && item.stroke.tone === 'cluster-line' && !item.dash)
+      if (frame)
+        expect(right).toBeLessThan(Math.max(...points(frame).map(([x]) => x)))
+    }
+  })
+
   it('draws every flowchart node, link and label', () => {
     const scene = layoutDiagram(parseDiagram('flowchart LR\n  A[One] -->|go| B{Two?}\n  B --> C((Three))'), measure)
     const texts = scene.items.flatMap(item => item.kind === 'text' ? item.lines : [])

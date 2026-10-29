@@ -376,3 +376,19 @@ test('fence closure follows parsed literals in quotes and lists', async ({ page 
     await expect(page.locator('#app figure.diagram')).toHaveCount(1)
   }
 })
+
+test('nested activations stay inside the SVG and clear the next lifeline', async ({ page }) => {
+  for (const depth of [20, 80]) {
+    const source = `sequenceDiagram\nparticipant A\n${depth === 80 ? 'participant B\n' : ''}${'activate A\n'.repeat(depth)}`
+    await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)
+    const result = await page.locator('#app figure.diagram svg').evaluate((element) => {
+      const svg = element as SVGSVGElement
+      const bars = [...svg.querySelectorAll('path')].filter(path => path.style.fill === 'var(--dg-data)')
+      const right = Math.max(...bars.map(path => path.getBBox().x + path.getBBox().width + 0.5))
+      const peer = [...svg.querySelectorAll('text')].find(text => text.textContent === 'B')
+      const next = peer ? peer.getBBox().x + peer.getBBox().width / 2 : Infinity
+      return { bars: bars.length, contained: right < svg.viewBox.baseVal.width, separated: right < next }
+    })
+    expect(result).toEqual({ bars: depth, contained: true, separated: true })
+  }
+})

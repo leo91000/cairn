@@ -207,6 +207,7 @@ class DiagramDeviceTest {
                     "flowchart LR\nA-->B",
                     "stateDiagram-v2\n[*]-->Ready\nnote left of Ready : Input\nnote right of Ready : Output",
                     "sequenceDiagram\nA->>B: Hello",
+                    "sequenceDiagram\nparticipant A\n" + "activate A\n".repeat(20),
                     "pie\n\"A\" : 1\n\"B\" : 2",
                 )) {
                 compose.runOnIdle {
