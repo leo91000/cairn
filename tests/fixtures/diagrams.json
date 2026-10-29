@@ -9158,6 +9158,50 @@
         "height": 4646,
         "items": 362
       }
+    },
+    {
+      "name": "multiline-flag-5",
+      "source": "flowchart TD\nA>\"Hello<br>Hello<br>Hello<br>Hello<br>Hello\"]",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Hello\nHello\nHello\nHello\nHello",
+            "shape": "flag"
+          }
+        ],
+        "edges": [],
+        "clusters": []
+      },
+      "layout": {
+        "width": 188,
+        "height": 146,
+        "items": 2
+      }
+    },
+    {
+      "name": "multiline-flag-11",
+      "source": "flowchart TD\nA>\"Hello<br>Hello<br>Hello<br>Hello<br>Hello<br>Hello<br>Hello<br>Hello<br>Hello<br>Hello<br>Hello\"]",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Hello\nHello\nHello\nHello\nHello\nHello\nHello\nHello\nHello\nHello\nHello",
+            "shape": "flag"
+          }
+        ],
+        "edges": [],
+        "clusters": []
+      },
+      "layout": {
+        "width": 268,
+        "height": 266,
+        "items": 2
+      }
     }
   ],
   "errors": [

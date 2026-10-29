@@ -7,6 +7,23 @@ import org.junit.Test
 
 /** Mermaid parsing and layout, on the corpus the web's diagram tests check too. */
 class DiagramCorpusTest {
+    @Test
+    fun `keeps multiline flag labels beyond the notch`() {
+        for (direction in listOf("TD", "BT", "LR", "RL")) {
+            for (lines in listOf(1, 5, 11)) {
+                val label = List(lines) { "Hello" }.joinToString("<br>")
+                val scene =
+                    layoutDiagram(parseDiagram("flowchart $direction\nA>\"$label\"]"), measure)
+                val outline = scene.items.filterIsInstance<PathItem>().first { it.shadow }
+                val text = scene.items.filterIsInstance<TextItem>().first()
+                val notch = points(outline)[4].first
+                val left =
+                    text.x - text.lines.maxOf { measure.width(it, text.size, text.weight) } / 2
+                assertTrue("$direction $lines lines: label crosses notch", left - notch >= 8)
+            }
+        }
+    }
+
     private val corpus =
         Json.parseToJsonElement(
                 File(requireNotNull(System.getProperty("cairn.diagramCorpus"))).readText()

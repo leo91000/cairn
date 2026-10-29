@@ -2,6 +2,8 @@
 
 ## Mermaid diagrams in Markdown (2026-10-29)
 
+Both layouts reserve the asymmetric flag notch when sizing multiline node labels.
+
 Both apps draw closed ```` ```mermaid ```` (or `mmd`) fences in chat Markdown as native
 diagrams: flowcharts (directions, node shapes, subgraphs, link styles, heads and labels,
 `classDef`/`class`/`style`/`linkStyle`, http(s) `click` links, front-matter titles), state

@@ -791,6 +791,28 @@ test('horizontal cluster titles fit their boxes without hiding neighboring title
   }
 })
 
+test('multiline flag labels stay inside their outline in every direction', async ({ page }) => {
+  for (const direction of ['TD', 'BT', 'LR', 'RL']) {
+    for (const lines of [1, 5, 11]) {
+      const label = Array.from({ length: lines }).fill('Hello').join('<br>')
+      await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\nflowchart ${direction}\nA>"${label}"]\n\`\`\``)
+      await expect(page.locator('#app figure.diagram svg tspan')).toHaveCount(lines)
+      const contained = await page.locator('#app figure.diagram svg').evaluate((svg) => {
+        const path = svg.querySelector<SVGPathElement>('path.diagram-raised')!
+        const outline = path.getBBox()
+        const notch = outline.x + outline.height / 3
+        const inverse = (svg as SVGSVGElement).getScreenCTM()!.inverse()
+        return [...svg.querySelectorAll('tspan')].every((span) => {
+          const box = span.getBoundingClientRect()
+          const left = new DOMPoint(box.left, box.top).matrixTransform(inverse).x
+          return left >= notch + 2
+        })
+      })
+      expect(contained, `${direction} ${lines} lines`).toBe(true)
+    }
+  }
+})
+
 test('graph links and loops meet every supported shape outline in all directions', async ({ page }) => {
   const shapes = ['rect', 'rounded', 'stadium', 'subroutine', 'cylinder', 'circle', 'double-circle', 'diamond', 'hexagon', 'lean-r', 'lean-l', 'trap-b', 'trap-t', 'flag', 'doc', 'start', 'stop', 'fork', 'choice']
   for (const direction of ['TB', 'BT', 'LR', 'RL']) {

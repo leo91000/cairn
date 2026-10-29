@@ -378,7 +378,8 @@ private fun nodeBox(node: GraphNode, horizontal: Boolean, measure: TextMeasure):
         NodeShape.TRAPEZOID_ALT -> box(tw + 36 + (th + 22) * 0.7, th + 22)
         NodeShape.CYLINDER -> box(max(tw + 32, 64.0), th + 34)
         NodeShape.SUBROUTINE -> box(tw + 48, th + 22)
-        NodeShape.FLAG -> box(tw + 44, th + 22)
+        // Keep the centered label beyond the inward notch, whose depth is h / 3.
+        NodeShape.FLAG -> box(tw + 44 + (th + 22) * 2 / 3, th + 22)
         NodeShape.STADIUM -> box(tw + 28 + th, th + 22)
         NodeShape.NOTE -> box(tw + 36, th + 24)
         else -> box(max(tw + 32, 56.0), th + 22)

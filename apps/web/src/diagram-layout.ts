@@ -331,7 +331,8 @@ function nodeBox(node: GraphNode, horizontal: boolean, measure: TextMeasure): No
     case 'subroutine':
       return box(tw + 48, th + 22)
     case 'flag':
-      return box(tw + 44, th + 22)
+      // Keep the centered label beyond the inward notch, whose depth is h / 3.
+      return box(tw + 44 + (th + 22) * 2 / 3, th + 22)
     case 'stadium':
       return box(tw + 28 + th, th + 22)
     case 'note':

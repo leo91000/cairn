@@ -332,6 +332,7 @@ class DiagramDeviceTest {
                     "flowchart LR\nA-->B",
                     "flowchart LR\nsubgraph S[Long descriptive group title]\nA[Go]\nend\nsubgraph T[Another group]\nB[Done]\nend\nS-->T",
                     "flowchart TD\nA{Ready?}-->|retry|A",
+                    "flowchart TD\nA>\"" + List(11) { "Hello" }.joinToString("<br>") + "\"]",
                     "stateDiagram-v2\n[*]-->Ready\nnote left of Ready : Input\nnote right of Ready : Output",
                     "stateDiagram-v2\nclassDef critical fill:red\nA-->B:::critical : proceed",
                     "sequenceDiagram\nA->>B: Hello",

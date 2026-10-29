@@ -60,6 +60,17 @@ describe('diagrams (shared Android corpus)', () => {
 })
 
 describe('diagram layout', () => {
+  it.each(['TD', 'BT', 'LR', 'RL'].flatMap(direction => [1, 5, 11].map(lines => ({ direction, lines }))))('keeps $lines-line flag labels beyond the notch in $direction', ({ direction, lines }) => {
+    const scene = layoutDiagram(parseDiagram(`flowchart ${direction}\nA>"${Array.from({ length: lines }).fill('Hello').join('<br>')}"]`), measure)
+    const outline = scene.items.find((item): item is PathItem => item.kind === 'path' && !!item.shadow)!
+    const text = scene.items.find(item => item.kind === 'text')!
+    if (text.kind !== 'text')
+      throw new Error('Expected a flag label')
+    const notch = points(outline)[4]![0]
+    const left = text.x - Math.max(...text.lines.map(line => measure.width(line, text.size))) / 2
+    expect(left - notch).toBeGreaterThanOrEqual(8)
+  })
+
   it.each([
     'stateDiagram-v2\nstate Active {\nIdle-->Running\n}\nActive --> Active : retry',
     'flowchart TD\nsubgraph Active\nIdle-->Running\nend\nActive-->|retry|Active',
