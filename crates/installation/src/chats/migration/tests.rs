@@ -339,3 +339,31 @@ async fn engine_switch_retains_current_progress_and_all_receipt_lifetimes() {
         0
     );
 }
+
+#[tokio::test]
+async fn receipts_left_by_an_old_purge_do_not_resurrect_work_or_block_startup() {
+    let root = tempfile::tempdir().unwrap();
+    let db = database(root.path()).await;
+    let receipt = json!({"chatId":"purged","requestId":"old","runId":"removed","turnId":"turn","provider":"codex"});
+    db.execute(
+        "INSERT INTO kv VALUES('chat-coding-agent-request:purged:old',?,1234)",
+        [receipt.to_string()],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO kv VALUES('chat-coding-agent:purged',?,NULL)",
+        [receipt.to_string()],
+    )
+    .unwrap();
+    let store = Store::open(root.path()).unwrap();
+    assert!(store.conversations().await.unwrap().is_empty());
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM conversation_engine_switches",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+}

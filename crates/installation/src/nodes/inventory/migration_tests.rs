@@ -270,13 +270,13 @@ async fn legacy_missing_defaults_and_revocation_are_retained() {
     insert(&db, NODE, &node);
     db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
     migration::upgrade(&mut db).unwrap();
+    migration::upgrade(&mut db).unwrap();
     let store = Store::open(root.path()).unwrap();
     let node = store.node(NODE).await.unwrap().unwrap();
     assert!(node.revoked);
     assert!(!node.exclusive_reservations);
     assert_eq!(node.capabilities.native_mode_protocol, 0);
     assert_eq!(node.storage, cairn_contracts::NodeStoragePolicy::default());
-    migration::upgrade(&mut db).unwrap();
 }
 
 #[tokio::test]

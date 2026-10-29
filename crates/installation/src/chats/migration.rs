@@ -159,6 +159,16 @@ fn migrate_switches(tx: &Connection) -> Result<()> {
         if key != expected || (!current && expires.is_none()) {
             return Err(invalid());
         }
+        // Version 12 purge did not delete these keys. They cannot be queried
+        // after their conversation is gone; do not resurrect deleted work.
+        let parent_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conversations WHERE id=?)",
+            [&value.chat_id],
+            |r| r.get(0),
+        )?;
+        if !parent_exists {
+            continue;
+        }
         tx.execute("INSERT INTO conversation_engine_switches(chat_id,request_id,run_id,turn_id,provider,model,pending,error,retry_at,receipt_expires_at,current_expires_at,is_current,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(chat_id,request_id) DO UPDATE SET model=excluded.model,pending=excluded.pending,error=excluded.error,retry_at=excluded.retry_at,current_expires_at=excluded.current_expires_at,is_current=excluded.is_current",
             params![value.chat_id,value.request_id,value.run_id,value.turn_id,value.provider,value.model,value.pending,value.error,value.retry_at,expires.unwrap_or(0),if current { expires } else { None },current,id()])?;
     }
