@@ -273,6 +273,8 @@ jobs:
             qualify "$resolved" "$served"
           fi
       - name: Qualify plan turns of the resolved Claude Code and Codex releases
+        # Backend-only runs resolve no engine release; full runs qualify the ones they ship.
+        if: inputs.backend-only != true
         env:
           CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
           CODEX_VERSION: ${{ needs.resolve.outputs.codex }}

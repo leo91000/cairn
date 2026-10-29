@@ -80,7 +80,7 @@ production, the CLIs may still contact their vendors' public endpoints:
   installs bubblewrap and socat, and lifts Ubuntu's restriction on unprivileged user
   namespaces, which both sandboxes need. `publish` depends on this job, so a release
   whose plan-turn boundary does not hold is not served. The short PR validation does
-  not run it.
+  not run it, nor does a `backend-only` dispatch, which resolves no engine release.
 
 The `resolve` job reads the served versions from the configuration of the
 installation image production reports at `CAIRN_BEACON_ORIGIN/install/release`
