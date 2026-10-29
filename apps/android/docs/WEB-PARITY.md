@@ -23,7 +23,7 @@ zoom and pan, including two-finger translation while pinching. Node links remain
 linked node pans without opening it. This is presentation of existing message text, so public MCP and
 `cairn_installation` are unchanged: agents already read and write the Mermaid source.
 
-Platform differences: web labels in English, Android in French (« Logigramme »,
+Platform differences: Android shrinks oversized card previews further when their physical dimensions cannot fit Compose constraints; the full scene stays available in the viewer. Web labels in English, Android in French (« Logigramme »,
 « Diagramme d’états »…). The web viewer downloads SVG or PNG; Android shares a PNG with a unique URI per export, so an earlier recipient cannot read a later export through its existing grant. Both PNG paths bound the image
 to 16 megapixels and 8192 pixels per side. A failed
 diagram's source can be hidden on web and is always shown on Android. Android draws a fence

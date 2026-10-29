@@ -521,6 +521,17 @@ test('sequence message labels clear wide badges and nested activations', async (
   }
 })
 
+test('large two-dimensional scenes remain visible in a card and the full-screen viewer', async ({ page }) => {
+  const source = `flowchart LR\n${
+    Array.from({ length: 90 }, (_, index) => `N${index}[${'W'.repeat(28)}]-->N${index + 1}`).join('\n')
+  }\nN50["${Array.from({ length: 230 }).fill('A descriptive step').join('<br>')}"]`
+  await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)
+  await expect(page.locator('#app figure.diagram svg')).toBeVisible()
+  await page.getByRole('button', { name: 'Open diagram' }).click()
+  await expect(page.locator('.diagram-stage svg')).toBeVisible()
+  await page.getByRole('button', { name: 'Close' }).click()
+})
+
 test('pie legends retain zero categories with colors matching their positive arcs', async ({ page }) => {
   for (const showData of [false, true]) {
     const source = `pie${showData ? ' showData' : ''}\n"No jobs":0\n"Completed":1\n"Failed":0\n"Waiting":1`

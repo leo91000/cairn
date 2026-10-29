@@ -13,9 +13,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -32,12 +35,17 @@ class DiagramDeviceTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val context = instrumentation.targetContext
 
-    private fun show(content: () -> String) {
+    private fun show(density: Float? = null, content: () -> String) {
         compose.setContent {
-            CairnTheme("light") {
-                Surface(Modifier.fillMaxSize()) {
-                    Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
-                        Markdown(content())
+            val platformDensity = LocalDensity.current
+            val testDensity =
+                density?.let { Density(it, platformDensity.fontScale) } ?: platformDensity
+            CompositionLocalProvider(LocalDensity provides testDensity) {
+                CairnTheme("light") {
+                    Surface(Modifier.fillMaxSize()) {
+                        Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
+                            Markdown(content())
+                        }
                     }
                 }
             }
@@ -210,6 +218,32 @@ class DiagramDeviceTest {
         } finally {
             instrumentation.removeMonitor(monitor)
         }
+    }
+
+    @Test
+    fun largeTwoDimensionalSceneFitsNativePreviewAtHighDensity() {
+        val source =
+            "flowchart LR\n" +
+                (0 until 90).joinToString("\n") { "N$it[${"W".repeat(28)}]-->N${it + 1}" } +
+                "\nN50[\"${List(230) { "A descriptive step" }.joinToString("<br>")}\"]"
+        val scene = renderDiagram(source, DiagramFonts.get(context))!!.scene
+        assertNotNull("The large fixture must stay inside supported scene limits", scene)
+        val density = Density(4f)
+        val oldPixels =
+            with(density) {
+                (scene!!.width * 0.75).dp.roundToPx() to (scene.height * 0.75).dp.roundToPx()
+            }
+        assertThrows(IllegalArgumentException::class.java) {
+            Constraints.fixed(oldPixels.first, oldPixels.second)
+        }
+        show(density = 4f) { "```mermaid\n$source\n```" }
+        compose.waitUntil(20000) {
+            compose.onAllNodesWithTag("diagram-drawing").fetchSemanticsNodes().size == 1
+        }
+        compose.onNodeWithTag("diagram-drawing").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Agrandir").performClick()
+        compose.onNodeWithTag("diagram-stage").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Fermer").performClick()
     }
 
     @Test

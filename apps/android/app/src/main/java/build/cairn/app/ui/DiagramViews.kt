@@ -52,6 +52,8 @@ import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -571,9 +573,28 @@ internal fun DiagramFigure(
         DiagramViewer(diagram, scene, openLink, close = { viewing = false })
 }
 
+internal fun diagramPreviewRatio(
+    width: Double,
+    height: Double,
+    available: Double,
+    density: Density,
+): Double {
+    val legible = min(width, max(320.0, width * 0.75))
+    val preferred = min(width, max(available, legible)) / width
+    val pixelWidth = with(density) { (width * preferred).dp.roundToPx() }
+    val pixelHeight = with(density) { (height * preferred).dp.roundToPx() }
+    val bounds = Constraints.fitPrioritizingWidth(0, pixelWidth, 0, pixelHeight)
+    if (bounds.maxWidth == pixelWidth && bounds.maxHeight == pixelHeight) return preferred
+
+    // Both axes within Compose's smallest 13-bit allocation always fit its packed constraints.
+    val safeAxis = 8190.0 / density.density
+    return min(preferred, min(safeAxis / width, safeAxis / height))
+}
+
 /**
- * Wide drawings shrink to the message, but not below a legible size; they scroll instead. Laid out
- * by the renderer beforehand, so the card keeps its height from the first frame.
+ * Wide drawings preserve a legible scrollable scale when their physical constraints fit. Oversized
+ * two-dimensional previews shrink uniformly; the viewer retains the full scene. Laid out
+ * beforehand, so the card keeps its height from the first frame.
  */
 @Composable
 private fun DiagramCanvas(scene: Scene, colors: DiagramColors, openLink: (String) -> Unit) {
@@ -587,9 +608,8 @@ private fun DiagramCanvas(scene: Scene, colors: DiagramColors, openLink: (String
             .padding(horizontal = 12.dp, vertical = 18.dp)
     ) {
         val available = maxWidth.value.toDouble()
-        val legible = min(scene.width, max(320.0, scene.width * 0.75))
-        val width = min(scene.width, max(available, legible))
-        val ratio = width / scene.width
+        val ratio = diagramPreviewRatio(scene.width, scene.height, available, LocalDensity.current)
+        val width = scene.width * ratio
         val scrolls = width > available + 0.5
         Box(
             Modifier.fillMaxWidth()
