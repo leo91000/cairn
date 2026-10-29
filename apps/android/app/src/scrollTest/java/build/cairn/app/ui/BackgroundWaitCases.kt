@@ -241,7 +241,7 @@ abstract class BackgroundWaitCases {
                             path in
                                 listOf(
                                     "/api/installations/fixture/api/runs/$SAVED_RUN_ID/resume",
-                                    "/api/installations/fixture/api/chats/chat/pause",
+                                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/pause",
                                 )
                     )
                         effects.add(path)
@@ -252,7 +252,7 @@ abstract class BackgroundWaitCases {
             org.junit.Assert.assertEquals(
                 listOf(
                     "/api/installations/fixture/api/runs/$SAVED_RUN_ID/resume",
-                    "/api/installations/fixture/api/chats/chat/pause",
+                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/pause",
                 ),
                 effects,
             )
@@ -606,7 +606,7 @@ abstract class BackgroundWaitCases {
             val now = System.currentTimeMillis()
             val chat =
                 Chat(
-                    id = "chat",
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
                     title = "Conversation de test",
                     agentId = MAIN_AGENT_ID,
                     agentName = "Agent principal",
@@ -752,7 +752,10 @@ abstract class BackgroundWaitCases {
                                 )
                         }
 
-                        if (path == "/api/installations/fixture/api/chats/chat/stream")
+                        if (
+                            path ==
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream"
+                        )
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
                                 .apply {
@@ -798,7 +801,7 @@ abstract class BackgroundWaitCases {
                                             )
                                         )
                                     )
-                                "/api/installations/fixture/api/chats/chat" ->
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1" ->
                                     wireJson.encodeToString(chat)
                                 "/api/installations/fixture/api/overview" -> "{}"
                                 "/api/installations/fixture/api/runs/$SAVED_RUN_ID/resume" ->
@@ -857,7 +860,7 @@ abstract class BackgroundWaitCases {
                                 ChatScreen(
                                     vm,
                                     state,
-                                    "chat",
+                                    "6cc6efab-10af-54c7-a91b-dcff664166a1",
                                     openChat = {},
                                     openRun = {},
                                     back = {},

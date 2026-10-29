@@ -49,7 +49,7 @@ abstract class ConversationLifecycleCases {
             val restarts = CopyOnWriteArrayList<String>()
             val chat =
                 Chat(
-                    id = "chat",
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
                     title = "Conversation à conserver",
                     agentName = "Agent principal",
                     updatedAt = System.currentTimeMillis(),
@@ -84,7 +84,10 @@ abstract class ConversationLifecycleCases {
                                 .setHeader("Content-Type", "text/event-stream")
                                 .setBody(frame)
                         }
-                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
+                        if (
+                            path ==
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream"
+                        ) {
                             val current =
                                 (if (restarts.size == 2) restarted else chat).copy(
                                     lifecycle = if (deleted.get()) "trash" else "active",
@@ -100,7 +103,8 @@ abstract class ConversationLifecycleCases {
                         }
                         val body =
                             when {
-                                path == "/api/installations/fixture/api/chats/chat/new-session" -> {
+                                path ==
+                                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/new-session" -> {
                                     restarts += request.body.readUtf8()
                                     if (restarts.size == 1)
                                         return MockResponse()
@@ -110,30 +114,31 @@ abstract class ConversationLifecycleCases {
                                             )
                                     wireJson.encodeToString(restarted)
                                 }
-                                path == "/api/installations/fixture/api/chats/chat/restore" &&
+                                path ==
+                                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/restore" &&
                                     request.method == "POST" -> {
                                     restores += request.body.readUtf8()
                                     deleted.set(false)
                                     wireJson.encodeToString(chat)
                                 }
-                                path == "/api/installations/fixture/api/chats/chat" &&
+                                path ==
+                                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1" &&
                                     request.method == "DELETE" -> {
                                     val payload = request.body.readUtf8()
                                     deletes += payload
                                     if (
                                         working &&
-                                            !wireJson
+                                            wireJson
                                                 .parseToJsonElement(payload)
-                                                .jsonObject
-                                                .getValue("confirm")
-                                                .jsonPrimitive
-                                                .boolean
+                                                .jsonObject["confirm"]
+                                                ?.jsonPrimitive
+                                                ?.boolean != true
                                     )
                                         return MockResponse()
                                             .setResponseCode(409)
                                             .setBody("""{"error":"Confirmation requise"}""")
                                     deleted.set(true)
-                                    "{}"
+                                    wireJson.encodeToString(chat.copy(lifecycle = "trash"))
                                 }
                                 path == "/api/installations/fixture/api/chats" &&
                                     request.path!!.contains("view=trash") -> {

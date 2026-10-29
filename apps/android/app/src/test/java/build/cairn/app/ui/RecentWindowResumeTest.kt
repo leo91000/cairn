@@ -52,7 +52,11 @@ class RecentWindowResumeTest {
                 val revision = "v1:fixture:1"
                 val streams = CopyOnWriteArrayList<String>()
                 val olderRequests = CopyOnWriteArrayList<String>()
-                val state = LiveState(chat = Chat(id = "diagnostic", title = "Diagnostic"))
+                val state =
+                    LiveState(
+                        chat =
+                            Chat(id = "aa61a476-87e5-5034-b813-8a63564107d7", title = "Diagnostic")
+                    )
                 fun message(n: Int) =
                     RunEvent(
                         id = n.toLong(),
@@ -81,7 +85,7 @@ class RecentWindowResumeTest {
                                     .throttleBody(13, 1, TimeUnit.SECONDS)
                             if (
                                 url.encodedPath ==
-                                    "/api/installations/fixture/api/chats/diagnostic/stream"
+                                    "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream"
                             ) {
                                 streams.add(request.path!!)
                                 return when (streams.size) {
@@ -116,7 +120,11 @@ class RecentWindowResumeTest {
                                     else -> MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)
                                 }
                             }
-                            if (url.encodedPath.endsWith("/chats/diagnostic/history")) {
+                            if (
+                                url.encodedPath.endsWith(
+                                    "/chats/aa61a476-87e5-5034-b813-8a63564107d7/history"
+                                )
+                            ) {
                                 val before = url.queryParameter("before").orEmpty()
                                 olderRequests.add(before)
                                 val end = before.toInt() - 1
@@ -171,7 +179,7 @@ class RecentWindowResumeTest {
                                     ChatScreen(
                                         vm,
                                         workspace,
-                                        "diagnostic",
+                                        "aa61a476-87e5-5034-b813-8a63564107d7",
                                         openChat = {},
                                         openRun = {},
                                     )
@@ -208,7 +216,7 @@ class RecentWindowResumeTest {
                         olderRequests.size == 2
                     }
                     assertEquals(
-                        "/api/installations/fixture/api/chats/diagnostic/stream?after=60&history=v1%3Afixture%3A1&window=1&recent=1",
+                        "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=60&history=v1%3Afixture%3A1&window=1&recent=1",
                         streams[1],
                     )
                     // Pages loaded above the replaced events are dropped: paging resumes at

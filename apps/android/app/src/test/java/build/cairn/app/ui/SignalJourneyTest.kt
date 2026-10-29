@@ -100,7 +100,7 @@ class SignalJourneyTest {
     private val chats =
         listOf(
             Chat(
-                id = "question",
+                id = "765886cd-efa2-5d30-bdce-99340ee87a3d",
                 title = "Choisir la pagination",
                 agentId = "23fd6447-79ef-5b16-9e92-4e5efcc9a72d",
                 agentName = "Designer",
@@ -108,7 +108,7 @@ class SignalJourneyTest {
                 updatedAt = now - 60_000,
             ),
             Chat(
-                id = "live",
+                id = "451f26a2-b83b-5559-b07e-9a031e6de7cb",
                 title = "Refonte de l’application",
                 agentName = "Agent principal",
                 projectName = "Cairn",
@@ -124,7 +124,7 @@ class SignalJourneyTest {
                 updatedAt = now - 120_000,
             ),
             Chat(
-                id = "done",
+                id = "a2b21257-b699-5665-82a6-6ee68c85fe62",
                 title = "Relecture de la PR",
                 agentName = "Agent principal",
                 updatedAt = now - 90_000_000,
@@ -243,7 +243,7 @@ class SignalJourneyTest {
                                 json(
                                     wireJson.encodeToString(
                                         Chat(
-                                            id = "created",
+                                            id = "7da5b743-0a48-5bb1-ae65-2edd832fe2ce",
                                             agentId = "23fd6447-79ef-5b16-9e92-4e5efcc9a72d",
                                         )
                                     )
@@ -264,11 +264,17 @@ class SignalJourneyTest {
                                                         "23fd6447-79ef-5b16-9e92-4e5efcc9a72d",
                                                 )
                                     ),
-                                    if (id == "live") liveEvents else emptyList(),
+                                    if (id == "451f26a2-b83b-5559-b07e-9a031e6de7cb") liveEvents
+                                    else emptyList(),
                                 )
                             }
                             path.startsWith("/api/installations/fixture/api/chats/") &&
-                                path.endsWith("/messages") -> json("{}")
+                                path.endsWith("/messages") ->
+                                json(
+                                    wireJson.encodeToString(
+                                        ChatMessage(id = "00000000-0000-4000-8000-000000000089")
+                                    )
+                                )
                             path.startsWith("/api/installations/fixture/api/runs/") &&
                                 path.endsWith("/stream") ->
                                 stream(
@@ -402,7 +408,7 @@ class SignalJourneyTest {
             feedChats =
                 listOf(
                     Chat(
-                        id = "quota",
+                        id = "ace4e77b-1dbf-57a6-9875-4dc3aa7f563b",
                         title = "Attendre le quota",
                         status = "running",
                         accountWaitReason =
@@ -611,13 +617,17 @@ class SignalJourneyTest {
             "e11e98cf-45bf-5364-83b7-7606435a2154",
             created["projectId"]?.jsonPrimitive?.content,
         )
-        waitCall("POST", "/api/installations/fixture/api/chats/created/messages")
+        waitCall(
+            "POST",
+            "/api/installations/fixture/api/chats/7da5b743-0a48-5bb1-ae65-2edd832fe2ce/messages",
+        )
         val message =
             wireJson
                 .parseToJsonElement(
                     calls
                         .first {
-                            it.second == "/api/installations/fixture/api/chats/created/messages"
+                            it.second ==
+                                "/api/installations/fixture/api/chats/7da5b743-0a48-5bb1-ae65-2edd832fe2ce/messages"
                         }
                         .third
                 )

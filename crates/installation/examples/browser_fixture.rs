@@ -113,10 +113,14 @@ async fn main() -> Result<()> {
                 "get" if string(0) == "nodes" => {
                     db.node_boundary(string(1))?.unwrap_or(Value::Null)
                 }
+                "get" if string(0) == "chats" => {
+                    db.conversation_boundary(string(1))?.unwrap_or(Value::Null)
+                }
                 "get" => db.get(string(0), string(1))?.unwrap_or(Value::Null),
                 "list" if string(0) == "agents" => db.agent_snapshots()?.into(),
                 "list" if string(0) == "tasks" => serde_json::to_value(db.missions()?)?,
                 "list" if string(0) == "nodes" => db.nodes_boundary()?.into(),
+                "list" if string(0) == "chats" => db.conversations_boundary()?.into(),
                 "list" => db.list(string(0))?.into(),
                 "projects" => serde_json::to_value(db.projects()?)?,
                 "put" if string(0) == "agents" => {
@@ -127,6 +131,22 @@ async fn main() -> Result<()> {
                     arg(1)
                 }
                 "put" if string(0) == "nodes" => db.put_node_fixture(&arg(1))?,
+                "put" if string(0) == "chats" => {
+                    let input = arg(1);
+                    let current = db.conversation(text(&input, "id"))?;
+                    let mut value = current
+                        .as_ref()
+                        .map(serde_json::to_value)
+                        .transpose()?
+                        .unwrap_or_else(|| json!({}));
+                    cairn_installation::store::merge(&mut value, &input);
+                    let mut chat: cairn_installation::chats::Conversation =
+                        serde_json::from_value(value)?;
+                    if let Some(current) = current {
+                        chat.revision = current.revision;
+                    }
+                    serde_json::to_value(db.save_conversation(&chat)?)?
+                }
                 "put" => db.put(string(0), &arg(1))?,
                 "run" => db.run(string(0))?.unwrap_or(Value::Null),
                 "runs" => db.runs(None, None, 10000, 0, true)?.into(),

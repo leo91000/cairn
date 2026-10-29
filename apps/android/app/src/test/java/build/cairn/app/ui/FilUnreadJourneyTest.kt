@@ -96,7 +96,7 @@ class FilUnreadJourneyTest {
     private val chats =
         listOf(
             Chat(
-                id = "done",
+                id = "a2b21257-b699-5665-82a6-6ee68c85fe62",
                 title = "Rédiger le changelog 0.53",
                 agentName = "Rédacteur",
                 status = "succeeded",
@@ -109,7 +109,7 @@ class FilUnreadJourneyTest {
                     "Le changelog est prêt : 12 corrections, 3 nouveautés. J’ai ouvert la PR #184.",
             ),
             Chat(
-                id = "question",
+                id = "765886cd-efa2-5d30-bdce-99340ee87a3d",
                 title = "Choisir la pagination",
                 agentName = "Rédacteur",
                 pendingQuestions = 1,
@@ -117,7 +117,7 @@ class FilUnreadJourneyTest {
                 provider = "claude",
             ),
             Chat(
-                id = "old",
+                id = "7e0552ad-fde3-5785-a37c-8bc7e408e409",
                 title = "Relecture du guide d’installation",
                 agentName = "Rédacteur",
                 status = "succeeded",
@@ -427,13 +427,13 @@ class FilUnreadJourneyTest {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path.endsWith("/chats/done/stream")) {
+                        if (path.endsWith("/chats/a2b21257-b699-5665-82a6-6ee68c85fe62/stream")) {
                             started.set(true)
                             check(release.await(20, TimeUnit.SECONDS))
                             val run =
                                 Run(
                                     id = "done-run",
-                                    taskId = "done",
+                                    taskId = "a2b21257-b699-5665-82a6-6ee68c85fe62",
                                     status = "succeeded",
                                     trigger = "chat",
                                     finishedAt = chats.first().finishedAt,
@@ -493,7 +493,13 @@ class FilUnreadJourneyTest {
                 }
                 CairnTheme {
                     if (state.installation != null)
-                        ChatScreen(vm, state, "done", openChat = {}, openRun = {})
+                        ChatScreen(
+                            vm,
+                            state,
+                            "a2b21257-b699-5665-82a6-6ee68c85fe62",
+                            openChat = {},
+                            openRun = {},
+                        )
                 }
             }
             try {
