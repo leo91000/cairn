@@ -457,6 +457,27 @@ test('sequence message labels clear wide badges and nested activations', async (
   }
 })
 
+test('pie legends retain zero categories with colors matching their positive arcs', async ({ page }) => {
+  for (const showData of [false, true]) {
+    const source = `pie${showData ? ' showData' : ''}\n"No jobs":0\n"Completed":1\n"Failed":0\n"Waiting":1`
+    await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)
+    const result = await page.locator('#app figure.diagram svg').evaluate((svg) => {
+      const paths = [...svg.querySelectorAll('path')].filter(item => item.style.fill.startsWith('var(--dg-series-'))
+      const wedges = paths.filter(item => item.getBBox().width > 20)
+      return {
+        texts: [...svg.querySelectorAll('text')].map(item => item.textContent),
+        wedges: wedges.map(item => item.style.fill),
+        swatches: paths.filter(item => !wedges.includes(item)).map(item => item.style.fill),
+      }
+    })
+    for (const label of ['No jobs', 'Completed', 'Failed', 'Waiting'])
+      expect(result.texts).toContain(label)
+    expect(result.texts.filter(text => text === (showData ? '0% · 0' : '0%'))).toHaveLength(2)
+    expect(result.wedges).toEqual(['var(--dg-series-1)', 'var(--dg-series-3)'])
+    expect(result.swatches).toEqual([0, 1, 2, 3].map(index => `var(--dg-series-${index})`))
+  }
+})
+
 test('state class suffixes style their target without entering transition labels', async ({ page }) => {
   for (const label of ['', ' : proceed']) {
     const source = `stateDiagram-v2\nclassDef critical fill:red\nA --> B:::critical${label}`

@@ -2892,22 +2892,23 @@ internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
     val radius = 92.0
     val inner = 56.0
     val cx = MARGIN + radius
-    val visible = diagram.slices.filter { it.value > 0 }
+    val positiveCount = diagram.slices.count { it.value > 0 }
     val rowHeight = 24.0
     fun format(value: Double) =
         if (value > 0 && value < 0.01) jsNumberString(value)
         else jsLocaleNumber(if (value < 1e12) jsRound(value * 100) / 100 else value)
     val totalText = format(total)
     val totalInLegend = measure.width(totalText, 18.0, 700) > inner * 2 - 24
-    val legendHeight = (visible.size + if (totalInLegend) 1 else 0) * rowHeight
+    val legendHeight = (diagram.slices.size + if (totalInLegend) 1 else 0) * rowHeight
     val cy = top + max(radius, legendHeight / 2)
 
     var angle = 0.0
-    visible.forEachIndexed { position, slice ->
+    diagram.slices.forEachIndexed { position, slice ->
+        if (slice.value == 0.0) return@forEachIndexed
         val sweep = (slice.value / total) * PI * 2
         val paint = tone("series-${position % SERIES}")
         // Slices are separated by a hairline gap of equal width on both rims.
-        val gap = if (visible.size == 1) 0.0 else min(0.012, sweep / 4)
+        val gap = if (positiveCount == 1) 0.0 else min(0.012, sweep / 4)
         items.add(
             PathItem(
                 d =
@@ -2971,7 +2972,7 @@ internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
     val legendX = cx + radius + 32
     var legendY = cy - legendHeight / 2 + rowHeight / 2
     var legendWidth = 0.0
-    for ((position, slice) in visible.withIndex()) {
+    for ((position, slice) in diagram.slices.withIndex()) {
         val share = jsRound((slice.value / total) * 1000) / 10
         val label = slice.label
         val detail =
@@ -3053,6 +3054,6 @@ internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
         ceil(max(cy + radius, cy + legendHeight / 2) + MARGIN),
         items,
         diagram.title
-            ?: "Pie chart with ${visible.size} ${if (visible.size == 1) "slice" else "slices"}",
+            ?: "Pie chart with ${positiveCount} ${if (positiveCount == 1) "slice" else "slices"}",
     )
 }

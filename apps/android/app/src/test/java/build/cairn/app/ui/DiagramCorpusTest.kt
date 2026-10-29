@@ -301,6 +301,37 @@ class DiagramCorpusTest {
     }
 
     @Test
+    fun `keeps zero pie categories and matching series colors`() {
+        for (showData in listOf(false, true)) {
+            val source =
+                "pie" +
+                    (if (showData) " showData" else "") +
+                    "\n\"No jobs\":0\n\"Completed\":1\n\"Failed\":0\n\"Waiting\":1"
+            val scene = layoutDiagram(parseDiagram(source), measure)
+            val texts = scene.items.filterIsInstance<TextItem>().flatMap { it.lines }
+            for (label in listOf("No jobs", "Completed", "Failed", "Waiting")) assertTrue(
+                texts.contains(label)
+            )
+            assertEquals(2, texts.count { it == if (showData) "0% · 0" else "0%" })
+            val series =
+                scene.items.filterIsInstance<PathItem>().filter {
+                    (it.fill as? DiagramPaint.Tone)?.tone?.startsWith("series-") == true
+                }
+            val wedges = series.filter { item ->
+                points(item).maxOf { it.first } - points(item).minOf { it.first } > 20
+            }
+            assertEquals(
+                listOf(DiagramPaint.Tone("series-1"), DiagramPaint.Tone("series-3")),
+                wedges.map { it.fill },
+            )
+            assertEquals(
+                (0..3).map { DiagramPaint.Tone("series-$it") },
+                series.filter { it !in wedges }.map { it.fill },
+            )
+        }
+    }
+
+    @Test
     fun `moves large pie totals to the legend without clipping their digits`() {
         val scene = layoutDiagram(parseDiagram("pie\n\"A\":1000000000000000000"), measure)
         val texts = scene.items.filterIsInstance<TextItem>()

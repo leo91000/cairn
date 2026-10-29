@@ -8,7 +8,7 @@ diagrams: flowcharts (directions, node shapes, subgraphs, link styles, heads and
 diagrams (start/end, composite states, choice, fork/join, notes), sequence diagrams
 (actors, every arrow kind, activations, notes, `loop`/`alt`/`opt`/`par`/`critical`/`break`/`rect`,
 `autonumber`, including start/increment values to hundredths) and pie charts. Large pie totals
-move to a full-value legend row, with a sum symbol in the center so digits do not cross the ring. Neither app loads Mermaid or a WebView: `diagram.ts` /
+move to a full-value legend row, with a sum symbol in the center so digits do not cross the ring. Zero-value categories stay in the legend without an arc. Neither app loads Mermaid or a WebView: `diagram.ts` /
 `Diagram.kt` parse the same model and `diagram-layout.ts` / `DiagramLayout.kt` compute the
 same scene, drawn as SVG on web and on a Compose canvas on Android with one light/dark
 palette. A fence stays code until its closing fence arrives, so streaming never flickers;

@@ -125,6 +125,19 @@ describe('diagram layout', () => {
       expect(diagram.items.filter(item => item.type === 'message').map(item => item.number)).toEqual([0.5, 0.75, 1])
   })
 
+  it.each([false, true])('keeps zero categories and matching colors in pie legends (showData=%s)', (showData) => {
+    const source = `pie${showData ? ' showData' : ''}\n"No jobs":0\n"Completed":1\n"Failed":0\n"Waiting":1`
+    const scene = layoutDiagram(parseDiagram(source), measure)
+    const texts = scene.items.filter(item => item.kind === 'text').flatMap(item => item.lines)
+    for (const label of ['No jobs', 'Completed', 'Failed', 'Waiting'])
+      expect(texts).toContain(label)
+    expect(texts.filter(text => text === (showData ? '0% · 0' : '0%'))).toHaveLength(2)
+    const series = scene.items.filter((item): item is PathItem => item.kind === 'path' && !!item.fill && 'tone' in item.fill && item.fill.tone.startsWith('series-'))
+    const wedges = series.filter(item => Math.max(...points(item).map(([x]) => x)) - Math.min(...points(item).map(([x]) => x)) > 20)
+    expect(wedges.map(item => item.fill)).toEqual([{ tone: 'series-1' }, { tone: 'series-3' }])
+    expect(series.filter(item => !wedges.includes(item)).map(item => item.fill)).toEqual([0, 1, 2, 3].map(index => ({ tone: `series-${index}` })))
+  })
+
   it('moves large pie totals to the legend without clipping their digits', () => {
     const scene = layoutDiagram(parseDiagram('pie\n"A":1000000000000000000'), measure)
     const texts = scene.items.filter(item => item.kind === 'text')

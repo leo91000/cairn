@@ -7746,6 +7746,135 @@
         "height": 66,
         "items": 2
       }
+    },
+    {
+      "name": "pie-zero-categories",
+      "source": "pie\n\"No jobs\":0\n\"Completed\":1\n\"Failed\":0\n\"Waiting\":1",
+      "diagram": {
+        "kind": "pie",
+        "showData": false,
+        "slices": [
+          {
+            "label": "No jobs",
+            "value": 0
+          },
+          {
+            "label": "Completed",
+            "value": 1
+          },
+          {
+            "label": "Failed",
+            "value": 0
+          },
+          {
+            "label": "Waiting",
+            "value": 1
+          }
+        ]
+      },
+      "layout": {
+        "width": 353,
+        "height": 208,
+        "items": 18
+      }
+    },
+    {
+      "name": "pie-zero-categories-show-data",
+      "source": "pie showData\n\"No jobs\":0\n\"Completed\":1\n\"Failed\":0\n\"Waiting\":1",
+      "diagram": {
+        "kind": "pie",
+        "showData": true,
+        "slices": [
+          {
+            "label": "No jobs",
+            "value": 0
+          },
+          {
+            "label": "Completed",
+            "value": 1
+          },
+          {
+            "label": "Failed",
+            "value": 0
+          },
+          {
+            "label": "Waiting",
+            "value": 1
+          }
+        ]
+      },
+      "layout": {
+        "width": 379,
+        "height": 208,
+        "items": 18
+      }
+    },
+    {
+      "name": "pie-tall-zero-legend",
+      "source": "pie showData\n\"Empty 0\":0\n\"Empty 1\":0\n\"Empty 2\":0\n\"Empty 3\":0\n\"Empty 4\":0\n\"Empty 5\":0\n\"Empty 6\":0\n\"Empty 7\":0\n\"Empty 8\":0\n\"Empty 9\":0\n\"Empty 10\":0\n\"Empty 11\":0\n\"Completed\":10",
+      "diagram": {
+        "kind": "pie",
+        "showData": true,
+        "slices": [
+          {
+            "label": "Empty 0",
+            "value": 0
+          },
+          {
+            "label": "Empty 1",
+            "value": 0
+          },
+          {
+            "label": "Empty 2",
+            "value": 0
+          },
+          {
+            "label": "Empty 3",
+            "value": 0
+          },
+          {
+            "label": "Empty 4",
+            "value": 0
+          },
+          {
+            "label": "Empty 5",
+            "value": 0
+          },
+          {
+            "label": "Empty 6",
+            "value": 0
+          },
+          {
+            "label": "Empty 7",
+            "value": 0
+          },
+          {
+            "label": "Empty 8",
+            "value": 0
+          },
+          {
+            "label": "Empty 9",
+            "value": 0
+          },
+          {
+            "label": "Empty 10",
+            "value": 0
+          },
+          {
+            "label": "Empty 11",
+            "value": 0
+          },
+          {
+            "label": "Completed",
+            "value": 10
+          }
+        ]
+      },
+      "layout": {
+        "width": 392,
+        "height": 336,
+        "items": 43
+      }
     }
   ],
   "errors": [

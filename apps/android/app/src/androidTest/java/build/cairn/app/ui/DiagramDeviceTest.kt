@@ -255,6 +255,7 @@ class DiagramDeviceTest {
                         "activate A\n".repeat(20) +
                         "A->>A: abcdefghijabcdefghijabcdefghij",
                     "pie\n\"A\" : 1\n\"B\" : 2",
+                    "pie showData\n\"Completed\":10\n\"Failed\":0",
                 )) {
                 compose.runOnIdle { content = "" }
                 compose.waitUntil(20000) {

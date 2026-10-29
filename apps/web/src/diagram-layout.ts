@@ -2577,20 +2577,22 @@ export function layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
   const radius = 92
   const inner = 56
   const cx = MARGIN + radius
-  const visible = diagram.slices.filter(slice => slice.value > 0)
+  const positiveCount = diagram.slices.filter(slice => slice.value > 0).length
   const rowHeight = 24
   const format = (value: number) => value > 0 && value < 0.01 ? String(value) : (value < 1e12 ? Math.round(value * 100) / 100 : value).toLocaleString('en-US')
   const totalText = format(total)
   const totalInLegend = measure.width(totalText, 18, 700) > inner * 2 - 24
-  const legendHeight = (visible.length + (totalInLegend ? 1 : 0)) * rowHeight
+  const legendHeight = (diagram.slices.length + (totalInLegend ? 1 : 0)) * rowHeight
   const cy = top + Math.max(radius, legendHeight / 2)
 
   let angle = 0
-  visible.forEach((slice, position) => {
+  diagram.slices.forEach((slice, position) => {
+    if (slice.value === 0)
+      return
     const sweep = (slice.value / total) * Math.PI * 2
     const paint: Paint = { tone: `series-${position % SERIES}` }
     // Slices are separated by a hairline gap of equal width on both rims.
-    const gap = visible.length === 1 ? 0 : Math.min(0.012, sweep / 4)
+    const gap = positiveCount === 1 ? 0 : Math.min(0.012, sweep / 4)
     items.push({
       kind: 'path',
       d: [...arc(cx, cy, radius, angle + gap, angle + sweep - gap, true), ...arc(cx, cy, inner, angle + sweep - gap * radius / inner, angle + gap * radius / inner, false), ['Z']],
@@ -2640,7 +2642,7 @@ export function layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
   const legendX = cx + radius + 32
   let legendY = cy - legendHeight / 2 + rowHeight / 2
   let legendWidth = 0
-  for (const [position, slice] of visible.entries()) {
+  for (const [position, slice] of diagram.slices.entries()) {
     const share = Math.round((slice.value / total) * 1000) / 10
     const label = slice.label
     const detail = diagram.showData ? `${share}% · ${format(slice.value)}` : `${share}%`
@@ -2703,6 +2705,6 @@ export function layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
     width,
     height: Math.ceil(Math.max(cy + radius, cy + legendHeight / 2) + MARGIN),
     items,
-    label: diagram.title ?? `Pie chart with ${visible.length} ${visible.length === 1 ? 'slice' : 'slices'}`,
+    label: diagram.title ?? `Pie chart with ${positiveCount} ${positiveCount === 1 ? 'slice' : 'slices'}`,
   }
 }
