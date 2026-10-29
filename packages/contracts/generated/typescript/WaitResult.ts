@@ -14,7 +14,7 @@ export interface WaitResult {
   finishedAt?: number
   paused?: boolean
   error?: string
-  condition?: WaitExternalCondition
+  condition?: import('./WaitExternalCondition').WaitExternalCondition
   wakeAt?: number
   display?: WaitResultDisplay
   pluginResult?: PluginWaitData

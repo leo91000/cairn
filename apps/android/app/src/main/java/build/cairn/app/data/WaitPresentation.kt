@@ -19,14 +19,23 @@ private fun presentCondition(value: JsonObject): JsonObject {
     return value
 }
 
+private fun presentResult(value: JsonElement): JsonElement = when(value) {
+    is JsonArray -> JsonArray(value.map(::presentResult))
+    is JsonObject -> {
+        val extra=value["pluginResult"] as? JsonObject
+        JsonObject((extra.orEmpty()+value).mapValues { (_, field) -> presentResult(field) })
+    }
+    else -> value
+}
+
 val ChatWakeup.conditionJson: JsonObject?
     get() = condition?.let { presentCondition(wireJson.encodeToJsonElement(it).jsonObject) }
 
 val ChatWakeup.membersJson: JsonArray?
-    get() = members?.let { wireJson.encodeToJsonElement(it).jsonArray }
+    get() = members?.let { presentResult(wireJson.encodeToJsonElement(it)).jsonArray }
 
 val ChatWakeup.observationJson: JsonObject?
-    get() = observation?.let { wireJson.encodeToJsonElement(it).jsonObject }
+    get() = observation?.let { presentResult(wireJson.encodeToJsonElement(it)).jsonObject }
 
 val ChatWakeup.displayJson: JsonObject?
     get() = display?.let { wireJson.encodeToJsonElement(it).jsonObject }

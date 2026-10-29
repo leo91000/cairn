@@ -25,6 +25,7 @@ window.questionnaireRaw = (fields: unknown) => {
     runId: 'run',
     blocking: false,
     status: 'pending',
+    source: 'cairn',
     createdAt: 1,
     fields: fields as ChatQuestion['fields'],
   }]
@@ -37,6 +38,7 @@ window.questionnaire = (fields: unknown) => {
     runId: 'run',
     blocking: false,
     status: 'pending',
+    source: 'cairn',
     createdAt: 1,
     fields: fields as ChatQuestion['fields'],
   }]

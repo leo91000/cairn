@@ -443,7 +443,29 @@ fn time_result(wake_at: i64) -> WaitObservation {
 }
 
 pub(crate) fn observed_from_wire(value: &Value) -> Result<WaitObservation> {
-    // Plugin extensions belong to the plugin, never to Cairn's scheduling state.
+    // Plugin fields can share names with native fields (GitHub runId is numeric).
+    // Decode only Cairn's envelope; preserve the plugin's complete remaining result.
+    if value["pluginId"].is_string() {
+        let mut extra = value
+            .as_object()
+            .cloned()
+            .ok_or_else(|| Error::bad_gateway("Invalid plugin observation."))?;
+        for key in ["state", "type", "message", "display"] {
+            extra.remove(key);
+        }
+        return Ok(WaitObservation {
+            state: text(value, "state").to_owned(),
+            kind: value["type"].as_str().map(str::to_owned),
+            message: value["message"].as_str().map(str::to_owned),
+            display: if value["display"].is_object() {
+                Some(serde_json::from_value(value["display"].clone())?)
+            } else {
+                None
+            },
+            plugin_result: Some(PluginWaitData(extra.into_iter().collect())),
+            ..Default::default()
+        });
+    }
     let mut raw = value.clone();
     if let Some(condition) = raw.get_mut("condition") {
         *condition = serde_json::to_value(condition_from_wire(condition)?)?;
@@ -459,16 +481,7 @@ pub(crate) fn observed_from_wire(value: &Value) -> Result<WaitObservation> {
             }
         }
     }
-    let mut observation: WaitObservation = serde_json::from_value(raw.clone())?;
-    if value["pluginId"].is_string() {
-        let known = serde_json::to_value(&observation)?;
-        let mut extra = raw.as_object().cloned().unwrap_or_default();
-        extra.retain(|key, _| !known.as_object().unwrap().contains_key(key));
-        if !extra.is_empty() {
-            observation.plugin_result = Some(PluginWaitData(extra.into_iter().collect()));
-        }
-    }
-    Ok(observation)
+    Ok(serde_json::from_value(raw)?)
 }
 
 fn input_revision(db: &Db<'_>, run: &Value, chat: &Value) -> Result<(i64, Vec<String>)> {

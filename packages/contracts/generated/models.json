@@ -979,6 +979,22 @@
       ],
       "type": "object"
     },
+    "AskQuestionsOutput": {
+      "properties": {
+        "questionId": {
+          "type": "string"
+        },
+        "status": {
+          "pattern": "^(pending|answering|answered|cancelled)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "questionId",
+        "status"
+      ],
+      "type": "object"
+    },
     "AvatarConfiguration": {
       "additionalProperties": false,
       "properties": {
@@ -2679,6 +2695,181 @@
       },
       "required": [
         "settings"
+      ],
+      "type": "object"
+    },
+    "DelegateTaskInput": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "maxLength": 120,
+          "pattern": "^[\\w./:\\[\\]-]*$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projectId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning": {
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "task": {
+          "maxLength": 50000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 90,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "task"
+      ],
+      "type": "object"
+    },
+    "DelegatedTask": {
+      "properties": {
+        "agentId": {
+          "type": "string"
+        },
+        "agentName": {
+          "type": "string"
+        },
+        "chatId": {
+          "type": "string"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finished": {
+          "type": "boolean"
+        },
+        "finishedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lifecycle": {
+          "pattern": "^(active|trash|purging)$",
+          "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "additionalProperties": true,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "TaskOutcome"
+        },
+        "paused": {
+          "type": "boolean"
+        },
+        "pendingQuestions": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "preview": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projectId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "report": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "pattern": "^(idle|queued|running|waiting|succeeded|failed|cancelled|interrupted)$",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "chatId",
+        "title",
+        "agentId",
+        "agentName",
+        "projectId",
+        "provider",
+        "model",
+        "status",
+        "lifecycle",
+        "finished",
+        "paused",
+        "error",
+        "pendingQuestions",
+        "outcome",
+        "runId",
+        "finishedAt"
       ],
       "type": "object"
     },
@@ -5975,6 +6166,42 @@
       },
       "required": [
         "version"
+      ],
+      "type": "object"
+    },
+    "PendingQuestion": {
+      "properties": {
+        "blocking": {
+          "type": "boolean"
+        },
+        "fields": {
+          "items": {
+            "$ref": "#/definitions/QuestionField"
+          },
+          "type": "array"
+        },
+        "questionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "questionId",
+        "fields",
+        "blocking"
+      ],
+      "type": "object"
+    },
+    "PendingQuestionsOutput": {
+      "properties": {
+        "questions": {
+          "items": {
+            "$ref": "#/definitions/PendingQuestion"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "questions"
       ],
       "type": "object"
     },
@@ -10064,6 +10291,33 @@
       ],
       "type": "object"
     },
+    "TaskStatusInput": {
+      "additionalProperties": false,
+      "properties": {
+        "chatId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TaskStatusOutput": {
+      "properties": {
+        "tasks": {
+          "items": {
+            "$ref": "#/definitions/DelegatedTask"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "tasks"
+      ],
+      "type": "object"
+    },
     "TimeCondition": {
       "oneOf": [
         {
@@ -10649,6 +10903,19 @@
         "tone",
         "title",
         "detail"
+      ],
+      "type": "object"
+    },
+    "WithdrawQuestionInput": {
+      "additionalProperties": false,
+      "properties": {
+        "questionId": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "questionId"
       ],
       "type": "object"
     }

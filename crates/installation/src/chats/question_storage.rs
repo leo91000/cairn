@@ -161,6 +161,10 @@ impl Db<'_> {
             Err(error) => {
                 self.0
                     .execute_batch("ROLLBACK TO question_write; RELEASE question_write")?;
+                let discarded = self.0.total_changes() - before;
+                if discarded>0&&self.0.query_row("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='cairn_discarded_changes')",[],|r|r.get::<_,bool>(0))? {
+                    self.0.query_row("SELECT cairn_discarded_changes(?)",[i64::try_from(discarded).unwrap_or(i64::MAX)],|_|Ok(()))?;
+                }
                 return Err(error);
             }
         }

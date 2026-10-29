@@ -107,7 +107,7 @@ macro_rules! observation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     #[schemars(with="Option<WaitExternalCondition>")]
-    #[ts(type="WaitExternalCondition")]
+    #[ts(type="import('./WaitExternalCondition').WaitExternalCondition")]
     pub condition: Option<WaitCondition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]

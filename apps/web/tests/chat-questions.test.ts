@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import askSchema from '../../../packages/contracts/generated/AskQuestionsInput.json'
 import answerSchema from '../../../packages/contracts/generated/QuestionAnswerInput.json'
 
-const ajv = new Ajv({ useDefaults: true })
+const ajv = new Ajv({ useDefaults: true, strict: false })
 addFormats(ajv)
 const ask = ajv.compile(askSchema)
 const answer = ajv.compile(answerSchema)

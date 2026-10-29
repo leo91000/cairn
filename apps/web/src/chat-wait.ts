@@ -3,6 +3,7 @@ import type {
   ChatWakeup,
   WaitCondition,
   WaitGroup,
+  WaitObservation,
 } from '../../../packages/contracts/chats'
 import type { ActivityWait } from './activity'
 
@@ -80,7 +81,7 @@ export interface WaitMember {
   lastError?: string
 }
 
-type Observation = Record<string, unknown> | null | undefined
+type Observation = WaitObservation | Record<string, unknown> | null | undefined
 
 export function waitGroup(condition: ChatWakeup['condition'] | null | undefined): WaitGroup | null {
   return condition?.type === 'group' && Array.isArray((condition as WaitGroup).conditions) ? condition as WaitGroup : null
@@ -267,7 +268,7 @@ export interface WaitProgress {
   /** Its wakeup is the one the conversation still honours. */
   current: boolean
   /** What Cairn observed, from the history or the pending wakeup; `undefined` before any result. */
-  observation: Record<string, unknown> | null | undefined
+  observation: Observation
   /** Its result arrived or the conversation resumed. */
   finished: boolean
   replaced: boolean
@@ -312,7 +313,7 @@ export function waitLeft(wakeup: { wakeAt: number, condition?: boolean, resolved
 }
 
 /** A plugin's words for a result, when it gave them. */
-function resultDisplay(observation: Record<string, unknown>) {
+function resultDisplay(observation: NonNullable<Observation>) {
   const display = observation.display as Partial<WaitOutcome> | null | undefined
   if (!display || typeof display !== 'object' || typeof display.title !== 'string' || !display.title)
     return null
@@ -324,7 +325,7 @@ function resultDisplay(observation: Record<string, unknown>) {
  * What a result answers, for a card that has no scheduled wakeup to name it. A plugin result
  * only names itself when its plugin gives a short wording.
  */
-export function observedTarget(observation: Record<string, unknown> | null | undefined) {
+export function observedTarget(observation: Observation) {
   if (!observation)
     return ''
   const members = groupObservation(observation)
@@ -339,14 +340,14 @@ export function observedTarget(observation: Record<string, unknown> | null | und
   const display = observation.display as { short?: unknown } | null | undefined
   if (typeof display?.short === 'string' && display.short)
     return display.short
-  return observation.type || observation.pluginId ? 'A condition' : ''
+  return observation.type || ('pluginId' in observation && observation.pluginId) || observation.pluginResult ? 'A condition' : ''
 }
 
 const runOutcomes: Record<string, string> = { blocked: 'Blocked', needs_input: 'Needs your input' }
 const failures = ['failure', 'failed', 'error', 'startup_failure', 'timed_out']
 
 /** What Cairn observed when a wait ended; time reached is distinct from an external timeout. */
-export function waitOutcome(observation: Record<string, unknown> | null | undefined): WaitOutcome {
+export function waitOutcome(observation: Observation): WaitOutcome {
   const state = observation?.state
   if (!observation || !state)
     return { tone: 'neutral', title: 'Wait finished', detail: '' }
@@ -382,7 +383,8 @@ export function waitOutcome(observation: Record<string, unknown> | null | undefi
   }
 
   // A plugin result without its own wording: its conclusion, when it has one.
-  const conclusion = observation.conclusion
+  const extra = observation.pluginResult
+  const conclusion = ('conclusion' in observation && observation.conclusion) || (extra && typeof extra === 'object' && 'conclusion' in extra ? extra.conclusion : undefined)
   if (typeof conclusion === 'string' && conclusion) {
     if (conclusion === 'success')
       return { tone: 'ok', title: 'Succeeded', detail: '' }
@@ -397,7 +399,7 @@ export function waitOutcome(observation: Record<string, unknown> | null | undefi
  * A group's result: the first result for `any`, every result for `all`, with the most serious tone
  * among them. Results that did not arrive before the deadline are counted, never assumed.
  */
-function groupOutcome(observation: Record<string, unknown>, members: { result?: Observation }[]): WaitOutcome {
+function groupOutcome(observation: NonNullable<Observation>, members: { result?: Observation }[]): WaitOutcome {
   const outcomes = members.map(member => member?.result && typeof member.result === 'object' && member.result.state ? waitOutcome(member.result) : null)
   const received = outcomes.filter(outcome => outcome !== null)
   const count = members.length
