@@ -285,7 +285,7 @@ class FilUnreadJourneyTest {
                     reads.isNotEmpty()
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"chat:done\",\"finishedAt\":${chats.first().finishedAt}}]}",
+                    "{\"items\":[{\"key\":\"chat:${chats.first().id}\",\"finishedAt\":${chats.first().finishedAt}}]}",
                     reads.first(),
                 )
                 compose.waitUntil(10000) {
@@ -523,7 +523,7 @@ class FilUnreadJourneyTest {
                     reads.isNotEmpty()
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"chat:done\",\"finishedAt\":${chats.first().finishedAt}}]}",
+                    "{\"items\":[{\"key\":\"chat:${chats.first().id}\",\"finishedAt\":${chats.first().finishedAt}}]}",
                     reads.first(),
                 )
             } finally {
