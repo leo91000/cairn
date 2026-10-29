@@ -237,6 +237,34 @@ describe('node health', () => {
     // Recovery, or a reported error, starts over.
     expect(observeUnready([node()], later, 400_000)).toEqual({})
     expect(observeUnready([node({ executionReady: false, budgetError: 'cgroup' })], later, 400_000)).toEqual({})
+    // Time spent offline or changing privileges does not count: the grace period starts at "Not ready".
+    const offline = node({ status: 'offline', executionReady: false })
+    const away = observeUnready([offline], observeUnready([offline], {}, 0), 10 * 60_000)
+    expect(away).toEqual({})
+    const back = observeUnready([{ ...offline, status: 'online' }], away, 10 * 60_000 + 10_000)
+    expect(nodeHealth({ ...offline, status: 'online' }, 0, null, null, back).state).toBe('updating')
+    const native = node({
+      capabilities: {
+        ...node().capabilities,
+        backend: 'native',
+        kvm: false,
+        ublk: true,
+        nativeModeProtocol: 1,
+      },
+      nativeEnabled: true,
+      nativeAccounts: ['person'],
+      executionReady: false,
+    })
+    expect(observeUnready([{ ...native, nativeModeStatus: 'pending' }], {}, 0)).toEqual({})
+  })
+
+  it('reads a runtime offering no slot as full', () => {
+    expect(nodeHealth(node({
+      slots: 2,
+      runtimeSlots: 0,
+      occupiedSlots: 0,
+      availableSlots: 2,
+    }))).toEqual({ state: 'full', label: 'Full', detail: 'The runtime offers no slot' })
   })
 
   it('reads partial payloads like the Kotlin contract and the server', () => {

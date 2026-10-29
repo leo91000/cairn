@@ -73,7 +73,7 @@ fun NodesScreen(
     suspend fun load() {
         nodes = vm.api.get("/nodes")
         runner = observeRunner(nodes, runner)
-        unready = observeUnready(nodes, unready)
+        unready = observeUnready(nodes, unready, clock = fleetClock(nodes, runner), runner = runner)
         if (nodes.any { it.capabilities.backend == "native" })
             nativeCallers = vm.api.get("/nodes/native-callers")
         val invitation = enrollment ?: return

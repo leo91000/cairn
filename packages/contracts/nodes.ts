@@ -43,21 +43,24 @@ export function slotCapacity(node: ExecutionNode) {
 }
 
 /** A runtime unready without a reported error: usually on its way, but some causes last (image, pool, data root). */
-function unexplainedUnready(node: ExecutionNode) {
-  return !node.revoked && !node.executionReady && node.budgetError == null && node.updateError == null
-}
-
 /** Unready machines without a reported error, first seen and last confirmed by successful listings. */
 export type UnreadyObservations = Record<string, { since: number, checkedAt: number }>
 
 /** How long an unexplained unready state may last before it needs the owner. */
 export const LASTING_UNREADY_MS = 5 * 60_000
 
-/** Follows unexplained unready states across successful listings; a recovered machine starts over. */
-export function observeUnready(nodes: ExecutionNode[], previous: UnreadyObservations, now = Date.now()): UnreadyObservations {
+/** The health label of a runtime unready without a reported error; only it is timed. */
+const NOT_READY = 'Not ready'
+
+/**
+ * Follows unexplained unready states across successful listings. Only time spent showing "Not ready"
+ * counts: while an earlier blocker explains the machine (offline, update, privilege change), or once it
+ * recovers, it starts over.
+ */
+export function observeUnready(nodes: ExecutionNode[], previous: UnreadyObservations, now = Date.now(), clock: number | null = null, runner: RunnerObservation | null = null): UnreadyObservations {
   const next: UnreadyObservations = {}
   for (const node of nodes) {
-    if (unexplainedUnready(node))
+    if (nodeHealth(node, now, clock, runner).label === NOT_READY)
       next[node.id] = { since: previous[node.id]?.since ?? now, checkedAt: now }
   }
 
@@ -251,7 +254,7 @@ export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number 
       return { state: 'attention', label: 'Needs attention', detail: 'The update failed' }
     if (unreadyFor(node, unready) >= LASTING_UNREADY_MS)
       return { state: 'attention', label: 'Needs attention', detail: 'Not ready for over 5 minutes' }
-    return { state: 'updating', label: 'Not ready', detail: 'The runtime is not ready yet' }
+    return { state: 'updating', label: NOT_READY, detail: 'The runtime is not ready yet' }
   }
 
   if (native && node.nativeModeProposal)
@@ -270,8 +273,8 @@ export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number 
   const slots = slotCapacity(node)
   const running = node.occupiedSlots ?? 0
   const free = freeSlots(node)
-  if (slots > 0 && free <= 0)
-    return { state: 'full', label: 'Full', detail: `All ${slots} slots in use` }
+  if (free <= 0)
+    return { state: 'full', label: 'Full', detail: slots ? `All ${slots} slots in use` : 'The runtime offers no slot' }
   return { state: 'ready', label: 'Ready', detail: running ? `${running} running · ${free} of ${slots} slots free` : `${free} of ${slots} slots free` }
 }
 

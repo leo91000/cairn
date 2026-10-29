@@ -266,6 +266,32 @@ class NodesTest {
         assertTrue(
             observeUnready(listOf(waiting.copy(budgetError = "cgroup")), later, 400_000).isEmpty()
         )
+        // Time spent offline does not count: the grace period starts at "Pas prête".
+        val disconnected = waiting.copy(status = "offline")
+        val away =
+            observeUnready(
+                listOf(disconnected),
+                observeUnready(listOf(disconnected), emptyMap(), 0),
+                600_000,
+            )
+        assertTrue(away.isEmpty())
+        assertEquals(
+            NodeHealthState.UPDATING,
+            nodeHealth(
+                    waiting,
+                    0,
+                    null,
+                    null,
+                    observeUnready(listOf(waiting), away, 610_000),
+                )
+                .state,
+        )
+        assertEquals(
+            NodeHealth(NodeHealthState.FULL, "Pleine", "Le runtime n’offre aucun slot"),
+            nodeHealth(
+                ready.copy(slots = 2, runtimeSlots = 0, occupiedSlots = 0, availableSlots = 2)
+            ),
+        )
         assertEquals(3L, slotCapacity(ready.copy(slots = null, runtimeSlots = 3)))
         assertEquals(4L, slotCapacity(ready.copy(slots = null, runtimeSlots = null)))
 

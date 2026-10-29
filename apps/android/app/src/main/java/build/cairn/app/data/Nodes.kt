@@ -208,23 +208,23 @@ data class UnreadyObservation(val since: Long, val checkedAt: Long)
 /** How long an unexplained unready state may last before it needs the owner. */
 const val LASTING_UNREADY_MS = 5 * 60_000L
 
-/**
- * A runtime unready without a reported error: usually on its way, but some causes last (image,
- * pool, data root).
- */
-private fun unexplainedUnready(node: ExecutionNode) =
-    !node.revoked && !node.executionReady && node.budgetError == null && node.updateError == null
+/** The health label of a runtime unready without a reported error; only it is timed. */
+private const val NOT_READY = "Pas prête"
 
 /**
- * Follows unexplained unready states across successful listings; a recovered machine starts over.
+ * Follows unexplained unready states across successful listings. Only time spent showing "Pas
+ * prête" counts: while an earlier blocker explains the machine (offline, update, privilege change),
+ * or once it recovers, it starts over.
  */
 fun observeUnready(
     nodes: List<ExecutionNode>,
     previous: Map<String, UnreadyObservation>,
     now: Long = System.currentTimeMillis(),
+    clock: Long? = null,
+    runner: RunnerObservation? = null,
 ): Map<String, UnreadyObservation> =
     nodes
-        .filter { unexplainedUnready(it) }
+        .filter { nodeHealth(it, now, clock, runner).label == NOT_READY }
         .associate { it.id to UnreadyObservation(previous[it.id]?.since ?: now, now) }
 
 /** How long a machine has stayed unready without a reported error, as listings saw it. */
@@ -374,7 +374,7 @@ fun nodeHealth(
             else ->
                 NodeHealth(
                     NodeHealthState.UPDATING,
-                    "Pas prête",
+                    NOT_READY,
                     "Le runtime n’est pas encore prêt",
                 )
         }
@@ -411,8 +411,12 @@ fun nodeHealth(
     }
     val slots = slotCapacity(node)
     val free = freeSlots(node)
-    if (slots > 0 && free <= 0)
-        return NodeHealth(NodeHealthState.FULL, "Pleine", "Les $slots slots sont occupés")
+    if (free <= 0)
+        return NodeHealth(
+            NodeHealthState.FULL,
+            "Pleine",
+            if (slots > 0) "Les $slots slots sont occupés" else "Le runtime n’offre aucun slot",
+        )
     val running = node.occupiedSlots
     return NodeHealth(
         NodeHealthState.READY,

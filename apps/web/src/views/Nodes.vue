@@ -131,16 +131,24 @@ watch(() => [adding.value, editing.value?.id, grantingId.value, cleaning.value?.
 // The newly enrolled native node whose "Who can use it?" step follows its configuration.
 let grantAfterConfigure: string | null = null
 
+// Polls and post-action refreshes can overlap: only the latest request's answer is kept.
+let listing = 0
+
 async function load() {
+  const request = ++listing
   try {
-    nodes.value = await api<ExecutionNode[]>('/nodes')
+    const listed = await api<ExecutionNode[]>('/nodes')
+    if (request !== listing)
+      return
+    nodes.value = listed
     runner.value = observeRunner(nodes.value, runner.value)
-    unready.value = observeUnready(nodes.value, unready.value)
+    unready.value = observeUnready(nodes.value, unready.value, Date.now(), fleetClock(nodes.value, runner.value), runner.value)
     loaded.value = true
     refreshError.value = ''
   }
   catch (e) {
-    refreshError.value = (e as Error).message
+    if (request === listing)
+      refreshError.value = (e as Error).message
     return
   }
 
