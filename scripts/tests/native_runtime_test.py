@@ -277,6 +277,59 @@ def main():
             path = Path('/proc') / pid / 'root' / str(state).lstrip('/') / 'native' / run / 'data/workspaces'
             return path / base_projects[run] if run in base_projects else path
 
+        def pressure_diagnostics(label, current_run, attempt):
+            sample = dict(label=label, monotonic=time.monotonic(), bootSeconds=Path('/proc/uptime').read_text().split()[0])
+            try:
+                sample['storage'] = api('/disks/' + current_run + '/storage-status')
+            except Exception as error:
+                sample['storageError'] = type(error).__name__
+            for suffix in ('lease', 'native-suspension.json', 'stop-reason.json', 'exit', 'active'):
+                path = state / (attempt + '.' + suffix)
+                if path.exists():
+                    sample[suffix] = path.read_text()[:4000]
+            unit = 'cairn-native-' + attempt + '.service'
+            result = subprocess.run(['systemctl', 'show', unit, '--property=ActiveState,SubState,FreezerState,MainPID,ControlGroup,Result,ExecMainStatus'], capture_output=True, text=True, timeout=5)
+            sample['unit'] = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+            group = sample['unit'].get('ControlGroup', '')
+            if group.startswith('/'):
+                directory = Path('/sys/fs/cgroup') / group.lstrip('/')
+                for field in ('cgroup.freeze', 'cgroup.events', 'cpu.stat'):
+                    try:
+                        sample[field] = (directory / field).read_text()
+                    except OSError:
+                        pass
+                sample['processes'] = []
+                for process_file in list(directory.rglob('cgroup.procs'))[:64]:
+                    try:
+                        pids = process_file.read_text().split()
+                    except OSError:
+                        continue
+                    for pid in pids[:64]:
+                        process = dict(pid=pid, tasks=[])
+                        for task in list((Path('/proc') / pid / 'task').glob('*'))[:16]:
+                            try:
+                                process['tasks'].append(dict(stat=(task / 'stat').read_text(), wchan=(task / 'wchan').read_text()))
+                            except OSError:
+                                pass
+                        sample['processes'].append(process)
+            evidence = Path(os.environ['NATIVE_STORAGE_EVIDENCE_DIR'])
+            evidence.mkdir(parents=True, exist_ok=True)
+            text = json.dumps(sample)
+            for secret in (SECRET, token, contexts[current_run]['grant']):
+                text = text.replace(secret, '[fixture-secret]')
+            with (evidence / 'pressure-samples.jsonl').open('a') as output:
+                output.write(text + '\n')
+            return sample.get('storage', {})
+
+        def pressure_wait(label, current_run, attempt, expected):
+            last = [0]
+            def check():
+                if time.monotonic() - last[0] < 0.5:
+                    return False
+                last[0] = time.monotonic()
+                return pressure_diagnostics(label, current_run, attempt).get('paused') is expected
+            eventually(check, timeout=25)
+
         def start_controller():
             nonlocal controller_started
             environment = dict(DATA_DIR=str(data), RUNNER_STATE_DIR=str(state), RUNNER_BIND='127.0.0.1:4311',
@@ -688,18 +741,21 @@ def main():
             storage_policy(pressure_policy)
             eventually(lambda: api('/disks/' + run + '/storage-status')['waitingFor'] == 'disk-space', timeout=25)
             eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is True)
+            pressure_diagnostics('first-frozen', run, resumed)
             size = descendant.stat().st_size
             time.sleep(0.5)
             assert descendant.stat().st_size == size, 'Storage pause left a descendant running.'
             storage_policy(contexts[run]['policy'])
             eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is False)
             eventually(lambda: descendant.stat().st_size > size)
+            pressure_diagnostics('first-resumed', run, resumed)
             (managed(run) / 'persisted').write_text('unpublished mutation')
             # Stopping a protected workload must thaw its owned unit before
             # systemd can deliver termination signals. No manual thaw in this test.
+            pressure_diagnostics('second-before-policy', run, resumed)
             storage_policy(pressure_policy)
             eventually(lambda: api('/disks/' + run + '/storage-status')['waitingFor'] == 'disk-space', timeout=25)
-            eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is True, timeout=25)
+            pressure_wait('second-paused-wait', run, resumed, True)
             api('/runs/' + resumed, method='DELETE')
             fenced(run, resumed)
             storage_policy(contexts[run]['policy'])
@@ -981,6 +1037,20 @@ def main():
             print('PASS: real ublk/ext4, unprivileged runner-entry, read-only runtime secrets/skills, '
                   'S3 publish/ack, conditional clean eviction, unrelated conversation retained, lazy remote resume, repeated restore, '
                   'lease/descendant/guardian/controller fencing, crash recovery, concurrent disk retirement, final checkpoint, retry tombstone.')
+        except BaseException:
+            evidence = Path(os.environ['NATIVE_STORAGE_EVIDENCE_DIR'])
+            evidence.mkdir(parents=True, exist_ok=True)
+            (evidence / 'partial-metrics.json').write_text(json.dumps(metrics, indent=2))
+            if 'resumed' in locals():
+                pressure_diagnostics('failure-before-cleanup', run, resumed)
+                records = []
+                for unit in (supervisor, 'cairn-native-' + resumed + '.service'):
+                    record = subprocess.run(['journalctl', '--no-pager', '--output=cat', '--lines=200', '--unit=' + unit], capture_output=True, text=True, timeout=10).stdout
+                    for secret in (SECRET, token, contexts[run]['grant']):
+                        record = record.replace(secret, '[fixture-secret]')
+                    records.append(unit + ':\n' + record)
+                (evidence / 'failure-journal.txt').write_text('\n'.join(records))
+            raise
         finally:
             helper.stdin.close()
             try:
