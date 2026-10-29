@@ -25,10 +25,11 @@
   agent grants but never widen them; they write hook rules only for one person, in a
   conversation that meets every provenance condition of ADR-0075, never in tasks or
   missions; they never touch another account's rule, never lift or work around,
-  through rule writes, an owner's emergency pause or an exhausted budget (no rule
-  writes of any kind for an account while one of its rules is so blocked), and never
-  reduce a grant another account's rule uses (any account's, outside such a
-  conversation) ([ADR-0075](docs/adr/0075-plugin-hooks-rules-and-scoped-grants.md)).
+  through rule writes, an owner's emergency pause or an exhausted budget (only
+  deactivations for an account while one of its rules is so blocked), and never reduce
+  a grant that a rule of the owner or of another current member uses (any account's,
+  outside such a conversation)
+  ([ADR-0075](docs/adr/0075-plugin-hooks-rules-and-scoped-grants.md)).
 - Separate logical steps with blank lines. Give complex expressions descriptive
   intermediate names when that makes the flow easier to follow. Avoid arbitrary
   function-size limits or extracting helpers solely to reduce line counts.

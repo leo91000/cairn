@@ -155,7 +155,8 @@ qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l’arbre.
   [CEL](https://cel.dev) (Common Expression Language), complétée par des fonctions de
   Cairn (tronquer, découper en morceaux, formater une date…). Une formule est pure,
   sans effet de bord ni boucle non bornée, et son coût d’évaluation est borné. L’agent
-  qu’une action démarre est choisi dans la règle, jamais calculé par une formule.
+  qu’une action démarre, et l’outil et l’instance qu’elle appelle, sont choisis dans
+  la règle, jamais calculés par une formule.
 - **Actions** : démarrer un agent, orienter une conversation, appeler un outil de
   plugin (jamais un outil de Cairn comme `cairn_installation` ou la délégation),
   annuler la conversation d’une clé, répondre à la question d’un agent, mémoriser une
@@ -246,17 +247,18 @@ propriétaire pouvait donner). Il écrit au nom de cette personne : il crée de
 son nom, et ne modifie, désactive, réactive ou supprime que les règles de ce compte.
 Tant qu’une règle de cette personne est en pause d’urgence ou au budget épuisé, il
 n’écrit aucune de ses règles : ni création, ni duplication, ni modification, ni
-réactivation, ni suppression ; il ne lève jamais ces empêchements et ne duplique la
-règle en pause ou au budget épuisé de personne. Il n’accorde de droits à aucun agent
-ni à aucun compte, et ne touche pas à la règle d’un autre compte. Enfin, dans toute
-conversation, il ne réduit pas un droit sur un hook ou un outil qu’utilise, sur son
-agent d’exécution, la règle d’un autre compte que cette personne (le propriétaire, ou
-un membre dont l’adhésion dure), ressources comprises et quel que soit l’état de la
-règle ; hors d’une conversation qui remplit ces conditions, cela vaut pour les règles
-de tous les comptes. Une conversation, des instructions ou des skills dont Cairn n’a
-pas enregistré qui les a écrits, comme tout ce qui précède cette décision, ne
-permettent jamais d’écrire des règles. Une règle créée par le MCP public a pour
-créateur le propriétaire qui a autorisé ce client.
+réactivation, ni suppression, seule la désactivation restant permise ; il ne lève
+jamais ces empêchements et ne duplique la règle en pause ou au budget épuisé de
+personne. Il n’accorde de droits à aucun agent ni à aucun compte, et ne touche pas à
+la règle d’un autre compte. Enfin, dans toute conversation, il ne réduit pas un droit
+sur un hook ou un outil qu’utilise, sur son agent d’exécution, la règle d’un autre
+compte que cette personne (le propriétaire, ou un membre dont l’adhésion dure),
+ressources comprises et quel que soit l’état de la règle ; hors d’une conversation qui
+remplit ces conditions, cela vaut pour les règles de tous les comptes. Une
+conversation, des instructions ou des skills dont Cairn n’a pas enregistré qui les a
+écrits, comme tout ce qui précède cette décision, ne permettent jamais d’écrire des
+règles. Une règle créée par le MCP public a pour créateur le propriétaire qui a
+autorisé ce client.
 
 Une règle n’atteint un agent dont la politique autorise l’exécution native, ou une
 conversation qui s’exécute en natif, que si son créateur détenait l’autorité native
@@ -276,12 +278,12 @@ renouvellement de bail de tout travail natif.
 
 Fusionner ou supprimer des agents ([guide](../AGENT-MERGE.md)) met les règles dont
 l’agent d’exécution, ou un agent qu’elles démarrent, disparaît en « Droits perdus »
-jusqu’à ce que leur créateur les modifie, tout comme les règles qui orientent des clés
-rattachées aux conversations que la fusion déplace : un agent qui reçoit des
-conversations ne reçoit pas ainsi les inconnus qui les orientent ; une conversation
-déplacée vers un autre agent ne permet plus d’écrire de règles. Les accès des comptes
-à l’agent fusionné ne passent pas à l’agent qui le reçoit : seul le propriétaire les
-accorde.
+jusqu’à ce que leur créateur les modifie. La fusion détache aussi les clés des
+conversations qu’elle déplace : aucune règle ne peut plus les orienter ni répondre à
+leurs questions, et un agent qui reçoit des conversations ne reçoit pas ainsi les
+inconnus qui les orientaient ; une conversation déplacée vers un autre agent ne permet
+plus d’écrire de règles. Les accès des comptes à l’agent fusionné ne passent pas à
+l’agent qui le reçoit : seul le propriétaire les accorde.
 
 ### Budget du moteur
 
@@ -347,9 +349,11 @@ reste donc de confiance pour ces déclarations, comme il l’était pour l’adm
 Une règle qui ne teste pas l’auteur ouvre son agent à n’importe qui : l’éditeur, le
 MCP public, `cairn_installation` (par une notification à la personne pour qui l’agent
 écrit) et l’installation d’un modèle de règles préviennent son créateur quand l’agent
-démarré a des droits de plugin, des connexions MCP, plusieurs projets, l’écriture de
-fichiers ou l’exécution de commandes, le pouvoir de déléguer, l’exécution native ou
-l’accès à l’installation, comme le faisait l’assistant des bots
+démarré, ou l’agent d’une conversation que ses clés rattachent et qu’une règle sans
+test de l’auteur oriente ou à laquelle elle répond, a des droits de plugin, des
+connexions MCP, plusieurs projets, l’écriture de fichiers ou l’exécution de commandes,
+le pouvoir de déléguer, l’exécution native ou l’accès à l’installation, comme le
+faisait l’assistant des bots
 ([ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md)).
 
 Avant qu’un droit élargisse un agent (des droits de plugin, des connexions MCP,
@@ -357,10 +361,11 @@ plusieurs projets, l’écriture de fichiers ou l’exécution de commandes, le 
 déléguer, l’exécution native ou l’accès à l’installation), la revue du propriétaire,
 sur le web, Android et le MCP public, liste les comptes qui ont accès à cet agent et
 les règles de tous les comptes qui le démarrent, l’utilisent comme agent d’exécution
-ou orientent des clés aujourd’hui rattachées à ses conversations ; l’approbation d’une
-mise à jour de plugin montre de même les agents en accès complet, leurs comptes et
-leurs règles qui reçoivent ses nouvelles contributions ; ce que l’agent peut alors
-faire pour des inconnus est ainsi visible au moment de l’accorder.
+ou, quand leur créateur a des clés rattachées à ses conversations, orientent des
+conversations ou répondent à leurs questions par une clé ; l’approbation d’une mise à
+jour de plugin montre de même les agents en accès complet, leurs comptes et leurs
+règles qui reçoivent ses nouvelles contributions ; ce que l’agent peut alors faire
+pour des inconnus est ainsi visible au moment de l’accorder.
 
 Les risques d’un droit trop large relèvent du propriétaire ; Cairn doit en revanche
 rendre ces droits lisibles et n’en accorder aucun par défaut. Les capacités d’un
