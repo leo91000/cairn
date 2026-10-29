@@ -1,8 +1,8 @@
 # Automatic placement with per-agent node priorities
 
 Update: [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) treats an agent
-whose policy allows native execution, including automatic placement, as native for hook rules: a rule reaches it only with recorded native
-authority.
+whose policy allows native execution, including automatic placement, as native for
+hook rules: a rule reaches it only with recorded native authority.
 
 Date: 2026-10-27.
 
