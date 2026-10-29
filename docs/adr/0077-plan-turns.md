@@ -61,7 +61,11 @@ Pendant un tour de plan, Cairn applique lui-même la frontière :
   `ExitPlanMode` sans argument ; Claude Code (2.1.280, 2.1.308) ajoute alors le contenu
   du fichier (`plan`) et son chemin à l’appel. Ce plan est affiché comme **plan
   proposé**, comme l’élément `plan` de Codex. Sans fichier de plan, aucun plan vide
-  n’est affiché et Claude est invité à l’écrire avant de réessayer.
+  n’est affiché et Claude est invité à l’écrire avant de réessayer. Seul un tour de plan
+  de Cairn affiche un plan proposé, avec « rien n’a été modifié » et **Implémenter** :
+  dans un tour ordinaire, le mode plan propre à Claude Code peut implémenter juste
+  après `ExitPlanMode`, qui s’affiche alors comme un appel d’outil, et un élément
+  `plan` de Codex comme un raisonnement. Les droits du tour ordinaire ne changent pas.
 - **Outils MCP en lecture seule seulement** : pour une connexion, les outils qu’elle
   déclare `readOnlyHint`, appliqués par la passerelle (connexions HTTP) et par la
   liste d’outils du moteur (connexions par commande) ; pour `cairn_installation`, les

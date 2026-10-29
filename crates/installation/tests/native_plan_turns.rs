@@ -1057,3 +1057,105 @@ async fn native_codex_plan_turn_bounds_a_subagent_an_earlier_turn_started() {
         "the sub-agent did not run after the plan"
     );
 }
+
+/// In an ordinary turn Claude Code's own plan mode may implement right after
+/// `ExitPlanMode`: Cairn shows no proposed plan for it, and the turn keeps its permissions.
+#[tokio::test]
+#[ignore = "requires a native Claude Code binary"]
+async fn native_claude_ordinary_turn_exit_plan_mode_is_not_a_proposed_plan() {
+    let binary = std::env::var("CLAUDE_NATIVE_BIN").expect("set CLAUDE_NATIVE_BIN");
+    let root = TempDir::new().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let ws = workspace.to_string_lossy().into_owned();
+    let main = vec![
+        (
+            "Write",
+            json!({ "file_path": format!("{ws}/before-plan"), "content": "before" }),
+        ),
+        ("EnterPlanMode", json!({})),
+        (
+            "Write",
+            json!({ "file_path": PLAN_FILE, "content": PROPOSAL }),
+        ),
+        ("ExitPlanMode", json!({})),
+        (
+            "Write",
+            json!({ "file_path": format!("{ws}/implemented"), "content": "implemented" }),
+        ),
+    ];
+    let (url, requests) = scripted_model(main, Vec::new()).await;
+    let launcher = root.path().join("claude");
+    std::fs::write(
+        &launcher,
+        format!(
+            "#!/bin/sh\nexport ANTHROPIC_BASE_URL={url} ANTHROPIC_API_KEY=sk-ant-local-test CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1\nexec '{binary}' \"$@\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &launcher,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let config = Config {
+        claude_bin: launcher.to_string_lossy().into_owned(),
+        ..common::config(root.path())
+    };
+    std::fs::create_dir_all(config.home.join(".claude")).unwrap();
+    std::fs::create_dir(root.path().join("inbox")).unwrap();
+
+    // As `chat_plan` renders an ordinary turn of a YOLO agent.
+    let plan = json!({
+        "provider": "claude",
+        "execution": { "messageId": "ordinary", "text": "Do the change.", "attachments": [] },
+        "instructions": "Follow the task scope",
+        "inputDirectory": root.path().join("inbox"),
+        "output": root.path().join("result.md"),
+        "cwd": workspace,
+        "model": "sonnet",
+        "reasoning": "high",
+        "sandbox": "yolo",
+        "writableRoots": [workspace],
+        "claudeMcps": { "mcpServers": {} },
+    });
+    let (tx, mut rx) = mpsc::channel(256);
+    let events = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        events
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(240),
+        claude_process::run(&config, plan, tx, CancellationToken::new()),
+    )
+    .await
+    .expect("native ordinary turn timed out");
+    let events = events.await.unwrap();
+    let requests = requests.lock().unwrap().clone();
+    report(
+        "claude-ordinary-exit-plan",
+        &json!({
+            "binary": binary,
+            "result": result.as_ref().map(|()| "completed").map_err(|error| error.message.clone()),
+            "toolCalls": transcript(&requests),
+            "exitPlanItems": events.iter().filter(|event| event["item"]["tool"] == "ExitPlanMode" || event["item"]["type"] == "proposed_plan").cloned().collect::<Vec<_>>(),
+        }),
+    );
+
+    result.unwrap();
+    // The ordinary turn implemented as its permissions allow, after leaving plan mode.
+    assert!(workspace.join("before-plan").exists());
+    assert!(workspace.join("implemented").exists());
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["item"]["type"] == "proposed_plan"),
+        "an ordinary turn showed a proposed plan"
+    );
+    assert!(events.iter().any(|event| {
+        event["item"]["type"] == "mcp_tool_call" && event["item"]["tool"] == "ExitPlanMode"
+    }));
+}

@@ -202,7 +202,10 @@ sandbox and deny rules. It denies `ExitPlanMode`, which would let Claude impleme
 turn, and shows its plan as a proposed plan. Claude Code 2.1.280 and 2.1.308 write
 that plan file without asking the callback, and add its content (`plan`) and path to
 the `ExitPlanMode` call the model makes without arguments. When no plan file was
-written, Cairn shows no proposal and asks Claude to write it first. Without bubblewrap and socat, Claude Code
+written, Cairn shows no proposal and asks Claude to write it first. Only a Cairn plan
+turn shows a proposed plan: in an ordinary turn Claude Code's own plan mode may
+implement right after `ExitPlanMode`, which then shows as an ordinary tool call, with
+the turn's usual permissions. Without bubblewrap and socat, Claude Code
 refuses to start and the turn fails with an explicit error.
 
 ## Subscription usage

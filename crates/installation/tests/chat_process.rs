@@ -616,6 +616,41 @@ async fn model_and_reasoning_reach_codex_and_model_changes_resolve_the_new_defau
 }
 
 #[tokio::test]
+async fn only_a_cairn_plan_turn_shows_a_codex_plan_as_a_proposed_plan() {
+    for planning in [false, true] {
+        let root = TempDir::new().unwrap();
+        let home = prepare(&root);
+        let config = config(&root);
+        let mut turn = plan(&root, "fixture:plan-item Propose an approach");
+        if planning {
+            turn["planning"] = true.into();
+            turn["sandbox"] = "read-only".into();
+        }
+        let (tx, mut rx) = mpsc::channel::<Value>(64);
+        let events = tokio::spawn(async move {
+            let mut events = Vec::new();
+            while let Some(event) = rx.recv().await {
+                events.push(event);
+            }
+            events
+        });
+        chat_process::run(&config, &home, turn, tx, CancellationToken::new())
+            .await
+            .unwrap();
+        let events = events.await.unwrap();
+        let shown = |kind: &str| {
+            events.iter().any(|event| {
+                event["item"]["type"] == kind
+                    && event["item"]["text"] == "1. Read the composer.\n2. Add the toggle."
+            })
+        };
+        // Outside a Cairn plan turn nothing guarantees the plan was not acted on.
+        assert_eq!(shown("proposed_plan"), planning, "planning {planning}");
+        assert_eq!(shown("reasoning"), !planning, "planning {planning}");
+    }
+}
+
+#[tokio::test]
 async fn plan_turns_override_the_thread_sandbox_and_the_next_turn_restores_it() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);

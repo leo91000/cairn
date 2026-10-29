@@ -288,8 +288,9 @@ pub fn args(plan: &Value, instructions: &Path) -> Vec<String> {
     args
 }
 
-/// The chat item a Claude content block shows as.
-pub fn item(block: &Value, message: &str, index: usize) -> Option<Value> {
+/// The chat item a Claude content block shows as. `planning` is a Cairn plan turn, whose
+/// boundary Cairn enforces.
+pub fn item(block: &Value, message: &str, index: usize, planning: bool) -> Option<Value> {
     let id = if block["type"] == "tool_use" {
         text(block, "id").to_owned()
     } else {
@@ -302,9 +303,13 @@ pub fn item(block: &Value, message: &str, index: usize) -> Option<Value> {
             subagent(&id, &block["input"])
         }
         // Claude Code fills `plan` from the plan file the model wrote; without one there is
-        // no proposal to show.
+        // no proposal to show. Only a Cairn plan turn proposes a plan nothing has acted on:
+        // in an ordinary turn Claude's own plan mode may implement right after, so the
+        // call shows as an ordinary tool call.
         "tool_use"
-            if block["name"] == "ExitPlanMode" && !proposed_plan(&block["input"]).is_empty() =>
+            if planning
+                && block["name"] == "ExitPlanMode"
+                && !proposed_plan(&block["input"]).is_empty() =>
         {
             json!({
                 "id": id,
@@ -1051,7 +1056,8 @@ impl Turn<'_> {
             let next = self.blocks.entry(message.clone()).or_insert(0);
             let index = *next;
             *next += 1;
-            let Some(mut item) = item(block, &message, index) else {
+            let planning = self.plan["planning"] == true;
+            let Some(mut item) = item(block, &message, index, planning) else {
                 continue;
             };
             if let Some(parent) = &parent {
@@ -1330,7 +1336,12 @@ impl Turn<'_> {
                 self.streams.clear();
             }
             "content_block_start" => {
-                let Some(item) = item(&event["content_block"], &self.stream_message, index) else {
+                let Some(item) = item(
+                    &event["content_block"],
+                    &self.stream_message,
+                    index,
+                    self.plan["planning"] == true,
+                ) else {
                     return Ok(());
                 };
                 if !["agent_message", "reasoning"].contains(&text(&item, "type")) {

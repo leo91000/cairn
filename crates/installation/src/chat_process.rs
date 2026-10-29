@@ -23,15 +23,18 @@ const STOPPED: &str = "Conversation stopped.";
 const MAX_MESSAGE: usize = 5_000_000;
 
 /// A Codex thread item as a chat item: snake_case names, as the conversation events use.
-pub fn chat_item(mut item: Value) -> Value {
+/// `planning` is a Cairn plan turn, whose boundary Cairn enforces.
+pub fn chat_item(mut item: Value, planning: bool) -> Value {
     let kind = match text(&item, "type") {
         "agentMessage" => "agent_message",
         "commandExecution" => "command_execution",
         "fileChange" => "file_change",
         "mcpToolCall" => "mcp_tool_call",
         "reasoning" => "reasoning",
-        // The approach a plan turn proposes, distinct from the progress checklist.
-        "plan" => "proposed_plan",
+        // The approach a Cairn plan turn proposes, distinct from the progress checklist.
+        // Elsewhere nothing guarantees it was not acted on: it shows as reasoning.
+        "plan" if planning => "proposed_plan",
+        "plan" => "reasoning",
         "webSearch" => "web_search",
         "collabAgentToolCall" => "collab_tool_call",
         "contextCompaction" => "context_compaction",
@@ -236,6 +239,8 @@ struct Chat<'a> {
     context: Option<ContextUsage>,
     /// Whether Codex reported a completed compaction during this execution.
     compacted: bool,
+    /// A Cairn plan turn: only its plans are proposals nothing has acted on.
+    planning: bool,
 }
 
 impl Chat<'_> {
@@ -296,13 +301,13 @@ impl Chat<'_> {
             }
             return Ok(());
         }
-        if item["type"] == "plan" && !text(&item, "text").is_empty() {
+        if self.planning && item["type"] == "plan" && !text(&item, "text").is_empty() {
             self.last_message = text(&item, "text").to_owned();
         }
         if item["type"] == "agentMessage" && !text(&item, "text").is_empty() {
             self.last_message = text(&item, "text").to_owned();
         }
-        let mut item = chat_item(item);
+        let mut item = chat_item(item, self.planning);
         if item["type"] == "context_compaction" {
             // Codex reports only the lifecycle; the visible transcript is never rewritten.
             let completed = kind == "item.completed";
@@ -458,7 +463,7 @@ impl Chat<'_> {
         if matches!(tool, "wait" | "listAgents") {
             return Ok(());
         }
-        let mut item = chat_item(item);
+        let mut item = chat_item(item, self.planning);
         if let Some(parent) = parent {
             item["parent_id"] = parent.into();
         }
@@ -520,7 +525,7 @@ impl Chat<'_> {
                     let kind = method.replace('/', ".");
                     return self.collaboration(item, &kind, Some(parent)).await;
                 }
-                let mut item = chat_item(item);
+                let mut item = chat_item(item, self.planning);
                 if item["type"] == "agent_message" {
                     item["type"] = "subagent_message".into();
                     // Its latest message is its report once its turn completes.
@@ -867,6 +872,7 @@ impl Chat<'_> {
     }
 
     async fn execute(&mut self, plan: &Value) -> Result<()> {
+        self.planning = plan["planning"] == true;
         let effort = self.effort(plan).await;
         let resume = plan["sessionId"].is_string();
         if compacting(plan) && !resume {
@@ -1274,6 +1280,7 @@ async fn run_session(
         children: HashMap::new(),
         context: None,
         compacted: false,
+        planning: false,
     };
     let mut result = chat.execute(&plan).await;
     if let Err(error) = &result

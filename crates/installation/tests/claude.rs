@@ -1143,6 +1143,34 @@ fn plan_turn_arguments_use_plan_mode_a_networkless_sandbox_and_deny_workspace_ed
 }
 
 #[tokio::test]
+async fn only_a_cairn_plan_turn_shows_exit_plan_mode_as_a_proposed_plan() {
+    // Claude Code's own plan mode, in an ordinary turn, may implement right after
+    // ExitPlanMode: the call is not a proposal nothing has acted on.
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let (result, events) = run_to_end(&c, plan(&root, "fixture:plan-turn")).await;
+    result.unwrap();
+    assert!(completes(&events));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["item"]["type"] == "proposed_plan"),
+        "{events:?}"
+    );
+    assert!(events.iter().any(|event| {
+        event["item"]["type"] == "mcp_tool_call" && event["item"]["tool"] == "ExitPlanMode"
+    }));
+    // Ordinary permissions are unchanged: the callback still allows leaving plan mode.
+    let responses = std::fs::read_to_string(c.home.join(".claude/plan-responses.jsonl")).unwrap();
+    let exit = responses
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|response| response["id"] == "exit-plan")
+        .unwrap();
+    assert_eq!(exit["behavior"], "allow");
+}
+
+#[tokio::test]
 async fn plan_turns_deny_writes_effects_and_leaving_plan_mode() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);

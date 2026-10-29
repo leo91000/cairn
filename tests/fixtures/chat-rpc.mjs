@@ -220,7 +220,9 @@ export function chatFixture() {
         }
         thread.turns.push(active)
         notify('turn/started', { threadId: thread.id, turn: active })
-        if (params.collaborationMode?.mode === 'plan') {
+        // Codex emits a plan item in its plan mode, which `fixture:plan-item` stands for
+        // outside a Cairn plan turn.
+        if (params.collaborationMode?.mode === 'plan' || params.input[0].text.includes('fixture:plan-item')) {
           const plan = { id: `plan-${active.id}`, type: 'plan', text: '1. Read the composer.\n2. Add the toggle.' }
           active.items.push(plan)
           notify('item/completed', { threadId: thread.id, item: plan })
