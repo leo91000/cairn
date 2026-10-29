@@ -531,7 +531,7 @@ async fn plan_turns_list_and_call_only_workspace_tools_without_effects() {
     let mut chat = s.chat_create(json!({})).await.unwrap();
     chat["runId"] = run["id"].clone();
     let chat_id = text(&chat, "id").to_owned();
-    s.store.put("chats", chat).await.unwrap();
+    s.store.save_conversation_boundary(chat).await.unwrap();
     let ask = |request: &str| {
         json!({
             "name": "ask_questions",

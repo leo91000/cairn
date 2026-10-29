@@ -28,6 +28,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
+// The generated message inputs require a UUID conversation id.
+private const val CHAT = "00000000-0000-4000-8000-0000000000c1"
+
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36], qualifiers = "w412dp-h915dp-mdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -55,7 +58,7 @@ class PlanTurnJourneyTest {
             val calls = CopyOnWriteArrayList<String>()
             val chat =
                 Chat(
-                    id = "chat",
+                    id = CHAT,
                     title = "Composeur",
                     agentId = MAIN_AGENT_ID,
                     agentName = "Agent principal",
@@ -63,7 +66,7 @@ class PlanTurnJourneyTest {
                     run =
                         Run(
                             id = "run",
-                            taskId = "chat",
+                            taskId = CHAT,
                             status = "succeeded",
                             trigger = "chat",
                             snapshot =
@@ -123,7 +126,7 @@ class PlanTurnJourneyTest {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
+                        if (path == "/api/installations/fixture/api/chats/$CHAT/stream") {
                             val initial = "event: batch\nid: 4\ndata: $batch\n\n"
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
@@ -134,8 +137,15 @@ class PlanTurnJourneyTest {
                                     TimeUnit.MILLISECONDS,
                                 )
                         }
-                        if (path == "/api/installations/fixture/api/chats/chat/messages")
-                            calls += request.body.readUtf8()
+                        if (path == "/api/installations/fixture/api/chats/$CHAT/messages") {
+                            val sent = request.body.readUtf8()
+                            calls += sent
+                            // The accepted message echoes its id, like the installation.
+                            val id = wireJson.parseToJsonElement(sent).jsonObject["id"]
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody(buildJsonObject { put("id", id!!) }.toString())
+                        }
                         val body =
                             when (path) {
                                 "/api/account/session" -> beaconAccountFixture()
@@ -153,13 +163,12 @@ class PlanTurnJourneyTest {
                                             )
                                         )
                                     )
-                                "/api/installations/fixture/api/chats/chat" ->
+                                "/api/installations/fixture/api/chats/$CHAT" ->
                                     wireJson.encodeToString(chat)
                                 "/api/installations/fixture/api/projects" -> """{"projects":[]}"""
                                 "/api/installations/fixture/api/tasks" -> """{"tasks":[]}"""
                                 "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
-                                "/api/installations/fixture/api/overview",
-                                "/api/installations/fixture/api/chats/chat/messages" -> "{}"
+                                "/api/installations/fixture/api/overview" -> "{}"
                                 else -> "[]"
                             }
                         return MockResponse()
@@ -195,7 +204,7 @@ class PlanTurnJourneyTest {
                                 ChatScreen(
                                     vm,
                                     state,
-                                    "chat",
+                                    CHAT,
                                     openChat = {},
                                     openRun = {},
                                     back = {},

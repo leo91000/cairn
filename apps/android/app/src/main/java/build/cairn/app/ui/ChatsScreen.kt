@@ -768,6 +768,7 @@ internal fun ChatPage(
                                     provider = content.provider,
                                     model = content.model,
                                     reasoning = content.reasoning,
+                                    plan = content.plan == true,
                                     speed = content.speed.orEmpty(),
                                     attachmentIds = content.attachmentIds,
                                 ),

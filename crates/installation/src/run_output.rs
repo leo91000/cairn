@@ -5,13 +5,23 @@ use std::{path::Path, sync::LazyLock};
 pub const ACTIVITY_DETAIL_LIMIT: usize = 16 * 1024;
 const NOTICE: &str = "Details shortened: arguments and output were omitted.";
 
+/// Items whose text is what the user reads in the conversation: an answer, or the
+/// approach a plan turn proposes for approval. Unlike tool activity, they are never
+/// replaced by a preview.
+pub fn conversation_item(event: &Value) -> bool {
+    matches!(
+        event["item"]["type"].as_str(),
+        Some("agent_message" | "proposed_plan")
+    )
+}
+
 /// Serialize UI activity before it crosses the guest transport. The native
 /// session retains full tool results; the manager already stores these previews.
 pub fn event_line(event: &Value) -> Vec<u8> {
     let mut bytes = event.to_string().into_bytes();
     let activity = text(event, "type").starts_with("item.")
         && event["item"].is_object()
-        && event["item"]["type"] != "agent_message";
+        && !conversation_item(event);
     if activity && bytes.len() > ACTIVITY_DETAIL_LIMIT {
         bytes = compact_activity_preview(event, None)
             .to_string()

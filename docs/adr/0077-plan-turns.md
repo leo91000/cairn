@@ -90,6 +90,12 @@ envoyé depuis le composeur ou le bouton **Implement** / **Implémenter** du der
 plan proposé. Il s’exécute avec les droits courants de l’agent, contrôlés comme
 avant par `covers` : il n’élargit aucun droit.
 
+Un plan proposé est un contenu de conversation, pas une activité d’outil : il traverse
+le transport et le stockage du manager sans l’aperçu de 16 Kio des outils (seulement
+masqué comme une réponse), et l’historique transmis à une nouvelle session (autre
+moteur, nouvelle session, environnement expiré) l’inclut, borné comme les réponses.
+Implémenter après un changement de moteur reçoit donc le plan à appliquer.
+
 ## Qualification
 
 `crates/installation/tests/native_plan_turns.rs` fait exécuter un tour de plan aux

@@ -49,7 +49,7 @@ impl Output {
             && let Ok(event) = serde_json::from_str::<Value>(&raw)
             && text(&event, "type").starts_with("item.")
             && event["item"].is_object()
-            && event["item"]["type"] != "agent_message"
+            && !run_output::conversation_item(&event)
         {
             return Self::new(
                 false,
@@ -322,7 +322,7 @@ pub(super) async fn record(
     }
     let exhausted = run_output::exhausted(&event);
     // Every activity item has its own detail limit, regardless of earlier output.
-    let conversation = event["item"]["type"] == "agent_message"
+    let conversation = run_output::conversation_item(&event)
         || CONVERSATION_EVENTS.contains(&text(&event, "type"))
         || shown_notice(&event);
     let activity_item = text(&event, "type").starts_with("item.") && event["item"].is_object();

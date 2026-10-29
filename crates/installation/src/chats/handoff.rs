@@ -9,15 +9,20 @@ const HISTORY_CHARS: usize = 100_000;
 const HISTORY_ENTRIES: usize = 200;
 const INITIAL_REQUEST_CHARS: usize = 8000;
 
-/// Latest visible user messages and final agent answers, newest first. A private
-/// answer keeps its redacted event text; streamed agent drafts are superseded.
+/// Latest visible user messages, final agent answers and proposed plans, newest
+/// first. A private answer keeps its redacted event text; streamed agent drafts
+/// are superseded. A plan-only answer has no agent message: without its proposal
+/// a fresh session could not implement it.
 const TRANSCRIPT: &str = "
 SELECT e.type,
   CASE WHEN e.type='chat.user' AND e.text!='Answered a private question.'
     THEN COALESCE(json_extract(e.payload,'$.text'),e.text)
     ELSE e.text END,
   json_object(
-    'item',json_object('text',substr(json_extract(e.payload,'$.item.text'),-100001)),
+    'item',json_object(
+      'type',json_extract(e.payload,'$.item.type'),
+      'text',substr(json_extract(e.payload,'$.item.text'),-100001)
+    ),
     'attachments',json_extract(e.payload,'$.attachments')
   )
 FROM events e
@@ -29,6 +34,15 @@ WHERE e.run_id=? AND (
       SELECT 1 FROM events n
       WHERE n.run_id=e.run_id AND n.id>e.id
         AND n.type='item.completed' AND json_extract(n.payload,'$.item.type')='agent_message'
+        AND json_extract(n.payload,'$.item.id')=json_extract(e.payload,'$.item.id')
+    )
+  ) OR (
+    e.type='item.completed'
+    AND json_extract(e.payload,'$.item.type')='proposed_plan'
+    AND NOT EXISTS (
+      SELECT 1 FROM events n
+      WHERE n.run_id=e.run_id AND n.id>e.id
+        AND n.type='item.completed' AND json_extract(n.payload,'$.item.type')='proposed_plan'
         AND json_extract(n.payload,'$.item.id')=json_extract(e.payload,'$.item.id')
     )
   )
@@ -113,6 +127,8 @@ pub(super) fn handoff_context(db: &Db<'_>, run: &str) -> Result<String> {
         remaining = remaining.saturating_sub(size);
         let speaker = if kind == "chat.user" {
             "User"
+        } else if payload["item"]["type"] == "proposed_plan" {
+            "Assistant (proposed plan)"
         } else {
             "Assistant"
         };
@@ -295,6 +311,56 @@ mod tests {
         });
         assert!(execution_text(&plan).contains("Changes committed"));
         assert!(execution_text(&plan).ends_with("Current user message:\nContinue"));
+    }
+
+    #[test]
+    fn a_fresh_session_receives_the_proposed_plan_it_is_asked_to_implement() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute_batch(EVENTS).unwrap();
+        connection.execute_batch(crate::runs::SCHEMA).unwrap();
+        let db = Db(&connection);
+        db.event(
+            "run",
+            &EventKind::ChatUser,
+            "Plan the new composer",
+            Some(&json!({ "text": "Plan the new composer", "plan": true })),
+        )
+        .unwrap();
+        let proposal =
+            |text: &str| json!({ "item": { "id": "plan", "type": "proposed_plan", "text": text } });
+        db.event(
+            "run",
+            &EventKind::ItemUpdated,
+            "",
+            Some(&proposal("1. Draft")),
+        )
+        .unwrap();
+        // A plan-only answer: the proposal is the turn's sole visible content.
+        for _ in 0..2 {
+            db.event(
+                "run",
+                &EventKind::ItemCompleted,
+                "",
+                Some(&proposal("1. Read the composer\n2. Add the Plan chip")),
+            )
+            .unwrap();
+        }
+        db.event(
+            "run",
+            &EventKind::ChatUser,
+            "Implement the plan you proposed.",
+            None,
+        )
+        .unwrap();
+        let history = handoff_context(&db, "run").unwrap();
+        assert_eq!(history.matches("Add the Plan chip").count(), 1);
+        assert!(!history.contains("1. Draft"));
+        let request = history.find("Plan the new composer").unwrap();
+        let proposed = history
+            .find("Assistant (proposed plan):\n1. Read the composer")
+            .unwrap();
+        let implement = history.find("Implement the plan you proposed.").unwrap();
+        assert!(request < proposed && proposed < implement, "{history}");
     }
 
     #[test]

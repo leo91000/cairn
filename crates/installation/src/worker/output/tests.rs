@@ -617,6 +617,33 @@ async fn transport_previews_do_not_cut_secrets_before_manager_redaction() {
 }
 
 #[tokio::test]
+async fn proposals_over_the_activity_limit_keep_their_redacted_text() {
+    let mut fixture = Fixture::new().await;
+    let steps: String = (0..1500)
+        .map(|step| format!("{step}. Update module {step} and its tests.\n"))
+        .collect();
+    let text = format!("{steps}Use sensitive-tool-credential for the deploy.");
+    assert!(text.len() > 2 * ITEM_DETAIL_LIMIT);
+    let event = json!({
+        "type": "item.completed",
+        "item": { "id": "plan", "type": "proposed_plan", "text": text },
+    });
+    // Through the guest transport, then the manager's own storage classification.
+    let transported: Value = serde_json::from_slice(&run_output::event_line(&event)).unwrap();
+    assert_eq!(transported, event);
+    fixture.event(transported).await;
+    let events = fixture.events().await;
+    let item = &events[0]["payload"]["item"];
+    assert_eq!(item["type"], "proposed_plan");
+    assert!(item["details_truncated"].is_null());
+    assert_eq!(
+        item["text"],
+        text.replace("sensitive-tool-credential", "[redacted]")
+    );
+    assert_eq!(fixture.log_total, 0);
+}
+
+#[tokio::test]
 async fn command_previews_redact_secrets_before_cutting_and_file_changes_stay_bounded() {
     let mut fixture = Fixture::new().await;
     fixture.event(json!({
