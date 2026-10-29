@@ -16,6 +16,7 @@ import { highlight } from '../highlight'
 import {
   ArrowDown,
   ArrowLeft,
+  ChevronLeft,
   ChevronRight,
   FileText,
   Link,
@@ -247,7 +248,7 @@ onBeforeUnmount(() => {
           </button>
           <div v-if="latest.length > 1" class="ml-auto flex items-center gap-1">
             <button :class="iconButton" aria-label="Previous file" @click="navigate(-1)">
-              <Icon :name="ArrowLeft" :size="16" />
+              <Icon :name="ChevronLeft" :size="16" />
             </button><button :class="iconButton" aria-label="Next file" @click="navigate(1)">
               <Icon :name="ChevronRight" :size="16" />
             </button>
