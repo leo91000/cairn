@@ -137,6 +137,8 @@ describe('node health', () => {
     expect(nodeHealth(runner, 0, 30_000).state).toBe('ready')
     // Offline ages follow the server clock too.
     expect(nodeHealth(node({ status: 'offline', lastSeen: 0 }), 3_600_000, 120_000).detail).toBe('Last contact 2 min ago')
+    // The fleet clock trails server time by up to a heartbeat: an offline age never reads under the timeout.
+    expect(nodeHealth(node({ status: 'offline', lastSeen: 0 }), 0, 50_000).detail).toBe('Last contact 1 min ago')
     // A device clock far ahead of the server does not make a refreshed runner look stale.
     expect(nodeHealth(node({ local: true, status: 'local', lastSeen: 120_000 }), 900_000, 125_000).state).toBe('ready')
     // Without any reference, the runner is not judged.

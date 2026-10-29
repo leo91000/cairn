@@ -180,6 +180,14 @@ export function observeRunner(nodes: ExecutionNode[], previous: RunnerObservatio
   }
 }
 
+/**
+ * An offline machine's silence: the server marks it offline after the heartbeat timeout, while the fleet clock
+ * can trail server time by a heartbeat, so the age never reads shorter than that timeout.
+ */
+function offlineAge(lastSeen: number, reference: number) {
+  return relativeAge(lastSeen, Math.max(reference, lastSeen + HEARTBEAT_TIMEOUT_MS))
+}
+
 /** How long the built-in runner's contact is known to lag server time, if it is. */
 function runnerLag(node: ExecutionNode, clock: number | null) {
   return clock != null && node.lastSeen != null ? clock - node.lastSeen : null
@@ -220,7 +228,7 @@ export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number 
   const reference = clock ?? now
   // Other machines are online or offline; a missing status reads offline, like the Kotlin contract.
   if (!node.local && node.status !== 'online')
-    return { state: 'offline', label: 'Offline', detail: node.lastSeen != null ? `Last contact ${relativeAge(node.lastSeen, Math.max(reference, node.lastSeen))}` : 'Never connected' }
+    return { state: 'offline', label: 'Offline', detail: node.lastSeen != null ? `Last contact ${offlineAge(node.lastSeen, reference)}` : 'Never connected' }
   if (runnerStale(node, clock, runner)) {
     const silence = runnerSilence(node, clock)
     return { state: 'attention', label: 'Needs attention', detail: silence ? `Last usable report ${silence}` : 'No usable report for over a minute' }
@@ -333,7 +341,7 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now(), clock: nu
   }
 
   if (!node.local && node.status !== 'online')
-    reasons.push(node.lastSeen != null ? `No contact since ${relativeAge(node.lastSeen, Math.max(reference, node.lastSeen))}: check that the machine is on, online and that the ${node.capabilities.backend === 'native' ? 'cairn-native-node' : 'cairn-node'} service is running.` : 'The machine has never connected: run the installation command on it.')
+    reasons.push(node.lastSeen != null ? `No contact since ${offlineAge(node.lastSeen, reference)}: check that the machine is on, online and that the ${node.capabilities.backend === 'native' ? 'cairn-native-node' : 'cairn-node'} service is running.` : 'The machine has never connected: run the installation command on it.')
   if (node.capabilities.backend !== 'native' && !node.capabilities.kvm)
     reasons.push('KVM is unavailable: enable virtualization in the BIOS and load the kvm module.')
   if (node.capabilities.backend === 'native' && !node.capabilities.ublk)

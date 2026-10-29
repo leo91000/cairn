@@ -1291,6 +1291,7 @@ test('a failed refresh is reported on the page and in the panel, then clears', a
   const panel = await openNode(page, 'Refreshed host')
   // Old disks are pointed out on the overview.
   await panel.getByRole('button', { name: 'Open storage', exact: true }).click()
+  await expect(panel.getByRole('heading', { name: 'Storage settings' })).toBeFocused()
   await expect(panel.getByRole('button', { name: 'Free old disks', exact: true })).toBeVisible()
   failing = true
   await expect(panel.getByRole('status').filter({ hasText: 'figures may be out of date' })).toContainText('The manager is restarting.', { timeout: 20000 })

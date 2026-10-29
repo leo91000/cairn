@@ -145,6 +145,7 @@ let grantAfterConfigure: string | null = null
 // Slow answers still apply when nothing newer arrived first, so slow listings keep the page current.
 let started = 0
 let applied = 0
+let failed = 0
 
 async function load() {
   const request = ++started
@@ -157,11 +158,16 @@ async function load() {
     runner.value = observeRunner(nodes.value, runner.value)
     unready.value = observeUnready(nodes.value, unready.value, Date.now(), fleetClock(nodes.value, runner.value), runner.value)
     loaded.value = true
-    refreshError.value = ''
+    // An older answer does not hide a newer listing's failure.
+    if (request > failed)
+      refreshError.value = ''
   }
   catch (e) {
-    if (request > applied)
+    if (request > applied) {
       refreshError.value = (e as Error).message
+      failed = request
+    }
+
     return
   }
 
@@ -476,7 +482,7 @@ function revoke() {
         </UiButton>
       </div>
     </header>
-    <section aria-label="Fleet summary">
+    <section v-if="loaded" aria-label="Fleet summary">
       <dl class="mb-5 grid grid-cols-3 gap-3 phone:gap-2">
         <div class="rounded-xl border border-line bg-surface flex flex-col-reverse px-4 py-3 phone:px-3">
           <dt class="text-xs text-muted">

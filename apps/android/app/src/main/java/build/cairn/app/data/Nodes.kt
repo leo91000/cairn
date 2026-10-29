@@ -252,6 +252,14 @@ fun observeRunner(
     return RunnerObservation(seen, now, now, refreshed = previous != null)
 }
 
+/**
+ * An offline machine's silence: the server marks it offline after the heartbeat timeout, while the
+ * fleet clock can trail server time by a heartbeat, so the age never reads shorter than that
+ * timeout.
+ */
+private fun offlineAge(lastSeen: Long, reference: Long) =
+    relativeAge(lastSeen, maxOf(reference, lastSeen + HEARTBEAT_TIMEOUT_MS))
+
 /** How long the built-in runner's contact is known to lag server time, if it is. */
 private fun runnerLag(node: ExecutionNode, clock: Long?): Long? =
     if (clock != null && node.lastSeen != null) clock - node.lastSeen else null
@@ -300,7 +308,7 @@ fun nodeHealth(
         return NodeHealth(
             NodeHealthState.OFFLINE,
             "Hors ligne",
-            node.lastSeen?.let { "Dernier contact ${relativeAge(it, maxOf(reference, it))}" }
+            node.lastSeen?.let { "Dernier contact ${offlineAge(it, reference)}" }
                 ?: "Jamais connectée",
         )
     if (runnerStale(node, clock, runner))
@@ -503,7 +511,7 @@ fun nodeDiagnostics(
     if (!node.local && node.status == "offline")
         reasons +=
             node.lastSeen?.let {
-                "Aucun contact depuis ${relativeAge(it, maxOf(reference, it)).removePrefix("il y a ")} : vérifiez que la machine est allumée, connectée et que le service ${if (node.capabilities.backend == NATIVE_BACKEND) "cairn-native-node" else "cairn-node"} tourne."
+                "Aucun contact depuis ${offlineAge(it, reference).removePrefix("il y a ")} : vérifiez que la machine est allumée, connectée et que le service ${if (node.capabilities.backend == NATIVE_BACKEND) "cairn-native-node" else "cairn-node"} tourne."
             } ?: "La machine ne s’est jamais connectée : lancez la commande d’installation dessus."
     if (node.capabilities.backend != "native" && !node.capabilities.kvm)
         reasons +=

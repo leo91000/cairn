@@ -63,6 +63,14 @@ type Section = 'overview' | 'access' | 'storage' | 'settings'
 const section = ref<Section>('overview')
 const content = ref<HTMLElement>()
 const nativeHeading = ref<HTMLElement>()
+const storageHeading = ref<HTMLElement>()
+
+// Links that switch sections remove themselves: focus follows to where they lead.
+async function openStorage() {
+  section.value = 'storage'
+  await nextTick()
+  storageHeading.value?.focus()
+}
 
 async function reviewRequest() {
   section.value = 'access'
@@ -186,7 +194,7 @@ const reserve = computed(() => {
             </p>
             <p v-if="node.staleDisks?.count" class="text-xs">
               {{ formatMiB(node.staleDisks.diskMiB) }} of old disks can be freed.
-              <button type="button" class="font-semibold text-accent hover:underline" @click="section = 'storage'">
+              <button type="button" class="font-semibold text-accent hover:underline" @click="openStorage">
                 Open storage
               </button>
             </p>
@@ -454,7 +462,12 @@ const reserve = computed(() => {
             </UiButton>
           </section>
           <section class="px-6.5 py-5 phone:px-5" aria-labelledby="node-storage-policy">
-            <h3 id="node-storage-policy" class="eyebrow mb-3.5">
+            <h3
+              id="node-storage-policy"
+              ref="storageHeading"
+              class="eyebrow mb-3.5 rounded focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              tabindex="-1"
+            >
               Storage settings
             </h3>
             <dl v-if="node.storage" class="mb-4 grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-2 text-sm">

@@ -136,6 +136,10 @@ class NodesTest {
             "Dernier contact il y a 2 min",
             nodeHealth(ready.copy(status = "offline", lastSeen = 0), 3_600_000, 120_000).detail,
         )
+        assertEquals(
+            "Dernier contact il y a 1 min",
+            nodeHealth(ready.copy(status = "offline", lastSeen = 0), 0, 50_000).detail,
+        )
         // A device clock far ahead of the server does not make a refreshed runner look stale.
         assertEquals(
             NodeHealthState.READY,
