@@ -34,6 +34,8 @@ import androidx.compose.ui.unit.sp
 import build.cairn.app.data.*
 import build.cairn.contracts.AccountCodeInput
 import build.cairn.contracts.AccountInput
+import build.cairn.contracts.AccountProviderInput
+import build.cairn.contracts.AccountProvidersOutput
 import build.cairn.contracts.AccountSettings
 import build.cairn.contracts.ConnectAccountInput
 import build.cairn.contracts.ListAccountsInput
@@ -42,6 +44,7 @@ import build.cairn.contracts.ReplaceAccountKeyInput
 import build.cairn.contracts.cancelCodingAgentAccountSignIn
 import build.cairn.contracts.connectCodingAgentAccount
 import build.cairn.contracts.deleteCodingAgentAccount
+import build.cairn.contracts.listCodingAgentAccountProviders
 import build.cairn.contracts.reconnectCodingAgentAccount
 import build.cairn.contracts.replaceCodingAgentAccount
 import build.cairn.contracts.replaceCodingAgentAccountKey
@@ -732,7 +735,7 @@ internal fun AccountSheet(
             { removing = false },
         ) {
             vm.perform {
-                api.deleteCodingAgentAccount(AccountInput(account.id))
+                api.deleteCodingAgentAccount(AccountInput(account.id)).requireCompleted()
                 removing = false
                 changed()
                 close()
@@ -823,7 +826,15 @@ internal fun AccountSignInSheet(
             try {
                 keyProviders =
                     withContext(Dispatchers.IO) {
-                        vm.api.get<List<ApiKeyProvider>>("/accounts/providers/${segment(provider)}")
+                        when (
+                            val result =
+                                vm.api.listCodingAgentAccountProviders(
+                                    AccountProviderInput(provider)
+                                )
+                        ) {
+                            is AccountProvidersOutput.A -> result.providers
+                            is AccountProvidersOutput.B -> error(result.message)
+                        }
                     }
                 if (keyProviders.none { it.id == modelProvider })
                     modelProvider = keyProviders.firstOrNull()?.id.orEmpty()
@@ -843,7 +854,7 @@ internal fun AccountSignInSheet(
     fun dismiss() {
         if (flow != null)
             vm.perform {
-                api.cancelCodingAgentAccountSignIn(ListAccountsInput())
+                api.cancelCodingAgentAccountSignIn(ListAccountsInput()).requireCompleted()
                 changed()
             }
         close()
@@ -999,21 +1010,23 @@ internal fun AccountSignInSheet(
                                 name.trim().ifBlank { "Compte ${providerLabel(provider)}" }
                             if (usesKey && account != null) {
                                 api.replaceCodingAgentAccountKey(
-                                    ReplaceAccountKeyInput(
-                                        accountId = account.id,
-                                        modelProvider = modelProvider,
-                                        apiKey = apiKey,
+                                        ReplaceAccountKeyInput(
+                                            accountId = account.id,
+                                            modelProvider = modelProvider,
+                                            apiKey = apiKey,
+                                        )
                                     )
-                                )
+                                    .requireConnection()
                             } else {
                                 api.connectCodingAgentAccount(
-                                    ConnectAccountInput(
-                                        provider = provider,
-                                        name = accountName,
-                                        modelProvider = if (usesKey) modelProvider else null,
-                                        apiKey = if (usesKey) apiKey else null,
+                                        ConnectAccountInput(
+                                            provider = provider,
+                                            name = accountName,
+                                            modelProvider = if (usesKey) modelProvider else null,
+                                            apiKey = if (usesKey) apiKey else null,
+                                        )
                                     )
-                                )
+                                    .requireConnection()
                             }
                             changed()
                             if (usesKey)
@@ -1039,6 +1052,7 @@ internal fun AccountSignInSheet(
                         ) {
                             vm.perform {
                                 api.reconnectCodingAgentAccount(AccountInput(flow.accountId))
+                                    .requireConnection()
                                 changed()
                             }
                         }
@@ -1130,8 +1144,9 @@ internal fun AccountSignInSheet(
                                 ) {
                                     vm.perform {
                                         api.submitCodingAgentAccountCode(
-                                            AccountCodeInput(code.trim())
-                                        )
+                                                AccountCodeInput(code.trim())
+                                            )
+                                            .requireCompleted()
                                         code = ""
                                         submitted = true
                                         changed()

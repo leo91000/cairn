@@ -4,5 +4,5 @@ package build.cairn.contracts
 import build.cairn.app.data.CairnApi
 import kotlinx.serialization.json.encodeToJsonElement
 
-suspend fun CairnApi.orderCodingAgentAccounts(input: OrderAccountsInput): CodingAgentAccounts =
+suspend fun CairnApi.orderCodingAgentAccounts(input: OrderAccountsInput): OrderAccountsOutput =
     send("POST", "/accounts/order", contractJson.encodeToJsonElement(input))

@@ -668,3 +668,24 @@ connections, alternating repetitions, warmups, read/list/ranking/save/delete pha
 audit, CPU and DB/WAL/page reporting are reused. Results belong in the PR description;
 no raw measurement artifact is committed. Cold connections retain the OS cache and
 these local timings do not measure production network latency.
+
+## Account connections and model catalogs (B2)
+
+A15 already owns the account SQL and eleven account commands. B2 completes their
+shared registry with `list_models` and `get_coding_agent_account_sign_in`, and
+generates the missing provider/model HTTP clients. Both apps delete their model
+catalog DTOs and consume `ModelCatalog`, routes, efforts and tiers from Rust.
+The cached native provider protocols remain at their existing adapter boundary;
+Claude projects only public model fields, excluding its cache source and extensions.
+Unknown speeds remain null, distinct from a known empty list. No persistent schema,
+cache writer, credential format or migration changes in this slice.
+
+Owner-only credential effects return tagged `humanRequired` to both agent tools,
+including manual refresh (which can redeem a banked reset). API-key/sign-in/order
+capabilities absent from a provider return `unsupported`. Public scopes and current
+installation grants remain mandatory. Agents follow only account identity, provider,
+state and phase of an owner-started sign-in; challenge URL/code, input codes and
+credentials never appear in that progress view. No agent confirmation token is
+implemented or inferred from a manage scope. The full owner view stays UI-only.
+The model corpus qualifies routes, billing, efforts, speeds, stale/absent catalogs
+and closed provider inputs in Rust, TypeScript/JSON Schema and Kotlin.

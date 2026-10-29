@@ -32,4 +32,17 @@ sealed interface ConnectAccountOutput {
     ) : ConnectAccountOutput {
         init {}
     }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
+    @SerialName("unsupported")
+    data class D(
+        val capability: String,
+        val message: String,
+        val provider: String,
+    ) : ConnectAccountOutput {
+        init {
+            require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
+        }
+    }
 }
