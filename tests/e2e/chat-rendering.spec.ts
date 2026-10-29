@@ -233,6 +233,70 @@ test('cyclic and unsupported composite semantics preserve readable source', asyn
   }
 })
 
+test('two-pointer gestures preserve the drawing under a moving pinch centroid', async ({ page }) => {
+  await page.evaluate(text => window.chatRendering.markdown(text), '\`\`\`mermaid\nflowchart LR\nA-->B\n\`\`\`')
+  await page.getByRole('button', { name: 'Open diagram' }).click()
+  const result = await page.locator('.diagram-stage').evaluate(async (element) => {
+    const stage = element as HTMLElement
+    const drawing = stage.querySelector('div')!
+    const frame = () => new Promise(resolve => requestAnimationFrame(resolve))
+    await frame()
+    const bounds = stage.getBoundingClientRect()
+    const cx = bounds.width / 2
+    const cy = bounds.height / 2
+    const read = () => {
+      const matrix = new DOMMatrix(drawing.style.transform)
+      return { x: matrix.m41, y: matrix.m42, scale: matrix.m11 }
+    }
+
+    const send = (type: string, pointerId: number, x: number, y: number) => stage.dispatchEvent(new PointerEvent(type, {
+      pointerId,
+      pointerType: 'touch',
+      button: 0,
+      buttons: type === 'pointerup' ? 0 : 1,
+      bubbles: true,
+      cancelable: true,
+      clientX: bounds.left + x,
+      clientY: bounds.top + y,
+    }))
+    // Synthetic pointer events exercise both engines' handlers; native capture requires a real device pointer.
+    const capture = stage.setPointerCapture
+    stage.setPointerCapture = () => {}
+    try {
+      const before = read()
+      send('pointerdown', 11, cx - 80, cy)
+      send('pointerdown', 12, cx + 80, cy)
+      send('pointermove', 11, cx - 80 + 100, cy + 50)
+      send('pointermove', 12, cx + 80 + 100, cy + 50)
+      await frame()
+      const translated = read()
+      send('pointermove', 11, cx - 120 + 140, cy + 70)
+      send('pointermove', 12, cx + 120 + 140, cy + 70)
+      await frame()
+      const zoomed = read()
+      send('pointerup', 11, cx - 120 + 140, cy + 70)
+      send('pointerup', 12, cx + 120 + 140, cy + 70)
+      return {
+        dx: translated.x - before.x,
+        dy: translated.y - before.y,
+        translationScale: translated.scale / before.scale,
+        zoomScale: zoomed.scale / before.scale,
+        beforePoint: { x: (cx - before.x) / before.scale, y: (cy - before.y) / before.scale },
+        afterPoint: { x: (cx + 140 - zoomed.x) / zoomed.scale, y: (cy + 70 - zoomed.y) / zoomed.scale },
+      }
+    }
+    finally {
+      stage.setPointerCapture = capture
+    }
+  })
+  expect(result.dx).toBeCloseTo(100, 2)
+  expect(result.dy).toBeCloseTo(50, 2)
+  expect(result.translationScale).toBeCloseTo(1, 3)
+  expect(result.zoomScale).toBeCloseTo(1.5, 3)
+  expect(result.afterPoint.x).toBeCloseTo(result.beforePoint.x, 2)
+  expect(result.afterPoint.y).toBeCloseTo(result.beforePoint.y, 2)
+})
+
 test('full-screen node links remain clickable after zoom and pan without navigating on a drag', async ({ page }) => {
   await page.evaluate(text => window.chatRendering.markdown(text), '\`\`\`mermaid\nflowchart TD\nA[Documentation]\nclick A "https://example.test/docs"\n\`\`\`')
   await page.getByRole('button', { name: 'Open diagram' }).click()

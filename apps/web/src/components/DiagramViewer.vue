@@ -41,7 +41,12 @@ const copied = ref(false)
 const percent = computed(() => `${Math.round(scale.value * 100)}%`)
 const pointers = new Map<number, { x: number, y: number, dragging: boolean }>()
 let suppressClick = false
-let pinch: { distance: number, scale: number } | undefined
+let pinch: {
+  distance: number
+  scale: number
+  x: number
+  y: number
+} | undefined
 let observer: ResizeObserver | undefined
 let fitted = true
 let copiedTimer: ReturnType<typeof setTimeout> | undefined
@@ -117,7 +122,13 @@ function onPointerDown(event: PointerEvent) {
     }
 
     const [a, b] = [...pointers.values()]
-    pinch = { distance: Math.max(1, Math.hypot(a!.x - b!.x, a!.y - b!.y)), scale: scale.value }
+    const bounds = stage.value!.getBoundingClientRect()
+    pinch = {
+      distance: Math.max(1, Math.hypot(a!.x - b!.x, a!.y - b!.y)),
+      scale: scale.value,
+      x: (a!.x + b!.x) / 2 - bounds.left,
+      y: (a!.y + b!.y) / 2 - bounds.top,
+    }
   }
 }
 
@@ -137,7 +148,13 @@ function onPointerMove(event: PointerEvent) {
     const [a, b] = [...pointers.values()]
     const bounds = stage.value!.getBoundingClientRect()
     const distance = Math.hypot(a!.x - b!.x, a!.y - b!.y)
-    zoomAt(pinch.scale * distance / pinch.distance, (a!.x + b!.x) / 2 - bounds.left, (a!.y + b!.y) / 2 - bounds.top)
+    const px = (a!.x + b!.x) / 2 - bounds.left
+    const py = (a!.y + b!.y) / 2 - bounds.top
+    x.value += px - pinch.x
+    y.value += py - pinch.y
+    pinch.x = px
+    pinch.y = py
+    zoomAt(pinch.scale * distance / pinch.distance, px, py)
     return
   }
 

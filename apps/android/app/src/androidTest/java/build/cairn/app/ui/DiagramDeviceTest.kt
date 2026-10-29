@@ -107,6 +107,27 @@ class DiagramDeviceTest {
                     .config[SemanticsProperties.Text]
                     .joinToString { it.text }
             val fitted = zoom()
+            val beforeTwoFingerPan = stage.captureToImage().asAndroidBitmap()
+            stage.performTouchInput {
+                pinch(
+                    center - Offset(40f, 0f),
+                    center + Offset(40f, 0f),
+                    center - Offset(40f, 0f) + Offset(80f, 50f),
+                    center + Offset(40f, 0f) + Offset(80f, 50f),
+                )
+            }
+            compose.waitForIdle()
+            assertEquals("Two-finger translation must keep the scale", fitted, zoom())
+            val afterTwoFingerPan = stage.captureToImage().asAndroidBitmap()
+            assertFalse(
+                "Two-finger translation must move the drawing",
+                beforeTwoFingerPan.sameAs(afterTwoFingerPan),
+            )
+            beforeTwoFingerPan.recycle()
+            afterTwoFingerPan.recycle()
+            stage.performTouchInput { doubleClick(center) }
+            compose.waitForIdle()
+            assertEquals(fitted, zoom())
             stage.performTouchInput {
                 pinch(
                     center - Offset(40f, 0f),
