@@ -2677,12 +2677,24 @@ async fn both_mcp_endpoints_manage_chat_queues_and_lifecycle() {
         )
         .await;
         assert_eq!(result(&pause)["paused"], true);
-        let message_id = uuid::Uuid::new_v4().to_string();
+        let message_id = "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDE1";
+        let attachment_id = "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDE2";
+        let uploaded = invoke(
+            "upload_chat_attachment",
+            json!({
+                "chatId": chat_id, "attachmentId": attachment_id,
+                "name": "uppercase.txt", "data": "QQ==",
+            }),
+        )
+        .await;
+        assert_eq!(result(&uploaded)["id"], attachment_id);
         let args = json!({
             "chatId": chat_id,
-            "message": { "id": message_id, "text": "First message" },
+            "message": { "id": message_id, "text": "First message", "attachmentIds": [attachment_id] },
         });
         let sent = invoke("send_chat_message", args.clone()).await;
+        assert_eq!(result(&sent)["id"], message_id);
+        assert_eq!(result(&sent)["attachments"][0]["id"], attachment_id);
         assert_eq!(result(&sent)["status"], "queued");
         let retry = invoke("send_chat_message", args).await;
         assert_eq!(result(&sent), result(&retry));

@@ -19,6 +19,8 @@ ordering timestamps are retained. Historical agent/project assignment IDs remain
 even if their resource was removed; live references use nullable foreign keys.
 Current run references are checked. Message IDs, delivery states, text, selections,
 private answer maps, equal-timestamp row order and attachment order are retained.
+UUID spelling is preserved in persisted identities and typed commands, so retained
+uppercase message IDs and attachment keys keep their retry/edit/delete semantics.
 Messages without a revision receive one. Engine-switch receipts keep their exact
 expiration; a current switch retains its separate expiry, pending state, model,
 error and retry timestamp. Unreachable switch keys left by version-12 conversation purges are discarded;

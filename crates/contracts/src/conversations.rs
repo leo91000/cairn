@@ -418,15 +418,37 @@ fn idle() -> ConversationStatus {
     ConversationStatus::Idle
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(transparent)]
 #[schemars(inline)]
-pub struct ConversationId(pub uuid::Uuid);
+pub struct ConversationId(
+    #[serde(deserialize_with = "uuid_string")]
+    #[schemars(with = "uuid::Uuid")]
+    pub String,
+);
 
 impl std::fmt::Display for ConversationId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
     }
+}
+
+// Client-generated identities are case-sensitive persisted keys. Validate the UUID
+// without changing its spelling, including when replaying a version-12 command.
+fn uuid_string<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    uuid::Uuid::parse_str(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
+}
+
+fn uuid_strings<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error> {
+    let values = Vec::<String>::deserialize(deserializer)?;
+    for value in &values {
+        uuid::Uuid::parse_str(value).map_err(serde::de::Error::custom)?;
+    }
+    Ok(values)
 }
 
 fn main_agent() -> AgentId {
@@ -451,13 +473,15 @@ pub struct ChatInput {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessageInput {
-    pub id: uuid::Uuid,
+    #[serde(deserialize_with = "uuid_string")]
+    #[schemars(with = "uuid::Uuid")]
+    pub id: String,
     #[serde(default)]
     #[schemars(length(max = 50000))]
     pub text: String,
-    #[serde(default)]
-    #[schemars(length(max = 8))]
-    pub attachment_ids: Vec<uuid::Uuid>,
+    #[serde(default, deserialize_with = "uuid_strings")]
+    #[schemars(with = "Vec<uuid::Uuid>", length(max = 8))]
+    pub attachment_ids: Vec<String>,
     #[serde(default)]
     #[schemars(with = "String", pattern("^(queue|steer)$"))]
     pub mode: MessageMode,
@@ -554,14 +578,18 @@ pub struct QuestionBoundary(pub serde_json::Value);
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChatMessageReference {
     pub chat_id: ConversationId,
-    pub message_id: uuid::Uuid,
+    #[serde(deserialize_with = "uuid_string")]
+    #[schemars(with = "uuid::Uuid")]
+    pub message_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EditChatMessageInput {
     pub chat_id: ConversationId,
-    pub message_id: uuid::Uuid,
+    #[serde(deserialize_with = "uuid_string")]
+    #[schemars(with = "uuid::Uuid")]
+    pub message_id: String,
     pub message: EditChatMessage,
 }
 
@@ -571,9 +599,9 @@ pub struct EditChatMessage {
     #[serde(default)]
     #[schemars(length(max = 50000))]
     pub text: String,
-    #[serde(default)]
-    #[schemars(length(max = 8))]
-    pub attachment_ids: Vec<uuid::Uuid>,
+    #[serde(default, deserialize_with = "uuid_strings")]
+    #[schemars(with = "Vec<uuid::Uuid>", length(max = 8))]
+    pub attachment_ids: Vec<String>,
     #[serde(default)]
     #[schemars(with = "String", pattern("^(queue|steer)$"))]
     pub mode: MessageMode,
@@ -791,7 +819,9 @@ pub struct CodingAgentOptions {
 pub struct SwitchChatCodingAgentInput {
     pub chat_id: ConversationId,
     pub run_id: RunId,
-    pub request_id: uuid::Uuid,
+    #[serde(deserialize_with = "uuid_string")]
+    #[schemars(with = "uuid::Uuid")]
+    pub request_id: String,
     #[schemars(length(min = 1, max = 200))]
     pub turn_id: String,
     #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
@@ -834,6 +864,11 @@ mod tests {
         for value in corpus["messages"].as_array().unwrap() {
             let mut command: ChatMessageInput = serde_json::from_value(value.clone()).unwrap();
             command.validate().unwrap();
+            let encoded = serde_json::to_value(command).unwrap();
+            assert_eq!(encoded["id"], value["id"]);
+            if value.get("attachmentIds").is_some() {
+                assert_eq!(encoded["attachmentIds"], value["attachmentIds"]);
+            }
         }
         for value in corpus["invalidMessages"]
             .as_array()
