@@ -33,7 +33,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-const DATABASE_VERSION: i64 = 13;
+const DATABASE_VERSION: i64 = 14;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -66,7 +66,7 @@ impl Store {
         let fresh = !file.exists();
         let mut writer = Connection::open(&file)?;
         let mut version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !fresh && !matches!(version, 11 | 12 | DATABASE_VERSION) {
+        if !fresh && !matches!(version, 11 | 12 | 13 | DATABASE_VERSION) {
             return Err(Error::bad(
                 "Unsupported installation database version; use a compatible release or an explicit migration.",
             ));
@@ -77,9 +77,9 @@ impl Store {
         if !fresh && version == 11 {
             let upgraded = crate::nodes::inventory::migration::upgrade(&mut writer);
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            // Another startup can finish both atomic steps while this one
+            // Another startup can finish later atomic steps while this one
             // waits for the inventory migration's immediate transaction.
-            if version != DATABASE_VERSION {
+            if !matches!(version, 12 | 13 | DATABASE_VERSION) {
                 upgraded?;
             }
         }
@@ -92,13 +92,14 @@ impl Store {
                 tx.execute_batch("CREATE TABLE direct_storage_grants(object TEXT PRIMARY KEY REFERENCES shared_objects(id) ON DELETE CASCADE,expires_at INTEGER NOT NULL,settled INTEGER NOT NULL DEFAULT 0 CHECK(settled IN (0,1)));")?;
                 tx.execute_batch("CREATE TABLE direct_read_authorizations(grant_id TEXT NOT NULL,object TEXT NOT NULL,hash TEXT NOT NULL,run_id TEXT NOT NULL,PRIMARY KEY(grant_id,object));CREATE INDEX direct_read_authorizations_object ON direct_read_authorizations(object);")?;
                 tx.execute_batch(crate::nodes::journal_acknowledgements::SCHEMA)?;
-                tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
-            } else if current != DATABASE_VERSION {
+                tx.pragma_update(None, "user_version", 13)?;
+            } else if !matches!(current, 13 | DATABASE_VERSION) {
                 return Err(Error::bad(
                     "Unexpected installation database version during direct storage upgrade.",
                 ));
             }
             tx.commit()?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
         }
         if !fresh && version != DATABASE_VERSION {
             crate::chats::migration::upgrade(&mut writer)?;
@@ -912,6 +913,7 @@ mod schema_tests {
         drop(Store::open(root.path()).unwrap());
         let file = root.path().join("manager.db");
         let db = Connection::open(&file).unwrap();
+        crate::chats::migration::tests::version13(&db);
         db.execute_batch("DROP TABLE direct_journal_acknowledgements; DROP TABLE direct_object_quarantines; DROP TABLE direct_storage_grants; DROP TABLE direct_read_authorizations; PRAGMA user_version=12;
             INSERT INTO kv(key,data) VALUES('migration-fixture','{\"preserved\":true}');
             INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES('old-object','bucket','hash',4096,'{}','ready');").unwrap();
@@ -958,7 +960,7 @@ mod schema_tests {
 
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 99] {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();

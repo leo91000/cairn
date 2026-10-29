@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 
 const CHAT: &str = "00000000-0000-4000-8000-000000000001";
 
-// Exact affected version-12 DDL from 4af96bbe, the last pre-A7 main. Other
+// Exact affected version-13 DDL from bc8bdf64, the last pre-A7 main. Other
 // domain tables retain their current schemas, matching the inventory migration's fixture.
-pub(crate) fn version12(db: &Connection) {
+pub(crate) fn version13(db: &Connection) {
     db.execute_batch("DROP TABLE conversation_engine_switches; DROP TABLE message_attachments; DROP TABLE chat_messages; DROP TABLE conversations; DROP TABLE conversation_retention;
 DROP TABLE records;
 CREATE TABLE records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
@@ -17,13 +17,13 @@ CREATE TABLE chat_messages(id TEXT PRIMARY KEY,chat_id TEXT NOT NULL,data TEXT N
 CREATE INDEX chat_messages_chat ON chat_messages(chat_id,created_at);
 DROP TABLE kv;
 CREATE TABLE kv(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%'),data TEXT NOT NULL,expires INTEGER);
-PRAGMA user_version=12;").unwrap();
+PRAGMA user_version=13;").unwrap();
 }
 
 async fn database(root: &std::path::Path) -> Connection {
     drop(Store::open(root).unwrap());
     let db = Connection::open(root.join("manager.db")).unwrap();
-    version12(&db);
+    version13(&db);
     db
 }
 
@@ -65,6 +65,10 @@ fn seed(db: &Connection) {
         [],
     )
     .unwrap();
+    db.execute_batch("INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES('retained-v13-object','bucket','hash',4096,'{}','ready');
+INSERT INTO direct_storage_grants VALUES('retained-v13-object',9007199254740001,1);
+INSERT INTO direct_read_authorizations VALUES('retained-grant','retained-v13-object','hash','historical-run');").unwrap();
+
     // Reverse lexical IDs and equal timestamps exercise rowid tie ordering.
     for id in ["z-message", "a-message"] {
         let message = json!({"id":id,"chatId":CHAT,"text":"private answer","createdAt":99,
@@ -111,6 +115,14 @@ async fn startup_preserves_conversations_messages_order_secrets_and_settings() {
         .collect::<rusqlite::Result<_>>()
         .unwrap();
     let store = Store::open(root.path()).unwrap();
+    assert_eq!(
+        db.query_row("SELECT expires_at,settled FROM direct_storage_grants WHERE object='retained-v13-object'", [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))).unwrap(),
+        (9007199254740001, 1)
+    );
+    assert_eq!(
+        db.query_row("SELECT run_id FROM direct_read_authorizations WHERE grant_id='retained-grant' AND object='retained-v13-object'", [], |row| row.get::<_, String>(0)).unwrap(),
+        "historical-run"
+    );
     let after = store.conversation_boundary(CHAT).await.unwrap().unwrap();
     assert_subset(&conversation(), &after);
     let messages = store.read(|db| db.messages(CHAT)).await.unwrap();
@@ -354,7 +366,7 @@ async fn late_invalid_message_rolls_back_schema_and_all_original_data() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        12
+        13
     );
     let after_schema: Vec<String> = db
         .prepare("SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name")
@@ -388,7 +400,7 @@ async fn broken_run_reference_aborts_and_historical_resource_ids_remain_valid() 
         let db = database(root.path()).await;
         seed(&db);
         if duplicate {
-            // A real version-12 unique index prevents duplicate slugs already.
+            // A real version-13 unique index prevents duplicate slugs already.
             // A non-canonical identity remains a valid old record and must survive.
             let mut other = conversation();
             other["id"] = "second".into();
@@ -411,7 +423,7 @@ async fn broken_run_reference_aborts_and_historical_resource_ids_remain_valid() 
             assert_eq!(
                 db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
-                12
+                13
             );
             assert!(!db.table_exists(None, "conversations").unwrap());
         }

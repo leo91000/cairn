@@ -1,4 +1,4 @@
-//! Version-12 input only; current conversations never fall back to JSON records.
+//! Version-13 input only; current conversations never fall back to JSON records.
 use super::{Conversation, Message};
 use crate::{
     config::id,
@@ -11,17 +11,17 @@ use serde::Deserialize;
 pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 13 {
+    if version == 14 {
         return Ok(());
     }
-    if version != 12 {
+    if version != 13 {
         return Err(Error::bad(
             "Unexpected installation database version during conversation upgrade.",
         ));
     }
 
     tx.execute_batch(
-        "ALTER TABLE chat_messages RENAME TO chat_messages_v12; DROP INDEX chat_messages_chat;",
+        "ALTER TABLE chat_messages RENAME TO chat_messages_v13; DROP INDEX chat_messages_chat;",
     )?;
     tx.execute_batch(super::storage::SCHEMA)?;
     tx.execute_batch(super::engine_switch::SCHEMA)?;
@@ -53,7 +53,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
 
     // rowid breaks equal timestamp ties in the old reader; preserve that order.
     let messages = tx
-        .prepare("SELECT id,chat_id,data,created_at FROM chat_messages_v12 ORDER BY rowid")?
+        .prepare("SELECT id,chat_id,data,created_at FROM chat_messages_v13 ORDER BY rowid")?
         .query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -94,21 +94,21 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
         )?;
     }
 
-    tx.execute_batch("DROP TABLE chat_messages_v12;
-CREATE TABLE records_v13(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('chats','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
-INSERT INTO records_v13 SELECT id,kind,data,updated_at FROM records WHERE kind!='chats';
+    tx.execute_batch("DROP TABLE chat_messages_v13;
+CREATE TABLE records_v14(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('chats','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+INSERT INTO records_v14 SELECT id,kind,data,updated_at FROM records WHERE kind!='chats';
 DROP TABLE records;
-ALTER TABLE records_v13 RENAME TO records;
+ALTER TABLE records_v14 RENAME TO records;
 CREATE INDEX records_kind ON records(kind,updated_at DESC);
 CREATE INDEX records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
-CREATE TABLE kv_v13(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%' AND key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key!='conversation-expiration'),data TEXT NOT NULL,expires INTEGER);
-INSERT INTO kv_v13 SELECT * FROM kv WHERE key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key!='conversation-expiration';
+CREATE TABLE kv_v14(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%' AND key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key!='conversation-expiration'),data TEXT NOT NULL,expires INTEGER);
+INSERT INTO kv_v14 SELECT * FROM kv WHERE key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key!='conversation-expiration';
 DROP TABLE kv;
-ALTER TABLE kv_v13 RENAME TO kv;")?;
+ALTER TABLE kv_v14 RENAME TO kv;")?;
     if tx.prepare("PRAGMA foreign_key_check")?.exists([])? {
         return Err(invalid());
     }
-    tx.pragma_update(None, "user_version", 13)?;
+    tx.pragma_update(None, "user_version", 14)?;
     tx.commit()?;
     Ok(())
 }

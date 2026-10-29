@@ -16,7 +16,7 @@ async fn version11(root: &std::path::Path) -> Connection {
         .unwrap();
     drop(store);
     let db = Connection::open(root.join("manager.db")).unwrap();
-    crate::chats::migration::tests::version12(&db);
+    crate::chats::migration::tests::version13(&db);
     db.execute_batch("DROP TABLE direct_journal_acknowledgements; DROP TABLE direct_object_quarantines; DROP TABLE direct_storage_grants; DROP TABLE direct_read_authorizations;
 DROP TABLE node_reviewed_agents; DROP TABLE node_trusted_accounts; DROP TABLE node_tags; DROP TABLE nodes;
 DROP TABLE records;
@@ -148,7 +148,7 @@ async fn version11_startup_conserves_inventory_credentials_and_references() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        13
+        14
     );
     for table in [
         "direct_storage_grants",
@@ -302,7 +302,7 @@ async fn legacy_missing_defaults_and_revocation_are_retained() {
     assert_eq!(node.storage, cairn_contracts::NodeStoragePolicy::default());
     assert!(
         migration::upgrade(&mut db).is_err(),
-        "The inventory-only helper must not rewrite version13"
+        "The inventory-only helper must not rewrite version14"
     );
 }
 
@@ -315,12 +315,12 @@ async fn empty_version11_inventory_upgrades_without_creating_a_node() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        13
+        14
     );
 }
 
 #[tokio::test]
-async fn concurrent_startups_complete_the_version11_to13_chain_without_repeating_metadata_ddl() {
+async fn concurrent_startups_complete_the_version11_to14_chain_without_repeating_metadata_ddl() {
     let root = tempfile::tempdir().unwrap();
     drop(version11(root.path()).await);
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -339,7 +339,7 @@ async fn concurrent_startups_complete_the_version11_to13_chain_without_repeating
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        13
+        14
     );
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))

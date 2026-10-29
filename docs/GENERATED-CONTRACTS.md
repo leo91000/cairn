@@ -637,8 +637,8 @@ boundaries; execution-node/backend migration and native provenance retain their
 owning domain adapters until A10/A11/A18. These adapters read the typed SQL writer,
 never `records`, and do not accept another persisted format.
 
-SQLite v13 upgrades version 12 atomically at startup; see
-[the preserving migration](migrations/0013-typed-conversations.md). Fresh installs use `conversations`, `chat_messages`, `message_attachments`,
+SQLite v14 upgrades version 13 atomically at startup; see
+[the preserving migration](migrations/0014-typed-conversations.md). Fresh installs use `conversations`, `chat_messages`, `message_attachments`,
 `conversation_engine_switches` and the singleton `conversation_retention` policy.
 Conversation and message revisions rotate with writes. Slugs are unique and never
 change on rename. The unique partial run index replaces `chat_for_run`'s collection
