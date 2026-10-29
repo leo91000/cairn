@@ -106,6 +106,12 @@ async fn main() -> Result<()> {
             let string = |index: usize| args.get(index).and_then(Value::as_str).unwrap_or("");
             let arg = |index: usize| args.get(index).cloned().unwrap_or(Value::Null);
             let result = match operation {
+                "accountFixture" => serde_json::to_value(db.coding_account(string(0))?)?,
+                "saveAccountFixture" => {
+                    db.save_coding_account(&serde_json::from_value(arg(0))?)?;
+                    arg(0)
+                }
+
                 "get" if string(0) == "agents" => {
                     db.agent_snapshot(string(1))?.unwrap_or(Value::Null)
                 }

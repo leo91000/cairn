@@ -36,7 +36,7 @@ async fn dispatch_inner(s: &Arc<Service>, input: &Input) -> Result<Value> {
         return crate::nodes::admin(s, input).await;
     }
     if under(&input.path, "/api/accounts") {
-        return crate::accounts::routes(s, input).await;
+        return crate::capabilities::accounts::routes(s, input).await;
     }
     if under(&input.path, "/api/plugins") {
         return crate::plugins::routes(s, input).await;

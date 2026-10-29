@@ -2,6 +2,7 @@ use crate::common::run_fixture::DbRunFixture;
 use common::AgentFixture;
 use common::MissionFixture;
 use common::StoreAgentFixture;
+use common::account_fixture::AccountFixtures;
 use common::node_fixture::*;
 
 mod common;
@@ -16,7 +17,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use cairn_installation::{
-    accounts::{self, KIND},
+    accounts,
     config::{Config, MAIN_AGENT_ID, id, now},
     nodes::LOCAL_NODE_ID,
     provider::Provider,
@@ -706,14 +707,16 @@ async fn managed_task_retry_releases_its_account_during_backoff() {
     let mut fixture = Fixture::new().await;
     fixture.stop(false).await;
     let s = fixture.service.clone();
-    let mut account = s
-        .accounts
-        .create(&s, Provider::Codex, "Retry fixture")
-        .await
-        .unwrap();
+    let mut account = serde_json::to_value(
+        s.accounts
+            .create(&s, Provider::Codex, "Retry fixture")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     account["state"] = "ready".into();
     account["maxConcurrentRuns"] = 1.into();
-    s.store.put(KIND, account.clone()).await.unwrap();
+    s.store.save_account_fixture(account.clone()).await.unwrap();
     let account_id = text(&account, "id");
     codex_credentials(
         &s,
@@ -776,11 +779,13 @@ async fn managed_task_retry_releases_its_account_during_backoff() {
 
 /// A signed-in Claude Code account whose CLI home holds fixture credentials.
 async fn claude_account(s: &Service, parallel_runs: u64) -> String {
-    let mut account = s
-        .accounts
-        .create(s, Provider::Claude, "Claude fixture")
-        .await
-        .unwrap();
+    let mut account = serde_json::to_value(
+        s.accounts
+            .create(s, Provider::Claude, "Claude fixture")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let id = text(&account, "id").to_owned();
     let home = accounts::claude::account_home(&s.config, &id);
     std::fs::create_dir_all(&home).unwrap();
@@ -795,7 +800,7 @@ async fn claude_account(s: &Service, parallel_runs: u64) -> String {
     std::fs::write(home.join(".credentials.json"), credentials.to_string()).unwrap();
     account["state"] = "ready".into();
     account["maxConcurrentRuns"] = parallel_runs.into();
-    s.store.put(KIND, account).await.unwrap();
+    s.store.save_account_fixture(account).await.unwrap();
     id
 }
 
@@ -1070,7 +1075,9 @@ async fn usage_exhaustion_switches_accounts_and_preserves_the_conversation() {
     let mut accounts = Vec::new();
     let mut usage = json!({});
     for (name, used) in [("More capacity", 10), ("Backup", 30)] {
-        let mut account = s.accounts.create(s, Provider::Codex, name).await.unwrap();
+        let mut account =
+            serde_json::to_value(s.accounts.create(s, Provider::Codex, name).await.unwrap())
+                .unwrap();
         let id = text(&account, "id").to_owned();
         let limits = json!({
             "ordinaryUsageAllowed": true,
@@ -1085,7 +1092,7 @@ async fn usage_exhaustion_switches_accounts_and_preserves_the_conversation() {
         });
         account["state"] = "ready".into();
         account["usage"] = accounts::codex::normalize(&limits);
-        s.store.put(KIND, account).await.unwrap();
+        s.store.save_account_fixture(account).await.unwrap();
         let tokens = json!({
             "account_id": id,
             "access_token": "synthetic-access",
@@ -1127,7 +1134,7 @@ async fn claude_individual_spend_limit_waits_for_capacity_and_remains_cancellabl
     assert_eq!(waiting["status"], RunStatus::Running, "{waiting}");
     assert!(waiting["sessionId"].is_string(), "{waiting}");
     assert!(waiting["error"].is_null(), "{waiting}");
-    let saved = s.store.get(KIND, &account).await.unwrap().unwrap();
+    let saved = s.store.account_fixture(&account).await.unwrap().unwrap();
     assert!(saved["exhausted"].is_object(), "{saved}");
     let session = common::relay_fixture::context(&s).await;
     reqwest::Client::new()
@@ -1171,13 +1178,15 @@ async fn parallel_managed_tasks_resume_after_restart_without_refresh_credentials
     let mut fixture = Fixture::new().await;
     fixture.stop(false).await;
     let s = fixture.service.clone();
-    let mut account = s
-        .accounts
-        .create(&s, Provider::Codex, "Shared")
-        .await
-        .unwrap();
+    let mut account = serde_json::to_value(
+        s.accounts
+            .create(&s, Provider::Codex, "Shared")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     account["state"] = "ready".into();
-    s.store.put(KIND, account.clone()).await.unwrap();
+    s.store.save_account_fixture(account.clone()).await.unwrap();
     let account_id = text(&account, "id");
     let tokens = json!({
         "access_token": "synthetic",
@@ -1432,14 +1441,16 @@ async fn waiting_mission_survives_restart_and_releases_capacity_without_finishin
     let mut fixture = Fixture::with_concurrency(1).await;
     let s = fixture.service.clone();
     fixture.stop(false).await;
-    let mut account = s
-        .accounts
-        .create(&s, Provider::Codex, "Mission wait fixture")
-        .await
-        .unwrap();
+    let mut account = serde_json::to_value(
+        s.accounts
+            .create(&s, Provider::Codex, "Mission wait fixture")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     account["state"] = "ready".into();
     account["maxConcurrentRuns"] = 1.into();
-    s.store.put(KIND, account.clone()).await.unwrap();
+    s.store.save_account_fixture(account.clone()).await.unwrap();
     codex_credentials(&s, text(&account, "id"), json!({
         "access_token": "synthetic", "refresh_token": "synthetic-refresh", "account_id": "mission-wait-fixture",
     })).await;
@@ -1552,13 +1563,15 @@ async fn stopped_waiting_mission_manual_resume_starts_a_new_provider_turn() {
     let mut fixture = Fixture::with_concurrency(1).await;
     fixture.stop(false).await;
     let s = fixture.service.clone();
-    let mut account = s
-        .accounts
-        .create(&s, Provider::Codex, "Manual mission resume")
-        .await
-        .unwrap();
+    let mut account = serde_json::to_value(
+        s.accounts
+            .create(&s, Provider::Codex, "Manual mission resume")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     account["state"] = "ready".into();
-    s.store.put(KIND, account.clone()).await.unwrap();
+    s.store.save_account_fixture(account.clone()).await.unwrap();
     codex_credentials(&s, text(&account, "id"), json!({
         "access_token": "synthetic", "refresh_token": "synthetic-refresh", "account_id": "manual-mission-resume",
     })).await;
@@ -2806,10 +2819,13 @@ async fn claude_conversations_run_together_and_lowering_limit_does_not_cancel_th
         assert!(!credentials.contains("refresh"));
         assert!(credentials.contains("fixture-access"));
     }
-    s.accounts
-        .update(&s, &account, &json!({ "maxConcurrentRuns": 1 }))
-        .await
-        .unwrap();
+    common::account_fixture::update_account_fixture(
+        &s,
+        &account,
+        &json!({ "maxConcurrentRuns": 1 }),
+    )
+    .await
+    .unwrap();
     for run in &runs[..2] {
         assert_eq!(
             s.store.run(run).await.unwrap()["status"],

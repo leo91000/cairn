@@ -33,7 +33,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-const DATABASE_VERSION: i64 = 14;
+const DATABASE_VERSION: i64 = 15;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -66,7 +66,7 @@ impl Store {
         let fresh = !file.exists();
         let mut writer = Connection::open(&file)?;
         let mut version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !fresh && !matches!(version, 11 | 12 | 13 | DATABASE_VERSION) {
+        if !fresh && !matches!(version, 11..=DATABASE_VERSION) {
             return Err(Error::bad(
                 "Unsupported installation database version; use a compatible release or an explicit migration.",
             ));
@@ -77,9 +77,9 @@ impl Store {
         if !fresh && version == 11 {
             let upgraded = crate::nodes::inventory::migration::upgrade(&mut writer);
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            // Another startup can finish the later atomic steps while this one
+            // Another startup can finish later atomic steps while this one
             // waits for the inventory migration's immediate transaction.
-            if version == 11 {
+            if !matches!(version, 13..=DATABASE_VERSION) {
                 upgraded?;
             }
         }
@@ -93,20 +93,25 @@ impl Store {
                 tx.execute_batch("CREATE TABLE direct_read_authorizations(grant_id TEXT NOT NULL,object TEXT NOT NULL,hash TEXT NOT NULL,run_id TEXT NOT NULL,PRIMARY KEY(grant_id,object));CREATE INDEX direct_read_authorizations_object ON direct_read_authorizations(object);")?;
                 tx.execute_batch(crate::nodes::journal_acknowledgements::SCHEMA)?;
                 tx.pragma_update(None, "user_version", 13)?;
-            } else if current < 13 {
+            } else if !matches!(current, 13..=DATABASE_VERSION) {
                 return Err(Error::bad(
                     "Unexpected installation database version during direct storage upgrade.",
                 ));
             }
             tx.commit()?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
         }
-        if !fresh && matches!(version, 11..=13) {
+        if !fresh && version == 13 {
+            crate::accounts::migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 14 {
             crate::agent_access::upgrade(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
             tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('agentAccounts','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS records_kind ON records(kind,updated_at DESC);
 CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),type TEXT NOT NULL CHECK(length(type)>0),text TEXT NOT NULL,payload TEXT CHECK(payload IS NULL OR json_valid(payload)));
@@ -126,6 +131,7 @@ CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id,created_a
 CREATE INDEX IF NOT EXISTS events_user_input ON events(run_id,id) WHERE type='chat.user';
 CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload,'$.item.id'),id) WHERE json_extract(payload,'$.item.type')='agent_message';")?;
             tx.execute_batch(crate::runs::SCHEMA)?;
+            tx.execute_batch(crate::accounts::sql::SCHEMA)?;
             tx.execute_batch(crate::nodes::shared_blocks::SCHEMA)?;
             tx.execute_batch(crate::nodes::journal_acknowledgements::SCHEMA)?;
             tx.execute_batch(crate::projects::SCHEMA)?;
@@ -464,7 +470,8 @@ impl Db<'_> {
     pub fn put(&self, kind: &str, value: &Value) -> Result<Value> {
         if matches!(
             kind,
-            "nodes"
+            "agentAccounts"
+                | "nodes"
                 | "projects"
                 | "agents"
                 | "mcps"
@@ -981,7 +988,7 @@ mod schema_tests {
         drop(Store::open(root.path()).unwrap());
         let file = root.path().join("manager.db");
         let db = Connection::open(&file).unwrap();
-        db.execute_batch("DROP TABLE direct_journal_acknowledgements; DROP TABLE direct_object_quarantines; DROP TABLE direct_storage_grants; DROP TABLE direct_read_authorizations; DROP TABLE agent_account_access; PRAGMA user_version=12;
+        db.execute_batch("DROP TABLE account_leases; DROP TABLE account_usage_windows; DROP TABLE account_usage; DROP TABLE account_exhaustion; DROP TABLE coding_agent_accounts; DROP TABLE direct_journal_acknowledgements; DROP TABLE direct_object_quarantines; DROP TABLE direct_storage_grants; DROP TABLE direct_read_authorizations; DROP TABLE agent_account_access; PRAGMA user_version=12;
             INSERT INTO kv(key,data) VALUES('migration-fixture','{\"preserved\":true}');
             INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES('old-object','bucket','hash',4096,'{}','ready');").unwrap();
         drop(db);
