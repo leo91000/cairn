@@ -22,7 +22,11 @@ fn enqueue_event(db: &Db<'_>, event: &NotificationEvent) -> Result<()> {
 }
 
 /// A question reaches only the people who may answer it (ADR-0075).
-pub fn enqueue(db: &Db<'_>, chat: &Value, question: &Question) -> Result<()> {
+pub fn enqueue(
+    db: &Db<'_>,
+    chat: &crate::chats::storage::Conversation,
+    question: &Question,
+) -> Result<()> {
     enqueue_event(
         db,
         &NotificationEvent {

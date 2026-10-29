@@ -12,13 +12,15 @@
 //! `cairn_installation` can only read them.
 use crate::{
     auth::{InstallationIdentity, InstallationRole},
-    conversation_lifecycle::is_active,
+    chats::storage::Conversation,
     error::{Error, Result, required},
     service::Service,
     store::Db,
     validation::text,
 };
-use cairn_contracts::{AgentAccount, AgentId, ListAgentAccountsOutput, Mission, MissionSettings};
+use cairn_contracts::{
+    AgentAccount, AgentId, ConversationLifecycle, ListAgentAccountsOutput, Mission, MissionSettings,
+};
 use cairn_protocol::TaskAuthorPolicy;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
@@ -139,30 +141,32 @@ pub(crate) fn uses_agent(
 pub(crate) fn uses_chat(
     db: &Db<'_>,
     identity: &InstallationIdentity,
-    chat: &Value,
+    chat: &Conversation,
 ) -> Result<bool> {
-    if uses_agent(db, identity, text(chat, "agentId"))? {
+    if uses_agent(db, identity, &chat.agent_id)? {
         return Ok(true);
     }
-    let Some(requester) = chat["requestedBy"]["chatId"].as_str() else {
-        return Ok(false);
-    };
-    match db.get("chats", requester)? {
-        Some(requesting) if is_active(&requesting) => {
-            uses_agent(db, identity, text(&requesting, "agentId"))
-        }
-        _ => Ok(false),
+    match requesting(db, chat)? {
+        Some(requesting) => uses_agent(db, identity, &requesting.agent_id),
+        None => Ok(false),
     }
 }
 
+/// The conversation that delegated this one, while it is not deleted.
+fn requesting(db: &Db<'_>, chat: &Conversation) -> Result<Option<Conversation>> {
+    let Some(requester) = &chat.requested_by else {
+        return Ok(None);
+    };
+    Ok(db
+        .conversation(&requester.chat_id)?
+        .filter(|requesting| requesting.lifecycle == ConversationLifecycle::Active))
+}
+
 /// The members who may direct a conversation, by the same rule as [`uses_chat`].
-pub(crate) fn chat_members(db: &Db<'_>, chat: &Value) -> Result<Vec<String>> {
-    let mut agents = vec![text(chat, "agentId").to_owned()];
-    if let Some(requester) = chat["requestedBy"]["chatId"].as_str()
-        && let Some(requesting) = db.get("chats", requester)?
-        && is_active(&requesting)
-    {
-        agents.push(text(&requesting, "agentId").to_owned());
+pub(crate) fn chat_members(db: &Db<'_>, chat: &Conversation) -> Result<Vec<String>> {
+    let mut agents = vec![chat.agent_id.clone()];
+    if let Some(requesting) = requesting(db, chat)? {
+        agents.push(requesting.agent_id);
     }
     let mut members = Vec::new();
     for agent in agents {
@@ -195,18 +199,18 @@ fn require_agent(db: &Db<'_>, identity: &InstallationIdentity, agent: &str) -> R
 }
 
 fn require_chat(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<bool> {
-    let chat = required(db.get("chats", id)?, "Chat not found")?;
+    let chat = required(db.conversation(id)?, "Chat not found")?;
     require(uses_chat(db, identity, &chat)?, member(identity))
 }
 
 /// A conversation's run follows its conversation; a task run follows its agent.
 fn require_run(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<bool> {
-    if let Some(chat) = crate::chats::chat_for_run(db, id)? {
+    if let Some(chat) = db.conversation_for_run(id)? {
         return require(uses_chat(db, identity, &chat)?, member(identity));
     }
     let run = required(db.run(id)?, "Run not found")?;
     // An earlier run of a conversation still follows the conversation.
-    if let Some(chat) = db.get("chats", text(&run, "taskId"))? {
+    if let Some(chat) = db.conversation(text(&run, "taskId"))? {
         return require(uses_chat(db, identity, &chat)?, member(identity));
     }
     require_agent(db, identity, crate::nodes::run_agent(&run))
@@ -325,8 +329,8 @@ fn gate(
         // Deleting, and restoring what was deleted, needs the conversation's own agent, even
         // for a delegated task.
         ("DELETE", ["chats", id]) | ("POST", ["chats", id, "restore"]) => {
-            let chat = required(db.get("chats", id)?, "Chat not found")?;
-            require_agent(db, identity, text(&chat, "agentId"))
+            let chat = required(db.conversation(id)?, "Chat not found")?;
+            require_agent(db, identity, &chat.agent_id)
         }
         ("POST", ["chats", id, "messages"])
         | ("PUT", ["chats", id, "messages", _])
@@ -698,15 +702,15 @@ mod tests {
             "id": crate::config::id(),
             "agentId": crate::config::MAIN_AGENT_ID,
             "lifecycle": "active",
-            "requestedBy": { "chatId": requesting["id"] },
+            "requestedBy": { "runId": crate::config::id(), "chatId": requesting["id"] },
         });
         let members = |requesting: Value, delegated: Value| {
             let s = s.clone();
             async move {
                 s.store
                     .transaction(move |db| {
-                        db.put("chats", &requesting)?;
-                        chat_members(db, &delegated)
+                        db.save_conversation(&serde_json::from_value(requesting)?)?;
+                        chat_members(db, &serde_json::from_value(delegated)?)
                     })
                     .await
                     .unwrap()
@@ -719,9 +723,12 @@ mod tests {
             vec!["main-member".to_owned(), MEMBER.to_owned()]
         );
         let mut deleted = requesting;
+        deleted["id"] = crate::config::id().into();
         deleted["lifecycle"] = "trash".into();
+        let mut orphan = delegated;
+        orphan["requestedBy"]["chatId"] = deleted["id"].clone();
         assert_eq!(
-            members(deleted, delegated).await,
+            members(deleted, orphan).await,
             vec!["main-member".to_owned()]
         );
     }

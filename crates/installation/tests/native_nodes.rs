@@ -1174,6 +1174,10 @@ async fn native_authority_outage_preserves_automatic_vm_admission_and_vm_continu
             )
             .await
             .unwrap();
+        // Memberships were confirmed just before the Beacon became unavailable: account
+        // access to agents (ADR-0075) trusts that check for a while, so only native
+        // authority is at stake below.
+        f.service.synchronize_task_authors().await.unwrap();
         let (listener, address) = common::bind().await;
         let requests = Arc::new(AtomicUsize::new(0));
         let observed = requests.clone();
