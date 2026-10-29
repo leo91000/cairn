@@ -47,11 +47,14 @@ internal fun QueueStrip(
     togglePause: () -> Unit,
     /** Codex's catalog, to name a queued message's speed as its model runs it. */
     models: List<CodingAgentModel> = emptyList(),
+    /** Without access to the agent: pausing and removing only (ADR-0075). */
+    readOnly: Boolean = false,
     attachments: @Composable (List<ChatAttachment>) -> Unit,
 ) {
     var selected by rememberSaveable { mutableStateOf<String?>(null) }
     fun steerable(message: ChatMessage) =
-        canSteer &&
+        !readOnly &&
+            canSteer &&
             message.status == "queued" &&
             message.questionId == null &&
             message.mode != "steer"
@@ -175,11 +178,11 @@ internal fun QueueStrip(
                 paused = paused,
                 steer = if (steerable(message)) ({ steer(message) }) else null,
                 edit =
-                    if (message.status == "queued" && message.questionId == null)
+                    if (!readOnly && message.status == "queued" && message.questionId == null)
                         ({ edit(message) })
                     else null,
                 remove = if (message.status == "queued") ({ remove(message) }) else null,
-                togglePause = togglePause,
+                togglePause = togglePause.takeUnless { readOnly && paused },
                 attachments = attachments,
                 close = { selected = null },
             )
@@ -204,7 +207,7 @@ private fun QueuedMessageSheet(
     steer: (() -> Unit)?,
     edit: (() -> Unit)?,
     remove: (() -> Unit)?,
-    togglePause: () -> Unit,
+    togglePause: (() -> Unit)?,
     attachments: @Composable (List<ChatAttachment>) -> Unit,
     close: () -> Unit,
 ) {
@@ -264,15 +267,17 @@ private fun QueuedMessageSheet(
                     then(it),
                 )
             }
-            SheetAction(
-                if (paused) Icons.Default.PlayArrow else CairnIcons.Pause,
-                if (paused) "Reprendre la file" else "Mettre la file en pause",
-                if (paused) "Les messages repartent dans l’ordre"
-                else "Rien ne part tant que vous ne reprenez pas",
-                MaterialTheme.colorScheme.onSurface,
-                !busy,
-                then(togglePause),
-            )
+            togglePause?.let {
+                SheetAction(
+                    if (paused) Icons.Default.PlayArrow else CairnIcons.Pause,
+                    if (paused) "Reprendre la file" else "Mettre la file en pause",
+                    if (paused) "Les messages repartent dans l’ordre"
+                    else "Rien ne part tant que vous ne reprenez pas",
+                    MaterialTheme.colorScheme.onSurface,
+                    !busy,
+                    then(it),
+                )
+            }
             remove?.let {
                 SheetAction(
                     Icons.Default.Delete,

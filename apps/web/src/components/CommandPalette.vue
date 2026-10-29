@@ -11,6 +11,7 @@ import {
 } from 'vue'
 import { useRouter } from 'vue-router'
 import { runMission as queueMission } from '../../../../packages/contracts/generated/runMission'
+import { canUseAgent } from '../agent-use'
 import { api, notify, state } from '../api'
 import { chatList } from '../chat-list'
 import {
@@ -218,7 +219,8 @@ const commands = computed<Command[]>(() => {
     })
   }
 
-  for (const agent of state.agents) {
+  // Members start conversations only with the agents they may use.
+  for (const agent of state.agents.filter(agent => canUseAgent(state.usableAgents, agent.id))) {
     items.push({
       id: `agent-${agent.id}`,
       group: 'Agents',

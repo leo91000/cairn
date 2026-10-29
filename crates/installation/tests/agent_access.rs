@@ -220,6 +220,10 @@ async fn members_manage_tasks_only_on_agents_they_can_use_and_lost_access_suspen
     });
     let (status, _) = member(&s, "POST", "/api/tasks", json!({ "settings": settings })).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    let mut unnamed = settings.clone();
+    unnamed.as_object_mut().unwrap().remove("agentId");
+    let (status, _) = member(&s, "POST", "/api/tasks", json!({ "settings": unnamed })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(owner(&s, "PUT", &grant, json!({})).await.0, StatusCode::OK);
     let (status, task) = member(&s, "POST", "/api/tasks", json!({ "settings": settings })).await;
     assert_eq!(status, StatusCode::OK, "{task}");
@@ -313,6 +317,11 @@ async fn a_delegated_task_follows_its_requesting_conversation_until_it_is_delete
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{sent}");
+
+    // Deleting it still needs its own agent.
+    let detail = format!("/api/chats/{}", delegated["id"].as_str().unwrap());
+    let (status, _) = member(&s, "DELETE", &detail, json!({ "confirm": true })).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 
     let requester = format!("/api/chats/{}", requesting["id"].as_str().unwrap());
     let (status, _) = owner(&s, "DELETE", &requester, json!({ "confirm": true })).await;

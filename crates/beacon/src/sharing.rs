@@ -354,6 +354,9 @@ pub(super) async fn accept(
     )
     .await?;
     transaction.commit().await?;
+    // A new membership never inherits account access to agents from an earlier one,
+    // even when the installation missed the removal's reconciliation.
+    super::relay::refresh_task_authors(&service, &installation).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

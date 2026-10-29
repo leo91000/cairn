@@ -991,7 +991,7 @@ private fun AgentOverview(
             open(AgentSection.Advanced)
         }
         Eyebrow("Personnes", Modifier.padding(start = 16.dp, top = 16.dp, bottom = 6.dp))
-        val allowed = people.rows.count { it.allowed }
+        val allowed = people.rows.count { it.known && it.allowed }
         OverviewRow(
             AgentSection.People,
             when {

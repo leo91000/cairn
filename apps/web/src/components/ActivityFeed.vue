@@ -78,6 +78,8 @@ const props = defineProps<{
   codingAgentSwitch?: { provider: Provider, error: string | null } | null
   canManageAccounts?: boolean
   busy?: boolean
+  // Without access to the agent, recovery choices that resume it are not offered.
+  readOnly?: boolean
 }>()
 const emit = defineEmits<{
   load: []
@@ -473,7 +475,7 @@ defineExpose({
               </template>
 
               <ChatQuotaRecovery
-                v-if="chat && chatId"
+                v-if="chat && chatId && !readOnly"
                 :chat-id="chatId"
                 :quota="quota"
                 :progress="codingAgentSwitch"

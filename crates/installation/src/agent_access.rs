@@ -210,8 +210,12 @@ pub(crate) async fn authorize_request(s: &Service, input: &crate::http::Input) -
                         .as_str()
                         .unwrap_or(crate::config::MAIN_AGENT_ID),
                 ),
-                ("DELETE", ["chats", id])
-                | ("POST", ["chats", id, "messages"])
+                // Deleting needs the conversation's own agent, even for a delegated task.
+                ("DELETE", ["chats", id]) => {
+                    let chat = required(db.get("chats", id)?, "Chat not found")?;
+                    require_agent(db, &identity, text(&chat, "agentId"))
+                }
+                ("POST", ["chats", id, "messages"])
                 | ("PUT", ["chats", id, "messages", _])
                 | ("POST", ["chats", id, "questions", _, "answer" | "cancel"])
                 | ("POST", ["chats", id, "new-session" | "compact" | "coding-agent"]) => {
@@ -223,18 +227,17 @@ pub(crate) async fn authorize_request(s: &Service, input: &crate::http::Input) -
                 ("POST", ["runs", id, "resume" | "retry" | "chat"]) => {
                     require_run(db, &identity, id)
                 }
-                ("POST", ["tasks"]) => require_agent(
-                    db,
-                    &identity,
-                    body["settings"]["agentId"].as_str().unwrap_or_default(),
-                ),
+                // A missing agent is left to the command's own validation.
+                ("POST", ["tasks"]) => match body["settings"]["agentId"].as_str() {
+                    Some(agent) => require_agent(db, &identity, agent),
+                    None => Ok(()),
+                },
                 ("PUT", ["tasks", id]) => {
                     require_task(db, &identity, id)?;
-                    require_agent(
-                        db,
-                        &identity,
-                        body["settings"]["agentId"].as_str().unwrap_or_default(),
-                    )
+                    match body["settings"]["agentId"].as_str() {
+                        Some(agent) => require_agent(db, &identity, agent),
+                        None => Ok(()),
+                    }
                 }
                 ("POST", ["tasks", id, "state"]) => {
                     let task = required(db.mission(id)?, "Mission not found")?;

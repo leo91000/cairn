@@ -270,7 +270,14 @@ watch(() => [visibleError.value, detail.value?.id, detail.value?.run?.finishedAt
 const busy = ref(false)
 const submitting = ref(false)
 const editing = ref<string | null>(null)
-const agentId = ref(typeof route.query.agent === 'string' ? route.query.agent : defaultAgent(state.usableAgents, state.agents))
+
+// A link may name an agent the member cannot use: start on one they can.
+function requestedAgent() {
+  const requested = typeof route.query.agent === 'string' ? route.query.agent : ''
+  return requested && canUseAgent(state.usableAgents, requested) ? requested : defaultAgent(state.usableAgents, state.agents)
+}
+
+const agentId = ref(requestedAgent())
 const projectId = ref(typeof route.query.project === 'string' ? route.query.project : '')
 const attachments = ref<ChatAttachment[]>([])
 const previews = ref<Record<string, string>>({})
@@ -741,7 +748,7 @@ watch(chatId, (id) => {
   if (outgoing.value?.chatId !== destinationId)
     outgoing.value = null
   if (!id) {
-    agentId.value = typeof route.query.agent === 'string' ? route.query.agent : defaultAgent(state.usableAgents, state.agents)
+    agentId.value = requestedAgent()
     projectId.value = typeof route.query.project === 'string' ? route.query.project : ''
   }
 
@@ -833,7 +840,7 @@ function key(event: KeyboardEvent) {
       >
         <Icon :name="FileText" :size="18" />Files <span class="ml-auto text-muted">{{ fileCount }}</span>
       </button>
-      <template v-if="detail?.compaction?.supported && !inactive">
+      <template v-if="detail?.compaction?.supported && !inactive && !readOnly">
         <button
           class="chat-detail-action"
           aria-haspopup="dialog"
@@ -865,7 +872,7 @@ function key(event: KeyboardEvent) {
         </button>
       </template>
       <button
-        v-if="detail && !inactive"
+        v-if="detail && !inactive && canUseAgent(state.usableAgents, detail.agentId)"
         class="chat-detail-action text-danger!"
         aria-haspopup="dialog"
         @click="detailAction(() => { deletingConversation = detail! })"
@@ -1108,6 +1115,7 @@ function key(event: KeyboardEvent) {
             :outcome="detail?.run?.status === 'succeeded' ? detail.run.outcome : null"
             :sending="delivery.sending"
             :events="events"
+            :read-only="readOnly"
             :quota="quota"
             :chat-id="detail?.id"
             :coding-agent-switch="detail?.codingAgentSwitch"
@@ -1203,7 +1211,12 @@ function key(event: KeyboardEvent) {
                   rel="noopener noreferrer"
                   class="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-accent px-3 text-xs font-semibold text-surface"
                 >OpenCode settings<Icon :name="ArrowUpRight" :size="14" /></a>
-                <UiButton size="small" :disabled="busy" @click="action('pause', { paused: false })">
+                <UiButton
+                  v-if="!readOnly"
+                  size="small"
+                  :disabled="busy"
+                  @click="action('pause', { paused: false })"
+                >
                   Retry response
                 </UiButton>
               </div>
@@ -1252,7 +1265,7 @@ function key(event: KeyboardEvent) {
                 Open Connections
               </RouterLink>
             </UiNotice>
-            <div v-if="detail?.canRequestNewSession" class="mb-3 rounded-lg border border-line p-3 text-sm">
+            <div v-if="detail?.canRequestNewSession && !readOnly" class="mb-3 rounded-lg border border-line p-3 text-sm">
               <p>If the restored native session is incompatible, start a fresh session using the preserved history and files.</p>
               <UiButton :disabled="busy" @click="newSession = true">
                 Start a fresh agent session
@@ -1295,6 +1308,7 @@ function key(event: KeyboardEvent) {
               <!-- Queued follow-ups open the composer itself, sharing its border and corners, as on Android. -->
               <template v-if="pending.length || detail?.paused">
                 <QueueStrip
+                  :read-only="readOnly"
                   :pending="pending"
                   :models="codexModels"
                   :paused="!!detail?.paused"

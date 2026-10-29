@@ -78,6 +78,7 @@ internal fun ConversationList(
 ) {
     var view by rememberSaveable { mutableStateOf("active") }
     var menu by remember { mutableStateOf(false) }
+    val usableAgents = vm.state.collectAsState().value.usableAgents
     var other by remember { mutableStateOf<List<Chat>>(emptyList()) }
     var revision by remember { mutableIntStateOf(0) }
     var listError by remember { mutableStateOf<String?>(null) }
@@ -186,7 +187,10 @@ internal fun ConversationList(
                             Box(Modifier.animateItem()) {
                                 key(view) {
                                     SwipeToTrashRow(
-                                        enabled = view != "trash",
+                                        // Deleting needs access to the conversation's agent.
+                                        enabled =
+                                            view != "trash" &&
+                                                canUseAgent(usableAgents, chat.agentId),
                                         onTrash = { trash.trash(chat.id) },
                                     ) { swipe ->
                                         Surface(
@@ -364,6 +368,11 @@ internal fun ChatPage(
     )
     var createdId by rememberSaveable(id) { mutableStateOf<String?>(null) }
     var agent by rememberSaveable(id) { mutableStateOf(initialAgent) }
+    // The member's agents may load after the new conversation opened.
+    LaunchedEffect(state.usableAgents, id) {
+        if (id == null && !canUseAgent(state.usableAgents, agent))
+            agent = defaultAgent(state.usableAgents, state.agents)
+    }
     var project by rememberSaveable(id) { mutableStateOf(initialProject) }
     val draftKey = id ?: "new:$initialAgent:$initialProject"
     val savedDraft = remember(draftKey) { vm.chatDrafts[draftKey] ?: ChatDraft() }
@@ -937,59 +946,61 @@ internal fun ChatPage(
                                         fullscreen = true
                                     },
                                 )
-                                chat?.let { current ->
-                                    DropdownMenuItem(
-                                        text = {
-                                            Text(
-                                                if (current.paused) "Reprendre"
-                                                else "Mettre en pause"
-                                            )
-                                        },
-                                        leadingIcon = {
-                                            Icon(
-                                                if (current.paused) Icons.Default.PlayArrow
-                                                else CairnIcons.Pause,
-                                                null,
-                                            )
-                                        },
-                                        enabled = !state.busy,
-                                        onClick = {
-                                            menu = false
-                                            togglePause(current)
-                                        },
-                                    )
-                                    current.runId?.let { runId ->
-                                        DropdownMenuItem(
-                                            text = { Text("Voir l’exécution") },
-                                            leadingIcon = { Icon(CairnIcons.Terminal, null) },
-                                            onClick = {
-                                                menu = false
-                                                openRun(runId)
-                                            },
-                                        )
-                                    }
-                                    if (active || current.wakeup != null)
+                                chat
+                                    ?.takeUnless { readOnly && it.paused }
+                                    ?.let { current ->
                                         DropdownMenuItem(
                                             text = {
                                                 Text(
-                                                    "Arrêter l’agent",
-                                                    color = MaterialTheme.colorScheme.error,
+                                                    if (current.paused) "Reprendre"
+                                                    else "Mettre en pause"
                                                 )
                                             },
                                             leadingIcon = {
                                                 Icon(
-                                                    CairnIcons.Stop,
+                                                    if (current.paused) Icons.Default.PlayArrow
+                                                    else CairnIcons.Pause,
                                                     null,
-                                                    tint = MaterialTheme.colorScheme.error,
                                                 )
                                             },
                                             enabled = !state.busy,
                                             onClick = {
                                                 menu = false
-                                                stopping = true
+                                                togglePause(current)
                                             },
                                         )
-                                }
+                                        current.runId?.let { runId ->
+                                            DropdownMenuItem(
+                                                text = { Text("Voir l’exécution") },
+                                                leadingIcon = { Icon(CairnIcons.Terminal, null) },
+                                                onClick = {
+                                                    menu = false
+                                                    openRun(runId)
+                                                },
+                                            )
+                                        }
+                                        if (active || current.wakeup != null)
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        "Arrêter l’agent",
+                                                        color = MaterialTheme.colorScheme.error,
+                                                    )
+                                                },
+                                                leadingIcon = {
+                                                    Icon(
+                                                        CairnIcons.Stop,
+                                                        null,
+                                                        tint = MaterialTheme.colorScheme.error,
+                                                    )
+                                                },
+                                                enabled = !state.busy,
+                                                onClick = {
+                                                    menu = false
+                                                    stopping = true
+                                                },
+                                            )
+                                    }
                             }
                         }
                     }
@@ -1088,7 +1099,7 @@ internal fun ChatPage(
                         }
                         chat
                             ?.compaction
-                            ?.takeIf { it.supported && chat.lifecycle == "active" }
+                            ?.takeIf { it.supported && chat.lifecycle == "active" && !readOnly }
                             ?.let { compaction ->
                                 TextButton(
                                     {
@@ -1221,7 +1232,7 @@ internal fun ChatPage(
                         chat?.environmentState?.let { state ->
                             EnvironmentExpirationNotice(state, chat.environmentError)
                         }
-                        if (chat?.canRequestNewSession == true)
+                        if (chat?.canRequestNewSession == true && !readOnly)
                             TextButton(
                                 { newSession = true },
                                 Modifier.padding(horizontal = 8.dp),
@@ -1337,7 +1348,10 @@ internal fun ChatPage(
                                         }
                                     }
                                     chat
-                                        ?.takeIf { quota != null || it.codingAgentSwitch != null }
+                                        ?.takeIf {
+                                            !readOnly &&
+                                                (quota != null || it.codingAgentSwitch != null)
+                                        }
                                         ?.let { currentChat ->
                                             item(key = "quota:${chat?.run?.id}") {
                                                 ChatQuotaRecovery(
@@ -1536,6 +1550,7 @@ internal fun ChatPage(
                                             steer = ::steerQueued,
                                             remove = { removing = it },
                                             togglePause = { chat?.let(::togglePause) },
+                                            readOnly = readOnly,
                                             models = state.modelCatalog("codex").models,
                                             attachments = {
                                                 MessageAttachments(

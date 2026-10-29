@@ -471,6 +471,11 @@ fun FilScreen(
     val trash = rememberConversationTrash(vm)
     val chats = live.state?.chats?.filter { it.id !in trash.hidden }
     val feed = buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads, now)
+    // Deleting a conversation needs access to its agent (ADR-0075).
+    fun deletion(item: FeedItem): (() -> Unit)? =
+        item.chatId
+            ?.takeIf { canUseAgent(state.usableAgents, item.agentKey) }
+            ?.let { id -> { trash.trash(id) } }
     fun retry(item: FeedItem) {
         val task = item.taskId ?: return
         vm.perform { openRun(api.runMission(RunMissionInput(task)).id) }
@@ -560,7 +565,7 @@ fun FilScreen(
             FeedRow(
                 item,
                 { open(item) },
-                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
+                onDelete = deletion(item),
             ) {
                 ForYouAction(
                     item,
@@ -579,7 +584,7 @@ fun FilScreen(
             FeedRow(
                 item,
                 { open(item) },
-                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
+                onDelete = deletion(item),
             ) {
                 Text(
                     elapsed(item.startedAt, now),
@@ -592,7 +597,7 @@ fun FilScreen(
             FeedRow(
                 item,
                 { open(item) },
-                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
+                onDelete = deletion(item),
             ) {
                 Text(
                     item.wakeAt?.let { waitLeft(it, item.condition, item.resolved, now) }
@@ -607,7 +612,7 @@ fun FilScreen(
             FeedRow(
                 item,
                 { open(item) },
-                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
+                onDelete = deletion(item),
             ) {
                 Stamp(item.stamp, now)
             }

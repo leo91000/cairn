@@ -29,10 +29,20 @@ export function useAgentPeople(agentId: Ref<string | null>) {
   const saving = ref<string[]>([])
   const failure = ref<{ accountId: string, message: string } | null>(null)
   let generation = 0
+  let shown: string | null = null
 
   async function load() {
     const agent = agentId.value
     const current = ++generation
+    // Another agent's rows never show while this one loads.
+    if (agent !== shown) {
+      people.value = []
+      allowed.value = []
+      loaded.value = false
+      failure.value = null
+      shown = agent
+    }
+
     if (!agent)
       return
     loading.value = true
@@ -76,7 +86,8 @@ export function useAgentPeople(agentId: Ref<string | null>) {
   }
 
   const rows = computed(() => accessRows(people.value, allowed.value))
-  const count = computed(() => allowed.value.length)
+  // Former members' leftover entries end at the next membership check.
+  const count = computed(() => rows.value.filter(row => row.known && row.allowed).length)
   return {
     rows,
     count,
