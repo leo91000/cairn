@@ -1,5 +1,6 @@
 -- Previous Store cb2309baa731f07456c733be10b5c7d60f5a8d17 upgraded the actual v12 fixture.
 -- All identities, encrypted credentials and direct-storage coordination rows are synthetic.
+PRAGMA foreign_keys=OFF;
 BEGIN TRANSACTION;
 CREATE TABLE agent_exclusive_nodes(
  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
@@ -563,3 +564,4 @@ CREATE INDEX direct_read_authorizations_object ON direct_read_authorizations(obj
 DELETE FROM "sqlite_sequence";
 COMMIT;
 PRAGMA user_version=13;
+PRAGMA foreign_keys=ON;
