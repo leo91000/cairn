@@ -113,6 +113,7 @@ pub enum Event {
 #[derive(Default)]
 struct StreamReset {
     incoming_complete: bool,
+    outgoing_queued: bool,
     outgoing_sequence: Option<u32>,
     outgoing_acknowledged: bool,
 }
@@ -2107,10 +2108,9 @@ impl Association {
     }
 
     fn complete_stream_reset(&mut self, id: StreamId) {
-        let complete = self
-            .stream_resets
-            .get(&id)
-            .is_some_and(|reset| reset.incoming_complete && reset.outgoing_acknowledged);
+        let complete = self.stream_resets.get(&id).is_some_and(|reset| {
+            reset.incoming_complete && reset.outgoing_acknowledged && !reset.outgoing_queued
+        });
         if complete {
             self.stream_resets.remove(&id);
             self.unregister_stream(id, AssociationError::Reset);
@@ -2120,6 +2120,7 @@ impl Association {
     fn record_outgoing_reset(&mut self, sequence: u32, streams: &[StreamId]) {
         for id in streams {
             let reset = self.stream_resets.entry(*id).or_default();
+            reset.outgoing_queued = false;
             reset.outgoing_sequence = Some(sequence);
             reset.outgoing_acknowledged = false;
         }
@@ -2177,7 +2178,7 @@ impl Association {
                     stream.state = RecvSendState::Closed;
                     let reset = self.stream_resets.entry(*id).or_default();
                     reset.incoming_complete = true;
-                    if reset.outgoing_sequence.is_none() {
+                    if reset.outgoing_sequence.is_none() && !reset.outgoing_queued {
                         sis_to_reset.push(*id);
                     }
                     self.complete_stream_reset(*id);
@@ -3295,6 +3296,10 @@ impl Association {
         };
 
         self.pending_queue.push(c);
+        self.stream_resets
+            .entry(stream_identifier)
+            .or_default()
+            .outgoing_queued = true;
         self.awake_write_loop();
 
         Ok(())

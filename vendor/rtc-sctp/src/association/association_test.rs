@@ -1049,3 +1049,125 @@ fn exhausted_reset_retries_end_the_unusable_association() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn a_queued_local_close_cannot_reset_a_replacement_stream() -> Result<()> {
+    for blocked_stream in [4, 2] {
+        let mut association = create_association(TransportConfig::default());
+        association.set_state(AssociationState::Established);
+        association.rwnd = 0;
+        association.cwnd = 0;
+        for id in [2, 4] {
+            association.open_stream(id, PayloadProtocolIdentifier::Binary)?;
+        }
+        let now = Instant::now();
+        association.stream(blocked_stream)?.write_sctp(
+            now,
+            &Bytes::from(vec![42; 3000]),
+            PayloadProtocolIdentifier::Binary,
+        )?;
+        association.stream(2)?.close(now)?;
+        assert!(
+            association.pending_queue.len() > 1,
+            "blocked DATA must precede local EOS"
+        );
+
+        association.handle_reconfig_param(&reset_request(7, vec![2]), &mut vec![])?;
+        acknowledge_pending_resets(&mut association)?;
+        assert!(
+            association
+                .open_stream(2, PayloadProtocolIdentifier::Binary)
+                .is_err(),
+            "a queued local close must keep the wire stream reserved"
+        );
+
+        association.rwnd = 65536;
+        association.cwnd = 65536;
+        let mut transferred = 0;
+        let mut resets = 0;
+        while let Some(transmit) = association.poll_transmit(now) {
+            if let Payload::RawEncode(packets) = transmit.message {
+                for packet in packets {
+                    let packet = crate::packet::PartialDecode::unmarshal(&packet)?.finish()?;
+                    for chunk in packet.chunks {
+                        if let Some(data) = chunk.as_any().downcast_ref::<ChunkPayloadData>() {
+                            transferred += data.user_data.len();
+                        }
+                        if let Some(reset) = chunk.as_any().downcast_ref::<ChunkReconfig>() {
+                            for parameter in [&reset.param_a, &reset.param_b].into_iter().flatten()
+                            {
+                                if let Some(request) = parameter
+                                    .as_any()
+                                    .downcast_ref::<ParamOutgoingResetRequest>()
+                                {
+                                    resets += usize::from(request.stream_identifiers.contains(&2));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            transferred, 3000,
+            "unrelated blocked DATA must remain intact"
+        );
+        assert_eq!(
+            resets, 1,
+            "local and reciprocal closure must share one outgoing reset"
+        );
+        acknowledge_pending_resets(&mut association)?;
+        association.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+        assert!(
+            association.poll_transmit(now).is_none(),
+            "no old EOS can remain after legitimate reuse"
+        );
+        assert!(association.stream(2)?.is_writable());
+    }
+    Ok(())
+}
+
+#[test]
+fn a_cancelled_read_cannot_strand_an_unread_stream_reset() -> Result<()> {
+    let mut association = create_association(TransportConfig::default());
+    association.set_state(AssociationState::Established);
+    association.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+    let credit = association.get_my_receiver_window_credit();
+    let data = |tsn, sequence, body: &'static [u8]| ChunkPayloadData {
+        tsn,
+        stream_identifier: 2,
+        stream_sequence_number: sequence,
+        beginning_fragment: true,
+        ending_fragment: true,
+        user_data: Bytes::from_static(body),
+        ..Default::default()
+    };
+    association.handle_data(&data(1, 0, b"cancelled response"))?;
+    assert!(association.get_my_receiver_window_credit() < credit);
+    let now = Instant::now();
+    association.stream(2)?.close(now)?;
+    assert_eq!(
+        association.get_my_receiver_window_credit(),
+        credit,
+        "closing the read half must release data the application will never read"
+    );
+    association.handle_data(&data(2, 1, b"late old response"))?;
+    assert_eq!(
+        association.peer_last_tsn, 2,
+        "old DATA still needs acknowledgement for reset progress"
+    );
+    assert_eq!(association.get_my_receiver_window_credit(), credit);
+    association.handle_reconfig_param(&reset_request(7, vec![2]), &mut vec![])?;
+    while association.poll_transmit(now).is_some() {}
+    acknowledge_pending_resets(&mut association)?;
+    association.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+    association.handle_data(&data(3, 0, b"replacement"))?;
+    let chunks = association
+        .stream(2)?
+        .read()?
+        .expect("replacement response");
+    let mut received = [0; 32];
+    let length = chunks.read(&mut received)?;
+    assert_eq!(&received[..length], b"replacement");
+    Ok(())
+}

@@ -7,8 +7,8 @@ recorded in Cairn's lockfile before this patch. Upstream revision:
 [`webrtc-rs/rtc`](https://github.com/webrtc-rs/rtc/tree/c8321cab79ae745aad973d62034ec84d301e893c/rtc-sctp).
 
 Compared with the archive, this directory patches only
-`src/association/mod.rs`, `src/association/association_test.rs` and
-`src/endpoint/endpoint_test.rs`, adds the
+`src/association/mod.rs`, `src/association/stream.rs`,
+`src/association/association_test.rs` and `src/endpoint/endpoint_test.rs`, adds the
 MIT/Apache licenses from the same upstream revision, this file and `.gitignore`,
 and omits packaging metadata (`.cargo*`) and the archive's `Cargo.lock`.
 All other files are byte-identical to the archive. Cairn's root lockfile pins
@@ -27,14 +27,20 @@ An In Progress reply keeps retransmission active. Reciprocal resets start the
 reconfiguration timer even when they originated on the read path, preserving an
 existing deadline while unrelated streams exchange traffic. Concurrent
 local and reciprocal closure share one outgoing request instead of issuing a
-second reset against the same stream. Replacement DATA arriving before the final
-ACK is not acknowledged against the old generation; reliable SCTP retransmits it
-after teardown completes instead of losing its DCEP message.
+second reset against the same stream. A local close still queued behind DATA
+keeps the wire ID reserved until that marker is transmitted and acknowledged;
+a reciprocal request cannot leave an old marker targeting a replacement.
+Replacement DATA arriving before the final ACK is not acknowledged against the
+old generation; reliable SCTP retransmits it after teardown completes instead of
+losing its DCEP message.
 
 A terminal reset refusal or exhausted reset-retry budget ends the unusable SCTP
 association and notifies its channels, rather than retrying a rejected request,
 reserving a stream forever or reusing an unsafe ID.
 Already established closed associations reject new streams and late packets.
+Cancelling a stream's read half releases unread receive data and acknowledges
+later old-generation DATA without retaining it, so an abandoned local HTTP
+connection cannot strand reset completion or consume receive-window credit.
 The gateway and manager also end a node peer when its control DataChannel closes,
 so SCTP loss cannot leave a stale peer advertised as connected while ICE remains up.
 
@@ -64,7 +70,11 @@ responses, terminal refusals, exhausted retries followed by restored delivery,
 retry deadlines under unrelated traffic,
 duplicate/older resets, serial-number wraparound and deferred reset completion
 after stream reuse. An endpoint test delays the final reset ACK until replacement
-DATA has arrived and verifies eventual byte-for-byte delivery after retransmission. The upstream delivery regressions still assert
+DATA has arrived and verifies eventual byte-for-byte delivery after retransmission.
+Queued-close regressions preserve blocked DATA from both the closing stream and
+an unrelated stream before permitting ID reuse. Cancellation tests release unread
+credit and deliver only the replacement generation after teardown.
+The upstream delivery regressions still assert
 intact payloads and final stream removal, allowing the reciprocal ACK round trip
 before asserting that the wire stream was released:
 

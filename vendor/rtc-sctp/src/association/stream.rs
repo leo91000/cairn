@@ -289,6 +289,9 @@ impl Stream<'_> {
                 reset = true;
             }
             s.state = ((s.state as u8) & 0x2).into();
+            // The application cancelled this read half. Do not retain bytes
+            // that can never be drained and would keep a peer reset pending.
+            s.reassembly_queue = ReassemblyQueue::new(self.stream_identifier);
         }
 
         if reset {
@@ -484,6 +487,12 @@ impl StreamState {
     }
 
     pub(crate) fn handle_data(&mut self, pd: &ChunkPayloadData) -> bool {
+        if !matches!(
+            self.state,
+            RecvSendState::Readable | RecvSendState::ReadWritable
+        ) {
+            return false;
+        }
         self.reassembly_queue.push(pd.clone())
     }
 

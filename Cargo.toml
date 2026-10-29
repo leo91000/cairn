@@ -14,10 +14,13 @@ exclude = [
   "vendor/rtc-dtls",
   "vendor/ext4-view",
   "vendor/rtc-sctp",
-  "vendor/rtc"
+  "vendor/rtc",
+  "vendor/webrtc"
 ]
 
 [patch.crates-io]
+# Register local channel event receivers before the driver can announce them.
+webrtc = { path = "vendor/webrtc" }
 # Reserve a closing channel until SCTP actually releases its wire stream.
 rtc = { path = "vendor/rtc" }
 # Keep stream resets from closing replacement channels on the pinned stack.
