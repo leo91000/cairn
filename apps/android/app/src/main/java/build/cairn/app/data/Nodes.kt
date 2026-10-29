@@ -383,6 +383,20 @@ fun nodeHealth(
     )
 }
 
+/** A native privilege change keeps the runtime unready until the supervisor confirms it. */
+private fun privilegeReason(node: ExecutionNode): String? {
+    if (node.capabilities.backend != NATIVE_BACKEND) return null
+    return when (node.nativeModeStatus) {
+        "failed" ->
+            "Le changement de privilèges a échoué : réessayez-le ou revenez en Natif protégé."
+        "pending" ->
+            if (node.capabilities.nativeModeProtocol == 1L)
+                "Un changement de privilèges attend la confirmation du superviseur."
+            else "Mettez à jour le superviseur pour confirmer les privilèges."
+        else -> null
+    }
+}
+
 /** Why a node cannot take new work right now; empty when it can. */
 fun nodeDiagnostics(
     node: ExecutionNode,
@@ -409,7 +423,8 @@ fun nodeDiagnostics(
             "ublk indisponible : cette node a besoin d’un runtime natif à jour et du module noyau ublk_drv (/dev/ublk-control) pour monter les disques de conversation stockés sur S3."
     if (node.status != "offline" && !node.executionReady)
         reasons +=
-            node.budgetError?.let { "Le budget partagé n’a pas pu être appliqué : $it" }
+            privilegeReason(node)
+                ?: node.budgetError?.let { "Le budget partagé n’a pas pu être appliqué : $it" }
                 ?: node.updateError?.let { "Le runtime n’est pas prêt : $it" }
                 ?: "Le runtime n’est pas encore prêt ou ne correspond pas à la version approuvée par le master."
     if (node.maintenance != null)

@@ -120,7 +120,7 @@ const healths = computed(() => active.value.map(node => nodeHealth(node, Date.no
 // Connected machines answer heartbeats; the built-in runner too, unless its contact went stale.
 const live = computed(() => active.value.filter((node, index) => (node.local || node.status === 'online') && healths.value[index].state !== 'offline' && !runnerStale(node, clock.value, runner.value)))
 const totalSlots = computed(() => live.value.reduce((total, node) => total + slotCapacity(node), 0))
-const usedSlots = computed(() => live.value.reduce((total, node) => total + (node.occupiedSlots ?? 0), 0))
+const usedSlots = computed(() => live.value.reduce((total, node) => total + Math.min(node.occupiedSlots ?? 0, slotCapacity(node)), 0))
 const attention = computed(() => healths.value.filter(health => ['offline', 'attention', 'setup'].includes(health.state)).length)
 let timer: ReturnType<typeof setInterval> | undefined
 
@@ -236,9 +236,7 @@ function switchBackend(node: ExecutionNode) {
   adding.value = true
 }
 
-// An error from an earlier action belongs to the machine it concerned.
 function openNode(node: ExecutionNode) {
-  error.value = ''
   openedId.value = node.id
 }
 
@@ -575,8 +573,8 @@ function revoke() {
       Machines
     </h2>
     <section class="overflow-hidden rounded-2xl border border-line bg-surface shadow-arcade" aria-labelledby="machines-heading">
-      <div class="grid grid-cols-[minmax(0,1fr)_7rem_5.5rem_8.5rem_4.5rem_1rem] gap-4 bg-inset px-4.5 py-2 text-[10.5px] tracking-[.06em] text-muted uppercase tablet:grid-cols-[minmax(0,1fr)_7rem_5.5rem_1rem] phone:hidden" aria-hidden="true">
-        <span>Machine</span><span>Runtime</span><span>Slots</span><span class="tablet:hidden">Usage</span><span class="tablet:hidden">Agents</span><span />
+      <div class="grid grid-cols-[minmax(0,1fr)_7rem_5.5rem_8.5rem_4.5rem_1rem] gap-4 bg-inset px-4.5 py-2 text-[10.5px] tracking-[.06em] text-muted uppercase compact:grid-cols-[minmax(0,1fr)_7rem_5.5rem_1rem] phone:hidden" aria-hidden="true">
+        <span>Machine</span><span>Runtime</span><span>Slots</span><span class="compact:hidden">Usage</span><span class="compact:hidden">Agents</span><span />
       </div>
       <ul aria-label="Machines" class="[&>li:first-child>button]:border-t-0">
         <li v-for="node in visible" :key="node.id">

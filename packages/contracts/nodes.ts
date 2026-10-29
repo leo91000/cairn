@@ -244,6 +244,17 @@ export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number 
   return { state: 'ready', label: 'Ready', detail: running ? `${running} running · ${free} of ${slots} slots free` : `${free} of ${slots} slots free` }
 }
 
+/** A native privilege change keeps the runtime unready until the supervisor confirms it. */
+function privilegeReason(node: ExecutionNode) {
+  if (node.capabilities.backend !== 'native')
+    return null
+  if (node.nativeModeStatus === 'failed')
+    return 'The privilege change failed: retry it or return to Native protected in Access.'
+  if (node.nativeModeStatus === 'pending')
+    return node.capabilities.nativeModeProtocol === 1 ? 'A privilege change waits for the supervisor to confirm it.' : 'Update the supervisor to confirm privileges.'
+  return null
+}
+
 /** Why a node cannot take new work right now; empty when it can. */
 export function nodeDiagnostics(node: ExecutionNode, now = Date.now(), clock: number | null = null, runner: RunnerObservation | null = null) {
   if (node.revoked)
@@ -262,7 +273,7 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now(), clock: nu
   if (node.capabilities.backend === 'native' && !node.capabilities.ublk)
     reasons.push('ublk is unavailable: this node needs a current native runtime and the ublk_drv kernel module (/dev/ublk-control) to mount S3-backed conversation disks.')
   if (node.status !== 'offline' && !node.executionReady)
-    reasons.push(node.budgetError ? `The shared budget could not be applied: ${node.budgetError}` : node.updateError ? `The runtime is not ready: ${node.updateError}` : 'The runtime is not ready yet or does not match the version approved by the master.')
+    reasons.push(privilegeReason(node) ?? (node.budgetError ? `The shared budget could not be applied: ${node.budgetError}` : node.updateError ? `The runtime is not ready: ${node.updateError}` : 'The runtime is not ready yet or does not match the version approved by the master.'))
   if (node.maintenance)
     reasons.push('Maintenance in progress: new work waits until the update finishes.')
   if (node.exclusiveReservation)

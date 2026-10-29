@@ -124,7 +124,7 @@ fun NodesScreen(
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 "${live.size}/${active.size} connectée${if (live.size > 1) "s" else ""} · " +
-                    "${live.sumOf { it.occupiedSlots }}/${live.sumOf { slotCapacity(it) }} slots utilisés" +
+                    "${live.sumOf { minOf(it.occupiedSlots, slotCapacity(it)) }}/${live.sumOf { slotCapacity(it) }} slots utilisés" +
                     if (attention > 0) " · $attention à vérifier" else "",
                 Modifier.weight(1f),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

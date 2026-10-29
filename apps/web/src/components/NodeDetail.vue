@@ -156,6 +156,11 @@ const reserve = computed(() => {
                 Review the request
               </button>
             </p>
+            <p v-else-if="native && ['pending', 'failed'].includes(node.nativeModeStatus ?? '')" class="text-xs">
+              <button type="button" class="font-semibold text-accent hover:underline" @click="reviewRequest">
+                Open host privileges
+              </button>
+            </p>
             <ul v-if="diagnostics.length" class="grid list-disc gap-1 pl-5 text-xs text-coral" :aria-label="`Why ${node.name} cannot take new work`">
               <li v-for="reason in diagnostics" :key="reason">
                 {{ reason }}

@@ -925,6 +925,8 @@ test('previews node administrator powers and keeps failed transitions visibly bl
     if (change.confirm) {
       node.nativeModeRequest = { mode: change.mode, generation: 'g1' }
       node.nativeModeStatus = 'failed'
+      // The server keeps the runtime unready until privileges are applied.
+      node.executionReady = false
       node.nativeModeObserved = {
         mode: 'protected',
         generation: null,
@@ -968,6 +970,11 @@ test('previews node administrator powers and keeps failed transitions visibly bl
   await expect(review).toHaveCount(0)
   await expect(card).toContainText('Change failed; new placements are blocked')
   await expect(row).toContainText('The privilege change failed')
+  // The overview names the cause and leads to the privileges.
+  await showSection(card, 'Overview')
+  await expect(card.getByRole('list', { name: 'Why Disposable administrator cannot take new work' })).toContainText('The privilege change failed: retry it')
+  await card.getByRole('button', { name: 'Open host privileges', exact: true }).click()
+  await expect(card.getByRole('heading', { name: 'Native execution' })).toBeFocused()
   await expect(page.getByRole('region', { name: 'Fleet summary' }).locator('div').filter({ hasText: 'attention' }).locator('dd')).toHaveText('1')
   await expect(card).toContainText('Last confirmed: Native protected')
   await expect(card).toContainText('Current privileges are unconfirmed')
