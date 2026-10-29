@@ -550,6 +550,11 @@ private class GraphBuilder {
                 throw DiagramError("Subgraphs with a different local direction are not supported.")
         }
 
+        if (this.edges.any { it.from == it.to && clusters.containsKey(it.from) })
+            throw DiagramError(
+                "Self-transitions on composite states or subgraphs are not supported."
+            )
+
         val known = nodes.map { it.id }.toSet() + clusters.keys
         val edges = edges.filter { known.contains(it.from) && known.contains(it.to) }
         return GraphDiagram(
@@ -1158,7 +1163,9 @@ private fun parseState(source: String): GraphDiagram {
             continue
         }
 
-        if (line == "--" || line == "end note") {
+        if (line == "--") throw DiagramError("Concurrent state regions are not supported.")
+
+        if (line == "end note") {
             index++
             continue
         }

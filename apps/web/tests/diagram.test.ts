@@ -60,6 +60,14 @@ describe('diagrams (shared Android corpus)', () => {
 })
 
 describe('diagram layout', () => {
+  it.each([
+    'stateDiagram-v2\nstate Active {\nIdle-->Running\n}\nActive --> Active : retry',
+    'flowchart TD\nsubgraph Active\nIdle-->Running\nend\nActive-->|retry|Active',
+    'stateDiagram-v2\nstate Active {\n[*]-->A\nA-->[*]\n--\n[*]-->B\nB-->[*]\n}',
+  ])('keeps unsupported composite semantics as readable source %#', (source) => {
+    expect(() => parseDiagram(source)).toThrow(DiagramError)
+  })
+
   it.each(corpus.parse)('keeps $name inside its bounds without overlapping nodes', ({ source }) => {
     const scene = layoutDiagram(parseDiagram(source), measure)
     for (const item of scene.items) {

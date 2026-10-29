@@ -15,7 +15,8 @@ palette. A fence stays code until its closing fence arrives, so streaming never 
 unsupported types (gantt, class…) keep the code block, and invalid sources show their code
 with a short note. State notes stay physically left/right of their target in every direction;
 multiple notes stack with reserved space. Notes on composite states or self-transition states
-keep readable source. Subgraphs with a differing local direction also keep source unless
+keep readable source. Self-transitions on composite states or subgraphs, and concurrent state
+regions (`--`), also keep source with an explanation. Subgraphs with a differing local direction keep source unless
 an external member link invokes Mermaid's documented parent-direction inheritance
 ([syntax](https://mermaid.js.org/syntax/flowchart.html#direction-in-subgraphs)). Each drawing has a source toggle, copy and a full-screen viewer with
 zoom and pan. Node links remain usable in the card and the full-screen viewer; dragging a

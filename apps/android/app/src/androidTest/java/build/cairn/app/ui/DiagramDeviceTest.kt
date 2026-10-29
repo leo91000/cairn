@@ -230,15 +230,22 @@ class DiagramDeviceTest {
                 compose.onNodeWithContentDescription("Fermer").performClick()
             }
         }
-        compose.runOnIdle {
-            content = "```mermaid\nflowchart TD\nsubgraph S\nsubgraph S\nA\nend\nend\n```"
+        for (source in
+            listOf(
+                "flowchart TD\nsubgraph S\nsubgraph S\nA\nend\nend",
+                "stateDiagram-v2\nstate Active {\nIdle-->Running\n}\nActive --> Active : retry",
+                "flowchart TD\nsubgraph Active\nIdle-->Running\nend\nActive-->|retry|Active",
+                "stateDiagram-v2\nstate Active {\n[*]-->A\nA-->[*]\n--\n[*]-->B\nB-->[*]\n}",
+            )) {
+            compose.runOnIdle { content = "```mermaid\n$source\n```" }
+            compose.waitUntil(20000) {
+                compose.onAllNodesWithTag("diagram-source").fetchSemanticsNodes().size == 1
+            }
+            compose.onNodeWithTag("diagram-source").assertTextEquals(source)
+            compose
+                .onNodeWithText("Impossible de dessiner ce diagramme.", substring = true)
+                .assertIsDisplayed()
+            compose.onNodeWithContentDescription("Agrandir").assertDoesNotExist()
         }
-        compose.waitUntil(20000) {
-            compose.onAllNodesWithTag("diagram-source").fetchSemanticsNodes().size == 1
-        }
-        compose
-            .onNodeWithText("Impossible de dessiner ce diagramme.", substring = true)
-            .assertIsDisplayed()
-        compose.onNodeWithContentDescription("Agrandir").assertDoesNotExist()
     }
 }

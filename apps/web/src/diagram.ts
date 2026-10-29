@@ -461,6 +461,9 @@ class GraphBuilder {
         throw new DiagramError('Subgraphs with a different local direction are not supported.')
     }
 
+    if (this.edges.some(edge => edge.from === edge.to && this.clusters.has(edge.from)))
+      throw new DiagramError('Self-transitions on composite states or subgraphs are not supported.')
+
     const known = new Set([...nodes.map(node => node.id), ...this.clusters.keys()])
     const edges = this.edges.filter(edge => known.has(edge.from) && known.has(edge.to))
     const graph: GraphDiagram = {
@@ -1080,7 +1083,10 @@ function parseState(source: string): GraphDiagram {
       continue
     }
 
-    if (line === '--' || line === 'end note')
+    if (line === '--')
+      throw new DiagramError('Concurrent state regions are not supported.')
+
+    if (line === 'end note')
       continue
 
     if (keyword.toLowerCase() === 'note') {

@@ -193,10 +193,19 @@ test('node label clicks open their safe link', async ({ page }) => {
   await expect(page.locator('body')).toHaveAttribute('data-diagram-link', 'https://example.test/docs')
 })
 
-test('cyclic subgraphs fall back to readable source without blocking the page', async ({ page }) => {
-  await page.evaluate(text => window.chatRendering.markdown(text), '\`\`\`mermaid\nflowchart TD\nsubgraph S\nsubgraph S\nA\nend\nend\n\`\`\`')
-  await expect(page.locator('#app .diagram-error')).toContainText('Subgraphs cannot contain themselves.')
-  await expect(page.locator('#app .diagram-source')).toContainText('subgraph S')
+test('cyclic and unsupported composite semantics preserve readable source', async ({ page }) => {
+  const cases = [
+    ['flowchart TD\nsubgraph S\nsubgraph S\nA\nend\nend', 'Subgraphs cannot contain themselves.'],
+    ['stateDiagram-v2\nstate Active {\nIdle-->Running\n}\nActive --> Active : retry', 'Self-transitions on composite states or subgraphs are not supported.'],
+    ['flowchart TD\nsubgraph Active\nIdle-->Running\nend\nActive-->|retry|Active', 'Self-transitions on composite states or subgraphs are not supported.'],
+    ['stateDiagram-v2\nstate Active {\n[*]-->A\nA-->[*]\n--\n[*]-->B\nB-->[*]\n}', 'Concurrent state regions are not supported.'],
+  ]
+  for (const [source, explanation] of cases) {
+    await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)
+    await expect(page.locator('#app .diagram-error')).toContainText(explanation!)
+    await expect(page.locator('#app .diagram-source')).toHaveText(source!)
+    await expect(page.getByRole('button', { name: 'Open diagram' })).toHaveCount(0)
+  }
 })
 
 test('full-screen node links remain clickable after zoom and pan without navigating on a drag', async ({ page }) => {
