@@ -1143,3 +1143,123 @@ controls; action secrets keep their raw bytes after the shared blank filter.
 These are client value transformations, not validation of an action. A plugin
 still validates its action input. The server's F6 manifest constraints, package
 admission/review, instance validation and completion handler remain unchanged.
+
+## Hooks and resources (ADR-0075, ticket A)
+
+These declarations are additive to API v2. Existing `inbound` and conversation
+capabilities keep their behavior until the later removal ticket. Hook rules and
+resource-restricted grants ship in later tickets; declaring a hook grants nobody
+permission to act on it, and nothing consumes the hook queue yet.
+
+```toml
+# Add "hooks" to capabilities and declare agentAccess for agents' future hook grants.
+[[resources]]
+name = "server"
+description = "A server"
+
+[[resources]]
+name = "channel"
+description = "A channel in a server"
+parentType = "server"
+
+[[hooks]]
+name = "message"
+description = "A message received"
+payloadSchema = { type = "object", required = [
+  "channelId",
+  "text"
+], properties = { channelId = { type = "string" }, text = { type = "string" } } }
+resourceFields = [ { path = "/channelId", resourceType = "channel" } ]
+```
+
+`resources` declares at most 32 unique types, each with a description and optional
+`parentType` naming another declared type. Hierarchies must be acyclic. `hooks`
+declares at most 32 unique hooks, each with a name, description, object
+`payloadSchema` (JSON Schema, at most 16 KiB), and optional `resourceFields`.
+Declaring hooks requires the `hooks` capability, and requesting it requires hooks.
+Tool `inputSchema` and hook `payloadSchema` are compiled during registry admission.
+Approval covers all these declarations and annotations; changing any of them
+changes the package digest. Omitted new fields preserve existing package digests.
+
+Tools also accept `resourceFields`, referring to their `inputSchema`. Each annotation
+is `{ path, resourceType }`. Paths use JSON Pointer escaping (`~0`, `~1`) through
+explicit object `properties`; `*` traverses array `items`, for example
+`/destinations/*/channelId`. The terminal schema must declare `type = "string"`.
+Paths through `$ref` or unions are not supported: expose resource IDs as explicit
+properties. At most 32 distinct paths, each at most 400 bytes and 16 segments, are
+allowed per contribution. Command arguments instead accept `resourceType = "channel"`.
+Every referenced type must be declared. Resource IDs are strings, scoped by both
+type and instance; labels carry no authority.
+
+The one-shot `resources(input)` handler uses one enabled instance's settings and
+host-injected credentials, with the usual capability and revision checks:
+
+```luau
+resources = function(input)
+    -- input.instance is { id, name, enabled, settings, secrets } (names only).
+    if input.op == "list" then
+        -- input.resourceType, input.page (1..10000), input.query (<=200 chars)
+        return { items = cairn.array({
+            { resourceType = "channel", id = "200", name = "Support",
+              parent = { resourceType = "server", id = "100" } },
+        }), nextPage = nil }
+    end
+    -- input.op == "resolve", input.resourceType, input.id
+    -- Resolve the exact ID, or fail when missing/inaccessible. Root: parent = nil.
+    return { resourceType = "server", id = input.id, name = "Team" }
+end
+```
+
+Lists contain at most 200 distinct items of the requested type. IDs are nonempty,
+control-free strings of at most 200 UTF-8 bytes; names at most 300 bytes. Every
+non-root item must name its immediate parent of the declared parent type; root
+items must have no parent. Invalid items or pagination fail the whole response.
+`nextPage`, if present, must advance and stay at most 10000. To resolve ancestors,
+Cairn calls `resolve` for the target and then independently for each immediate
+parent, through the root, rejecting mismatched IDs/types and unresolved parents.
+The result is `{ resource, ancestors }`, nearest parent first.
+
+Read surfaces share these implementations:
+
+- HTTP: `GET /api/plugins/{pluginId}/connections/{instanceId}/resources?resourceType=channel&page=1&query=`
+  and `GET .../resources/ancestors?resourceType=channel&id=200` (authenticated owner,
+  matching the existing plugin management routes).
+- Public MCP and `cairn_installation`: `list_plugin_resources`
+  (`pluginId`, `instanceId`, `resourceType`, optional `page`/`query`) and
+  `resolve_plugin_resource` (`pluginId`, `instanceId`, `resourceType`, `id`). Public
+  MCP requires `read`. Installation agents also need a current grant on the
+  instance, because discovery uses its service credentials; installation access
+  alone does not confer access to the service account. Authorization and instance
+  grants are checked again after the handler. Generated web/Android clients use
+  the same typed contracts; no picker UI is introduced in this ticket.
+
+Transport (`socket`) and durable `timer` handlers can emit declared hooks:
+
+```luau
+local queued = cairn.hooks.emit({
+    name = "message", id = "service-event-123",
+    payload = { channelId = "200", text = "Hello" },
+})
+```
+
+The approved `hooks` capability gates the call. Undeclared hooks, schema-invalid
+payloads, IDs over 200 bytes or with controls, and payloads over 256 KiB fail.
+One-shot handlers and ordinary script events cannot emit hooks. A transport must
+finish protocol acknowledgements before emitting; asynchronous rules cannot meet
+service protocol deadlines.
+
+Admission is atomic and durable in SQLite: event plus receipt, per instance.
+`true` means queued; `false` means duplicate ID or full queue/receipt ledger. IDs
+are deduplicated across hook names for 30 days, even after acknowledgement and
+manager restart. A full queue does not record the ID, so a producer can retry it.
+The separate hook queue holds at most 50 events per instance. The receipt ledger
+holds at most 10000 IDs per instance; at capacity, new IDs are refused until receipts
+expire rather than evicting IDs still inside their deduplication window. Events
+expire after 30 days, carry the instance revision and approved package digest, and
+are invalidated by revision/package changes. Instance deletion cascades to events
+and receipts. The existing script event pump never delivers hook events.
+
+Ticket F can use `Db::plugin_hooks(instance, revision, digest, now)` to read current
+events and `Db::remove_plugin_hook(instance, id)` to acknowledge them in its own
+transaction; receipts remain intact. Ticket C can use `plugins::resources::resolve`
+and the manifest's `resourceFields`/argument `resourceType` for grant enforcement.

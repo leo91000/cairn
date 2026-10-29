@@ -9,6 +9,8 @@ data class PluginTool(
     val description: String,
     val inputSchema: kotlinx.serialization.json.JsonElement?,
     val name: String,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val resourceFields: List<PluginResourceField> = listOf(),
 ) {
     init {}
 }

@@ -132,14 +132,21 @@ pub async fn call(
     let context = Context {
         connection,
         manifest: package.manifest.clone(),
+        package_digest: Some(package.digest.clone()),
         event: Value::Null,
         link: None,
         draft,
         management: management.clone(),
     };
-    if ["conversations.", "inbound.", "instance.", "socket."]
-        .iter()
-        .any(|family| method.starts_with(family))
+    if [
+        "conversations.",
+        "inbound.",
+        "hooks.",
+        "instance.",
+        "socket.",
+    ]
+    .iter()
+    .any(|family| method.starts_with(family))
     {
         return Err(Error::forbidden(
             "Conversations and connections belong to the instance's worker.",

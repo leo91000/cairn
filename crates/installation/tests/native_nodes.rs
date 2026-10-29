@@ -99,6 +99,7 @@ async fn an_owner_approved_bot_can_submit_to_its_native_agent() {
         management: None,
         connection: connection.clone(),
         manifest: registry::builtin("discord").unwrap().manifest,
+        package_digest: None,
         event,
         link: None,
         draft: None,

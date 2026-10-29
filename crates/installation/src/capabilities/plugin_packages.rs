@@ -1,7 +1,7 @@
 //! Package and program capabilities shared by authenticated transports. Installation
 //! management is not the owner's approval of new executable code.
 use super::{ResumeContext, decode};
-use crate::plugins::{management, operations, program_installation, registry};
+use crate::plugins::{management, operations, program_installation, registry, resources};
 use crate::{
     error::{Error, Result},
     service::Service,
@@ -22,6 +22,16 @@ pub(crate) const PLUGIN_PACKAGE_OPERATIONS: &[PluginPackageOperation] = &[
         name: "list_plugins",
         scope: "read",
         description: "List plugin packages, exact versions, approvals, contributions and redacted instances.",
+    },
+    PluginPackageOperation {
+        name: "list_plugin_resources",
+        scope: "read",
+        description: "List a plugin instance's resources by declared type, page and query. Installation agents also need a grant on the instance.",
+    },
+    PluginPackageOperation {
+        name: "resolve_plugin_resource",
+        scope: "read",
+        description: "Resolve an instance resource and each ancestor through its plugin. Installation agents also need a grant on the instance.",
     },
     PluginPackageOperation {
         name: "install_plugin_package",
@@ -142,6 +152,12 @@ impl PluginPackageOperation {
     pub(crate) fn descriptor(&self) -> Value {
         let input = match self.name {
             "list_plugins" => schema_for::<ListPluginPackagesInput>(Contract::Deserialize),
+            "list_plugin_resources" => {
+                schema_for::<ListPluginResourcesInput>(Contract::Deserialize)
+            }
+            "resolve_plugin_resource" => {
+                schema_for::<ResolvePluginResourceInput>(Contract::Deserialize)
+            }
             "install_plugin_package" => {
                 schema_for::<InstallPluginPackageInput>(Contract::Deserialize)
             }
@@ -160,6 +176,10 @@ impl PluginPackageOperation {
         };
         let output = match self.name {
             "list_plugins" => schema_for::<PluginCatalog>(Contract::Serialize),
+            "list_plugin_resources" => schema_for::<ListPluginResourcesOutput>(Contract::Serialize),
+            "resolve_plugin_resource" => {
+                schema_for::<ResolvePluginResourceOutput>(Contract::Serialize)
+            }
             "list_plugin_programs" => schema_for::<ListPluginProgramsOutput>(Contract::Serialize),
             "get_plugin_operation" | "cancel_plugin_operation" => {
                 schema_for::<PluginOperation>(Contract::Serialize)
@@ -228,6 +248,23 @@ impl PluginPackageOperation {
             "list_plugins" => {
                 let _: ListPluginPackagesInput = decode(input)?;
                 serde_json::to_value(management::catalog(s).await?)?
+            }
+            "list_plugin_resources" | "resolve_plugin_resource" => {
+                authority.recheck(s).await?;
+                let caller = match &authority.bearer {
+                    Some(bearer) => Some(crate::installation_mcp::authorize(s, bearer).await?),
+                    None => None,
+                };
+                let agent = caller
+                    .as_ref()
+                    .map(|run| crate::validation::text(&run["snapshot"]["agent"], "id"));
+                let result = if self.name == "list_plugin_resources" {
+                    serde_json::to_value(resources::list(s, decode(input)?, agent).await?)?
+                } else {
+                    serde_json::to_value(resources::resolve(s, decode(input)?, agent).await?)?
+                };
+                authority.recheck(s).await?;
+                result
             }
             "install_plugin_package" => {
                 let input: InstallPluginPackageInput = decode(input)?;

@@ -1201,6 +1201,8 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     public_names.insert("manage_plugin");
     public_names.extend([
         "list_plugins",
+        "list_plugin_resources",
+        "resolve_plugin_resource",
         "install_plugin_package",
         "approve_plugin_package",
         "activate_plugin_package",
@@ -5908,4 +5910,111 @@ async fn slow_resource_imports_complete_through_both_tools_without_extending_cod
         assert!(!imported.to_string().contains("synthetic-slow-source"));
     }
     tokio::join!(scenario(false), scenario(true));
+}
+
+#[tokio::test]
+async fn resource_reads_match_http_public_mcp_and_installation_with_live_grants() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    s.plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    let installed = common::package_install(
+        &s,
+        &json!({
+            "manifest": {
+                "id":"resource-probe", "name":"Resources", "version":"1", "apiVersion":2,
+                "capabilities":[], "agentAccess":{},
+                "resources":[{"name":"repository","description":"A repository"}]
+            },
+            "source": r#"return { resources = function(input)
+            local item = {resourceType = "repository", id = "repo", name = "Repository"}
+            if input.op == "list" then return {items = cairn.array({item})} end
+            return item
+        end }"#
+        }),
+    )
+    .await
+    .unwrap();
+    common::package_approve(&s, "resource-probe", "1", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let saved = common::save_plugin(
+        &s,
+        "resource-probe",
+        &json!({"name":"Private","enabled":true}),
+        None,
+    )
+    .await
+    .unwrap();
+    let instance = text(&saved, "id");
+    let main = enabled_main(&s).await;
+    let (_, ungranted) = active_run(&s, &main).await;
+    let list_args = json!({"pluginId":"resource-probe","instanceId":instance,"resourceType":"repository","page":1,"query":""});
+    let resolve_args = json!({"pluginId":"resource-probe","instanceId":instance,"resourceType":"repository","id":"repo"});
+    for (name, args) in [
+        ("list_plugin_resources", list_args.clone()),
+        ("resolve_plugin_resource", resolve_args.clone()),
+    ] {
+        let refused = call(&s, &ungranted, name, args.clone()).await;
+        assert_eq!(refused["result"]["isError"], true, "{refused}");
+        let refused = public_call(&s, &["manage"], name, args).await;
+        assert_eq!(refused["result"]["isError"], true, "{refused}");
+    }
+    let main = s
+        .agent_fixture(json!({"plugins":[instance]}), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
+    let (_, configuration) = active_run(&s, &main).await;
+    let app = cairn_installation::http::router(s.clone()).await.unwrap();
+    for (name, args, path) in [
+        (
+            "list_plugin_resources",
+            list_args,
+            format!(
+                "/api/plugins/resource-probe/connections/{instance}/resources?resourceType=repository&page=1&query="
+            ),
+        ),
+        (
+            "resolve_plugin_resource",
+            resolve_args,
+            format!(
+                "/api/plugins/resource-probe/connections/{instance}/resources/ancestors?resourceType=repository&id=repo"
+            ),
+        ),
+    ] {
+        let http = common::send(
+            &app,
+            common::request("GET", &path).body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(http.status(), StatusCode::OK);
+        let expected = common::read_json(http).await;
+        let public = public_call(&s, &["read"], name, args.clone()).await;
+        let internal = call(&s, &configuration, name, args.clone()).await;
+        assert_eq!(result(&public), &expected);
+        assert_eq!(result(&internal), &expected);
+        let member = common::send(
+            &app,
+            common::request("GET", &path)
+                .extension(cairn_installation::auth::InstallationIdentity::trusted(
+                    cairn_installation::auth::InstallationRole::Member,
+                    "member",
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(member.status(), StatusCode::FORBIDDEN);
+    }
+    s.agent_fixture(json!({"plugins":[]}), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
+    let refused = call(
+        &s,
+        &configuration,
+        "list_plugin_resources",
+        json!({"pluginId":"resource-probe","instanceId":instance,"resourceType":"repository"}),
+    )
+    .await;
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
 }

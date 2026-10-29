@@ -19,6 +19,8 @@ data class PluginArgument(
     val positional: Boolean = false,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val required: Boolean = false,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val resourceType: String? = null,
 ) {
     init {
         maxLength?.let { require(it >= 0L) }

@@ -30,6 +30,29 @@
     "path": "/plugins/packages/{pluginId}/activate"
   },
   {
+    "input": "ListPluginResourcesInput",
+    "method": "GET",
+    "name": "listPluginResources",
+    "output": "ListPluginResourcesOutput",
+    "path": "/plugins/{pluginId}/connections/{instanceId}/resources",
+    "query": [
+      "resourceType",
+      "page",
+      "query"
+    ]
+  },
+  {
+    "input": "ResolvePluginResourceInput",
+    "method": "GET",
+    "name": "resolvePluginResource",
+    "output": "ResolvePluginResourceOutput",
+    "path": "/plugins/{pluginId}/connections/{instanceId}/resources/ancestors",
+    "query": [
+      "resourceType",
+      "id"
+    ]
+  },
+  {
     "input": "ListPluginProgramsInput",
     "method": "GET",
     "name": "listPluginPrograms",
