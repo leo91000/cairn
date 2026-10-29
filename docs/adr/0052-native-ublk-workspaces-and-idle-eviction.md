@@ -60,7 +60,8 @@ An explicitly aborted I/O path records only the durable crash prefix after fenci
 and non-lazy unmount; it does not claim a successful filesystem flush. Publication
 can then run asynchronously across a following turn under the stable disk grant.
 
-A fenced filesystem whose flush reports `EIO` or `EROFS` follows that explicit
+A fenced filesystem whose flush reports `EIO` or `EROFS`, or that became read-only,
+follows that explicit
 abort path. Retrying a terminal ext4 journal error must not retain execution slots
 forever. The controller reports a failed execution, retains the durable crash
 prefix, and still requires non-lazy unmount and device retirement before ownership

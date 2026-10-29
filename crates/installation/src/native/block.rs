@@ -634,23 +634,31 @@ async fn sync_io(path: &Path) -> std::io::Result<()> {
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         use std::os::fd::AsRawFd;
         let directory = std::fs::File::open(path)?;
-        // ext4 can return success from syncfs after a forced shutdown. A native
-        // workspace is mounted writable; a read-only remount is itself evidence
-        // that normal filesystem completion is no longer available.
-        let mut status = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-        if unsafe { libc::fstatvfs(directory.as_raw_fd(), status.as_mut_ptr()) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if unsafe { status.assume_init() }.f_flag & libc::ST_RDONLY != 0 {
-            return Err(std::io::Error::from_raw_os_error(libc::EROFS));
-        }
+        require_writable(&directory)?;
         if unsafe { libc::syncfs(directory.as_raw_fd()) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(())
+        // An error can remount ext4 during this very flush, while syncfs still
+        // returns success. Check both sides before claiming completion.
+        require_writable(&directory)
     })
     .await
     .map_err(std::io::Error::other)?
+}
+
+fn require_writable(directory: &std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    // Native workspaces are mounted writable. ext4 can return success from
+    // syncfs after shutdown, so a read-only mount is also a terminal failure.
+    let mut status = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::fstatvfs(directory.as_raw_fd(), status.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { status.assume_init() }.f_flag & libc::ST_RDONLY != 0 {
+        return Err(std::io::Error::from_raw_os_error(libc::EROFS));
+    }
+    Ok(())
 }
 
 pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> Result<()> {
