@@ -1061,6 +1061,108 @@ async fn compressed_history_budget_keeps_repetitive_output_and_preserves_trimmed
 }
 
 #[tokio::test]
+async fn compressed_history_bounds_decoded_json_and_advances_past_oversized_events() {
+    use rand::{RngCore, SeedableRng};
+
+    let f = Fixture::new().await;
+    let run = f.run.clone();
+    f.service
+        .store
+        .transaction(move |db| {
+            // JSON escaping makes each payload much larger than its source string.
+            for _ in 0..5 {
+                db.event(
+                    &run,
+                    &EventKind::Output,
+                    "escaped",
+                    Some(&json!({
+                        "text": "\u{001f}".repeat(300_000),
+                    })),
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let expected = ids(&f).await;
+    let run = f.run.clone();
+    let (events, more) = f
+        .service
+        .store
+        .read(move |db| db.events_before(&run, i64::MAX))
+        .await
+        .unwrap();
+    assert!(more);
+    assert_eq!(events.len(), 2);
+    assert!(serde_json::to_vec(&events).unwrap().len() <= 4 * 1024 * 1024);
+    let before_escaped = events[0].id;
+
+    let run = f.run.clone();
+    f.service
+        .store
+        .transaction(move |db| {
+            // A single event may exceed either ceiling, but must remain readable.
+            db.event(
+                &run,
+                &EventKind::Output,
+                "decoded oversized",
+                Some(&json!({
+                    "text": "q".repeat(5 * 1024 * 1024),
+                })),
+            )?;
+            let mut noise = vec![0; 512 * 1024];
+            rand::rngs::StdRng::seed_from_u64(29).fill_bytes(&mut noise);
+            db.event(
+                &run,
+                &EventKind::Output,
+                "gzip oversized",
+                Some(&json!({
+                    "noise": hex::encode(noise),
+                })),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut before = i64::MAX;
+    for text in ["gzip oversized", "decoded oversized"] {
+        let run = f.run.clone();
+        let (events, more) = f
+            .service
+            .store
+            .read(move |db| db.events_before(&run, before))
+            .await
+            .unwrap();
+        assert!(more);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].text, text);
+        assert!(events[0].id < before);
+        before = events[0].id;
+    }
+    let mut collected = Vec::new();
+    loop {
+        let run = f.run.clone();
+        let (events, more) = f
+            .service
+            .store
+            .read(move |db| db.events_before(&run, before))
+            .await
+            .unwrap();
+        assert!(!events.is_empty());
+        assert!(events[0].id < before);
+        before = events[0].id;
+        let mut page: Vec<_> = events.into_iter().map(|event| event.id).collect();
+        page.extend(collected);
+        collected = page;
+        if !more {
+            break;
+        }
+    }
+    assert_eq!(collected, expected);
+    assert!(before < before_escaped);
+}
+
+#[tokio::test]
 async fn paginated_chat_metadata_keeps_pending_messages_without_replaying_delivered_text() {
     let f = Fixture::new().await;
     let mut chat = f.service.chat_create(json!({})).await.unwrap();

@@ -25,7 +25,11 @@ opens immediately; otherwise the reader waits for the stream’s first snapshot.
   event arrays use a 256 KiB gzip budget and at most 1,000 events, with a separate
   4 MiB decoded ceiling. One oversized event remains readable whole so cursors
   always advance. Backwards candidates are measured in chronological wire order;
-  unused candidates remain reachable through the next cursor. Live SSE initial/replay windows and forward
+  unused candidates remain reachable through the next cursor. Candidates are
+  serialized once and reused for bulk gzip probes; probes at least double their
+  decoded input, and at most two proportional cuts precede a single-event
+  fallback for highly uneven rows. Pages can therefore leave budget unused.
+  HTTP still compresses the final response separately. Live SSE initial/replay windows and forward
   batches keep their existing 100-event and raw-byte limits. Public MCP and agent-tool responses retain
   their bounded previews and chunked full-content reads.
 - Relay requests preserve compression negotiation and encoding headers. Web and

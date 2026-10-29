@@ -909,7 +909,7 @@ fn event_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
     ))
 }
 
-/// Probe batches, then use their compression ratio to jump toward the budget.
+/// Serialize each candidate once and probe geometrically increasing byte batches.
 /// Large/noisy rows stop early instead of reading and compressing 1,000 rows.
 /// Backwards reads measure chronological order, as delivered to the clients.
 /// Keep one oversized event whole so every cursor can make progress.
@@ -926,7 +926,7 @@ fn within_budget(
     };
     let mut bytes = if compressed { 2 } else { 0 };
     let mut trimmed = false;
-    let mut next_count = 128.min(limit as usize);
+    let mut encoded = Vec::new();
     let mut next_bytes = max_bytes.saturating_mul(2);
     let mut compressed_bytes = None;
     for row in rows {
@@ -946,52 +946,59 @@ fn within_budget(
                 .transpose()?,
         };
         if compressed {
-            let mut size = CountBytes::default();
-            serde_json::to_writer(&mut size, &event)?;
-            let encoded_bytes = size.0 + usize::from(!events.is_empty());
+            let json = serde_json::to_vec(&event)?;
+            let encoded_bytes = json.len() + usize::from(!events.is_empty());
             if !events.is_empty() && bytes + encoded_bytes > HISTORY_PAGE_DECODED_BYTES {
                 trimmed = true;
                 break;
             }
             bytes += encoded_bytes;
+            encoded.push(json);
         }
         events.push(event);
         compressed_bytes = None;
         if events.len() >= limit as usize || !compressed && bytes >= max_bytes {
             break;
         }
-        if compressed && (events.len() >= next_count || bytes >= next_bytes) {
-            let size = compressed_event_bytes(&events, backwards)?;
+        if compressed && bytes >= next_bytes {
+            let size = compressed_event_bytes(&encoded, backwards)?;
             compressed_bytes = Some(size);
             if size >= max_bytes {
                 break;
             }
-            let minimum_count = (events.len() + 64).min(limit as usize);
-            next_count = events
-                .len()
-                .saturating_mul(max_bytes)
-                .div_ceil(size.max(1))
-                .clamp(minimum_count, limit as usize);
+
+            // At least double the input between probes: at most four probes for
+            // the 4 MiB ceiling, even if compression ratios vary across rows.
             next_bytes = bytes
                 .saturating_mul(max_bytes)
                 .div_ceil(size.max(1))
-                .max(bytes.saturating_add(max_bytes));
+                .max(bytes.saturating_mul(2));
         }
     }
 
     if compressed && events.len() > 1 {
         let mut size = match compressed_bytes {
             Some(size) => size,
-            None => compressed_event_bytes(&events, backwards)?,
+            None => compressed_event_bytes(&encoded, backwards)?,
         };
-        // A proportional cut avoids recompressing almost the same large prefix
-        // at every binary-search step. Leave 1% headroom and verify the result.
-        while size > max_bytes && events.len() > 1 {
+        // Try two proportional cuts with headroom. Heterogeneous rows need not
+        // have proportional sizes, so fall back to one whole event if neither
+        // fits. This bounds compression work independently of the event count.
+        for _ in 0..2 {
+            if size <= max_bytes || events.len() <= 1 {
+                break;
+            }
+
             let estimated = events.len().saturating_mul(max_bytes) / size;
-            let count = (estimated.saturating_mul(99) / 100).clamp(1, events.len() - 1);
+            let count = (estimated.saturating_mul(95) / 100).clamp(1, events.len() - 1);
             events.truncate(count);
+            encoded.truncate(count);
             trimmed = true;
-            size = compressed_event_bytes(&events, backwards)?;
+            size = compressed_event_bytes(&encoded, backwards)?;
+        }
+        if size > max_bytes && events.len() > 1 {
+            events.truncate(1);
+            trimmed = true;
         }
     }
     Ok((events, trimmed))
@@ -1011,15 +1018,29 @@ impl std::io::Write for CountBytes {
     }
 }
 
-fn compressed_event_bytes(events: &[Event], backwards: bool) -> Result<usize> {
+fn compressed_event_bytes(events: &[Vec<u8>], backwards: bool) -> Result<usize> {
+    use std::io::Write;
+
+    // Bulk writes avoid invoking the compressor for every JSON token. The
+    // serialized candidates are reused by probes and cuts, without re-encoding.
+    let mut json = Vec::with_capacity(2 + events.iter().map(|e| e.len() + 1).sum::<usize>());
+    json.push(b'[');
+    for index in 0..events.len() {
+        if index != 0 {
+            json.push(b',');
+        }
+        let event = if backwards {
+            &events[events.len() - index - 1]
+        } else {
+            &events[index]
+        };
+        json.extend_from_slice(event);
+    }
+    json.push(b']');
+
     let mut gzip =
         flate2::write::GzEncoder::new(CountBytes::default(), flate2::Compression::fast());
-    if backwards {
-        let ordered: Vec<_> = events.iter().rev().collect();
-        serde_json::to_writer(&mut gzip, &ordered)?;
-    } else {
-        serde_json::to_writer(&mut gzip, events)?;
-    }
+    gzip.write_all(&json)?;
     Ok(gzip.finish()?.0)
 }
 

@@ -210,7 +210,7 @@ DROP TABLE run_checkpoints; DROP TABLE kv; CREATE TABLE kv(key TEXT PRIMARY KEY,
     }
 }
 
-/// Compare the shipped raw-budget reader with compressed-budget history pages.
+/// Run this same harness on the current base and candidate (no frozen reader).
 /// Cold means a fresh SQLite connection; the host's filesystem cache stays warm.
 #[tokio::test]
 #[ignore = "local pagination measurement; run alone with --ignored --nocapture --test-threads=1"]
@@ -224,13 +224,13 @@ async fn compressed_history_budget_measurement() {
             let output = if workload == "noise" || workload == "mixed" && n % 10 == 0 {
                 let mut bytes = [0; 2048];
                 rng.fill_bytes(&mut bytes);
-                hex::encode(bytes)
+                bytes.iter().map(|byte| char::from(b'!' + byte % 94)).collect()
             } else {
                 "src/module/example.rs\n".repeat(80)
             };
             json!({"item":{"id":format!("tool-{n}"),"type":"command_execution","command":"rg --files","aggregated_output":output}})
         }).collect();
-        for reference in [true, false] {
+        {
             let root = tempfile::tempdir().unwrap();
             let store = Store::open(root.path()).unwrap();
             drop(store);
@@ -249,25 +249,14 @@ async fn compressed_history_budget_measurement() {
             }
             tx.commit().unwrap();
             let page = |db: &Connection, before| {
-                if reference {
-                    let (events, more) = frozen::Reference(db).events_before(RUN, before).unwrap();
-                    let oldest = events.first().map_or(before, |e| e.id);
-                    (
-                        serde_json::to_vec(&events).unwrap(),
-                        oldest,
-                        more,
-                        events.len(),
-                    )
-                } else {
-                    let (events, more) = Db(db).events_before(RUN, before).unwrap();
-                    let oldest = events.first().map_or(before, |e| e.id);
-                    (
-                        serde_json::to_vec(&events).unwrap(),
-                        oldest,
-                        more,
-                        events.len(),
-                    )
-                }
+                let (events, more) = Db(db).events_before(RUN, before).unwrap();
+                let oldest = events.first().map_or(before, |e| e.id);
+                (
+                    serde_json::to_vec(&events).unwrap(),
+                    oldest,
+                    more,
+                    events.len(),
+                )
             };
             let encode = |bytes: &[u8]| {
                 let mut gzip =
@@ -303,11 +292,7 @@ async fn compressed_history_budget_measurement() {
                 before = oldest;
                 pages += 1;
                 raw_total += bytes.len();
-                wire_total += if reference {
-                    bytes.len()
-                } else {
-                    encode(&bytes)
-                };
+                wire_total += encode(&bytes);
                 received += count;
                 if !more {
                     break;
@@ -331,9 +316,10 @@ async fn compressed_history_budget_measurement() {
             println!(
                 "HISTORY_BUDGET {}",
                 json!({
-                    "reference":reference,"workload":workload,"rows":corpus.len(),"openingEvents":events,
+                    "label":std::env::var("CAIRN_HISTORY_MEASUREMENT_LABEL").unwrap_or_else(|_|"candidate".into()),
+                    "workload":workload,"rows":corpus.len(),"openingEvents":events,
                     "openingRawBytes":bytes.len(),"openingGzipBytes":compressed_bytes,
-                    "pages":pages,"historyRawBytes":raw_total,"historyTransferredBytes":wire_total,
+                    "pages":pages,"historyRawBytes":raw_total,"historyGzipBytes":wire_total,
                     "historyUs":history_us,"historyCpuUs":history_cpu,
                     "warm":distribution(&warm),"connectionCold":distribution(&cold),"write":distribution(&writes),
                     "cpuUs":{"warm12":warm_cpu,"cold12IncludingOpen":cold_cpu,"write100":write_cpu},

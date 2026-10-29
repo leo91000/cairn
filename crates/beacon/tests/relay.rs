@@ -86,7 +86,6 @@ async fn history_compression_is_negotiated_and_preserved_through_the_relay() {
 #[tokio::test]
 #[ignore = "local endpoint measurement; run alone with --ignored --nocapture --test-threads=1"]
 async fn history_endpoint_measurement() {
-    assert!(cairn_protocol::request_header("accept-encoding"));
     use rand::{RngCore, SeedableRng};
     use std::time::Instant;
     for workload in ["repetitive", "mixed", "noise"] {
@@ -107,7 +106,7 @@ async fn history_endpoint_measurement() {
                 let output = if workload == "noise" || workload == "mixed" && n % 10 == 0 {
                     let mut bytes = [0; 2048];
                     rng.fill_bytes(&mut bytes);
-                    hex::encode(bytes)
+                    bytes.iter().map(|byte| char::from(b'!' + byte % 94)).collect()
                 } else { "src/module/example.rs\n".repeat(80) };
                 db.event(&id, &cairn_contracts::EventKind::ItemCompleted, "tool", Some(&json!({
                     "item":{"id":format!("tool-{n}"),"type":"command_execution","command":"rg --files","aggregated_output":output},
@@ -151,12 +150,25 @@ async fn history_endpoint_measurement() {
                 (page, encoded, decoded.len(), started.elapsed().as_micros())
             }
         };
+        let cpu = || {
+            let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+            unsafe {
+                assert_eq!(libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()), 0);
+                let usage = usage.assume_init();
+                (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1_000_000
+                    + usage.ru_utime.tv_usec
+                    + usage.ru_stime.tv_usec
+            }
+        };
         let (opening, encoded, decoded, cold_us) = request(i64::MAX).await;
         let mut warm = Vec::new();
+        let warm_cpu_start = cpu();
         for _ in 0..12 {
             warm.push(request(i64::MAX).await.3);
         }
+        let warm_cpu = cpu() - warm_cpu_start;
         warm.sort();
+        let history_cpu_start = cpu();
         let started = Instant::now();
         let mut before = i64::MAX;
         let mut pages = 0;
@@ -182,6 +194,7 @@ async fn history_endpoint_measurement() {
                 "openingTransferredBytes":encoded,"openingDecodedBytes":decoded,
                 "coldUs":cold_us,"warmP50Us":warm[6],"warmP95Us":warm[11],
                 "historyPages":pages,"historyTransferredBytes":transferred,"historyUs":started.elapsed().as_micros(),
+                "warm12CpuUs":warm_cpu,"historyCpuUs":cpu()-history_cpu_start,
                 "conditions":"loopback HTTP through real Beacon/installation relay; first-read cold, warm OS cache; no simulated network latency"
             })
         );
