@@ -14,9 +14,6 @@ data class ProjectSettings(
 ) {
     init {
         require(Regex("^[a-zA-Z0-9][a-zA-Z0-9_/.-]*\$").containsMatchIn(baseBranch))
-        require(description.codePointCount(0, description.length) <= 500)
-        require(name.codePointCount(0, name.length) in 1..100)
-        require(path.codePointCount(0, path.length) in 1..2000)
         require(Regex("^(remote|local)\$").containsMatchIn(sourceMode))
     }
 }

@@ -19,13 +19,9 @@ data class ChatMessageInput(
         require(attachmentIds.size <= 8)
         java.util.UUID.fromString(id)
         require(Regex("^(queue|steer)\$").containsMatchIn(mode))
-        require(model.codePointCount(0, model.length) <= 120)
         require(Regex("^[\\w./:\\[\\]-]*\$").containsMatchIn(model))
         require(Regex("^(|codex|claude|opencode)\$").containsMatchIn(provider))
-        require(reasoning.codePointCount(0, reasoning.length) <= 40)
         require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(reasoning))
-        require(speed.codePointCount(0, speed.length) <= 40)
         require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(speed))
-        require(text.codePointCount(0, text.length) <= 50000)
     }
 }
