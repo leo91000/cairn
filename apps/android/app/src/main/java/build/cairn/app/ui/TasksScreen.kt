@@ -166,6 +166,9 @@ internal fun TaskEditor(
                 form.prompt.isNotBlank() &&
                 form.prompt.length <= 50000 &&
                 form.agentId.isNotBlank() &&
+                // A task is saved only on an agent its author may use; pausing and archiving stay
+                // on the mission.
+                canUseAgent(state.usableAgents, form.agentId) &&
                 (form.cron == null || !form.cron.isNullOrBlank()),
     ) {
         Field("Nom", form.name, { form = form.copy(name = it) })
@@ -178,6 +181,17 @@ internal fun TaskEditor(
         if (agents.isEmpty() && state.agents.isNotEmpty())
             Notice(
                 "Aucun agent ne vous est encore accessible. Demandez l’accès à un agent au propriétaire de l’installation.",
+                icon = CairnIcons.Shield,
+            )
+        val unusable =
+            state.agents
+                .find { it.id == form.agentId }
+                ?.takeUnless {
+                    canUseAgent(state.usableAgents, it.id)
+                }
+        if (unusable != null)
+            Notice(
+                "Vous n’avez plus accès à ${unusable.name}. Choisissez un agent que vous pouvez utiliser pour enregistrer cette mission ; vous pouvez toujours la mettre en pause ou l’archiver depuis la mission.",
                 icon = CairnIcons.Shield,
             )
         Choice("Agent", form.agentId, agents.map { it.id to it.name }) {

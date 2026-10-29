@@ -1212,7 +1212,9 @@ internal fun ChatPage(
                         chat.lifecycleError?.let {
                             Text(it, color = MaterialTheme.colorScheme.error)
                         }
-                        if (recoverable)
+                        // Restoring, like deleting, needs access to the conversation's own
+                        // agent.
+                        if (recoverable && canUseAgent(state.usableAgents, chat.agentId))
                             Button(
                                 onClick = {
                                     vm.perform {
@@ -1223,6 +1225,12 @@ internal fun ChatPage(
                             ) {
                                 Text("Restaurer la conversation")
                             }
+                        else if (recoverable)
+                            Text(
+                                "Seules les personnes ayant accès à ${chat.agentName.ifBlank { "son agent" }} peuvent la restaurer.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                     }
                 } else
                     Column(

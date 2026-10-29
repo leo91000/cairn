@@ -54,6 +54,8 @@ const agents = computed(() => state.agents
   .filter(agent => canUseAgent(state.usableAgents, agent.id) || agent.id === form.value.agentId)
   .map(agent => ({ value: agent.id, label: agent.name, description: agent.description || `${agent.model || 'Codex default'} · ${agent.reasoning || 'default'} reasoning` })))
 const selectedAgent = computed(() => state.agents.find(agent => agent.id === form.value.agentId))
+// A task is saved only on an agent its author may use; pausing and archiving stay on the mission.
+const agentUsable = computed(() => canUseAgent(state.usableAgents, form.value.agentId))
 const allowedProjects = computed(() => state.projects.filter(project => selectedAgent.value?.access?.projects === null || selectedAgent.value?.access.projects?.includes(project.id)))
 const projects = computed(() => [{ value: '', label: 'Let the agent choose', description: 'Work across its allowed projects' }, ...allowedProjects.value.map(project => ({ value: project.id, label: project.name, description: project.path }))])
 const projectChoice = computed({
@@ -259,6 +261,13 @@ async function save() {
         >
           No agent is available to you yet. Ask the installation owner to give you access to one.
         </p>
+        <p
+          v-else-if="selectedAgent && !agentUsable"
+          class="inline-note bg-surface rounded-lg text-xs leading-[1.7] text-muted span-2 col-span-2 phone:col-span-1 px-[15px] py-[13px]"
+          role="note"
+        >
+          You no longer have access to {{ selectedAgent.name }}. Choose an agent you can use to save this mission; you can still pause or archive it from the mission.
+        </p>
         <div class="form-divider h-[1px] bg-line span-2 col-span-2 phone:col-span-1" />
         <label class="span-2 col-span-2 phone:col-span-1">Tags<input
           v-model="tagText"
@@ -321,7 +330,7 @@ async function save() {
         </UiButton><UiButton
           variant="primary"
           type="submit"
-          :disabled="busy || !agents.length"
+          :disabled="busy || !agents.length || !agentUsable"
         >
           {{ busy ? "Saving…" : savedId ? "Save changes" : "Create mission" }}
         </UiButton>

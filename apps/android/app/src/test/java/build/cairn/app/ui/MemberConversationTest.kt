@@ -65,15 +65,18 @@ class MemberConversationTest {
             .throttleBody(frame.toByteArray().size.toLong(), 1, TimeUnit.SECONDS)
     }
 
-    @Test
-    fun `a member without access follows the conversation without directing it`() {
-        val usable = AtomicReference("[]")
+    /** Opens [chat] as a member whose usable agents the server reads from [usable]. */
+    private fun asMember(
+        chat: Chat,
+        usable: AtomicReference<String>,
+        check: (CairnViewModel, (() -> Boolean) -> Unit) -> Unit,
+    ) {
         MockWebServer().use { server ->
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path.endsWith("/chats/shared/stream"))
+                        if (path.endsWith("/chats/${chat.id}/stream"))
                             return stream(LiveState(chat = chat))
                         if (path.endsWith("/chats/stream"))
                             return stream(LiveState(chats = listOf(chat)))
@@ -110,7 +113,7 @@ class MemberConversationTest {
                 }
                 CairnTheme {
                     if (state.installation != null)
-                        ChatScreen(vm, state, "shared", openChat = {}, openRun = {})
+                        ChatScreen(vm, state, chat.id, openChat = {}, openRun = {})
                 }
             }
             fun waitFor(condition: () -> Boolean) =
@@ -119,48 +122,76 @@ class MemberConversationTest {
                     condition()
                 }
             try {
-                waitFor { vm.state.value.usableAgents == emptyList<String>() }
-                waitFor {
-                    compose
-                        .onAllNodesWithTag("conversation-read-only")
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
-                }
-                compose
-                    .onNodeWithText("Vous pouvez suivre cette conversation", substring = true)
-                    .assertExists()
-                // The composer offers no editing, only the reason.
-                compose
-                    .onAllNodes(
-                        hasSetTextAction() and hasAnyAncestor(hasTestTag("conversation-composer"))
-                    )
-                    .assertCountEquals(0)
-                compose
-                    .onNodeWithText("Réservé aux personnes ayant accès à cet agent")
-                    .assertExists()
-                compose.onNodeWithTag("conversation-send").assertIsNotEnabled()
-                compose.onNodeWithContentDescription("Joindre").assertIsNotEnabled()
-
-                // Resuming needs access; pausing and reading do not.
-                compose.onNodeWithContentDescription("Options de la conversation").performClick()
-                compose.onNodeWithText("Détails de la conversation").assertExists()
-                compose.onAllNodesWithText("Reprendre").assertCountEquals(0)
-                compose.onNodeWithText("Suivre les réponses").performClick()
-
-                // The owner gives access: a refused action shows the current agents at once.
-                usable.set("[\"$MAIN_AGENT_ID\"]")
-                compose.runOnIdle { vm.report(ApiException(403, "Refused")) }
-                waitFor { vm.state.value.usableAgents == listOf(MAIN_AGENT_ID) }
-                waitFor {
-                    compose
-                        .onAllNodesWithTag("conversation-read-only")
-                        .fetchSemanticsNodes()
-                        .isEmpty()
-                }
-                assertEquals(listOf(MAIN_AGENT_ID), vm.state.value.usableAgents)
+                check(vm, ::waitFor)
             } finally {
                 vm.api.closeStreams()
             }
+        }
+    }
+
+    @Test
+    fun `a member without access follows the conversation without directing it`() {
+        val usable = AtomicReference("[]")
+        asMember(chat, usable) { vm, waitFor ->
+            waitFor { vm.state.value.usableAgents == emptyList<String>() }
+            waitFor {
+                compose
+                    .onAllNodesWithTag("conversation-read-only")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose
+                .onNodeWithText("Vous pouvez suivre cette conversation", substring = true)
+                .assertExists()
+            // The composer offers no editing, only the reason.
+            compose
+                .onAllNodes(
+                    hasSetTextAction() and hasAnyAncestor(hasTestTag("conversation-composer"))
+                )
+                .assertCountEquals(0)
+            compose.onNodeWithText("Réservé aux personnes ayant accès à cet agent").assertExists()
+            compose.onNodeWithTag("conversation-send").assertIsNotEnabled()
+            compose.onNodeWithContentDescription("Joindre").assertIsNotEnabled()
+
+            // Resuming needs access; pausing and reading do not.
+            compose.onNodeWithContentDescription("Options de la conversation").performClick()
+            compose.onNodeWithText("Détails de la conversation").assertExists()
+            compose.onAllNodesWithText("Reprendre").assertCountEquals(0)
+            compose.onNodeWithText("Suivre les réponses").performClick()
+
+            // The owner gives access: a refused action shows the current agents at once.
+            usable.set("[\"$MAIN_AGENT_ID\"]")
+            compose.runOnIdle { vm.report(ApiException(403, "Refused")) }
+            waitFor { vm.state.value.usableAgents == listOf(MAIN_AGENT_ID) }
+            waitFor {
+                compose.onAllNodesWithTag("conversation-read-only").fetchSemanticsNodes().isEmpty()
+            }
+            assertEquals(listOf(MAIN_AGENT_ID), vm.state.value.usableAgents)
+        }
+    }
+
+    @Test
+    fun `only people with access to its agent are offered to restore a deleted conversation`() {
+        val trashed =
+            chat.copy(
+                id = "trashed",
+                lifecycle = "trash",
+                purgeAt = System.currentTimeMillis() + 86_400_000,
+            )
+        asMember(trashed, AtomicReference("[]")) { _, waitFor ->
+            waitFor {
+                compose
+                    .onAllNodesWithText("Cette conversation est dans la corbeille.")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose
+                .onNodeWithText(
+                    "Seules les personnes ayant accès à Agent principal",
+                    substring = true,
+                )
+                .assertExists()
+            compose.onAllNodesWithText("Restaurer la conversation").assertCountEquals(0)
         }
     }
 }

@@ -1077,14 +1077,18 @@ function key(event: KeyboardEvent) {
             <UiAlert v-if="error || detail?.lifecycleError" class="mb-4">
               {{ error || detail?.lifecycleError }}
             </UiAlert>
+            <!-- Restoring, like deleting, needs access to the conversation's own agent. -->
             <UiButton
-              v-if="recoverable"
+              v-if="recoverable && canUseAgent(state.usableAgents, detail?.agentId)"
               :disabled="busy"
               variant="primary"
               @click="action('restore')"
             >
               Restore conversation
             </UiButton>
+            <p v-else-if="recoverable" class="text-sm text-muted" role="note">
+              Only people with access to {{ detail?.agentName || 'its agent' }} can restore it.
+            </p>
           </div>
           <div v-else-if="!detail?.run && !delivery.sending.length" class="flex min-h-0 flex-1 flex-col items-center justify-center overflow-auto px-6 pb-[8vh] pt-8 text-center phone:px-2 phone:py-5">
             <AgentAvatar

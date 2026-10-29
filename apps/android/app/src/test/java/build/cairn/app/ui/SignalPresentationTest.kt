@@ -818,6 +818,11 @@ class SignalPresentationTest {
         assertEquals("Chaque lundi · 09:00", hits.first { it.kind == SearchKind.MISSION }.detail)
         assertEquals("Revue de code", hits.first { it.kind == SearchKind.CHAT }.avatar)
         assertTrue(searchWorkspace("   ", chats, state).isEmpty())
+
+        // Members find only the agents they may start a conversation with.
+        val member = searchWorkspace("revue", chats, state.copy(usableAgents = emptyList()))
+        assertTrue(member.none { it.kind == SearchKind.AGENT })
+        assertTrue(member.any { it.kind == SearchKind.MISSION })
     }
 
     @Test
