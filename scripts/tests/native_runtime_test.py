@@ -167,8 +167,8 @@ def main():
         metrics['dockerVolumeHostReference'] = json.loads(command(str(probe), 'io', str(reference)).stdout)
         metrics['filesystem'] = command('stat', '-f', '-c', '%T', str(root)).stdout.strip()
 
-        def api(path, body=None, method='POST', raw=False):
-            connection = host.UnixControllerConnection(state / 'controller.sock', timeout=120)
+        def api(path, body=None, method='POST', raw=False, timeout=120):
+            connection = host.UnixControllerConnection(state / 'controller.sock', timeout=timeout)
             try:
                 connection.request(method, path, body=json.dumps(body or {}).encode() if method != 'GET' else None,
                     headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
@@ -198,6 +198,19 @@ def main():
                     body = self.rfile.read(length) if length else None
                     connection.request(self.command, self.path, body=body, headers=dict(self.headers))
                     response = connection.getresponse()
+                    if self.path.endswith('/direct-reader') and self.command == 'POST':
+                        # This response owns the publication reader. Forward its
+                        # headers and heartbeats while bounded PUT RPCs proceed.
+                        self.send_response(response.status)
+                        for key, value in response.getheaders():
+                            if key.lower() not in ('content-length', 'transfer-encoding', 'connection'):
+                                self.send_header(key, value)
+                        self.send_header('Connection', 'close')
+                        self.end_headers()
+                        while chunk := response.read1(16384):
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                        return
                     payload = response.read()
                     self.send_response(response.status)
                     for key, value in response.getheaders():
@@ -396,7 +409,7 @@ def main():
             if long:
                 # Read the actual read-only bind as the unprivileged workload,
                 # including concurrent steering updates after a disk warning.
-                script += "/usr/bin/python3 - <<'INBOX' &\nimport json,time\nfrom pathlib import Path\nwhile True:\n    for name in ('messages.json','disk-notice.json'):\n        try: value=json.loads((Path('/run/cairn-chat')/name).read_text())\n        except FileNotFoundError: continue\n        except PermissionError:\n            Path('inbox-read-error').write_text(name); raise\n        if name=='disk-notice.json': Path('disk-notice-seen').write_text(value['id'])\n        elif value: Path('steering-seen').write_text(value[0]['text'])\n    time.sleep(0.02)\nINBOX\n"
+                script += "/usr/bin/python3 - <<'INBOX' &\nimport json,os,time\nfrom pathlib import Path\nseen={}\nwhile True:\n    for name in ('messages.json','disk-notice.json'):\n        try: value=json.loads((Path('/run/cairn-chat')/name).read_text())\n        except FileNotFoundError: continue\n        except PermissionError:\n            Path('inbox-read-error').write_text(name); raise\n        if name=='disk-notice.json': marker,content='disk-notice-seen',value['id']\n        elif value: marker,content='steering-seen',value[0]['text']\n        else: continue\n        if seen.get(marker)==content: continue\n        with open(marker,'w') as output:\n            output.write(content); output.flush(); os.fsync(output.fileno())\n        seen[marker]=content\n    time.sleep(0.02)\nINBOX\n"
                 script += ("sudo -n " if administrator else "") + "setsid sh -c 'while :; do printf x >> descendant; sleep 0.1; done' &\nwait\n"
             workload = 'native-workload-' + attempt
             (tools / 'bin' / workload).write_text(script)
@@ -550,6 +563,18 @@ def main():
             metrics.setdefault('exclusiveReservations', []).append(dict(mode=current_mode['mode'],
                 descendantFrozen=True, admissionBlocked=True, released=True, expired=True))
 
+        def workload_stopped(attempt):
+            result = subprocess.run(['systemctl', 'show', 'cairn-native-' + attempt + '.service',
+                '--property=ActiveState,MainPID,ControlGroup'], capture_output=True, text=True, timeout=5)
+            properties = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+            if properties.get('ActiveState') not in ('inactive', 'failed') or properties.get('MainPID') != '0':
+                return False
+            group = properties.get('ControlGroup', '')
+            if not group:
+                return True
+            events = Path('/sys/fs/cgroup') / group.lstrip('/') / 'cgroup.events'
+            return not events.exists() or 'populated 1' not in events.read_text().splitlines()
+
         def fenced(run, attempt, timeout=90):
             eventually(lambda: (state / (attempt + '.exit')).exists(), timeout=timeout)
             # Completion writes the exit marker before retiring admission. Use
@@ -665,15 +690,14 @@ def main():
                 assert error.code == 409
             else:
                 raise AssertionError('Eviction removed an active writer cache.')
-            # Real cgroup backpressure must stop all descendant CPUs while the
-            # controller/backend remain able to publish and acknowledge blocks.
+            # Upload lag is visible while safe local work continues.
             policy = dict(contexts[run]['policy'], backupSeconds=5, maxDirtySeconds=5)
             storage_policy(policy)
-            eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is True, timeout=25)
+            eventually(lambda: api('/disks/' + run + '/storage-status')['backupDegraded'] is True, timeout=25)
+            assert api('/disks/' + run + '/storage-status')['paused'] is False
             descendant = managed(run) / 'descendant'
             size = descendant.stat().st_size
-            time.sleep(0.5)
-            assert descendant.stat().st_size == size, 'Storage pause left a descendant running.'
+            eventually(lambda: descendant.stat().st_size > size)
             # Acknowledgement retires the earlier point; restore the current
             # retained publication rather than requesting a collected history.
             point = manager('live-publish', run=run)
@@ -682,14 +706,45 @@ def main():
             status = api('/disks/' + run + '/storage-status')
             receipt = dict(attempt=resumed, backupId=point['backupId'], generation=point['generation'], grantId=status['grantId'])
             storage_policy(contexts[run]['policy'])
+            # Real disk-reserve pressure must still stop every descendant CPU.
+            # The maximum supported reserve exceeds this disposable host's free
+            # space without allocating a pressure file or exhausting its disk.
+            pressure_policy = dict(contexts[run]['policy'], reserveMiB=16 * 1024 * 1024)
+            storage_policy(pressure_policy)
+            eventually(lambda: api('/disks/' + run + '/storage-status')['waitingFor'] == 'disk-space', timeout=25)
+            eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is True)
+            size = descendant.stat().st_size
+            time.sleep(0.5)
+            assert descendant.stat().st_size == size, 'Storage pause left a descendant running.'
+            storage_policy(contexts[run]['policy'])
+            eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is False)
+            eventually(lambda: descendant.stat().st_size > size)
             (managed(run) / 'persisted').write_text('unpublished mutation')
             # Stopping a protected workload must thaw its owned unit before
             # systemd can deliver termination signals. No manual thaw in this test.
-            storage_policy(policy)
+            storage_policy(pressure_policy)
+            eventually(lambda: api('/disks/' + run + '/storage-status')['waitingFor'] == 'disk-space', timeout=25)
             eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is True, timeout=25)
-            api('/runs/' + resumed, method='DELETE')
-            fenced(run, resumed)
+            stop_finished = threading.Event()
+            stop_errors = []
+            def stop_protected_workload():
+                try:
+                    api('/runs/' + resumed, method='DELETE')
+                except Exception as error:
+                    stop_errors.append(error)
+                finally:
+                    stop_finished.set()
+            threading.Thread(target=stop_protected_workload, daemon=True).start()
+            # DELETE must thaw and fence every workload process while reserve
+            # pressure remains active. Its durable checkpoint may still need I/O.
+            eventually(lambda: workload_stopped(resumed), timeout=25)
+            # Release only this fixture's artificial reserve after CPU fencing,
+            # so pending ext4 writes can flush before ownership is released.
             storage_policy(contexts[run]['policy'])
+            assert stop_finished.wait(120), 'Protected stop did not finish after reserve pressure was released.'
+            if stop_errors:
+                raise stop_errors[0]
+            fenced(run, resumed)
             assert api('/disks/' + run + '/storage-status')['dirtyBytes'] > 0
             try:
                 api('/disks/' + run + '/evict', receipt)
@@ -969,6 +1024,13 @@ def main():
                   'S3 publish/ack, conditional clean eviction, unrelated conversation retained, lazy remote resume, repeated restore, '
                   'lease/descendant/guardian/controller fencing, crash recovery, concurrent disk retirement, final checkpoint, retry tombstone.')
         finally:
+            # An impossible test reserve must not keep kernel writeback blocked
+            # while fixture cleanup waits for the controller to stop.
+            try:
+                policy_generation += 1
+                api('/storage-policy', dict(generation=policy_generation, policy=contexts[runs[0]]['policy']), timeout=5)
+            except Exception:
+                pass
             helper.stdin.close()
             try:
                 helper.wait(timeout=10)

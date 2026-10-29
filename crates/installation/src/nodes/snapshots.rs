@@ -1,5 +1,8 @@
 //! Content-addressed disk manifests. Capture callers must provide an immutable disk.
 use crate::performance::publication::{self as diagnostic, Stage};
+
+mod direct_readers;
+
 use crate::{
     error::{Error, Result},
     validation::text,
@@ -24,7 +27,10 @@ pub const READ_BATCH: usize = 8;
 /// 60 s; 32 MiB finishes within that limit from a 5 Mbit/s uplink.
 pub const PUBLICATION_BATCH: usize = 8;
 pub const MAX_PUBLICATION_BLOCKS: usize = (1024_u64 * 1024 * 1024 * 1024 / BLOCK) as usize;
-const DIRECT_PUBLICATION_STARTUP: std::time::Duration = std::time::Duration::from_secs(1800);
+
+pub(crate) const DIRECT_PUBLICATION_STARTUP: std::time::Duration =
+    std::time::Duration::from_secs(1800);
+
 /// Opening a stopped journal verifies its durable append history before headers.
 /// Keep that work separate from the idle deadline on the subsequent byte stream.
 pub(crate) const PUBLICATION_STARTUP: std::time::Duration = std::time::Duration::from_secs(300);
@@ -189,6 +195,107 @@ pub async fn served(directory: &Path, hash: &str) -> Result<Vec<u8>> {
     Reader::open(directory).await?.block(hash).await
 }
 
+/// Shared native/VM node operation. The controller authenticates the caller;
+/// this owned task drains all started uploads even if the HTTP caller leaves.
+pub async fn upload_direct(directory: &Path, body: &[u8]) -> Result<Value> {
+    if body.len() > 131_072 {
+        return Err(Error::bad(
+            "Direct publication plan exceeds its size limit.",
+        ));
+    }
+    let batch = serde_json::from_slice(body)
+        .map_err(|_| Error::bad("Invalid direct publication batch."))?;
+    let directory = directory.to_owned();
+    let task =
+        tokio::spawn(
+            async move { crate::storage::direct::upload_snapshot(&directory, batch).await },
+        );
+    serde_json::to_value(task.await.map_err(Error::internal)??).map_err(Error::internal)
+}
+
+/// The response owns one reader until explicit close or disconnection. Only weak
+/// entries are shared with subsequent bounded direct-upload requests.
+pub async fn direct_reader(directory: &Path, body: &[u8]) -> Result<axum::body::Body> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        #[serde(default)]
+        diagnostics: Option<diagnostic::Request>,
+    }
+    if body.len() > 4096 {
+        return Err(Error::bad("Invalid publication reader request."));
+    }
+    let request: Request = serde_json::from_slice(body)?;
+    direct_readers::response(directory, request.diagnostics).await
+}
+
+pub async fn close_direct_reader(directory: &Path) -> Result<()> {
+    direct_readers::close(directory).await
+}
+
+pub async fn discard(directory: &Path) -> Result<()> {
+    close_direct_reader(directory).await?;
+    tokio::fs::remove_dir_all(directory).await?;
+    if let Some(snapshot) = directory.file_name().and_then(|name| name.to_str()) {
+        diagnostic::discard_snapshot(snapshot);
+    }
+    Ok(())
+}
+
+pub(crate) struct UploadReader {
+    reader: std::sync::Arc<Reader>,
+    _session: Option<std::sync::Arc<direct_readers::Session>>,
+}
+
+impl UploadReader {
+    pub(crate) async fn block(&self, hash: &str) -> Result<Vec<u8>> {
+        let stop = self
+            ._session
+            .as_ref()
+            .map(|session| session.read_stop())
+            .unwrap_or_default();
+        let read = self.reader.block_with_stop(hash, Some(stop.clone()));
+        tokio::pin!(read);
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(crate::storage::direct::TRANSFER_SECONDS),
+            &mut read,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                stop.cancel();
+                // Do not detach a blocking read with physical disk ownership.
+                // Its source observes cancellation; durable reports finish first.
+                let _ = read.await;
+                Err(Error::unavailable("Publication base read timed out."))
+            }
+        }
+    }
+}
+
+pub(crate) async fn upload_reader(directory: &Path, required: bool) -> Result<UploadReader> {
+    if let Some(session) = direct_readers::get(directory) {
+        return Ok(UploadReader {
+            reader: session.reader.clone(),
+            _session: Some(session),
+        });
+    }
+    if required {
+        return Err(Error::unavailable(
+            "Publication reader disconnected; local journal retained.",
+        ));
+    }
+    // Keep the pre-session single-batch seam for older callers and raw fixtures.
+    let sample = diagnostic::start(Stage::NodeOpen);
+    let reader = Reader::open(directory).await?;
+    sample.finish(0);
+    Ok(UploadReader {
+        reader: std::sync::Arc::new(reader),
+        _session: None,
+    })
+}
+
 // A response owns the reader: cancellation releases stopped reads, and no cache
 // or timer can retain an idle journal after the response has ended.
 struct JournalReader {
@@ -198,7 +305,7 @@ struct JournalReader {
     generation: i64,
 }
 
-struct Reader {
+pub(crate) struct Reader {
     directory: std::path::PathBuf,
     manifest: Value,
     journal: Option<JournalReader>,
@@ -206,7 +313,7 @@ struct Reader {
 }
 
 impl Reader {
-    async fn open(directory: &Path) -> Result<Self> {
+    pub(crate) async fn open(directory: &Path) -> Result<Self> {
         let manifest: Value =
             serde_json::from_slice(&tokio::fs::read(directory.join("manifest.json")).await?)?;
         if manifest["onDemand"] == true {
@@ -253,14 +360,26 @@ impl Reader {
         })
     }
 
-    async fn block(&self, hash: &str) -> Result<Vec<u8>> {
+    pub(crate) async fn block(&self, hash: &str) -> Result<Vec<u8>> {
+        self.block_with_stop(hash, None).await
+    }
+
+    async fn block_with_stop(
+        &self,
+        hash: &str,
+        stop: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<Vec<u8>> {
         if let Some(journal) = &self.journal {
             let (volume, generation, hash) =
                 (journal.volume.clone(), journal.generation, hash.to_owned());
-            return diagnostic::blocking(move || volume.disk.captured_block(generation, &hash))
-                .await
-                .map_err(Error::internal)?
-                .map_err(Into::into);
+            return diagnostic::blocking(move || {
+                crate::storage::read_scope::scope(stop, || {
+                    volume.disk.captured_block(generation, &hash)
+                })
+            })
+            .await
+            .map_err(Error::internal)?
+            .map_err(Into::into);
         }
         block_where(
             &self.directory.join("disk"),

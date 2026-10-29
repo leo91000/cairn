@@ -1,5 +1,6 @@
 """Keep real Moto version/purge semantics while bounding native fixture RAM."""
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import os
 from pathlib import Path
@@ -8,11 +9,13 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+from threading import Event
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 import boto3
+from botocore.config import Config
 from moto import mock_aws
 from moto.s3.models import s3_backends
 import node_s3_test as fixture
@@ -49,6 +52,58 @@ class NativeRuntimeEntrypointTests(unittest.TestCase):
 
 
 class NativeS3MemoryTests(unittest.TestCase):
+    def test_version_listing_survives_a_concurrent_real_delete(self):
+        server = fixture.s3_server(native=True)
+        host, port = server.get_host_and_port()
+        client = boto3.client('s3', endpoint_url=f'http://{host}:{port}', region_name='us-east-1',
+                              aws_access_key_id='node-fixture', aws_secret_access_key='node-fixture-secret',
+                              config=Config(retries={'max_attempts': 0}, read_timeout=10, connect_timeout=2))
+        bucket, key = 'native-concurrent-gc', 'shared-blocks/retired'
+        snapshot, resume, deleting, deleted = Event(), Event(), Event(), Event()
+        try:
+            client.create_bucket(Bucket=bucket)
+            client.put_object(Bucket=bucket, Key=key, Body=b'payload' * 16384)
+            versions = s3_backends['123456789012']['aws'].get_bucket(bucket).keys
+            original_snapshot = versions._self_iterable
+
+            def held_snapshot():
+                copied = original_snapshot()
+                snapshot.set()
+                if not resume.wait(5):
+                    raise AssertionError('GC snapshot fixture was not released.')
+                return copied
+
+            original_application = server._server.app
+
+            def observe_delete(environment, start_response):
+                if environment['REQUEST_METHOD'] == 'DELETE':
+                    deleting.set()
+                response = original_application(environment, start_response)
+                if environment['REQUEST_METHOD'] == 'DELETE':
+                    deleted.set()
+                return response
+
+            server._server.app = observe_delete
+            with ThreadPoolExecutor(max_workers=2) as workers, \
+                    patch.object(versions, '_self_iterable', side_effect=held_snapshot):
+                listing = workers.submit(client.list_object_versions, Bucket=bucket)
+                try:
+                    self.assertTrue(snapshot.wait(5), 'Version listing did not reach its snapshot.')
+                    deletion = workers.submit(client.delete_object, Bucket=bucket, Key=key)
+                    self.assertTrue(deleting.wait(5), 'Concurrent delete did not reach the server.')
+                    # Give unprotected Moto time to delete between its key-name
+                    # snapshot and version lookup. The fixed server holds it.
+                    deleted.wait(1)
+                finally:
+                    resume.set()
+                listed = listing.result(timeout=10)
+                deletion.result(timeout=10)
+            self.assertEqual([item['Key'] for item in listed['Versions']], [key])
+            self.assertEqual(client.list_objects_v2(Bucket=bucket)['KeyCount'], 0)
+        finally:
+            resume.set()
+            server.stop()
+
     def test_insufficient_hard_limit_fails_before_starting_server(self):
         with patch.object(resource, 'getrlimit', return_value=(128, 1024)), \
                 patch.object(resource, 'setrlimit') as change:

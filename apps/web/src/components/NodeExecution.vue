@@ -121,6 +121,8 @@ const status = computed((): { tone: 'bad' | 'warn' | 'busy' | 'ok' | 'idle', lab
     return { tone: 'busy', label: labels[run.nodeState] || run.nodeState }
   if (run.capacityWaitUntil)
     return { tone: 'warn', label: 'Waiting for capacity' }
+  if (run.storage?.backupDegraded)
+    return { tone: 'warn', label: 'Sync overdue' }
   if (run.backup?.status === 'saving')
     return { tone: 'warn', label: 'Saving…' }
   if (dirtyBytes.value)
@@ -410,6 +412,9 @@ onUnmounted(() => {
           </template>
           <p v-if="dirtyBytes" class="m-0! mt-1.5!">
             {{ run.storage?.dirtySince ? `Unsaved changes since ${relativeAge(run.storage.dirtySince, now)}` : 'Unsaved changes' }}; they exist only on this node until saved.
+          </p>
+          <p v-if="run.storage?.backupDegraded" role="status" class="m-0! mt-1.5! text-warning">
+            Synchronization is overdue. Work can continue while local storage is safe; unsaved changes remain only on this node.
           </p>
           <p v-else-if="run.backup?.capturedAt" class="m-0! mt-1.5!" :title="`${new Date(run.backup.capturedAt).toLocaleString()}. Newer disk changes may still be waiting for synchronization.`">
             Disk synchronized {{ relativeAge(run.backup.capturedAt, now) }}.
