@@ -158,10 +158,10 @@ qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l’arbre.
   [CEL](https://cel.dev) (Common Expression Language), complétée par des fonctions de
   Cairn (tronquer, découper en morceaux, formater une date…). Une formule est pure,
   sans effet de bord ni boucle non bornée, et son coût d’évaluation est borné. Une
-  valeur textuelle peut aussi être un modèle de texte où `{{…}}` insère le résultat
-  d’une expression CEL (`discord:{{threadId}}`). L’agent qu’une action démarre, et
-  l’outil et l’instance qu’elle appelle, sont choisis dans la règle, jamais calculés
-  par une formule.
+  valeur textuelle peut aussi être un texte où `{{…}}` insère le résultat d’une
+  expression CEL (`discord:{{threadId}}`). L’agent qu’une action démarre, et l’outil
+  et l’instance qu’elle appelle, sont choisis dans la règle, jamais calculés par une
+  formule.
 - **Actions** : démarrer un agent, orienter une conversation, appeler un outil de
   plugin (jamais un outil de Cairn comme `cairn_installation` ou la délégation),
   annuler la conversation d’une clé, répondre à la question d’un agent, mémoriser une
