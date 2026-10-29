@@ -51,7 +51,7 @@ class AccountsDeviceTest {
                                     accounts.set(
                                         """{"id":"studio","provider":"claude","name":"Studio","email":"claude@example.test","state":"ready","status":"next"}"""
                                     )
-                                    """{"done":true}"""
+                                    """{"kind":"completed","done":true}"""
                                 }
                                 "GET /api/installations/fixture/api/overview",
                                 "GET /api/installations/fixture/api/codex/models",

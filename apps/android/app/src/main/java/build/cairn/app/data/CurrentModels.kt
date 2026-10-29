@@ -214,65 +214,20 @@ data class LiveBatch(
 
 typealias HistoryPage = build.cairn.contracts.HistoryPage
 
-@Serializable data class ReasoningOption(val reasoningEffort: String, val description: String = "")
+typealias ReasoningOption = build.cairn.contracts.ReasoningOption
 
-/** A speed Codex offers for a model. [description] is Codex's own wording of its usage. */
-@Serializable
-data class ServiceTier(
-    val id: String,
-    val name: String = "",
-    val description: String = "",
-    /**
-     * Not confirmed by every enabled account able to run the model: runs prefer accounts that
-     * confirm it, and each turn says when it runs at Standard or Codex cannot confirm it.
-     */
-    val limited: Boolean = false,
-)
+typealias ServiceTier = build.cairn.contracts.ServiceTier
 
-/** One connected provider offering a model, as `provider/model`. */
-@Serializable
-data class ModelRoute(
-    val model: String,
-    val provider: String = "",
-    val providerName: String = "",
-    /** `subscription`, `credits` or `key`: who pays for this route's usage. */
-    val billing: String = "key",
-    val hidden: Boolean = false,
-    val supportedReasoningEfforts: List<ReasoningOption> = emptyList(),
-)
+typealias ModelRoute = build.cairn.contracts.ModelRoute
 
-@Serializable
-data class CodingAgentModel(
-    val model: String,
-    val displayName: String = "",
-    val description: String = "",
-    val hidden: Boolean = false,
-    val isDefault: Boolean = false,
-    val defaultReasoningEffort: String = "",
-    val supportedReasoningEfforts: List<ReasoningOption> = emptyList(),
-    /** Models offered by several providers. [model] then runs on the first available route. */
-    val routes: List<ModelRoute> = emptyList(),
-    /** Codex speeds besides standard; null in catalogs cached before speeds were listed. */
-    val serviceTiers: List<ServiceTier>? = null,
-    /**
-     * Codex's catalog default tier, applied only by Codex's own terminal client: Cairn runs
-     * Standard when no speed is chosen.
-     */
-    val defaultServiceTier: String? = null,
-)
+typealias CodingAgentModel = build.cairn.contracts.CodingAgentModel
+
+typealias ModelCatalog = build.cairn.contracts.ModelCatalog
 
 fun CodingAgentModel.route(value: String): ModelRoute? = routes.find { it.model == value }
 
 /** Whether [value] selects this model, on any of its routes. */
 fun CodingAgentModel.matches(value: String) = model == value || route(value) != null
-
-@Serializable
-data class ModelCatalog(
-    val models: List<CodingAgentModel> = emptyList(),
-    val checkedAt: Long? = null,
-    val stale: Boolean = false,
-    val error: String = "",
-)
 
 typealias Mcp = build.cairn.contracts.McpView
 

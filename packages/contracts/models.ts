@@ -1,48 +1,18 @@
-/** Who pays for a route: a subscription's included usage, prepaid credits or the user's own key. */
-export type RouteBilling = 'subscription' | 'credits' | 'key'
+import type { RouteBilling } from './generated/typescript/RouteBilling'
+import type { ServiceTier } from './generated/typescript/ServiceTier'
+
+export type { CodingAgentModel } from './generated/typescript/CodingAgentModel'
+export type { ModelCatalog } from './generated/typescript/ModelCatalog'
+export type { ModelRoute } from './generated/typescript/ModelRoute'
+export type { RouteBilling } from './generated/typescript/RouteBilling'
+export type { ServiceTier } from './generated/typescript/ServiceTier'
+
 export const billingLabels: Record<RouteBilling, string> = {
   subscription: 'Included',
   credits: 'Credits',
   key: 'Your key',
 }
-/** One connected provider offering a model, as `provider/model`. */
-export interface ModelRoute {
-  model: string
-  provider: string
-  providerName: string
-  billing: RouteBilling
-  hidden: boolean
-  supportedReasoningEfforts: { reasoningEffort: string, description: string }[]
-}
-/** A speed Codex offers for a model. `description` is Codex's own wording of its usage. */
-export interface ServiceTier {
-  id: string
-  name: string
-  description: string
-  /** Not confirmed by every enabled account able to run the model: runs prefer accounts that confirm it, and each turn says when it runs at Standard or Codex cannot confirm it. */
-  limited?: boolean
-}
-export interface CodingAgentModel {
-  model: string
-  /** Models offered by several providers. `model` then runs on the first available route. */
-  routes?: ModelRoute[]
-  displayName: string
-  description: string
-  hidden: boolean
-  isDefault: boolean
-  defaultReasoningEffort: string
-  supportedReasoningEfforts: { reasoningEffort: string, description: string }[]
-  /** Codex speeds besides standard. Absent from catalogs cached before speeds were listed. */
-  serviceTiers?: ServiceTier[]
-  /** Codex's catalog default tier, applied only by Codex's own terminal client. Cairn runs Standard when no speed is chosen. */
-  defaultServiceTier?: string | null
-}
-export interface ModelCatalog {
-  models: CodingAgentModel[]
-  checkedAt: number | null
-  stale: boolean
-  error: string
-}
+
 export function effortLabel(value: string) {
   if (value === 'xhigh')
     return 'Extra high'

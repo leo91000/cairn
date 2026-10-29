@@ -18,11 +18,20 @@ function model(fields: Partial<CodingAgentModel>): CodingAgentModel {
     isDefault: true,
     defaultReasoningEffort: 'medium',
     supportedReasoningEfforts: [],
+    routes: [],
+    serviceTiers: null,
+    defaultServiceTier: null,
+    resolvedModel: null,
     ...fields,
   }
 }
 
-const fast = { id: 'priority', name: 'Fast', description: '2x speed, increased usage' }
+const fast = {
+  id: 'priority',
+  name: 'Fast',
+  description: '2x speed, increased usage',
+  limited: false,
+}
 const astra = model({ serviceTiers: [fast], defaultServiceTier: null })
 
 describe('codex speeds', () => {
@@ -35,7 +44,15 @@ describe('codex speeds', () => {
 
   it('names a queued speed as its model runs it', () => {
     const deep = model({ model: 'deep', serviceTiers: [] })
-    const fast = model({ model: 'fast', serviceTiers: [{ id: 'priority', name: 'Fast', description: '' }] })
+    const fast = model({
+      model: 'fast',
+      serviceTiers: [{
+        id: 'priority',
+        name: 'Fast',
+        description: '',
+        limited: false,
+      }],
+    })
     // A faster speed is a request: each turn says how it runs.
     expect(speedNote('priority', 'fast', [fast, deep])).toBe('Fast speed requested')
     expect(speedNote('priority', 'deep', [fast, deep])).toBe('Fast speed requested (not listed for this model)')
