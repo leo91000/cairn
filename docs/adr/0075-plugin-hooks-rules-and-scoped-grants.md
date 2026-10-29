@@ -230,7 +230,7 @@ indépendamment des autres :
 | Pause d’urgence | le propriétaire ; arrête aussi les déclenchements en cours | le propriétaire |
 | Budget épuisé | un plafond horaire dépassé ; le créateur est prévenu | son créateur ou le propriétaire |
 | Droits perdus | le créateur perd l’accès à l’agent d’exécution ou à un agent que la règle démarre, ou l’agent d’exécution perd le hook de plugin écouté | le retour du droit, de lui-même, ou le créateur qui modifie la règle (autre agent d’exécution ou autre agent démarré) |
-| Adhésion terminée | le créateur est retiré, part ou est supprimé ; le réinviter n’y change rien | jamais : il reste à dupliquer |
+| Adhésion terminée | le créateur est retiré, part ou est supprimé ; le réinviter n’y change rien | jamais : il reste à dupliquer ; arrête les déclenchements en cours |
 
 Un agent qui a l’accès à l’installation n’écrit des règles que dans un tour lancé par
 une entrée de cette personne, et dans une conversation dont toutes les entrées, depuis
