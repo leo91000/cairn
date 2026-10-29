@@ -418,7 +418,10 @@ private fun MissionCard(
                             if (quiet) MaterialTheme.colorScheme.onSurfaceVariant else signal.onInk,
                         outlined = quiet,
                         size = 52.dp,
-                        enabled = !state.busy && !task.archived,
+                        enabled =
+                            !state.busy &&
+                                !task.archived &&
+                                canUseAgent(state.usableAgents, task.agentId),
                         onClick = launch,
                     )
             }
@@ -506,7 +509,9 @@ private fun MissionDetail(
     actions: MissionActions,
     sheet: Boolean,
 ) {
-    val canEdit = state.isOwner || task.authorId == state.session.account?.id
+    // Members direct only missions whose agent they may use (ADR-0075).
+    val usable = canUseAgent(state.usableAgents, task.agentId)
+    val canEdit = usable && (state.isOwner || task.authorId == state.session.account?.id)
     var history by remember(task.id) { mutableStateOf<List<Run>?>(null) }
     var occurrences by
         remember(task.id, task.cron, task.timezone, task.enabled) {
@@ -576,7 +581,7 @@ private fun MissionDetail(
             DropdownMenu(menu, { menu = false }) {
                 DropdownMenuItem(
                     text = { Text("Dupliquer (en pause)") },
-                    enabled = !state.busy,
+                    enabled = !state.busy && usable,
                     onClick = {
                         menu = false
                         vm.perform {
@@ -697,7 +702,13 @@ private fun MissionDetail(
                 }
         }
     }
-    if (!canEdit)
+    if (!usable)
+        Text(
+            "Seules les personnes ayant accès à son agent peuvent lancer, modifier ou reprendre cette mission. Demandez l’accès au propriétaire de l’installation.",
+            Modifier.padding(top = 12.dp),
+            style = MaterialTheme.typography.bodySmall,
+        )
+    else if (!canEdit)
         Text(
             "Seuls l’auteur ou le propriétaire peuvent modifier ou reprendre cette mission. Dupliquez-la pour prendre votre propre engagement.",
             Modifier.padding(top = 12.dp),
@@ -809,7 +820,7 @@ private fun MissionDetail(
             expand = true,
             icon = CairnIcons.Play,
             height = 52.dp,
-            enabled = !state.busy && !task.archived,
+            enabled = !state.busy && !task.archived && usable,
         ) {
             actions.launch(task)
         }

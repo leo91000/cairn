@@ -267,6 +267,7 @@ async fn members_manage_tasks_only_on_agents_they_can_use_and_lost_access_suspen
         json!({ "taskId": id, "revision": task.revision, "enabled": false, "archived": false });
     let (status, paused) = member(&s, "POST", &state, paused).await;
     assert_eq!(status, StatusCode::OK, "{paused}");
+    assert_eq!(paused["scheduleWaitReason"], SUSPENDED);
     let resumed =
         json!({ "taskId": id, "revision": paused["revision"], "enabled": true, "archived": false });
     assert_eq!(
@@ -284,6 +285,37 @@ async fn members_manage_tasks_only_on_agents_they_can_use_and_lost_access_suspen
     let (status, resumed) = member(&s, "POST", &state, resumed).await;
     assert_eq!(status, StatusCode::OK, "{resumed}");
     assert!(resumed["scheduleWaitReason"].is_null());
+}
+
+#[tokio::test]
+async fn merging_an_agent_never_passes_its_account_access_to_the_receiving_agent() {
+    let root = tempfile::tempdir().unwrap();
+    let s = service(root.path()).await;
+    let source = agent(&s, "Source").await;
+    let destination = agent(&s, "Destination").await;
+    relay_fixture::allow_member(&s, MEMBER, &source).await;
+
+    let settings = json!({
+        "name": "Nightly review",
+        "prompt": "Review the changes",
+        "agentId": source,
+        "cron": "0 3 * * *",
+    });
+    let (status, task) = member(&s, "POST", "/api/tasks", json!({ "settings": settings })).await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+
+    s.merge_agents_fixture(json!({ "sourceId": source, "targetId": destination, "confirm": true }))
+        .await
+        .unwrap();
+    assert_eq!(usable(&s).await, json!([]));
+    let moved = s
+        .store
+        .mission(task["id"].as_str().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(moved.settings.agent_id.to_string(), destination);
+    assert_eq!(moved.schedule_wait_reason.as_deref(), Some(SUSPENDED));
 }
 
 #[tokio::test]

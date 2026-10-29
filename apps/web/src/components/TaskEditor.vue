@@ -253,6 +253,12 @@ async function save() {
         >
           Add an agent before creating your first task.
         </p>
+        <p
+          v-else-if="!agents.length"
+          class="inline-note bg-surface rounded-lg text-xs leading-[1.7] text-muted span-2 col-span-2 phone:col-span-1 px-[15px] py-[13px]"
+        >
+          No agent is available to you yet. Ask the installation owner to give you access to one.
+        </p>
         <div class="form-divider h-[1px] bg-line span-2 col-span-2 phone:col-span-1" />
         <label class="span-2 col-span-2 phone:col-span-1">Tags<input
           v-model="tagText"
@@ -315,7 +321,7 @@ async function save() {
         </UiButton><UiButton
           variant="primary"
           type="submit"
-          :disabled="busy || !state.agents.length"
+          :disabled="busy || !agents.length"
         >
           {{ busy ? "Saving…" : savedId ? "Save changes" : "Create mission" }}
         </UiButton>

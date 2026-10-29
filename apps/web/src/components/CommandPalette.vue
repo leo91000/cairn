@@ -201,6 +201,7 @@ const commands = computed<Command[]>(() => {
   }
 
   for (const task of state.tasks.filter(task => !task.archived)) {
+    const usable = canUseAgent(state.usableAgents, task.agentId)
     items.push({
       id: `task-${task.id}`,
       group: 'Missions',
@@ -210,13 +211,15 @@ const commands = computed<Command[]>(() => {
       keywords: task.prompt.slice(0, 400),
       run: go(`/tasks?task=${task.id}`),
     })
-    items.push({
-      id: `run-${task.id}`,
-      group: 'Missions',
-      label: `Run “${task.name}” now`,
-      icon: Play,
-      run: () => runMission(task.id, task.name),
-    })
+    if (usable) {
+      items.push({
+        id: `run-${task.id}`,
+        group: 'Missions',
+        label: `Run “${task.name}” now`,
+        icon: Play,
+        run: () => runMission(task.id, task.name),
+      })
+    }
   }
 
   // Members start conversations only with the agents they may use.

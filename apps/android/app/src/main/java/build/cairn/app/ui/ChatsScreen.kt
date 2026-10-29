@@ -461,6 +461,8 @@ internal fun ChatPage(
     val chats = conversations.state?.chats
     // A member without access to the conversation's agent follows it without directing it.
     val readOnly = chat != null && !canDirectChat(state.usableAgents, chat, chats.orEmpty())
+    // A member the owner has not yet given any agent cannot start a conversation.
+    val noAgent = id == null && state.usableAgents?.isEmpty() == true
     val timeline =
         remember(history, live.events, chats) {
             quotaTimeline(history, live.events).followingDelegations(chats)
@@ -946,9 +948,9 @@ internal fun ChatPage(
                                         fullscreen = true
                                     },
                                 )
-                                chat
-                                    ?.takeUnless { readOnly && it.paused }
-                                    ?.let { current ->
+                                chat?.let { current ->
+                                    // Resuming needs access; reading and stopping do not.
+                                    if (!(readOnly && current.paused))
                                         DropdownMenuItem(
                                             text = {
                                                 Text(
@@ -969,38 +971,38 @@ internal fun ChatPage(
                                                 togglePause(current)
                                             },
                                         )
-                                        current.runId?.let { runId ->
-                                            DropdownMenuItem(
-                                                text = { Text("Voir l’exécution") },
-                                                leadingIcon = { Icon(CairnIcons.Terminal, null) },
-                                                onClick = {
-                                                    menu = false
-                                                    openRun(runId)
-                                                },
-                                            )
-                                        }
-                                        if (active || current.wakeup != null)
-                                            DropdownMenuItem(
-                                                text = {
-                                                    Text(
-                                                        "Arrêter l’agent",
-                                                        color = MaterialTheme.colorScheme.error,
-                                                    )
-                                                },
-                                                leadingIcon = {
-                                                    Icon(
-                                                        CairnIcons.Stop,
-                                                        null,
-                                                        tint = MaterialTheme.colorScheme.error,
-                                                    )
-                                                },
-                                                enabled = !state.busy,
-                                                onClick = {
-                                                    menu = false
-                                                    stopping = true
-                                                },
-                                            )
+                                    current.runId?.let { runId ->
+                                        DropdownMenuItem(
+                                            text = { Text("Voir l’exécution") },
+                                            leadingIcon = { Icon(CairnIcons.Terminal, null) },
+                                            onClick = {
+                                                menu = false
+                                                openRun(runId)
+                                            },
+                                        )
                                     }
+                                    if (active || current.wakeup != null)
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    "Arrêter l’agent",
+                                                    color = MaterialTheme.colorScheme.error,
+                                                )
+                                            },
+                                            leadingIcon = {
+                                                Icon(
+                                                    CairnIcons.Stop,
+                                                    null,
+                                                    tint = MaterialTheme.colorScheme.error,
+                                                )
+                                            },
+                                            enabled = !state.busy,
+                                            onClick = {
+                                                menu = false
+                                                stopping = true
+                                            },
+                                        )
+                                }
                             }
                         }
                     }
@@ -1133,7 +1135,8 @@ internal fun ChatPage(
                 if (error != null && !errorDismissed && isOpenCodePrivacyError(error))
                     OpenCodePrivacyNotice(
                         enabled = !state.busy,
-                        retry = { chat?.let { setPaused(it, false) } },
+                        retry =
+                            if (readOnly) null else ({ if (chat != null) setPaused(chat, false) }),
                         create = create,
                         dismiss = { errorDismissed = true },
                     )
@@ -1503,6 +1506,15 @@ internal fun ChatPage(
                                     )
                                 }
                             }
+                        if (!fullscreen && noAgent)
+                            Notice(
+                                "Vous pouvez lire toutes les conversations de l’installation. Pour en démarrer une, demandez l’accès à un agent au propriétaire de l’installation.",
+                                Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                                    .testTag("conversation-no-agent"),
+                                title = "Aucun agent accessible pour l’instant",
+                                icon = CairnIcons.Shield,
+                                maxLines = 4,
+                            )
                         if (!fullscreen && readOnly)
                             Notice(
                                 "Seules les personnes ayant accès à ${chat?.agentName?.ifBlank { null } ?: "son agent"} peuvent la poursuivre, répondre à ses questions ou la supprimer. Vous pouvez toujours la mettre en pause ou l’arrêter. Demandez l’accès au propriétaire de l’installation.",
@@ -1640,14 +1652,14 @@ internal fun ChatPage(
                                             SkillMentionHighlight(skillNames, skillMentionStyle()),
                                         lineLimits =
                                             TextFieldLineLimits.MultiLine(maxHeightInLines = 4),
-                                        enabled = !state.busy && !readOnly,
+                                        enabled = !state.busy && !readOnly && !noAgent,
                                         decorator = { inner ->
                                             Box {
                                                 if (draft.isEmpty())
                                                     Text(
                                                         // Any message cancels a pending wait,
                                                         // paused or not.
-                                                        if (readOnly)
+                                                        if (readOnly || noAgent)
                                                             "Réservé aux personnes ayant accès à cet agent"
                                                         else if (chat?.paused == true)
                                                             if (liveWakeup(chat) != null)
@@ -1714,6 +1726,7 @@ internal fun ChatPage(
                                         val canSend =
                                             !state.busy &&
                                                 !readOnly &&
+                                                !noAgent &&
                                                 rejected.isEmpty() &&
                                                 uploadProgress.isEmpty() &&
                                                 (draft.isNotBlank() || attachments.isNotEmpty()) &&

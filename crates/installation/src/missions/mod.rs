@@ -198,6 +198,13 @@ impl Missions {
                     mission.author_access_id = current.author_access_id.clone();
                     mission.author_removed = current.author_removed;
                     mission.created_at = current.created_at;
+                    // Pausing or archiving keeps showing that its author lost the agent.
+                    if reduces
+                        && current.schedule_wait_reason.as_deref()
+                            == Some(crate::agent_access::SUSPENDED)
+                    {
+                        mission.schedule_wait_reason = current.schedule_wait_reason.clone();
+                    }
                 } else {
                     if let Some(current) = current.as_ref() {
                         if creation {
@@ -399,6 +406,15 @@ impl Missions {
             })
             .await?;
         s.worker.notify();
+
+        // Moved tasks show at once whether their authors may use the receiving agent;
+        // their admission checks it again regardless.
+        if let Err(error) = self.observe(s).await {
+            tracing::warn!(
+                status = error.status,
+                "Task suspensions await the next membership check after a merge"
+            );
+        }
         Ok(result)
     }
 }
@@ -480,7 +496,12 @@ impl Service {
                     }
                 }
                 Err(error) => {
-                    self.schedule_wait(&mission, None).await?;
+                    // A suspended task keeps its reason while its preparation fails.
+                    if mission.schedule_wait_reason.as_deref()
+                        != Some(crate::agent_access::SUSPENDED)
+                    {
+                        self.schedule_wait(&mission, None).await?;
+                    }
                     Err(error)
                 }
             };

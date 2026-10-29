@@ -175,6 +175,11 @@ internal fun TaskEditor(
             state.agents.filter {
                 canUseAgent(state.usableAgents, it.id) || it.id == form.agentId
             }
+        if (agents.isEmpty() && state.agents.isNotEmpty())
+            Notice(
+                "Aucun agent ne vous est encore accessible. Demandez l’accès à un agent au propriétaire de l’installation.",
+                icon = CairnIcons.Shield,
+            )
         Choice("Agent", form.agentId, agents.map { it.id to it.name }) {
             val nextAccess =
                 state.agents.find { agent -> agent.id == it }?.access

@@ -15,7 +15,7 @@ internal fun isOpenCodePrivacyError(message: String) =
 @Composable
 internal fun OpenCodePrivacyNotice(
     enabled: Boolean,
-    retry: () -> Unit,
+    retry: (() -> Unit)?,
     create: () -> Unit,
     dismiss: () -> Unit,
 ) {
@@ -39,7 +39,9 @@ internal fun OpenCodePrivacyNotice(
                 style = MaterialTheme.typography.bodySmall,
             )
             ExternalButton("Réglages OpenCode", "https://opencode.ai/console/")
-            OutlinedButton(onClick = retry, enabled = enabled) { Text("Réessayer la réponse") }
+            retry?.let {
+                OutlinedButton(onClick = it, enabled = enabled) { Text("Réessayer la réponse") }
+            }
             Text(
                 "Pour garder vos réglages Privacy, choisissez un autre modèle dans une nouvelle conversation. Celle-ci et ses fichiers restent conservés.",
                 style = MaterialTheme.typography.bodySmall,

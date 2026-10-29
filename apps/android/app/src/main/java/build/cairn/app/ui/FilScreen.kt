@@ -572,7 +572,8 @@ fun FilScreen(
                     now,
                     !state.busy,
                     { open(item) },
-                    { retry(item) },
+                    // Relaunching needs access to the mission's agent.
+                    { retry(item) }.takeIf { canUseAgent(state.usableAgents, item.agentKey) },
                     { vm.markRead(listOf(item.read)) },
                     dismiss = { setAside(item) },
                     snooze = { setAside(item, tomorrowMorning(now)) },
@@ -652,7 +653,7 @@ private fun ForYouAction(
     now: Long,
     enabled: Boolean,
     open: () -> Unit,
-    retry: () -> Unit,
+    retry: (() -> Unit)?,
     markRead: () -> Unit,
     dismiss: () -> Unit = {},
     snooze: () -> Unit = {},
@@ -688,15 +689,19 @@ private fun ForYouAction(
                             snooze()
                         },
                     )
-                    DropdownMenuItem(
-                        text = { Text("Relancer") },
-                        leadingIcon = { androidx.compose.material3.Icon(CairnIcons.Retry, null) },
-                        enabled = enabled,
-                        onClick = {
-                            menu = false
-                            retry()
-                        },
-                    )
+                    retry?.let { relaunch ->
+                        DropdownMenuItem(
+                            text = { Text("Relancer") },
+                            leadingIcon = {
+                                androidx.compose.material3.Icon(CairnIcons.Retry, null)
+                            },
+                            enabled = enabled,
+                            onClick = {
+                                menu = false
+                                relaunch()
+                            },
+                        )
+                    }
                     DropdownMenuItem(
                         text = { Text("Archiver la mission") },
                         leadingIcon = { androidx.compose.material3.Icon(CairnIcons.Trash, null) },
@@ -720,7 +725,7 @@ private fun ForYouAction(
         SignalButton("Répondre", height = 36.dp, onClick = open)
     else if (item.kind == FeedKind.RECONNECT)
         SignalButton("Connexions", height = 36.dp, onClick = open)
-    else if (item.kind == FeedKind.FAILED_TASK)
+    else if (item.kind == FeedKind.FAILED_TASK && retry != null)
         RoundAction(
             "Relancer ${item.title}",
             CairnIcons.Retry,

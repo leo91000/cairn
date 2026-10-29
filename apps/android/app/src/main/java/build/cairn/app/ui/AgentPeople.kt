@@ -135,7 +135,7 @@ internal fun PeopleSection(
                 color = content,
             )
             Text(
-                "Par lui, qui peut l’utiliser peut modifier les autres agents et leurs accès, comme s’il pouvait utiliser tous les agents.",
+                "Par lui, qui peut l’utiliser peut travailler avec les autres agents et les modifier, comme s’il pouvait utiliser tous les agents.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = content,
             )

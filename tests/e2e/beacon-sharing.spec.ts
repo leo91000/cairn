@@ -162,6 +162,9 @@ test('owner shares an installation and member works without management controls'
     // A new member uses no agent until the owner gives access from the agent page.
     expect((await (await member.request.get(`${apiRoot}/usable-agents`)).json()).agentIds).toEqual([])
     expect((await member.request.post(`${apiRoot}/tasks`, commitment)).status()).toBe(403)
+    await member.goto(`${installationUrl}chats`)
+    await expect(member.getByRole('note').filter({ hasText: 'No agent available to you yet' })).toBeVisible()
+    await expect(member.getByRole('textbox', { name: 'Message', exact: true })).toBeDisabled()
     await page.goto(`${installationUrl}agents/${agents[0].id}`)
     const peopleCard = page.getByRole('region', { name: 'Who can use it' })
     await expect(peopleCard.getByText('Only you', { exact: true }).first()).toBeVisible()

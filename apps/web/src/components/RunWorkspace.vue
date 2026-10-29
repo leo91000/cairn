@@ -2,11 +2,12 @@
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
-
 import { cancelRun } from '../../../../packages/contracts/generated/cancelRun'
+
 import { cleanupRun } from '../../../../packages/contracts/generated/cleanupRun'
 import { resumeRun } from '../../../../packages/contracts/generated/resume-run'
 import { retryRun } from '../../../../packages/contracts/generated/retryRun'
+import { canUseAgent } from '../agent-use'
 import {
   api,
   date,
@@ -98,6 +99,8 @@ const confirmCleanup = ref(false)
 const active = computed(
   () => run.value && ['running', 'queued', 'waiting'].includes(run.value.status),
 )
+// Members direct only runs whose agent they may use (ADR-0075).
+const directable = computed(() => !run.value || canUseAgent(state.usableAgents, run.value.snapshot?.agent?.id))
 const task = computed(() => props.mission && run.value && run.value.trigger !== 'chat' ? state.tasks.find(task => task.id === run.value!.taskId) : undefined)
 const tabs = computed(() => [
   { value: 'events', label: 'Conversation', icon: Terminal },
@@ -190,11 +193,11 @@ async function copy() {
         <RouterLink v-if="run.trigger === 'chat'" :to="`/chats/${run.taskId}`" class="text-sm text-accent">
           Open chat
         </RouterLink>
-        <UiButton v-else size="small" @click="retry">
+        <UiButton v-else-if="directable" size="small" @click="retry">
           Run again
         </UiButton>
         <UiButton
-          v-if="run.trigger !== 'chat' && run.status === 'succeeded' && run.sessionId && !run.workspaceCleanedAt"
+          v-if="directable && run.trigger !== 'chat' && run.status === 'succeeded' && run.sessionId && !run.workspaceCleanedAt"
           size="small"
           variant="primary"
           :disabled="converting"
@@ -203,7 +206,7 @@ async function copy() {
           <Icon :name="MessageCircle" :size="16" />{{ converting ? 'Opening…' : 'Continue in chat' }}
         </UiButton>
         <UiButton
-          v-if="run.resumeAvailable && run.trigger !== 'chat'"
+          v-if="directable && run.resumeAvailable && run.trigger !== 'chat'"
           size="small"
           variant="primary"
           @click="resume"

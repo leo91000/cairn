@@ -291,7 +291,9 @@ const hasDraft = computed(() => !!draft.value.trim() || attachments.value.length
 const attachmentsBlocked = computed(() => Object.values(attachmentStates.value).some(item => item.status === 'rejected' || item.status === 'uploading'))
 // A member without access to the conversation's agent reads it but cannot direct it.
 const readOnly = computed(() => !!detail.value && !canDirectChat(state.usableAgents, detail.value, chats.value))
-const canSend = computed(() => !readOnly.value && !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
+// A member the owner has not yet given any agent cannot start a conversation.
+const noAgent = computed(() => !route.params.id && state.usableAgents !== null && !state.usableAgents.length)
+const canSend = computed(() => !readOnly.value && !noAgent.value && !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
 
 function removeAttachment(id: string) {
   if (previews.value[id])
@@ -1167,6 +1169,18 @@ function key(event: KeyboardEvent) {
               :read-only="readOnly"
             />
             <UiNotice
+              v-if="noAgent"
+              role="note"
+              class="mb-3"
+              tone="info"
+              :icon="Lock"
+              title="No agent available to you yet"
+            >
+              <p>
+                You can read every conversation in this installation. To start one, ask the installation owner to give you access to an agent.
+              </p>
+            </UiNotice>
+            <UiNotice
               v-if="readOnly"
               role="note"
               class="mb-3"
@@ -1368,8 +1382,8 @@ function key(event: KeyboardEvent) {
                   v-model="draft"
                   :skills="skills"
                   aria-label="Message"
-                  :disabled="readOnly"
-                  :placeholder="readOnly ? 'Only people with access to this agent can write here' : liveWait?.wakeup ? (detail?.paused ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
+                  :disabled="readOnly || noAgent"
+                  :placeholder="readOnly || noAgent ? 'Only people with access to this agent can write here' : liveWait?.wakeup ? (detail?.paused ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
                   rows="2"
                   maxlength="50000"
                   @keydown="key"

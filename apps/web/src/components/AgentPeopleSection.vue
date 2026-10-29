@@ -56,7 +56,7 @@ const name = computed(() => props.agentName || 'this agent')
       <Icon :name="TriangleAlert" :size="16" class="mt-px shrink-0 text-power" />
       <p>
         <span class="font-semibold text-ink">This agent manages the whole installation.</span>
-        Through it, anyone who can use it can change other agents and their access, as if they could use every agent.
+        Through it, anyone who can use it can work with and change other agents, as if they could use every agent.
       </p>
     </div>
 

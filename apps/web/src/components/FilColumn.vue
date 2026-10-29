@@ -12,6 +12,7 @@ import {
 import { useRouter } from 'vue-router'
 import { runMission as queueMission } from '../../../../packages/contracts/generated/runMission'
 import { setMissionState } from '../../../../packages/contracts/generated/setMissionState'
+import { canUseAgent } from '../agent-use'
 import {
   api,
   notify,
@@ -166,7 +167,7 @@ function tone(item: FilItem) {
 }
 
 function action(item: FilItem) {
-  return item.kind === 'question' ? 'Answer' : item.kind === 'failed' ? 'Resume' : isUnread(item) && !read(item) ? 'Read' : 'Open'
+  return item.kind === 'question' ? (canUseAgent(state.usableAgents, item.agentKey) ? 'Answer' : 'Open') : item.kind === 'failed' ? 'Resume' : isUnread(item) && !read(item) ? 'Read' : 'Open'
 }
 
 function open(item: FilItem) {
@@ -371,7 +372,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                 </button>
                 <div class="flex gap-1.5 px-4 pb-3.5 pl-[62px]">
                   <button
-                    v-if="item.kind === 'failed-mission'"
+                    v-if="item.kind === 'failed-mission' && canUseAgent(state.usableAgents, item.agentKey)"
                     type="button"
                     :aria-label="`Run “${item.title}” again`"
                     class="press flex h-8 items-center gap-1.5 rounded-full bg-coral-soft px-3 text-[12.5px] font-semibold text-coral"
@@ -429,6 +430,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                         <Icon :name="Clock" :size="16" />Remind me tomorrow
                       </button>
                       <button
+                        v-if="canUseAgent(state.usableAgents, item.agentKey)"
                         type="button"
                         role="menuitem"
                         tabindex="-1"

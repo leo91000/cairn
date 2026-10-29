@@ -7,6 +7,7 @@ import {
   watch,
 } from 'vue'
 import { previewSchedule } from '../../../../packages/contracts/generated/previewSchedule'
+import { canUseAgent } from '../agent-use'
 import { api, date, state } from '../api'
 import {
   Archive,
@@ -60,7 +61,9 @@ const occurrences = ref<number[]>([])
 const promptOpen = ref(false)
 const menu = ref(false)
 const agent = computed(() => state.agents.find(agent => agent.id === props.task.agentId))
-const canEdit = computed(() => state.installationRole === 'owner' || props.task.authorId === state.accountId)
+// Members direct only missions whose agent they may use (ADR-0075).
+const usable = computed(() => canUseAgent(state.usableAgents, props.task.agentId))
+const canEdit = computed(() => usable.value && (state.installationRole === 'owner' || props.task.authorId === state.accountId))
 const project = computed(() => state.projects.find(project => project.id === props.task.projectId))
 const wording = computed(() => describeSchedule(props.task))
 const time = computed(() => wording.value.match(/\d{2}:\d{2}$/)?.[0])
@@ -147,7 +150,7 @@ const statusLabels: Record<RunListItem['status'], string> = {
           <button
             class="mission-menu-item"
             role="menuitem"
-            :disabled="busy"
+            :disabled="busy || !usable"
             @click="act('duplicate')"
           >
             <Icon :name="Copy" :size="15" />Duplicate (paused)
@@ -266,7 +269,10 @@ const statusLabels: Record<RunListItem['status'], string> = {
     <p v-if="task.scheduleFailure && task.cron && task.enabled && !task.archived" role="alert" class="m-0! text-sm text-danger">
       The run scheduled for {{ date(task.scheduleFailure.scheduledFor) }} did not start: {{ task.scheduleFailure.message }}
     </p>
-    <p v-if="!canEdit" class="m-0! text-sm text-muted">
+    <p v-if="!usable" class="m-0! text-sm text-muted">
+      Only people with access to its agent can run, edit or resume this mission. Ask the installation owner for access.
+    </p>
+    <p v-else-if="!canEdit" class="m-0! text-sm text-muted">
       Only the author or installation owner can edit or resume this mission. Duplicate it to make your own commitment.
     </p>
     <div class="mt-4 flex items-center gap-2.5">
@@ -287,7 +293,7 @@ const statusLabels: Record<RunListItem['status'], string> = {
       >
         <Icon :name="task.enabled ? Pause : Clock" :size="18" />
       </button>
-      <button class="flex h-13 min-w-0 flex-1 items-center justify-center gap-2 rounded-full bg-ink px-5 text-sm font-semibold text-canvas hover:opacity-90 disabled:opacity-40" :disabled="busy || task.archived" @click="emit('run')">
+      <button class="flex h-13 min-w-0 flex-1 items-center justify-center gap-2 rounded-full bg-ink px-5 text-sm font-semibold text-canvas hover:opacity-90 disabled:opacity-40" :disabled="busy || task.archived || !usable" @click="emit('run')">
         <Icon :name="Play" :size="15" />{{ busy ? 'Starting…' : 'Run now' }}
       </button>
     </div>

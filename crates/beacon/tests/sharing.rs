@@ -87,6 +87,21 @@ async fn invited_new_account_accepts_and_uses_the_shared_installation() {
     .unwrap();
     assert_eq!(session["installations"][0]["role"], "member");
     assert_eq!(session["installations"][0]["id"], id);
+
+    // A new member uses no agent until the owner gives access.
+    let denied = request(
+        &relay,
+        &cookie,
+        &session,
+        Method::POST,
+        &format!("/api/installations/{id}/api/chats"),
+    )
+    .json(&json!({}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    allow_main(&relay, &session).await;
     let response = request(
         &relay,
         &cookie,
@@ -119,6 +134,27 @@ async fn invited_new_account_accepts_and_uses_the_shared_installation() {
     assert_eq!(sharing["members"][0]["email"], "member@example.test");
     assert_eq!(sharing["invitations"], json!([]));
     relay.close().await;
+}
+
+/// The owner lets a member use the main agent, from the apps' owner-only route (ADR-0075).
+async fn allow_main(relay: &RelayedInstallation, member: &Value) {
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let account = member["account"]["id"].as_str().unwrap();
+    let response = request(
+        relay,
+        &relay.cookie,
+        &relay.session,
+        Method::PUT,
+        &format!(
+            "/api/installations/{id}/api/agents/{}/accounts/{account}",
+            cairn_installation::config::MAIN_AGENT_ID
+        ),
+    )
+    .json(&json!({}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 async fn member(relay: &RelayedInstallation, email: &str) -> (String, Value) {
@@ -155,6 +191,7 @@ async fn member(relay: &RelayedInstallation, email: &str) -> (String, Value) {
         .status(),
         StatusCode::NO_CONTENT
     );
+    allow_main(relay, &session).await;
     (cookie, session)
 }
 
@@ -1483,7 +1520,11 @@ async fn offline_removal_and_reinvitation_do_not_revive_old_task_commitments() {
     assert_eq!(retired["enabled"], false);
     assert_eq!(retired["authorRemoved"], true);
     assert_eq!(retired["nextRun"], Value::Null);
-    for (actor_cookie, actor_session) in [(&cookie, &session), (&relay.cookie, &relay.session)] {
+    // Account access to agents belonged to the earlier membership as well.
+    for (actor_cookie, actor_session, refused) in [
+        (&cookie, &session, StatusCode::FORBIDDEN),
+        (&relay.cookie, &relay.session, StatusCode::CONFLICT),
+    ] {
         assert_eq!(
             request(&relay, actor_cookie, actor_session, Method::PUT, &task_path)
                 .json(&mission_replacement(&task, &input))
@@ -1491,9 +1532,19 @@ async fn offline_removal_and_reinvitation_do_not_revive_old_task_commitments() {
                 .await
                 .unwrap()
                 .status(),
-            StatusCode::CONFLICT
+            refused
         );
     }
+    allow_main(&relay, &session).await;
+    assert_eq!(
+        request(&relay, &cookie, &session, Method::PUT, &task_path)
+            .json(&mission_replacement(&task, &input))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
     let replacement: Value = request(&relay, &cookie, &session, Method::POST, &tasks)
         .json(&json!({"settings": input}))
         .send()
