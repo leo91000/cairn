@@ -710,7 +710,7 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let run_id = text(&s.get("chats", &chat).await.unwrap(), "runId").to_owned();
+    let run_id = text(&s.conversation_boundary(&chat).await.unwrap(), "runId").to_owned();
     s.store
         .event(
             &run_id,
@@ -914,7 +914,10 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
         .await
         .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    assert_eq!(s.get("chats", &chat).await.unwrap()["paused"], true);
+    assert_eq!(
+        s.conversation_boundary(&chat).await.unwrap()["paused"],
+        true
+    );
     assert_eq!(
         mock.called(
             "PUT",
@@ -932,7 +935,10 @@ async fn finish_turn(s: &Service, delivery: &Value, answer: &str) {
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(delivery, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(delivery, "chatId"))
+        .await
+        .unwrap();
     let run_id = text(&chat, "runId").to_owned();
     s.store
         .event(
@@ -1461,7 +1467,10 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&receipt, "chatId"))
+        .await
+        .unwrap();
     let run_id = text(&chat, "runId");
     let agent = |text: &str| Some(json!({ "item": { "type": "agent_message", "text": text } }));
     s.store
@@ -1544,7 +1553,11 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
             .unwrap()
             .is_empty()
     );
-    assert!(s.get("chats", text(&receipt, "chatId")).await.is_ok());
+    assert!(
+        s.conversation_boundary(text(&receipt, "chatId"))
+            .await
+            .is_ok()
+    );
 }
 
 /// Dates the run's last event back, as if it was recorded `ms` ago.
@@ -1577,7 +1590,10 @@ async fn replies_answer_a_retried_turn_with_its_last_attempt() {
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&receipt, "chatId"))
+        .await
+        .unwrap();
     let run_id = text(&chat, "runId");
     let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
@@ -1639,7 +1655,10 @@ async fn replies_answer_a_retried_turn_stopped_by_cairn_with_its_last_attempt() 
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&receipt, "chatId"))
+        .await
+        .unwrap();
     let run_id = text(&chat, "runId");
     let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
@@ -1716,7 +1735,10 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&receipt, "chatId"))
+        .await
+        .unwrap();
     let run_id = text(&chat, "runId");
     let run = s.store.run(run_id).await.unwrap();
     assert_eq!(run["chatExecution"]["messageId"], receipt["messageId"]);
@@ -1931,7 +1953,10 @@ async fn replies_do_not_follow_a_retry_stopped_before_it_ran() {
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&receipt, "chatId"))
+        .await
+        .unwrap();
     let run_id = text(&chat, "runId");
     let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
@@ -2008,7 +2033,10 @@ async fn replies_to_a_stopped_turn_do_not_carry_the_next_answer() {
         s.chat_tick(&std::collections::HashSet::new())
             .await
             .unwrap();
-        let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+        let chat = s
+            .conversation_boundary(text(&receipt, "chatId"))
+            .await
+            .unwrap();
         let run_id = text(&chat, "runId");
         let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
         let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
@@ -2093,7 +2121,7 @@ async fn revoked_and_deleted_deliveries_do_not_stop_other_people() {
     let removed = deliveries.iter().find(|d| d["thread"] == "511").unwrap();
     let chat_id = text(removed, "chatId").to_owned();
     s.store
-        .transaction(move |db| db.remove("chats", &chat_id))
+        .transaction(move |db| db.remove_conversation(&chat_id))
         .await
         .unwrap();
     common::plugin_people(&s, "discord", &connection.id, "300", "remove")
@@ -2153,7 +2181,10 @@ async fn public_question_partial_answers_require_the_starters_authority() {
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&delivery, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&delivery, "chatId"))
+        .await
+        .unwrap();
     let run = text(&chat, "runId");
     s.store
         .event(
@@ -2241,7 +2272,10 @@ async fn failures_before_acknowledgement_finish_and_followups_resume_stopped_run
         s.chat_tick(&std::collections::HashSet::new())
             .await
             .unwrap();
-        let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+        let chat = s
+            .conversation_boundary(text(&receipt, "chatId"))
+            .await
+            .unwrap();
         let run = text(&chat, "runId");
         s.store
             .change_run(
@@ -2272,7 +2306,7 @@ async fn failures_before_acknowledgement_finish_and_followups_resume_stopped_run
                 .await
                 .unwrap();
             assert_eq!(
-                s.get("chats", text(&chat, "id")).await.unwrap()["paused"],
+                s.conversation_boundary(text(&chat, "id")).await.unwrap()["paused"],
                 true
             );
             let mut follow = event.clone();
@@ -2285,7 +2319,7 @@ async fn failures_before_acknowledgement_finish_and_followups_resume_stopped_run
                 .unwrap();
             assert_eq!(s.store.run(run).await.unwrap()["status"], "queued");
             assert_eq!(
-                s.get("chats", text(&chat, "id")).await.unwrap()["paused"],
+                s.conversation_boundary(text(&chat, "id")).await.unwrap()["paused"],
                 false
             );
         }
@@ -2307,7 +2341,10 @@ async fn channel_fallback_questions_retry_and_controls_route_to_the_right_conver
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&delivery, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&delivery, "chatId"))
+        .await
+        .unwrap();
     let run = text(&chat, "runId");
     s.store
         .event(
@@ -2384,7 +2421,7 @@ async fn channel_fallback_questions_retry_and_controls_route_to_the_right_conver
     })).await.unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     assert_eq!(
-        s.get("chats", text(&chat, "id")).await.unwrap()["paused"],
+        s.conversation_boundary(text(&chat, "id")).await.unwrap()["paused"],
         true
     );
     session.stop().await;
@@ -2444,7 +2481,10 @@ async fn optional_questions_are_not_republished_on_later_turns() {
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&first, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&first, "chatId"))
+        .await
+        .unwrap();
     let run = text(&chat, "runId");
     s.store
         .event(
@@ -2546,7 +2586,10 @@ async fn reviewed_reduced_agent_grants_start_a_fresh_conversation() {
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&second, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&second, "chatId"))
+        .await
+        .unwrap();
     let run = s.store.run(text(&chat, "runId")).await.unwrap();
     assert_eq!(run["snapshot"]["agent"]["access"]["sandbox"], "read-only");
 }

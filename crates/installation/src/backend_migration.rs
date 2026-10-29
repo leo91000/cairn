@@ -84,7 +84,7 @@ pub(crate) fn candidate(run: &Value) -> Value {
 }
 
 fn chat_run(db: &Db<'_>, chat_id: &str) -> Result<(Value, Value, Value, bool)> {
-    let chat = required(db.get("chats", chat_id)?, "Chat not found")?;
+    let chat = required(db.conversation_boundary(chat_id)?, "Chat not found")?;
     require_active(&chat)?;
     crate::conversation_lifecycle::require_environment_ready(&chat)?;
     let run = required(db.run(text(&chat, "runId"))?, "Run not found")?;
@@ -278,7 +278,7 @@ fn change_expired_backend(
 
     policy::apply(&mut chat, proposed);
     chat["sessionRestartRequested"] = true.into();
-    db.put("chats", &chat)?;
+    db.save_conversation_boundary(&chat)?;
 
     for action in [
         "chat.backend-migration.requested",
@@ -327,7 +327,7 @@ pub(crate) async fn preview(
     let check = authorize.clone();
     s.store.read(move |db| check(db)).await?;
     // Both native sources and destinations need fresh human authority.
-    let chat = s.get("chats", chat_id).await?;
+    let chat = s.conversation_boundary(chat_id).await?;
     refresh_authority(s, &chat).await?;
     let (chat_id, origin) = (chat_id.to_owned(), origin());
     s.store.read(move |db| {
@@ -375,7 +375,7 @@ impl Service {
         // Check management authority before contacting Beacon or a controller.
         let check = authorize.clone();
         self.store.read(move |db| check(db)).await?;
-        let chat = self.get("chats", &chat_id).await?;
+        let chat = self.conversation_boundary(&chat_id).await?;
         refresh_authority(self, &chat).await?;
         let operation = id();
         let (args, who, migration) = (input.clone(), source.clone(), operation.clone());
@@ -433,7 +433,7 @@ impl Service {
                 }
             }
             chat["paused"] = true.into();
-            db.put("chats", &chat)?;
+            db.save_conversation_boundary(&chat)?;
             db.update_run_boundary(text(&run, "id"), &json!({ "backendMigration": migration, "backendMigrationError": null }))?;
             db.audit("chat.backend-migration.requested", &json!({
                 "chatId": chat["id"],
@@ -461,7 +461,7 @@ impl Service {
                 let _ = s
                     .store
                     .transaction(move |db| {
-                        let Some(chat) = db.get("chats", &chat_id)? else {
+                        let Some(chat) = db.conversation_boundary(&chat_id)? else {
                             return Ok(());
                         };
                         let Some(run) = db.run(text(&chat, "runId"))? else {
@@ -504,7 +504,7 @@ impl Service {
     where
         F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
     {
-        let chat = self.get("chats", chat_id).await?;
+        let chat = self.conversation_boundary(chat_id).await?;
         let run_id = text(&chat, "runId").to_owned();
         let _storage_lock = crate::conversation_lifecycle::storage_lock(&self.config.data_dir)?;
         let _storage = self.conversation_storage_lock.lock().await;
@@ -695,7 +695,7 @@ impl Service {
             chat["paused"] = migration["paused"].clone();
             chat["sessionRestartRequested"] = true.into();
             chat["wakeup"] = Value::Null;
-            db.put("chats", &chat)?;
+            db.save_conversation_boundary(&chat)?;
             db.event(&run_id, &EventKind::Status, "Execution backend migrated. Conversation history and files preserved; the next message starts a fresh engine session.", None)?;
             db.audit("chat.backend-migration.completed", &json!({
                 "chatId": chat_id,

@@ -32,8 +32,11 @@ data class PluginConfiguration(
 ) {
     init {
         require(Regex("^(allowlist|requests|everyone)\$").containsMatchIn(accessMode))
+        agentIds?.let { require(it.size <= 100) }
         require(maxMessagesPerHour in 1..100)
         require(maxPerPersonPerHour in 1..50)
+        require(people.size <= 100)
         sharedFrom?.let { java.util.UUID.fromString(it) }
+        require(userIds.size <= 100)
     }
 }

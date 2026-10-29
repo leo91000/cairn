@@ -96,8 +96,8 @@ class FilUnreadJourneyTest {
     private val chats =
         listOf(
             Chat(
-                "done",
-                "Rédiger le changelog 0.53",
+                id = "a2b21257-b699-5665-82a6-6ee68c85fe62",
+                title = "Rédiger le changelog 0.53",
                 agentName = "Rédacteur",
                 status = "succeeded",
                 runId = "done-run",
@@ -109,16 +109,16 @@ class FilUnreadJourneyTest {
                     "Le changelog est prêt : 12 corrections, 3 nouveautés. J’ai ouvert la PR #184.",
             ),
             Chat(
-                "question",
-                "Choisir la pagination",
+                id = "765886cd-efa2-5d30-bdce-99340ee87a3d",
+                title = "Choisir la pagination",
                 agentName = "Rédacteur",
                 pendingQuestions = 1,
                 updatedAt = now - 60_000,
                 provider = "claude",
             ),
             Chat(
-                "old",
-                "Relecture du guide d’installation",
+                id = "7e0552ad-fde3-5785-a37c-8bc7e408e409",
+                title = "Relecture du guide d’installation",
                 agentName = "Rédacteur",
                 status = "succeeded",
                 updatedAt = now - 86_400_000,
@@ -285,7 +285,7 @@ class FilUnreadJourneyTest {
                     reads.isNotEmpty()
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"chat:done\",\"finishedAt\":${chats.first().finishedAt}}]}",
+                    "{\"items\":[{\"key\":\"chat:${chats.first().id}\",\"finishedAt\":${chats.first().finishedAt}}]}",
                     reads.first(),
                 )
                 compose.waitUntil(10000) {
@@ -427,13 +427,13 @@ class FilUnreadJourneyTest {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path.endsWith("/chats/done/stream")) {
+                        if (path.endsWith("/chats/a2b21257-b699-5665-82a6-6ee68c85fe62/stream")) {
                             started.set(true)
                             check(release.await(20, TimeUnit.SECONDS))
                             val run =
                                 Run(
                                     id = "done-run",
-                                    taskId = "done",
+                                    taskId = "a2b21257-b699-5665-82a6-6ee68c85fe62",
                                     status = "succeeded",
                                     trigger = "chat",
                                     finishedAt = chats.first().finishedAt,
@@ -493,7 +493,13 @@ class FilUnreadJourneyTest {
                 }
                 CairnTheme {
                     if (state.installation != null)
-                        ChatScreen(vm, state, "done", openChat = {}, openRun = {})
+                        ChatScreen(
+                            vm,
+                            state,
+                            "a2b21257-b699-5665-82a6-6ee68c85fe62",
+                            openChat = {},
+                            openRun = {},
+                        )
                 }
             }
             try {
@@ -505,7 +511,7 @@ class FilUnreadJourneyTest {
                 compose.waitUntil(10000) {
                     compose.onAllNodes(isRoot()).fetchSemanticsNodes()
                     compose
-                        .onAllNodesWithTag("chat-page:question")
+                        .onAllNodesWithTag("chat-page:765886cd-efa2-5d30-bdce-99340ee87a3d")
                         .fetchSemanticsNodes()
                         .isNotEmpty()
                 }
@@ -517,7 +523,7 @@ class FilUnreadJourneyTest {
                     reads.isNotEmpty()
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"chat:done\",\"finishedAt\":${chats.first().finishedAt}}]}",
+                    "{\"items\":[{\"key\":\"chat:${chats.first().id}\",\"finishedAt\":${chats.first().finishedAt}}]}",
                     reads.first(),
                 )
             } finally {

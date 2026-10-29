@@ -39,6 +39,8 @@ it('retries a temporary preview failure after expiry even while its card remains
   const attachment = {
     id: 'temporary',
     chatId: 'chat',
+    digest: '',
+    createdAt: 0,
     name: 'brief.pdf',
     size: 10,
     kind: 'file' as const,
@@ -62,6 +64,8 @@ it('retries temporary summary failures but keeps unsupported previews missing', 
   const attachment = {
     id: 'summary',
     chatId: 'chat',
+    digest: '',
+    createdAt: 0,
     name: 'notes.txt',
     size: 10,
     kind: 'file' as const,
@@ -85,6 +89,8 @@ it('revokes a pending preview after it is evicted and finishes loading', async (
   const attachment = {
     id: 'evicted-pending',
     chatId: 'chat',
+    digest: '',
+    createdAt: 0,
     name: 'image.png',
     size: 10,
     kind: 'image' as const,
@@ -111,6 +117,8 @@ it('downloads full originals through the binary stream route', async () => {
   const attachment = {
     id: 'original',
     chatId: 'chat',
+    digest: '',
+    createdAt: 0,
     name: 'archive.zip',
     size: 10 * 1024 * 1024,
     kind: 'file' as const,
@@ -128,6 +136,8 @@ it('does not retry a failed download in a newly selected installation', async ()
   const attachment = {
     id: 'switched-download',
     chatId: 'chat',
+    digest: '',
+    createdAt: 0,
     name: 'notes.txt',
     size: 6,
     kind: 'file' as const,
@@ -146,6 +156,8 @@ it('isolates previews and summaries between installations, accounts and sessions
   const attachment = {
     id: 'restored-id',
     chatId: 'restored-chat',
+    digest: '',
+    createdAt: 0,
     name: 'brief.pdf',
     size: 100,
     kind: 'file' as const,
@@ -176,6 +188,8 @@ it('types downloaded SVGs for image decoding without changing the server respons
   const attachment = {
     id: 'vector',
     chatId: 'chat',
+    digest: '',
+    createdAt: 0,
     name: 'logo.svg',
     size: 100,
     kind: 'file' as const,

@@ -176,7 +176,7 @@ class NodesTest {
                 .decodeFromString<Run>(wireJson.encodeToString(Run.serializer(), run))
                 .suspendedByExclusive,
         )
-        val chat = Chat("chat", status = "running", suspendedByExclusive = reservation)
+        val chat = Chat(id = "chat", status = "running", suspendedByExclusive = reservation)
         val decodedChat =
             wireJson.decodeFromString<Chat>(wireJson.encodeToString(Chat.serializer(), chat))
         assertEquals(reservation, decodedChat.suspendedByExclusive)

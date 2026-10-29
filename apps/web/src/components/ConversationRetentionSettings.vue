@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { getConversationRetention } from '../../../../packages/contracts/generated/getConversationRetention'
+import { setConversationRetention } from '../../../../packages/contracts/generated/setConversationRetention'
 import { api, notify } from '../api'
 import Modal from './Modal.vue'
 import UiAlert from './UiAlert.vue'
@@ -14,7 +16,7 @@ const valid = computed(() => days.value !== '' && Number.isInteger(Number(days.v
 
 onMounted(async () => {
   try {
-    days.value = (await api('/settings/conversations')).inactivityDays
+    days.value = (await getConversationRetention(api, {})).inactivityDays
     loaded.value = true
   }
   catch (cause) {
@@ -26,10 +28,7 @@ async function save() {
   busy.value = true
   error.value = ''
   try {
-    const policy = await api('/settings/conversations', {
-      method: 'PUT',
-      body: JSON.stringify({ inactivityDays: Number(days.value) }),
-    })
+    const policy = await setConversationRetention(api, { inactivityDays: Number(days.value) })
     days.value = policy.inactivityDays
     confirming.value = false
     notify('Conversation retention saved')

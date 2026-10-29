@@ -63,7 +63,7 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
     );
     let other = rows(
         &db,
-        "SELECT json_array(id,kind,data,updated_at) FROM records WHERE kind!='agentAccounts' ORDER BY id",
+        "SELECT json_array(id,kind,data,updated_at) FROM records WHERE kind NOT IN ('agentAccounts','chats') ORDER BY id",
     );
     let timestamps = rows(
         &db,
@@ -114,6 +114,14 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
         other
     );
     assert_eq!(
+        store
+            .conversation_boundary("retained-chat")
+            .await
+            .unwrap()
+            .unwrap()["accountId"],
+        ACCOUNT
+    );
+    assert_eq!(
         rows(
             &db,
             "SELECT json_array(id,updated_at) FROM coding_agent_accounts ORDER BY id"
@@ -134,7 +142,7 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        14
+        15
     );
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
@@ -283,7 +291,7 @@ async fn real_version12_database_completes_both_atomic_upgrades() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        14
+        15
     );
     assert_eq!(direct_metadata(&db), vec![Vec::<String>::new(); 7]);
 }

@@ -62,7 +62,16 @@ impl App {
     }
 
     async fn create_chat(&self) -> Value {
-        self.request("POST", CHATS, json!({})).await.1
+        let (status, view) = self.request("POST", CHATS, json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        // Fixture mutations retain the stored authority snapshot. The generated
+        // public view deliberately does not expose internal directing grants.
+        self.service
+            .store
+            .conversation_boundary(text(&view, "id"))
+            .await
+            .unwrap()
+            .unwrap()
     }
 
     /// Lets the chat scheduler run once, with no conversation active.
@@ -185,7 +194,11 @@ async fn trash_denies_direct_run_history_and_artifact_access() {
     app.add_finished_run(&run, RunStatus::Succeeded, json!({}), "Private transcript")
         .await;
     chat["runId"] = run.clone().into();
-    app.service.store.put("chats", chat.clone()).await.unwrap();
+    app.service
+        .store
+        .save_conversation_boundary(chat.clone())
+        .await
+        .unwrap();
     let path = chat_path(&chat);
     assert_eq!(
         app.request("DELETE", &path, json!({})).await.0,
@@ -209,7 +222,11 @@ async fn cleanup_racing_cancellation_still_returns_successful_deletion() {
     app.add_finished_run(&run, RunStatus::Succeeded, json!({}), "Finished work")
         .await;
     chat["runId"] = run.into();
-    app.service.store.put("chats", chat.clone()).await.unwrap();
+    app.service
+        .store
+        .save_conversation_boundary(chat.clone())
+        .await
+        .unwrap();
     let path = chat_path(&chat);
     let active = app.service.worker.active.lock().await;
     let deleting = app.clone();
@@ -224,7 +241,7 @@ async fn cleanup_racing_cancellation_still_returns_successful_deletion() {
             let current = app
                 .service
                 .store
-                .get("chats", chat["id"].as_str().unwrap())
+                .conversation_boundary(chat["id"].as_str().unwrap())
                 .await
                 .unwrap()
                 .unwrap();
@@ -254,7 +271,11 @@ async fn deletion_waits_for_running_agents_before_removing_their_files() {
     app.add_finished_run(&run, RunStatus::Running, json!({}), "Work in progress")
         .await;
     chat["runId"] = run.clone().into();
-    app.service.store.put("chats", chat.clone()).await.unwrap();
+    app.service
+        .store
+        .save_conversation_boundary(chat.clone())
+        .await
+        .unwrap();
     let cancellation = tokio_util::sync::CancellationToken::new();
     app.service
         .worker
@@ -314,7 +335,6 @@ async fn incompatible_restored_session_requires_consent_and_never_restarts_on_it
     let run = id();
     chat["runId"] = run.clone().into();
     chat["paused"] = true.into();
-    app.service.store.put("chats", chat.clone()).await.unwrap();
     app.add_finished_run(
         &run,
         RunStatus::Failed,
@@ -322,6 +342,11 @@ async fn incompatible_restored_session_requires_consent_and_never_restarts_on_it
         "Context to preserve",
     )
     .await;
+    app.service
+        .store
+        .save_conversation_boundary(chat.clone())
+        .await
+        .unwrap();
     common::set_checkpoint(
         &app.service.store,
         &run,
@@ -360,12 +385,13 @@ async fn fresh_session_availability_uses_restored_runs_and_keeps_its_lifetime() 
         let mut chat = app.create_chat().await;
         let run = id();
         chat["runId"] = run.clone().into();
-        if historical_chat {
-            // The restored run is written below.
-        }
-        app.service.store.put("chats", chat.clone()).await.unwrap();
         app.add_finished_run(&run, RunStatus::Failed, json!({}), "History")
             .await;
+        app.service
+            .store
+            .save_conversation_boundary(chat.clone())
+            .await
+            .unwrap();
         if historical_chat {
             app.service
                 .store
@@ -439,8 +465,19 @@ async fn fresh_session_availability_uses_restored_runs_and_keeps_its_lifetime() 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(pending["sessionRestartRequested"], true);
         assert_eq!(pending["paused"], true);
+        let mut chat = app
+            .service
+            .store
+            .conversation_boundary(text(&chat, "id"))
+            .await
+            .unwrap()
+            .unwrap();
         chat["lifecycle"] = "trash".into();
-        app.service.store.put("chats", chat).await.unwrap();
+        app.service
+            .store
+            .save_conversation_boundary(chat)
+            .await
+            .unwrap();
         assert_eq!(app.get(&path).await.1["canRequestNewSession"], false);
     }
 }
@@ -451,7 +488,11 @@ async fn inactivity_never_archives_even_with_an_old_enabled_policy() {
     let mut chat = app.create_chat().await;
     chat["updatedAt"] = (cairn_installation::config::now() - 2 * 86_400_000).into();
     let path = chat_path(&chat);
-    app.service.store.put("chats", chat).await.unwrap();
+    app.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
     let policy = json!({ "enabled": true, "inactivityDays": 1, "coldAfterDays": 1 });
     app.service
         .store
@@ -540,7 +581,11 @@ async fn permanent_revocation_does_not_block_requested_conversation_erasure() {
         )
         .await;
         chat["runId"] = run.clone().into();
-        app.service.store.put("chats", chat.clone()).await.unwrap();
+        app.service
+            .store
+            .save_conversation_boundary(chat.clone())
+            .await
+            .unwrap();
         if let Some(revoked) = revoked {
             app.service
                 .store
@@ -731,7 +776,11 @@ async fn previously_trashed_conversations_keep_their_recovery_deadline() {
     chat["lifecycle"] = "trash".into();
     chat["trashedAt"] = cairn_installation::config::now().into();
     chat["purgeAt"] = (cairn_installation::config::now() + 30 * 86_400_000).into();
-    app.service.store.put("chats", chat).await.unwrap();
+    app.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
     app.service.cleanup_conversations().await.unwrap();
     let (status, restored) = app
         .request("POST", &format!("{path}/restore"), json!({}))
@@ -769,7 +818,11 @@ async fn old_chat(app: &App, days: i64) -> Value {
     chat["createdAt"] = activity.into();
     chat["updatedAt"] = activity.into();
     chat["lastActivityAt"] = activity.into();
-    app.service.store.put("chats", chat).await.unwrap()
+    app.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -822,7 +875,11 @@ async fn empty_and_converted_chats_start_their_inactivity_clock_at_creation() {
         for field in ["createdAt", "updatedAt", "lastActivityAt"] {
             chat[field] = expired.into();
         }
-        app.service.store.put("chats", chat.clone()).await.unwrap();
+        app.service
+            .store
+            .save_conversation_boundary(chat.clone())
+            .await
+            .unwrap();
         app.service.cleanup_conversations().await.unwrap();
         assert_eq!(
             app.get(&chat_path(&chat)).await.1["environmentState"],
@@ -857,8 +914,14 @@ async fn retention_defaults_to_seven_days_and_validates_persisted_owner_settings
     let root = app.service.config.data_dir.clone();
     let reopened = cairn_installation::store::Store::open(&root).unwrap();
     assert_eq!(
-        reopened.kv("conversation-expiration").await.unwrap(),
-        Some(policy)
+        serde_json::to_value(
+            reopened
+                .read(|db| db.conversation_retention())
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        policy
     );
 }
 
@@ -929,9 +992,9 @@ async fn expired_remote_conversation_continues_with_history_without_fencing_a_re
                     }),
             )
             .expect("fixture checkpoint");
-            let mut chat = db.get("chats", &chat_id)?.unwrap();
+            let mut chat = db.conversation_boundary(&chat_id)?.unwrap();
             chat["lastActivityAt"] = (cairn_installation::config::now() - 8 * DAY).into();
-            db.put("chats", &chat)?;
+            db.save_conversation_boundary(&chat)?;
             Ok(())
         })
         .await
@@ -989,7 +1052,11 @@ async fn interrupted_environment_cleanup_blocks_execution_and_retries_after_poli
     )
     .await;
     chat["runId"] = run.clone().into();
-    app.service.store.put("chats", chat.clone()).await.unwrap();
+    app.service
+        .store
+        .save_conversation_boundary(chat.clone())
+        .await
+        .unwrap();
     app.service.cleanup_conversations().await.unwrap();
     let detail = app.get(&chat_path(&chat)).await.1;
     assert_eq!(detail["environmentState"], "cleaning");
@@ -1014,12 +1081,16 @@ async fn interrupted_environment_cleanup_blocks_execution_and_retries_after_poli
     let mut current = app
         .service
         .store
-        .get("chats", text(&chat, "id"))
+        .conversation_boundary(text(&chat, "id"))
         .await
         .unwrap()
         .unwrap();
     current["environmentRetryAfter"] = 0.into();
-    app.service.store.put("chats", current).await.unwrap();
+    app.service
+        .store
+        .save_conversation_boundary(current)
+        .await
+        .unwrap();
     app.service.cleanup_conversations().await.unwrap();
     let detail = app.get(&chat_path(&chat)).await.1;
     assert_eq!(detail["environmentState"], "expired");
@@ -1042,7 +1113,7 @@ async fn seven_day_expiration_preserves_history_uploads_artifacts_and_public_acc
     expired["runId"] = run.clone().into();
     app.service
         .store
-        .put("chats", expired.clone())
+        .save_conversation_boundary(expired.clone())
         .await
         .unwrap();
     let attachments = app
@@ -1245,7 +1316,11 @@ async fn retention_protects_pending_work_recent_completion_and_worker_finalizati
                 .await
                 .unwrap();
         }
-        app.service.store.put("chats", chat.clone()).await.unwrap();
+        app.service
+            .store
+            .save_conversation_boundary(chat.clone())
+            .await
+            .unwrap();
         app.service.cleanup_conversations().await.unwrap();
         assert_eq!(
             app.get(&chat_path(&chat)).await.1["lifecycle"],
@@ -1266,7 +1341,7 @@ async fn expiration_uses_recorded_activity_and_bounds_each_pass() {
     recent["lastActivityAt"] = cairn_installation::config::now().into();
     app.service
         .store
-        .put("chats", recent.clone())
+        .save_conversation_boundary(recent.clone())
         .await
         .unwrap();
     let expired = old_chat(&app, 8).await;
@@ -1275,7 +1350,7 @@ async fn expiration_uses_recorded_activity_and_bounds_each_pass() {
     assert_eq!(
         app.service
             .store
-            .list("chats")
+            .conversations_boundary()
             .await
             .unwrap()
             .iter()
@@ -1337,7 +1412,11 @@ async fn expiration_rechecks_policy_and_activity_after_waiting_for_worker_lock()
                 .await;
         } else {
             chat["lastActivityAt"] = cairn_installation::config::now().into();
-            app.service.store.put("chats", chat.clone()).await.unwrap();
+            app.service
+                .store
+                .save_conversation_boundary(chat.clone())
+                .await
+                .unwrap();
         }
         drop(active);
         cleanup.await.unwrap();
@@ -1368,8 +1447,14 @@ async fn measure_retention_storage() {
     for _ in 0..100 {
         old_chat(&app, 8).await;
     }
-    let chat = app.service.store.list("chats").await.unwrap().remove(0);
-    let id = chat["id"].as_str().unwrap();
+    let mut chat = app
+        .service
+        .store
+        .conversations_boundary()
+        .await
+        .unwrap()
+        .remove(0);
+    let id = chat["id"].as_str().unwrap().to_owned();
     let encoded = serde_json::to_vec(&chat).unwrap().len();
     for enabled in [false, true] {
         app.service
@@ -1383,17 +1468,22 @@ async fn measure_retention_storage() {
         let mut cleanup = Vec::new();
         for _ in 0..50 {
             let start = Instant::now();
-            app.service.store.get("chats", id).await.unwrap();
+            app.service.store.conversation_boundary(&id).await.unwrap();
             warm.push(start.elapsed().as_secs_f64() * 1000.0);
             // Fresh SQLite connections, with the host OS page cache still warm.
             let reopened =
                 cairn_installation::store::Store::open(&app.service.config.data_dir).unwrap();
             let start = Instant::now();
-            reopened.get("chats", id).await.unwrap();
+            reopened.conversation_boundary(&id).await.unwrap();
             cold.push(start.elapsed().as_secs_f64() * 1000.0);
             drop(reopened);
             let start = Instant::now();
-            app.service.store.put("chats", chat.clone()).await.unwrap();
+            chat = app
+                .service
+                .store
+                .save_conversation_boundary(chat.clone())
+                .await
+                .unwrap();
             writes.push(start.elapsed().as_secs_f64() * 1000.0);
         }
         for _ in 0..20 {
@@ -1411,7 +1501,7 @@ async fn measure_retention_storage() {
                 "writeMedianMs": median(writes),
                 "cleanupMedianMs": median(cleanup),
                 "cpuSeconds": cpu_seconds() - before_cpu,
-                "remainingChats": app.service.store.list("chats").await.unwrap().len()
+                "remainingChats": app.service.store.conversations_boundary().await.unwrap().len()
             })
         );
     }
@@ -1654,13 +1744,19 @@ async fn completed_quota_switch_replay_does_not_cancel_the_replacement_or_a_late
         input["requestId"].clone(),
         uuid::Uuid::new_v4().to_string().into(),
     ] {
-        let mut completed = input.clone();
-        completed["requestId"] = latest_request.clone();
-        completed["pending"] = false.into();
-        let key = format!("chat-coding-agent:{}", path.rsplit('/').next().unwrap());
-        app.service
+        let chat_id = path.rsplit('/').next().unwrap().to_owned();
+        let original = input["requestId"].as_str().unwrap().to_owned();
+        let saved_chat = chat_id.clone();
+        let completed = app
+            .service
             .store
-            .set(&key, completed.clone(), None)
+            .transaction(move |db| {
+                let mut receipt = db.engine_switch_receipt(&chat_id, &original)?.unwrap();
+                receipt.request_id = latest_request.as_str().unwrap().to_owned();
+                receipt.pending = false;
+                db.save_engine_switch(&receipt)?;
+                Ok(serde_json::to_value(db.engine_switch(&chat_id)?)?)
+            })
             .await
             .unwrap();
         app.service
@@ -1690,7 +1786,11 @@ async fn completed_quota_switch_replay_does_not_cancel_the_replacement_or_a_late
             "An idempotent replay must not cancel the replacement run"
         );
         assert_eq!(
-            app.service.store.kv(&key).await.unwrap().unwrap(),
+            app.service
+                .store
+                .read(move |db| Ok(serde_json::to_value(db.engine_switch(&saved_chat)?)?))
+                .await
+                .unwrap(),
             completed
         );
         app.service.worker.active.lock().await.clear();

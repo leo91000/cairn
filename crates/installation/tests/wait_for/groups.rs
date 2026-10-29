@@ -143,9 +143,9 @@ async fn plugin_results_in_a_group_are_recorded_one_by_one() {
     let probes = f.calls().len();
 
     f.github_state("completed", Some("success"), 0);
-    let mut chat = f.s.get("chats", &f.chat).await.unwrap();
+    let mut chat = f.s.conversation_boundary(&f.chat).await.unwrap();
     chat["wakeup"]["members"][0]["nextCheckAt"] = 0.into();
-    f.s.store.put("chats", chat).await.unwrap();
+    f.s.store.save_conversation_boundary(chat).await.unwrap();
     conditions::poll_once(&f.s).await.unwrap();
     assert_eq!(f.calls().len(), probes + 1);
     let wakeup = f.wakeup().await;
@@ -154,9 +154,9 @@ async fn plugin_results_in_a_group_are_recorded_one_by_one() {
     assert!(f.ready_events().await.is_empty());
 
     // A recorded result is never observed again.
-    let mut chat = f.s.get("chats", &f.chat).await.unwrap();
+    let mut chat = f.s.conversation_boundary(&f.chat).await.unwrap();
     chat["wakeup"]["members"][0]["nextCheckAt"] = 0.into();
-    f.s.store.put("chats", chat).await.unwrap();
+    f.s.store.save_conversation_boundary(chat).await.unwrap();
     conditions::poll_once(&f.s).await.unwrap();
     assert_eq!(f.calls().len(), probes + 1);
     assert_eq!(f.tick().await["run"]["status"], "succeeded");
@@ -298,7 +298,7 @@ async fn cycles_through_grouped_dependencies_are_rejected() {
     f.s.chat_tick(&HashSet::new()).await.unwrap();
     let target = f.s.chat_detail(other_id).await.unwrap()["run"].clone();
     let unrelated = f.target().await;
-    let mut other = f.s.get("chats", other_id).await.unwrap();
+    let mut other = f.s.conversation_boundary(other_id).await.unwrap();
     other["wakeup"] = json!({
         "id": id(), "messageId": target["chatExecution"]["messageId"],
         "condition": {
@@ -308,7 +308,7 @@ async fn cycles_through_grouped_dependencies_are_rejected() {
         "members": [{}, {}],
         "wakeAt": now() + 420_000,
     });
-    f.s.store.put("chats", other).await.unwrap();
+    f.s.store.save_conversation_boundary(other).await.unwrap();
     f.s.store
         .change_run(
             text(&target, "id"),
@@ -459,11 +459,11 @@ async fn measure_group_metadata() {
             writes.push(started.elapsed().as_secs_f64() * 1000.0);
         }
         let write_cpu = process_cpu_ms() - cpu_start;
-        let pending = f.s.get("chats", &f.chat).await.unwrap();
+        let pending = f.s.conversation_boundary(&f.chat).await.unwrap();
         let mut warm = Vec::new();
         for _ in 0..500 {
             let started = std::time::Instant::now();
-            std::hint::black_box(f.s.get("chats", &f.chat).await.unwrap());
+            std::hint::black_box(f.s.conversation_boundary(&f.chat).await.unwrap());
             warm.push(started.elapsed().as_secs_f64() * 1000.0);
         }
         let mut cold = Vec::new();
@@ -473,7 +473,7 @@ async fn measure_group_metadata() {
             let store = cairn_installation::store::Store::open(&f.s.config.data_dir).unwrap();
             pool_open.push(started.elapsed().as_secs_f64() * 1000.0);
             let started = std::time::Instant::now();
-            std::hint::black_box(store.get("chats", &f.chat).await.unwrap());
+            std::hint::black_box(store.conversation_boundary(&f.chat).await.unwrap());
             cold.push(started.elapsed().as_secs_f64() * 1000.0);
         }
         f.finish().await;
