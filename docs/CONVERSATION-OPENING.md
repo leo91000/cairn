@@ -21,7 +21,17 @@ opens immediately; otherwise the reader waits for the stream’s first snapshot.
   the reader receives only what it lacks and keeps its history and position. Otherwise the
   behavior is unchanged: the recent window for a reader following the latest output, the
   replay for a reader of older messages.
-- History pages read the run and its events only, not the stream metadata.
+- History pages read the run and its events only, not the stream metadata. Their
+  event arrays use a 256 KiB gzip budget and at most 1,000 events, with a separate
+  4 MiB decoded ceiling. One oversized event remains readable whole so cursors
+  always advance. Backwards candidates are measured in chronological wire order;
+  unused candidates remain reachable through the next cursor. Live SSE initial/replay windows and forward
+  batches keep their existing 100-event and raw-byte limits. Public MCP and agent-tool responses retain
+  their bounded previews and chunked full-content reads.
+- Relay requests preserve compression negotiation and encoding headers. Web and
+  Android direct channels request gzip and decode it explicitly, with the same
+  8 MB decoded-response bound as their wire bodies. Older browsers without
+  DecompressionStream request identity. Live SSE streams remain uncompressed.
 - Reads share one queue across four SQLite connections instead of alternating between two,
   so a slow page no longer delays the next read queued behind it.
 - New image attachments record their displayed size (the camera orientation applied),

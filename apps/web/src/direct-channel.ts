@@ -259,9 +259,11 @@ export class DirectChannel {
       }
 
       const headers = new Headers(options.headers)
+      // DataChannel responses bypass the browser's HTTP decompression.
+      headers.set('accept-encoding', typeof DecompressionStream !== 'undefined' ? 'gzip' : 'identity')
       if (options.body !== undefined && !headers.has('content-type'))
         headers.set('content-type', 'application/json')
-      const forwarded = [...headers].filter(([name]) => ['content-type', 'accept', 'range', 'if-none-match', 'if-modified-since', 'last-event-id', 'mcp-protocol-version', 'mcp-method'].includes(name))
+      const forwarded = [...headers].filter(([name]) => ['content-type', 'accept', 'accept-encoding', 'range', 'if-none-match', 'if-modified-since', 'last-event-id', 'mcp-protocol-version', 'mcp-method'].includes(name))
       void this.send({
         type: 'request',
         id,
@@ -362,7 +364,25 @@ export class DirectChannel {
           return
         }
 
-        pending.resolve(new Response([204, 205, 304].includes(frame.status!) ? null : body, { status: frame.status, headers }))
+        let response = new Response([204, 205, 304].includes(frame.status!) ? null : body, { status: frame.status, headers })
+        if (headers.get('content-encoding') === 'gzip' && response.body) {
+          let size = 0
+          const decoded = response.body
+            .pipeThrough(new DecompressionStream('gzip'))
+            .pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+              transform(chunk, controller) {
+                size += chunk.byteLength
+                if (size > MAX_BODY)
+                  throw new Error('Response is too large')
+                controller.enqueue(chunk)
+              },
+            }))
+          headers.delete('content-encoding')
+          headers.delete('content-length')
+          response = new Response(decoded, { status: frame.status, headers })
+        }
+
+        pending.resolve(response)
         return
       }
 

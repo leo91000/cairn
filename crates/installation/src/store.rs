@@ -746,7 +746,7 @@ impl Db<'_> {
             AND id>? ORDER BY id LIMIT ?";
         let mut stmt = self.0.prepare_cached(sql)?;
         let rows = stmt.query_map(params![run, after, limit], event_row)?;
-        within_budget(rows, limit, max_bytes)
+        Ok(within_budget(rows, limit, EventBudget::Raw(max_bytes), false)?.0)
     }
 
     pub fn events_before(&self, run: &str, before: i64) -> Result<(Vec<Event>, bool)> {
@@ -757,6 +757,39 @@ impl Db<'_> {
     /// text snapshots a later snapshot of the same message replaced within its turn.
     /// Also reports whether earlier such events remain above `after`.
     pub fn events_between(&self, run: &str, after: i64, before: i64) -> Result<(Vec<Event>, bool)> {
+        self.history_events(
+            run,
+            after,
+            before,
+            HISTORY_PAGE_EVENTS,
+            EventBudget::Gzip(HISTORY_PAGE_BYTES),
+        )
+    }
+
+    /// SSE is intentionally uncompressed; preserve its small initial/replay window.
+    pub(crate) fn live_events_between(
+        &self,
+        run: &str,
+        after: i64,
+        before: i64,
+    ) -> Result<(Vec<Event>, bool)> {
+        self.history_events(
+            run,
+            after,
+            before,
+            100,
+            EventBudget::Raw(HISTORY_PAGE_BYTES),
+        )
+    }
+
+    fn history_events(
+        &self,
+        run: &str,
+        after: i64,
+        before: i64,
+        limit: i64,
+        budget: EventBudget,
+    ) -> Result<(Vec<Event>, bool)> {
         let sql = "SELECT e.id,e.run_id,e.created_at,e.type,e.text,e.payload FROM events e
 WHERE e.run_id=? AND e.id>? AND e.id<? AND (
  json_extract(e.payload,'$.item.type') IS NOT 'agent_message'
@@ -768,12 +801,9 @@ WHERE e.run_id=? AND e.id>? AND e.id<? AND (
    AND n.id>e.id AND n.id<COALESCE((SELECT t.id FROM events t WHERE t.run_id=e.run_id AND t.type='turn.started' AND t.id>e.id ORDER BY t.id LIMIT 1),9223372036854775807)
  )) ORDER BY e.id DESC LIMIT ?";
         let mut stmt = self.0.prepare_cached(sql)?;
-        let mut rows = stmt.query_map(
-            params![run, after, before, HISTORY_PAGE_EVENTS + 1],
-            event_row,
-        )?;
-        let mut events = within_budget(&mut rows, HISTORY_PAGE_EVENTS, HISTORY_PAGE_BYTES)?;
-        let more = rows.next().transpose()?.is_some();
+        let mut rows = stmt.query_map(params![run, after, before, limit + 1], event_row)?;
+        let (mut events, trimmed) = within_budget(&mut rows, limit, budget, true)?;
+        let more = trimmed || rows.next().transpose()?.is_some();
         events.reverse();
         Ok((events, more))
     }
@@ -822,11 +852,17 @@ WHERE e.run_id=? AND e.id>? AND e.id<? AND (
     }
 }
 
-/// Events per page of history, and their approximate byte budget.
-const HISTORY_PAGE_EVENTS: i64 = 100;
+/// Gzip-budgeted history windows, with a separate decoded memory ceiling.
+const HISTORY_PAGE_EVENTS: i64 = 1000;
 const HISTORY_PAGE_BYTES: usize = 256 * 1024;
+const HISTORY_PAGE_DECODED_BYTES: usize = 4 * 1024 * 1024;
 
 type EventRow = (i64, String, i64, String, String, Option<String>);
+
+enum EventBudget {
+    Raw(usize),
+    Gzip(usize),
+}
 
 fn event_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
     Ok((
@@ -839,20 +875,32 @@ fn event_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
     ))
 }
 
-/// Stops reading rows at the byte budget, rather than allocating an entire page
-/// of large historical outputs. Stored payloads are already JSON: their bytes are
-/// kept as they are instead of being parsed into intermediate object nodes.
+/// Probe batches, then use their compression ratio to jump toward the budget.
+/// Large/noisy rows stop early instead of reading and compressing 1,000 rows.
+/// Backwards reads measure chronological order, as delivered to the clients.
+/// Keep one oversized event whole so every cursor can make progress.
 fn within_budget(
     rows: impl Iterator<Item = rusqlite::Result<EventRow>>,
     limit: i64,
-    max_bytes: usize,
-) -> Result<Vec<Event>> {
+    budget: EventBudget,
+    backwards: bool,
+) -> Result<(Vec<Event>, bool)> {
     let mut events = Vec::new();
-    let mut bytes = 0;
+    let (max_bytes, compressed) = match budget {
+        EventBudget::Raw(bytes) => (bytes, false),
+        EventBudget::Gzip(bytes) => (bytes, true),
+    };
+    let mut bytes = if compressed { 2 } else { 0 };
+    let mut trimmed = false;
+    let mut next_count = 128.min(limit as usize);
+    let mut next_bytes = max_bytes.saturating_mul(2);
+    let mut compressed_bytes = None;
     for row in rows {
         let (id, run, created, kind, text, payload) = row?;
-        bytes += text.len() + payload.as_ref().map_or(0, String::len) + 256;
-        events.push(Event {
+        if !compressed {
+            bytes += text.len() + payload.as_ref().map_or(0, String::len) + 256;
+        }
+        let event = Event {
             id,
             run_id: run,
             created_at: created,
@@ -862,12 +910,83 @@ fn within_budget(
             payload: payload
                 .map(serde_json::value::RawValue::from_string)
                 .transpose()?,
-        });
-        if bytes >= max_bytes || events.len() >= limit as usize {
+        };
+        if compressed {
+            let mut size = CountBytes::default();
+            serde_json::to_writer(&mut size, &event)?;
+            let encoded_bytes = size.0 + usize::from(!events.is_empty());
+            if !events.is_empty() && bytes + encoded_bytes > HISTORY_PAGE_DECODED_BYTES {
+                trimmed = true;
+                break;
+            }
+            bytes += encoded_bytes;
+        }
+        events.push(event);
+        compressed_bytes = None;
+        if events.len() >= limit as usize || !compressed && bytes >= max_bytes {
             break;
         }
+        if compressed && (events.len() >= next_count || bytes >= next_bytes) {
+            let size = compressed_event_bytes(&events, backwards)?;
+            compressed_bytes = Some(size);
+            if size >= max_bytes {
+                break;
+            }
+            let minimum_count = (events.len() + 64).min(limit as usize);
+            next_count = events
+                .len()
+                .saturating_mul(max_bytes)
+                .div_ceil(size.max(1))
+                .clamp(minimum_count, limit as usize);
+            next_bytes = bytes
+                .saturating_mul(max_bytes)
+                .div_ceil(size.max(1))
+                .max(bytes.saturating_add(max_bytes));
+        }
     }
-    Ok(events)
+
+    if compressed && events.len() > 1 {
+        let mut size = match compressed_bytes {
+            Some(size) => size,
+            None => compressed_event_bytes(&events, backwards)?,
+        };
+        // A proportional cut avoids recompressing almost the same large prefix
+        // at every binary-search step. Leave 1% headroom and verify the result.
+        while size > max_bytes && events.len() > 1 {
+            let estimated = events.len().saturating_mul(max_bytes) / size;
+            let count = (estimated.saturating_mul(99) / 100).clamp(1, events.len() - 1);
+            events.truncate(count);
+            trimmed = true;
+            size = compressed_event_bytes(&events, backwards)?;
+        }
+    }
+    Ok((events, trimmed))
+}
+
+#[derive(Default)]
+struct CountBytes(usize);
+
+impl std::io::Write for CountBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn compressed_event_bytes(events: &[Event], backwards: bool) -> Result<usize> {
+    let mut gzip =
+        flate2::write::GzEncoder::new(CountBytes::default(), flate2::Compression::fast());
+    if backwards {
+        let ordered: Vec<_> = events.iter().rev().collect();
+        serde_json::to_writer(&mut gzip, &ordered)?;
+    } else {
+        serde_json::to_writer(&mut gzip, events)?;
+    }
+    Ok(gzip.finish()?.0)
 }
 
 /// Shallow merge: every top-level key of `patch` replaces the key in `value`

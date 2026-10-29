@@ -1,8 +1,190 @@
 mod common;
 
-use common::{Fixture, RelayedInstallation, login};
+use common::{Fixture, MissionFixture, RelayedInstallation, login};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
+
+#[tokio::test]
+async fn history_compression_is_negotiated_and_preserved_through_the_relay() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let task = relay.installation.task_fixture(json!({
+        "name": "Compressed history", "prompt": "Test", "agentId": cairn_installation::config::MAIN_AGENT_ID,
+    }), None).await.unwrap();
+    let run = relay
+        .installation
+        .enqueue(task["id"].as_str().unwrap(), "manual", None)
+        .await
+        .unwrap();
+    let run_id = run["id"].as_str().unwrap().to_owned();
+    let id = run_id.clone();
+    relay
+        .installation
+        .store
+        .transaction(move |db| {
+            for _ in 0..200 {
+                db.event(
+                    &id,
+                    &cairn_contracts::EventKind::Output,
+                    &"history 🦊 ".repeat(500),
+                    None,
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let id = run_id.clone();
+    let first = relay
+        .installation
+        .store
+        .read(move |db| Ok(db.event_page(&id, 0, 1)?[0].id))
+        .await
+        .unwrap();
+    let path = format!(
+        "/runs/{run_id}/history?before={}&history=v1:{run_id}:{first}",
+        i64::MAX
+    );
+    let response = relay
+        .get(&path)
+        .header("accept-encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-encoding"], "gzip");
+    assert_eq!(response.headers()["x-cairn-transport"], "relay");
+    let encoded = response.bytes().await.unwrap();
+    assert!(encoded.len() < 256 * 1024);
+    let mut decoded = String::new();
+    std::io::Read::read_to_string(
+        &mut flate2::read::GzDecoder::new(encoded.as_ref()),
+        &mut decoded,
+    )
+    .unwrap();
+    let page: Value = serde_json::from_str(&decoded).unwrap();
+    assert!(decoded.len() > 256 * 1024);
+    assert!(page["events"].as_array().unwrap().len() >= 200);
+    let plain = relay
+        .get(&path)
+        .header("accept-encoding", "identity")
+        .send()
+        .await
+        .unwrap();
+    assert!(!plain.headers().contains_key("content-encoding"));
+    assert_eq!(plain.json::<Value>().await.unwrap(), page);
+    let stream = relay
+        .get(&format!("/runs/{run_id}/stream?window=1"))
+        .header("accept-encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert!(!stream.headers().contains_key("content-encoding"));
+    drop(stream);
+    relay.close().await;
+}
+
+#[tokio::test]
+#[ignore = "local endpoint measurement; run alone with --ignored --nocapture --test-threads=1"]
+async fn history_endpoint_measurement() {
+    use rand::{RngCore, SeedableRng};
+    use std::time::Instant;
+    for workload in ["repetitive", "mixed", "noise"] {
+        let relay = RelayedInstallation::new(axum::Router::new()).await;
+        let task = relay.installation.task_fixture(json!({
+            "name":"History measurement","prompt":"Test","agentId":cairn_installation::config::MAIN_AGENT_ID,
+        }), None).await.unwrap();
+        let run = relay
+            .installation
+            .enqueue(task["id"].as_str().unwrap(), "manual", None)
+            .await
+            .unwrap();
+        let run_id = run["id"].as_str().unwrap().to_owned();
+        let id = run_id.clone();
+        relay.installation.store.transaction(move |db| {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(391);
+            for n in 0..1500 {
+                let output = if workload == "noise" || workload == "mixed" && n % 10 == 0 {
+                    let mut bytes = [0; 2048];
+                    rng.fill_bytes(&mut bytes);
+                    hex::encode(bytes)
+                } else { "src/module/example.rs\n".repeat(80) };
+                db.event(&id, &cairn_contracts::EventKind::ItemCompleted, "tool", Some(&json!({
+                    "item":{"id":format!("tool-{n}"),"type":"command_execution","command":"rg --files","aggregated_output":output},
+                })))?;
+            }
+            Ok(())
+        }).await.unwrap();
+        let id = run_id.clone();
+        let first = relay
+            .installation
+            .store
+            .read(move |db| Ok(db.event_page(&id, 0, 1)?[0].id))
+            .await
+            .unwrap();
+        let request = |before| {
+            let path =
+                format!("/runs/{run_id}/history?before={before}&history=v1:{run_id}:{first}");
+            let pending = relay.get(&path).header("accept-encoding", "gzip");
+            async move {
+                let started = Instant::now();
+                let response = pending.send().await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let gzip = response
+                    .headers()
+                    .get("content-encoding")
+                    .is_some_and(|v| v == "gzip");
+                let bytes = response.bytes().await.unwrap();
+                let encoded = bytes.len();
+                let decoded = if gzip {
+                    let mut plain = Vec::new();
+                    std::io::Read::read_to_end(
+                        &mut flate2::read::GzDecoder::new(bytes.as_ref()),
+                        &mut plain,
+                    )
+                    .unwrap();
+                    plain
+                } else {
+                    bytes.to_vec()
+                };
+                let page: Value = serde_json::from_slice(&decoded).unwrap();
+                (page, encoded, decoded.len(), started.elapsed().as_micros())
+            }
+        };
+        let (opening, encoded, decoded, cold_us) = request(i64::MAX).await;
+        let mut warm = Vec::new();
+        for _ in 0..12 {
+            warm.push(request(i64::MAX).await.3);
+        }
+        warm.sort();
+        let started = Instant::now();
+        let mut before = i64::MAX;
+        let mut pages = 0;
+        let mut transferred = 0;
+        loop {
+            let (page, bytes, _, _) = request(before).await;
+            pages += 1;
+            transferred += bytes;
+            let oldest = page["oldest"].as_i64().unwrap();
+            assert!(oldest < before);
+            before = oldest;
+            if page["hasOlder"] == false {
+                break;
+            }
+        }
+        println!(
+            "HISTORY_ENDPOINT {}",
+            json!({
+                "label":std::env::var("CAIRN_HISTORY_MEASUREMENT_LABEL").unwrap_or_else(|_|"candidate".into()),
+                "workload":workload,"rows":1500,"openingEvents":opening["events"].as_array().unwrap().len(),
+                "openingTransferredBytes":encoded,"openingDecodedBytes":decoded,
+                "coldUs":cold_us,"warmP50Us":warm[6],"warmP95Us":warm[11],
+                "historyPages":pages,"historyTransferredBytes":transferred,"historyUs":started.elapsed().as_micros(),
+                "conditions":"loopback HTTP through real Beacon/installation relay; first-read cold, warm OS cache; no simulated network latency"
+            })
+        );
+        relay.close().await;
+    }
+}
 
 #[tokio::test]
 async fn additional_nodes_enroll_directly_and_keep_their_channel_outside_the_relay() {

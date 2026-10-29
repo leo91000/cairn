@@ -1171,6 +1171,7 @@ dependencies = [
  "cairn-protocol",
  "crc32fast",
  "email_address",
+ "flate2",
  "futures-util",
  "hex",
  "ipnet",

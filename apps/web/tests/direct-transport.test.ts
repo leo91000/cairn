@@ -1,3 +1,5 @@
+import { Buffer } from 'node:buffer'
+import { gzipSync } from 'node:zlib'
 import {
   afterEach,
   beforeEach,
@@ -183,6 +185,65 @@ it('reads JSON from the actual direct response instead of relaying its payload',
     body: btoa('{"marker":"direct"}'),
   })
   expect(await response).toEqual({ marker: 'direct' })
+})
+
+it('negotiates and decodes gzip history on the direct channel', async () => {
+  const { api, channel } = await direct()
+  const response = api('/runs/r/history?before=42&history=v1:r:1')
+  const decoded = { events: [{ id: 41, text: 'History 🦊 '.repeat(1000) }], hasOlder: true }
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
+  reply(channel, {
+    type: 'response',
+    id: request.id,
+    status: 200,
+    headers: [['content-type', 'application/json'], ['content-encoding', 'gzip']],
+    body: gzipSync(JSON.stringify(decoded)).toString('base64'),
+  })
+  expect(await response).toEqual(decoded)
+  expect(request.headers).toContainEqual(['accept-encoding', 'gzip'])
+})
+
+it('requests identity when browser gzip decompression is unavailable', async () => {
+  vi.stubGlobal('DecompressionStream', undefined)
+  const { api, channel } = await direct()
+  const response = api('/runs/r/history?before=42&history=v1:r:1')
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
+  expect(request.headers).toContainEqual(['accept-encoding', 'identity'])
+  reply(channel, {
+    type: 'response',
+    id: request.id,
+    status: 200,
+    headers: [],
+    body: btoa('{"events":[]}'),
+  })
+  expect(await response).toEqual({ events: [] })
+})
+
+it.each(['corrupt', 'too large'])('rejects a %s gzip response on the direct channel', async (kind) => {
+  const { DirectChannel } = await import('../src/direct-channel')
+  const channel = new Channel()
+  channel.readyState = 'open'
+  const transport = new DirectChannel(channel as unknown as RTCDataChannel, { account_id: 'a', role: 'owner' }, () => {})
+  try {
+    const pending = transport.request('/api/runs/r/history')
+    await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+    const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
+    const body = kind === 'corrupt' ? Buffer.from('invalid gzip') : gzipSync('x'.repeat(8_000_001))
+    reply(channel, {
+      type: 'response',
+      id: request.id,
+      status: 200,
+      headers: [['content-encoding', 'gzip'], ['content-length', String(body.length)]],
+      body: body.toString('base64'),
+    })
+    const response = await pending
+    expect(response.headers.has('content-encoding')).toBe(false)
+    expect(response.headers.has('content-length')).toBe(false)
+    await expect(response.text()).rejects.toThrow()
+  }
+  finally { transport.close() }
 })
 
 it('retries interrupted reads on relay but leaves other mutations visibly failed', async () => {

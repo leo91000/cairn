@@ -387,7 +387,7 @@ async fn following_viewer_resumes_a_long_backlog_on_the_recent_window() {
         .await
         .unwrap();
     let previous = event_ids(&older["events"]);
-    assert_eq!(previous, backlog[backlog.len() - 200..backlog.len() - 100]);
+    assert_eq!(previous, backlog[backlog.len() - 1100..backlog.len() - 100]);
 
     // The viewer then follows live output without another reset.
     f.append(1).await;
@@ -419,7 +419,7 @@ async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
     let history = batch["history"].as_str().unwrap().to_owned();
     drop(initial);
 
-    // While the reader was away, an answer streamed as 300 snapshots after a tool call.
+    // While the reader was away, an answer streamed as 1300 snapshots after a tool call.
     let run = f.run.clone();
     f.service
         .store
@@ -428,9 +428,9 @@ async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
                 json!({ "item": { "id": "tool", "type": "command_execution", "command": "ls" } });
             db.event(&run, &EventKind::ItemCompleted, "ls", Some(&tool))?;
             let mut answer = String::new();
-            for n in 0..=300 {
+            for n in 0..=1300 {
                 answer.push_str(&format!("word {n} "));
-                let kind = if n == 300 {
+                let kind = if n == 1300 {
                     "item.completed"
                 } else {
                     "item.updated"
@@ -450,10 +450,10 @@ async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
         .await
         .unwrap();
     let all = ids(&f).await;
-    let replaced = all[all.len() - 302..all.len() - 2].to_vec();
+    let replaced = all[all.len() - 1302..all.len() - 2].to_vec();
 
     // Following or not, the catch-up is the tool call, the final answer, the turn's
-    // end and any later output: none of the 300 replaced snapshots.
+    // end and any later output: none of the 1300 replaced snapshots.
     for following in ["&recent=1", ""] {
         let expected: Vec<i64> = ids(&f)
             .await
@@ -477,7 +477,7 @@ async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
             batch["events"][1]["payload"]["item"]["text"]
                 .as_str()
                 .unwrap()
-                .ends_with("word 300 ")
+                .ends_with("word 1300 ")
         );
 
         // Live output then continues on the same connection.
@@ -926,7 +926,7 @@ async fn cache_revision_resumes_valid_history_and_resets_pruned_or_foreign_histo
 #[tokio::test]
 async fn recent_window_pages_backwards_without_gaps_and_keeps_live_cursor() {
     let f = Fixture::new().await;
-    f.append(245).await;
+    f.append(2450).await;
     let all = ids(&f).await;
     let mut stream = f
         .open_path(&format!("/api/runs/{}/stream?window=1", f.run), None)
@@ -977,6 +977,87 @@ async fn recent_window_pages_backwards_without_gaps_and_keeps_live_cursor() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn compressed_history_budget_keeps_repetitive_output_and_preserves_trimmed_cursors() {
+    use rand::{RngCore, SeedableRng};
+    let f = Fixture::new().await;
+    let run = f.run.clone();
+    f.service
+        .store
+        .transaction(move |db| {
+            for _ in 0..200 {
+                db.event(
+                    &run,
+                    &EventKind::Output,
+                    &"tool output 🦊 ".repeat(700),
+                    None,
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let before_noise = ids(&f).await;
+    let run = f.run.clone();
+    let window = f
+        .service
+        .store
+        .read(move |db| db.events_before(&run, i64::MAX))
+        .await
+        .unwrap();
+    assert!(!window.1);
+    assert_eq!(window.0.len(), before_noise.len());
+    assert!(serde_json::to_vec(&window.0).unwrap().len() > 256 * 1024);
+
+    let run = f.run.clone();
+    f.service
+        .store
+        .transaction(move |db| {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(19);
+            for _ in 0..24 {
+                let mut noise = vec![0; 96 * 1024];
+                rng.fill_bytes(&mut noise);
+                db.event(
+                    &run,
+                    &EventKind::Output,
+                    "noise",
+                    Some(&json!({"noise": hex::encode(noise)})),
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let expected = ids(&f).await;
+    let mut before = i64::MAX;
+    let mut collected = Vec::new();
+    let mut pages = 0;
+    loop {
+        let run = f.run.clone();
+        let (events, more) = f
+            .service
+            .store
+            .read(move |db| db.events_before(&run, before))
+            .await
+            .unwrap();
+        assert!(!events.is_empty());
+        let bytes = serde_json::to_vec(&events).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut encoder, &bytes).unwrap();
+        assert!(encoder.finish().unwrap().len() <= 256 * 1024);
+        before = events[0].id;
+        let mut next: Vec<_> = events.into_iter().map(|event| event.id).collect();
+        next.extend(collected);
+        collected = next;
+        pages += 1;
+        if !more {
+            break;
+        }
+    }
+    assert!(pages > 2);
+    assert_eq!(collected, expected);
 }
 
 #[tokio::test]
