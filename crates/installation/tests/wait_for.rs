@@ -468,18 +468,15 @@ async fn github_monitor_only_probes_resumable_wakeups() {
     ] {
         let mut blocked = chat.clone();
         blocked[field] = value;
-        f.s.store
-            .save_conversation_boundary(blocked.clone())
-            .await
-            .unwrap();
+        blocked["revision"] = f.s.conversation_boundary(&f.chat).await.unwrap()["revision"].clone();
+        let blocked = f.s.store.save_conversation_boundary(blocked).await.unwrap();
         conditions::poll_once(&f.s).await.unwrap();
         assert_eq!(f.calls().len(), 1, "chat guard: {field}");
         assert_eq!(f.s.conversation_boundary(&f.chat).await.unwrap(), blocked);
     }
-    f.s.store
-        .save_conversation_boundary(chat.clone())
-        .await
-        .unwrap();
+    let mut chat = chat;
+    chat["revision"] = f.s.conversation_boundary(&f.chat).await.unwrap()["revision"].clone();
+    f.s.store.save_conversation_boundary(chat).await.unwrap();
 
     for (field, value) in [
         ("status", json!("running")),
@@ -534,10 +531,7 @@ async fn github_monitor_rechecks_session_restart_after_the_probe() {
     // new-session's normal cancellation of the wakeup and pause of the chat.
     let mut chat = f.s.conversation_boundary(&f.chat).await.unwrap();
     chat["sessionRestartRequested"] = true.into();
-    f.s.store
-        .save_conversation_boundary(chat.clone())
-        .await
-        .unwrap();
+    let chat = f.s.store.save_conversation_boundary(chat).await.unwrap();
     std::fs::write(f.root.path().join("github-release"), "").unwrap();
     observer.await.unwrap().unwrap();
     assert_eq!(f.s.conversation_boundary(&f.chat).await.unwrap(), chat);
@@ -734,10 +728,7 @@ async fn deferred_target_conversations_are_not_finished_and_cycles_are_rejected(
         "condition": { "type": "run_finished", "runId": f.run },
         "wakeAt": now() + 420000,
     });
-    f.s.store
-        .save_conversation_boundary(other.clone())
-        .await
-        .unwrap();
+    let mut other = f.s.store.save_conversation_boundary(other).await.unwrap();
     f.s.store
         .change_run(
             text(&target, "id"),

@@ -362,7 +362,7 @@ async fn delivered_message_retains_its_original_submission_timestamp() {
         .chat_send(text(&chat, "id"), json!({ "id": id(), "text": "Hello" }))
         .await
         .unwrap();
-    let mut chat = chat;
+    let mut chat = s.conversation_boundary(text(&chat, "id")).await.unwrap();
     chat["runId"] = run["id"].clone();
     s.store.save_conversation_boundary(chat).await.unwrap();
     s.chat_acknowledge(text(&run, "id"), text(&message, "id"))
