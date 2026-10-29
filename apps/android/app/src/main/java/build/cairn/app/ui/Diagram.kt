@@ -459,6 +459,19 @@ private class GraphBuilder {
     }
 
     fun build(title: String?, dir: Direction): GraphDiagram {
+        // Reusing a cluster ID can reparent an existing ancestor. Reject cycles before layout.
+        val checked = mutableSetOf<String>()
+        for (id in clusters.keys) {
+            val ancestors = mutableSetOf<String>()
+            var current: String? = id
+            while (current != null && current !in checked) {
+                if (!ancestors.add(current))
+                    throw DiagramError("Subgraphs cannot contain themselves.")
+                current = clusters[current]?.parent
+            }
+            checked.addAll(ancestors)
+        }
+
         val nodes = nodes.values.filter { !clusters.containsKey(it.id) }
         for (node in nodes) {
             val classes = nodeClasses[node.id].orEmpty().map { classes[it] }

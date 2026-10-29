@@ -152,3 +152,48 @@ test('unsupported and invalid Mermaid sources stay readable as code', async ({ p
   await expect(failed.locator('.diagram-source')).toContainText('A[Start --> B')
   await expect(failed.getByRole('button', { name: 'Open diagram' })).toHaveCount(0)
 })
+
+test('identical closed and streaming fences keep their own completion state', async ({ page }) => {
+  const source = 'flowchart TD\nA-->B'
+  const closed = `\`\`\`mermaid\n${source}\n\`\`\``
+  const open = `\`\`\`mermaid\n${source}`
+  await page.evaluate(text => window.chatRendering.markdown(text), `${closed}\n\n${open}`)
+  await expect(page.locator('#app figure.diagram')).toHaveCount(1)
+  await expect(page.locator('#app .markdown > pre code')).toHaveText(`${source}\n`)
+  await page.evaluate(text => window.chatRendering.markdown(text), `${closed}\n\n${closed}`)
+  await expect(page.locator('#app figure.diagram')).toHaveCount(2)
+})
+
+test('node label clicks open their safe link', async ({ page }) => {
+  await page.evaluate(text => window.chatRendering.markdown(text), '\`\`\`mermaid\nflowchart TD\nA[Documentation]\nclick A "https://example.test/docs"\n\`\`\`')
+  await page.evaluate(() => {
+    document.addEventListener('click', (event) => {
+      const anchor = event.target instanceof Element ? event.target.closest('a') : null
+      document.body.dataset.diagramLink = anchor?.getAttribute('href') ?? ''
+      event.preventDefault()
+    }, { once: true })
+  })
+  // WebKit's protocol bounding box omits SVG text positioning; use its actual DOM geometry.
+  const label = await page.locator('#app figure.diagram svg text').evaluate((element) => {
+    const {
+      x,
+      y,
+      width,
+      height,
+    } = element.getBoundingClientRect()
+    return {
+      x,
+      y,
+      width,
+      height,
+    }
+  })
+  await page.mouse.click(label.x + label.width / 2, label.y + label.height / 2)
+  await expect(page.locator('body')).toHaveAttribute('data-diagram-link', 'https://example.test/docs')
+})
+
+test('cyclic subgraphs fall back to readable source without blocking the page', async ({ page }) => {
+  await page.evaluate(text => window.chatRendering.markdown(text), '\`\`\`mermaid\nflowchart TD\nsubgraph S\nsubgraph S\nA\nend\nend\n\`\`\`')
+  await expect(page.locator('#app .diagram-error')).toContainText('Subgraphs cannot contain themselves.')
+  await expect(page.locator('#app .diagram-source')).toContainText('subgraph S')
+})

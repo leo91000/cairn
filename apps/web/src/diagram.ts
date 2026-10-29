@@ -369,6 +369,22 @@ class GraphBuilder {
   }
 
   build(title: string | undefined, dir: Direction): GraphDiagram {
+    // Reusing a cluster ID can reparent an existing ancestor. Reject cycles before layout.
+    const checked = new Set<string>()
+    for (const id of this.clusters.keys()) {
+      const ancestors = new Set<string>()
+      let current: string | undefined = id
+      while (current && !checked.has(current)) {
+        if (ancestors.has(current))
+          throw new DiagramError('Subgraphs cannot contain themselves.')
+        ancestors.add(current)
+        current = this.clusters.get(current)?.parent
+      }
+
+      for (const ancestor of ancestors)
+        checked.add(ancestor)
+    }
+
     const nodes = [...this.nodes.values()].filter(node => !this.clusters.has(node.id))
     for (const node of nodes) {
       const classes = (this.nodeClasses.get(node.id) ?? []).map(name => this.classes.get(name))

@@ -25,7 +25,11 @@ end of its list item or quote, which the web keeps as code.
 Validation: shared corpus `tests/fixtures/diagrams.json` (parsed models and layout
 signatures must match exactly) in `apps/web/tests/diagram.test.ts` and `DiagramCorpusTest`;
 browser journeys in `tests/e2e/chat-rendering.spec.ts` (Chromium and WebKit);
-`DiagramMarkdownTest` on Robolectric.
+`DiagramMarkdownTest` on Robolectric and `DiagramDeviceTest` on Android 16 (native drawing
+in both themes, closed-fence streaming, source/copy, node links, pinch/pan/double-tap fit,
+and a readable PNG shared through FileProvider). The corpus also covers cyclic hierarchies,
+long titles, large pie legends and single-participant notes; both platforms check text and
+path bounds and a deterministic measurement budget for long labels.
 
 ## Direct storage and overdue synchronization (2026-10-28)
 

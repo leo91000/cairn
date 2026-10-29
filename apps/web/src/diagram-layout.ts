@@ -55,6 +55,7 @@ export interface TextItem {
   weight: number
   anchor: 'start' | 'middle' | 'end'
   fill: Paint
+  link?: string
 }
 
 export type SceneItem = PathItem | TextItem
@@ -111,16 +112,37 @@ export function wrapText(text: string, size: number, weight: number, max: number
       if (line)
         lines.push(line)
       line = ''
-      let rest = word
-      while (measure.width(rest, size, weight) > max && rest.length > 1) {
-        let cut = rest.length - 1
-        while (cut > 1 && measure.width(rest.slice(0, cut), size, weight) > max)
-          cut--
-        lines.push(rest.slice(0, cut))
-        rest = rest.slice(cut)
-      }
+      let start = 0
+      while (start < word.length) {
+        const remaining = word.length - start
+        let low = 1
+        let high = Math.min(2, remaining)
+        // Grow from the start of each segment, never rescan the entire remaining word.
+        while (high < remaining && measure.width(word.slice(start, start + high), size, weight) <= max) {
+          low = high
+          high = Math.min(high * 2, remaining)
+        }
 
-      line = rest
+        if (measure.width(word.slice(start, start + high), size, weight) <= max) {
+          low = high
+        }
+        else {
+          while (high - low > 1) {
+            const middle = Math.floor((low + high) / 2)
+            if (measure.width(word.slice(start, start + middle), size, weight) <= max)
+              low = middle
+            else
+              high = middle
+          }
+        }
+
+        const segment = word.slice(start, start + low)
+        start += low
+        if (start < word.length)
+          lines.push(segment)
+        else
+          line = segment
+      }
     }
 
     lines.push(line)
@@ -1307,21 +1329,24 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
   const titleSpace = titleBlock ? titleBlock.height + 14 : 0
   const extentX = maxX - minX
   const extentY = maxY
+  const graphWidth = (horizontal ? extentY : extentX) + MARGIN * 2
+  const titleWidth = titleBlock ? titleBlock.width + MARGIN * 2 : 0
+  const horizontalMargin = MARGIN + Math.max(0, (titleWidth - graphWidth) / 2)
   const transform = ([x, y]: [number, number]): [number, number] => {
     const lx = x - minX
     switch (graph.direction) {
       case 'BT':
-        return [lx + MARGIN, extentY - y + MARGIN + titleSpace]
+        return [lx + horizontalMargin, extentY - y + MARGIN + titleSpace]
       case 'LR':
-        return [y + MARGIN, lx + MARGIN + titleSpace]
+        return [y + horizontalMargin, lx + MARGIN + titleSpace]
       case 'RL':
-        return [extentY - y + MARGIN, lx + MARGIN + titleSpace]
+        return [extentY - y + horizontalMargin, lx + MARGIN + titleSpace]
       default:
-        return [lx + MARGIN, y + MARGIN + titleSpace]
+        return [lx + horizontalMargin, y + MARGIN + titleSpace]
     }
   }
 
-  const width = Math.ceil((horizontal ? extentY : extentX) + MARGIN * 2)
+  const width = Math.ceil(Math.max(graphWidth, titleWidth))
   const height = Math.ceil((horizontal ? extentX : extentY) + MARGIN * 2 + titleSpace)
   const finalBox = (box: Box): Box => {
     const [x0, y0] = transform([box.x, box.y])
@@ -1577,6 +1602,7 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         ...(filled ? { fill: { tone: 'ink' } as Paint } : {}),
         stroke: filled ? { tone: 'ink' } : stroke,
         width: 1.25,
+        ...(source.link ? { link: source.link } : {}),
       })
     }
 
@@ -1590,6 +1616,7 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         weight: 500,
         anchor: 'middle',
         fill: textOn(style, `${tone}-ink`),
+        ...(source.link ? { link: source.link } : {}),
       })
     }
   }
@@ -1722,8 +1749,23 @@ export function layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): 
         else
           rightRoom = Math.max(rightRoom, w + 12 - heads.at(-1)!.w / 2)
       }
-      else if (ids.length > 1) {
-        need(ids[0]!, ids[1]!, w - 40)
+      else {
+        const first = Math.min(...ids)
+        const last = Math.max(...ids)
+        if (first !== last) {
+          need(first, last, w - 40)
+        }
+        else {
+          const sideRoom = Math.max(0, (w - heads[first]!.w) / 2)
+          if (first === 0)
+            leftRoom = Math.max(leftRoom, sideRoom)
+          else
+            need(first - 1, first, w / 2 + heads[first - 1]!.w / 2 + 12)
+          if (last === heads.length - 1)
+            rightRoom = Math.max(rightRoom, sideRoom)
+          else
+            need(last, last + 1, w / 2 + heads[last + 1]!.w / 2 + 12)
+        }
       }
 
       return { item, text }
@@ -2161,10 +2203,11 @@ export function layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): 
     }
   }
 
+  const width = Math.ceil(Math.max(widest, titleBlock ? titleBlock.width + MARGIN * 2 : 0))
   if (titleBlock) {
     items.push({
       kind: 'text',
-      x: widest / 2,
+      x: width / 2,
       y: MARGIN + titleBlock.height / 2,
       lines: titleBlock.lines,
       size: TITLE_FONT,
@@ -2177,7 +2220,7 @@ export function layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): 
   items.push(...frames.filter(item => item.kind === 'path' && item.opacity !== undefined), ...lifelines, ...bars, ...frames.filter(item => !(item.kind === 'path' && item.opacity !== undefined)), ...rows, ...participants)
   const count = diagram.participants.length
   return {
-    width: Math.ceil(Math.max(widest, titleBlock ? titleBlock.width + MARGIN * 2 : 0)),
+    width,
     height: Math.ceil(bottomTop + headHeight + MARGIN),
     items,
     label: diagram.title ?? `Sequence diagram with ${count} ${count === 1 ? 'participant' : 'participants'}`,
@@ -2249,11 +2292,13 @@ export function layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
   const radius = 92
   const inner = 56
   const cx = MARGIN + radius
-  const cy = top + radius
+  const visible = diagram.slices.filter(slice => slice.value > 0)
+  const rowHeight = 24
+  const legendHeight = visible.length * rowHeight
+  const cy = top + Math.max(radius, legendHeight / 2)
   const format = (value: number) => (Math.round(value * 100) / 100).toLocaleString('en-US')
 
   let angle = 0
-  const visible = diagram.slices.filter(slice => slice.value > 0)
   visible.forEach((slice, position) => {
     const sweep = (slice.value / total) * Math.PI * 2
     const paint: Paint = { tone: `series-${position % SERIES}` }
@@ -2306,8 +2351,6 @@ export function layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
   })
 
   const legendX = cx + radius + 32
-  const rowHeight = 24
-  const legendHeight = visible.length * rowHeight
   let legendY = cy - legendHeight / 2 + rowHeight / 2
   let legendWidth = 0
   for (const [position, slice] of visible.entries()) {

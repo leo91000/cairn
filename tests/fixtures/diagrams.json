@@ -1724,6 +1724,378 @@
         "height": 86,
         "items": 6
       }
+    },
+    {
+      "name": "flowchart-title-TD",
+      "source": "---\ntitle: Production deployment pipeline\n---\nflowchart TD\nA[Start]",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Start",
+            "shape": "rect"
+          }
+        ],
+        "edges": [],
+        "clusters": [],
+        "title": "Production deployment pipeline"
+      },
+      "layout": {
+        "width": 288,
+        "height": 102,
+        "items": 3
+      }
+    },
+    {
+      "name": "flowchart-title-BT",
+      "source": "---\ntitle: Production deployment pipeline\n---\nflowchart BT\nA[Start]",
+      "diagram": {
+        "kind": "graph",
+        "direction": "BT",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Start",
+            "shape": "rect"
+          }
+        ],
+        "edges": [],
+        "clusters": [],
+        "title": "Production deployment pipeline"
+      },
+      "layout": {
+        "width": 288,
+        "height": 102,
+        "items": 3
+      }
+    },
+    {
+      "name": "flowchart-title-LR",
+      "source": "---\ntitle: Production deployment pipeline\n---\nflowchart LR\nA[Start]",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Start",
+            "shape": "rect"
+          }
+        ],
+        "edges": [],
+        "clusters": [],
+        "title": "Production deployment pipeline"
+      },
+      "layout": {
+        "width": 288,
+        "height": 102,
+        "items": 3
+      }
+    },
+    {
+      "name": "flowchart-title-RL",
+      "source": "---\ntitle: Production deployment pipeline\n---\nflowchart RL\nA[Start]",
+      "diagram": {
+        "kind": "graph",
+        "direction": "RL",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Start",
+            "shape": "rect"
+          }
+        ],
+        "edges": [],
+        "clusters": [],
+        "title": "Production deployment pipeline"
+      },
+      "layout": {
+        "width": 288,
+        "height": 102,
+        "items": 3
+      }
+    },
+    {
+      "name": "sequence-title",
+      "source": "sequenceDiagram\ntitle Production deployment pipeline\nparticipant A",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          }
+        ],
+        "items": [],
+        "title": "Production deployment pipeline"
+      },
+      "layout": {
+        "width": 288,
+        "height": 178,
+        "items": 6
+      }
+    },
+    {
+      "name": "sequence-note-single",
+      "source": "sequenceDiagram\nparticipant A\nNote over A: This is a fairly long explanation of the step",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "note",
+            "placement": "over",
+            "participants": [
+              "A"
+            ],
+            "label": "This is a fairly long explanation of the step"
+          }
+        ]
+      },
+      "layout": {
+        "width": 213,
+        "height": 206,
+        "items": 8
+      }
+    },
+    {
+      "name": "sequence-notes-edges",
+      "source": "sequenceDiagram\nparticipant A\nparticipant B\nparticipant C\nNote over A: This is a fairly long explanation of the step\nNote over B: This is a fairly long explanation of the step\nNote over C: This is a fairly long explanation of the step",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "actor": false
+          },
+          {
+            "id": "C",
+            "label": "C",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "note",
+            "placement": "over",
+            "participants": [
+              "A"
+            ],
+            "label": "This is a fairly long explanation of the step"
+          },
+          {
+            "type": "note",
+            "placement": "over",
+            "participants": [
+              "B"
+            ],
+            "label": "This is a fairly long explanation of the step"
+          },
+          {
+            "type": "note",
+            "placement": "over",
+            "participants": [
+              "C"
+            ],
+            "label": "This is a fairly long explanation of the step"
+          }
+        ]
+      },
+      "layout": {
+        "width": 521,
+        "height": 334,
+        "items": 24
+      }
+    },
+    {
+      "name": "pie-many-slices",
+      "source": "pie\n\"Slice 1\" : 1\n\"Slice 2\" : 1\n\"Slice 3\" : 1\n\"Slice 4\" : 1\n\"Slice 5\" : 1\n\"Slice 6\" : 1\n\"Slice 7\" : 1\n\"Slice 8\" : 1\n\"Slice 9\" : 1\n\"Slice 10\" : 1\n\"Slice 11\" : 1\n\"Slice 12\" : 1\n\"Slice 13\" : 1\n\"Slice 14\" : 1\n\"Slice 15\" : 1\n\"Slice 16\" : 1\n\"Slice 17\" : 1\n\"Slice 18\" : 1\n\"Slice 19\" : 1\n\"Slice 20\" : 1\n\"Slice 21\" : 1\n\"Slice 22\" : 1\n\"Slice 23\" : 1\n\"Slice 24\" : 1\n\"Slice 25\" : 1\n\"Slice 26\" : 1\n\"Slice 27\" : 1\n\"Slice 28\" : 1\n\"Slice 29\" : 1\n\"Slice 30\" : 1\n\"Slice 31\" : 1\n\"Slice 32\" : 1\n\"Slice 33\" : 1\n\"Slice 34\" : 1\n\"Slice 35\" : 1\n\"Slice 36\" : 1\n\"Slice 37\" : 1\n\"Slice 38\" : 1\n\"Slice 39\" : 1\n\"Slice 40\" : 1",
+      "diagram": {
+        "kind": "pie",
+        "showData": false,
+        "slices": [
+          {
+            "label": "Slice 1",
+            "value": 1
+          },
+          {
+            "label": "Slice 2",
+            "value": 1
+          },
+          {
+            "label": "Slice 3",
+            "value": 1
+          },
+          {
+            "label": "Slice 4",
+            "value": 1
+          },
+          {
+            "label": "Slice 5",
+            "value": 1
+          },
+          {
+            "label": "Slice 6",
+            "value": 1
+          },
+          {
+            "label": "Slice 7",
+            "value": 1
+          },
+          {
+            "label": "Slice 8",
+            "value": 1
+          },
+          {
+            "label": "Slice 9",
+            "value": 1
+          },
+          {
+            "label": "Slice 10",
+            "value": 1
+          },
+          {
+            "label": "Slice 11",
+            "value": 1
+          },
+          {
+            "label": "Slice 12",
+            "value": 1
+          },
+          {
+            "label": "Slice 13",
+            "value": 1
+          },
+          {
+            "label": "Slice 14",
+            "value": 1
+          },
+          {
+            "label": "Slice 15",
+            "value": 1
+          },
+          {
+            "label": "Slice 16",
+            "value": 1
+          },
+          {
+            "label": "Slice 17",
+            "value": 1
+          },
+          {
+            "label": "Slice 18",
+            "value": 1
+          },
+          {
+            "label": "Slice 19",
+            "value": 1
+          },
+          {
+            "label": "Slice 20",
+            "value": 1
+          },
+          {
+            "label": "Slice 21",
+            "value": 1
+          },
+          {
+            "label": "Slice 22",
+            "value": 1
+          },
+          {
+            "label": "Slice 23",
+            "value": 1
+          },
+          {
+            "label": "Slice 24",
+            "value": 1
+          },
+          {
+            "label": "Slice 25",
+            "value": 1
+          },
+          {
+            "label": "Slice 26",
+            "value": 1
+          },
+          {
+            "label": "Slice 27",
+            "value": 1
+          },
+          {
+            "label": "Slice 28",
+            "value": 1
+          },
+          {
+            "label": "Slice 29",
+            "value": 1
+          },
+          {
+            "label": "Slice 30",
+            "value": 1
+          },
+          {
+            "label": "Slice 31",
+            "value": 1
+          },
+          {
+            "label": "Slice 32",
+            "value": 1
+          },
+          {
+            "label": "Slice 33",
+            "value": 1
+          },
+          {
+            "label": "Slice 34",
+            "value": 1
+          },
+          {
+            "label": "Slice 35",
+            "value": 1
+          },
+          {
+            "label": "Slice 36",
+            "value": 1
+          },
+          {
+            "label": "Slice 37",
+            "value": 1
+          },
+          {
+            "label": "Slice 38",
+            "value": 1
+          },
+          {
+            "label": "Slice 39",
+            "value": 1
+          },
+          {
+            "label": "Slice 40",
+            "value": 1
+          }
+        ]
+      },
+      "layout": {
+        "width": 352,
+        "height": 984,
+        "items": 162
+      }
     }
   ],
   "errors": [
@@ -1754,6 +2126,18 @@
     {
       "name": "empty-sequence",
       "source": "sequenceDiagram\n  loop x\n  end"
+    },
+    {
+      "name": "flowchart-self-parent",
+      "source": "flowchart TD\nsubgraph S\nsubgraph S\nA\nend\nend"
+    },
+    {
+      "name": "flowchart-ancestor-cycle",
+      "source": "flowchart TD\nsubgraph S\nsubgraph T\nsubgraph S\nA\nend\nend\nend"
+    },
+    {
+      "name": "state-self-parent",
+      "source": "stateDiagram-v2\nstate S {\nstate S {\nA\n}\n}"
     }
   ],
   "unsupported": [

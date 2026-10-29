@@ -73,6 +73,23 @@ class DiagramCorpusTest {
                 layoutDiagram(parseDiagram(case.getValue("source").jsonPrimitive.content), measure)
             val boxes = mutableListOf<DoubleArray>()
             for (item in scene.items) {
+                if (item is TextItem) {
+                    val width =
+                        item.lines.maxOfOrNull { measure.width(it, item.size, item.weight) } ?: 0.0
+                    val left =
+                        item.x -
+                            when (item.anchor) {
+                                TextAnchor.MIDDLE -> width / 2
+                                TextAnchor.END -> width
+                                TextAnchor.START -> 0.0
+                            }
+                    val height = item.lines.size * lineHeight(item.size)
+                    assertTrue("$name text left: $left", left >= -1)
+                    assertTrue("$name text right", left + width <= scene.width + 1)
+                    assertTrue("$name text top", item.y - height / 2 >= -1)
+                    assertTrue("$name text bottom", item.y + height / 2 <= scene.height + 1)
+                    continue
+                }
                 if (item !is PathItem) continue
                 val points = points(item)
                 for ((x, y) in points) {
@@ -141,6 +158,29 @@ class DiagramCorpusTest {
             wrapText("abcdefghijklmnop", 10.0, 400, 30.0, measure),
         )
         assertEquals(listOf("one", "two"), wrapText("one\ntwo", 10.0, 400, 200.0, measure))
+    }
+
+    @Test
+    fun `wraps an adversarial long word with bounded measurement work`() {
+        val source = "a".repeat(15000)
+        var calls = 0
+        var characters = 0
+        val lines =
+            wrapText(
+                source,
+                14.0,
+                600,
+                200.0,
+                TextMeasure { text, size, weight ->
+                    calls++
+                    characters += text.length
+                    measure.width(text, size, weight)
+                },
+            )
+        assertEquals(source, lines.joinToString(""))
+        assertTrue(lines.all { measure.width(it, 14.0, 600) <= 200 })
+        assertTrue("measurement calls: $calls", calls < source.length)
+        assertTrue("measured characters: $characters", characters < source.length * 30)
     }
 
     @Test

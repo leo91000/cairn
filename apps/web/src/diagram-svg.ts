@@ -74,6 +74,28 @@ export function sceneSvg(scene: Scene, resolve?: (tone: string) => string) {
   svg.setAttribute('class', 'diagram-svg')
   const color = (value: Paint | undefined) => value && 'tone' in value && resolve ? resolve(value.tone) : paint(value)
 
+  // Consecutive outlines, decorations and text of a linked node share one focusable link.
+  let currentLink: SVGAElement | undefined
+
+  function append(element: SVGElement, href?: string) {
+    if (!href) {
+      currentLink = undefined
+      svg.append(element)
+      return
+    }
+
+    if (currentLink?.getAttribute('href') !== href) {
+      currentLink = document.createElementNS(SVG, 'a')
+      currentLink.setAttribute('href', href)
+      currentLink.setAttribute('target', '_blank')
+      currentLink.setAttribute('rel', 'noopener noreferrer')
+      currentLink.setAttribute('class', 'diagram-link')
+      svg.append(currentLink)
+    }
+
+    currentLink!.append(element)
+  }
+
   for (const item of scene.items) {
     if (item.kind === 'path') {
       const path = document.createElementNS(SVG, 'path')
@@ -88,18 +110,7 @@ export function sceneSvg(scene: Scene, resolve?: (tone: string) => string) {
         path.style.opacity = String(item.opacity)
       if (item.shadow)
         path.setAttribute('class', 'diagram-raised')
-      if (item.link) {
-        const link = document.createElementNS(SVG, 'a')
-        link.setAttribute('href', item.link)
-        link.setAttribute('target', '_blank')
-        link.setAttribute('rel', 'noopener noreferrer')
-        link.setAttribute('class', 'diagram-link')
-        link.append(path)
-        svg.append(link)
-      }
-      else {
-        svg.append(path)
-      }
+      append(path, item.link)
 
       continue
     }
@@ -120,7 +131,7 @@ export function sceneSvg(scene: Scene, resolve?: (tone: string) => string) {
       span.textContent = line
       text.append(span)
     })
-    svg.append(text)
+    append(text, item.link)
   }
 
   return svg

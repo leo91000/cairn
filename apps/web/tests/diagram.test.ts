@@ -8,7 +8,7 @@ import {
   isDiagramLanguage,
   parseDiagram,
 } from '../src/diagram'
-import { layoutDiagram, wrapText } from '../src/diagram-layout'
+import { layoutDiagram, lineHeight, wrapText } from '../src/diagram-layout'
 
 // Android's DiagramCorpusTest uses the same measure, so both layouts must agree exactly.
 const measure = { width: (text: string, size: number) => text.length * size * 0.55 }
@@ -63,8 +63,17 @@ describe('diagram layout', () => {
   it.each(corpus.parse)('keeps $name inside its bounds without overlapping nodes', ({ source }) => {
     const scene = layoutDiagram(parseDiagram(source), measure)
     for (const item of scene.items) {
-      if (item.kind !== 'path')
+      if (item.kind === 'text') {
+        const width = Math.max(0, ...item.lines.map(line => measure.width(line, item.size)))
+        const left = item.x - (item.anchor === 'middle' ? width / 2 : item.anchor === 'end' ? width : 0)
+        const height = item.lines.length * lineHeight(item.size)
+        expect(left).toBeGreaterThanOrEqual(-1)
+        expect(left + width).toBeLessThanOrEqual(scene.width + 1)
+        expect(item.y - height / 2).toBeGreaterThanOrEqual(-1)
+        expect(item.y + height / 2).toBeLessThanOrEqual(scene.height + 1)
         continue
+      }
+
       for (const [x, y] of points(item)) {
         expect(x).toBeGreaterThanOrEqual(-1)
         expect(y).toBeGreaterThanOrEqual(-1)
@@ -104,6 +113,23 @@ describe('diagram layout', () => {
     expect(wrapText('alpha beta gamma', 10, 400, 50, measure)).toEqual(['alpha', 'beta', 'gamma'])
     expect(wrapText('abcdefghijklmnop', 10, 400, 30, measure)).toEqual(['abcde', 'fghij', 'klmno', 'p'])
     expect(wrapText('one\ntwo', 10, 400, 200, measure)).toEqual(['one', 'two'])
+  })
+
+  it('wraps an adversarial long word with bounded measurement work', () => {
+    const source = 'a'.repeat(15_000)
+    let calls = 0
+    let characters = 0
+    const lines = wrapText(source, 14, 600, 200, {
+      width(text, size) {
+        calls++
+        characters += text.length
+        return measure.width(text, size)
+      },
+    })
+    expect(lines.join('')).toBe(source)
+    expect(lines.every(line => measure.width(line, 14) <= 200)).toBe(true)
+    expect(calls).toBeLessThan(source.length)
+    expect(characters).toBeLessThan(source.length * 30)
   })
 
   it('cleans Mermaid label markup', () => {

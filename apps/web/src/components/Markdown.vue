@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Deliverable } from '../../../../packages/contracts/artifacts'
 import DOMPurify from 'dompurify'
-import { marked } from 'marked'
+import { marked, Renderer } from 'marked'
 import {
   computed,
   defineAsyncComponent,
@@ -114,15 +114,24 @@ function closedFence(raw: string) {
 const html = computed(() => {
   let rawHtml = false
   // Streaming fences stay code until their closing fence arrives, so drawings never flicker.
-  const finished = new Set<string>()
+  const codeRenderer = new Renderer()
+  const closedFenceAttribute = `data-diagram-${crypto.randomUUID()}`
+  let hasDiagrams = false
+  const renderCode = codeRenderer.code.bind(codeRenderer)
+  codeRenderer.code = (token) => {
+    const rendered = renderCode(token)
+    if (!isDiagramLanguage(token.lang?.split(/\s/)[0]) || !closedFence(token.raw))
+      return rendered
+    hasDiagrams = true
+    return rendered.replace('<pre>', `<pre ${closedFenceAttribute}>`)
+  }
+
   const parsed = marked.parse(props.content, {
     async: false,
+    renderer: codeRenderer,
     walkTokens(token) {
       if (token.type === 'html')
         rawHtml = true
-      if (token.type === 'code' && isDiagramLanguage(token.lang?.split(/\s/)[0]) && closedFence(token.raw))
-        finished.add(token.text)
-
       // Sync parsing needs no callback results. Avoid growing the result array
       // that Marked concatenates at each token while collecting async work.
       return []
@@ -131,7 +140,7 @@ const html = computed(() => {
   const container = document.createElement('div')
   container.innerHTML = DOMPurify.sanitize(parsed)
   highlights.beginRender()
-  if (finished.size) {
+  if (hasDiagrams) {
     // Layouts measured before the web fonts loaded are redone once they arrive.
     void diagramFonts.value
     diagrams.beginRender()
@@ -140,7 +149,9 @@ const html = computed(() => {
   for (const code of container.querySelectorAll('pre code')) {
     const language = [...code.classList].find(name => name.startsWith('language-'))?.slice(9)
     const source = (code.textContent || '').replace(/\n$/, '')
-    const figure = isDiagramLanguage(language) && finished.has(source) && diagramFigure(source, diagrams, sourceViews.has(source))
+    const closed = code.parentElement!.hasAttribute(closedFenceAttribute)
+    code.parentElement!.removeAttribute(closedFenceAttribute)
+    const figure = isDiagramLanguage(language) && closed && diagramFigure(source, diagrams, sourceViews.has(source))
     if (figure) {
       code.parentElement!.replaceWith(figure)
       continue

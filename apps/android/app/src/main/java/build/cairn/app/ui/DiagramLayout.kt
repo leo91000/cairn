@@ -68,6 +68,7 @@ internal data class TextItem(
     val weight: Int,
     val anchor: TextAnchor,
     val fill: DiagramPaint,
+    val link: String? = null,
 ) : SceneItem
 
 internal class Scene(
@@ -128,15 +129,36 @@ internal fun wrapText(
 
             if (line.isNotEmpty()) lines.add(line)
             line = ""
-            var rest = word
-            while (measure.width(rest, size, weight) > max && rest.length > 1) {
-                var cut = rest.length - 1
-                while (cut > 1 && measure.width(rest.substring(0, cut), size, weight) > max) cut--
-                lines.add(rest.substring(0, cut))
-                rest = rest.substring(cut)
+            var start = 0
+            while (start < word.length) {
+                val remaining = word.length - start
+                var low = 1
+                var high = min(2, remaining)
+                // Grow from the start of each segment, never rescan the entire remaining word.
+                while (
+                    high < remaining &&
+                        measure.width(word.substring(start, start + high), size, weight) <= max
+                ) {
+                    low = high
+                    high = min(high * 2, remaining)
+                }
+                if (measure.width(word.substring(start, start + high), size, weight) <= max) {
+                    low = high
+                } else {
+                    while (high - low > 1) {
+                        val middle = (low + high) / 2
+                        if (
+                            measure.width(word.substring(start, start + middle), size, weight) <=
+                                max
+                        )
+                            low = middle
+                        else high = middle
+                    }
+                }
+                val segment = word.substring(start, start + low)
+                start += low
+                if (start < word.length) lines.add(segment) else line = segment
             }
-
-            line = rest
         }
 
         lines.add(line)
@@ -1368,17 +1390,20 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     val titleSpace = if (titleBlock != null) titleBlock.height + 14 else 0.0
     val extentX = maxX - minX
     val extentY = maxY
+    val graphWidth = (if (horizontal) extentY else extentX) + MARGIN * 2
+    val titleWidth = if (titleBlock != null) titleBlock.width + MARGIN * 2 else 0.0
+    val horizontalMargin = MARGIN + max(0.0, (titleWidth - graphWidth) / 2)
     fun transform(point: Pt): Pt {
         val lx = point.x - minX
         return when (graph.direction) {
-            Direction.BT -> Pt(lx + MARGIN, extentY - point.y + MARGIN + titleSpace)
-            Direction.LR -> Pt(point.y + MARGIN, lx + MARGIN + titleSpace)
-            Direction.RL -> Pt(extentY - point.y + MARGIN, lx + MARGIN + titleSpace)
-            Direction.TB -> Pt(lx + MARGIN, point.y + MARGIN + titleSpace)
+            Direction.BT -> Pt(lx + horizontalMargin, extentY - point.y + MARGIN + titleSpace)
+            Direction.LR -> Pt(point.y + horizontalMargin, lx + MARGIN + titleSpace)
+            Direction.RL -> Pt(extentY - point.y + horizontalMargin, lx + MARGIN + titleSpace)
+            Direction.TB -> Pt(lx + horizontalMargin, point.y + MARGIN + titleSpace)
         }
     }
 
-    val width = ceil((if (horizontal) extentY else extentX) + MARGIN * 2)
+    val width = ceil(max(graphWidth, titleWidth))
     val height = ceil((if (horizontal) extentX else extentY) + MARGIN * 2 + titleSpace)
     fun finalBox(box: Box): Box {
         val a = transform(Pt(box.x, box.y))
@@ -1709,6 +1734,7 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
                     fill = if (filled) tone("ink") else null,
                     stroke = if (filled) tone("ink") else stroke,
                     width = 1.25,
+                    link = source.link,
                 )
             )
         }
@@ -1729,6 +1755,7 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
                     weight = 500,
                     anchor = TextAnchor.MIDDLE,
                     fill = textOn(style, "$kind-ink"),
+                    link = source.link,
                 )
             )
         }
@@ -1893,7 +1920,19 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                             if (ids[0] + 1 < heads.size)
                                 need(ids[0], ids[0] + 1, w + 24 + heads[ids[0] + 1].w / 2)
                             else rightRoom = max(rightRoom, w + 12 - heads.last().w / 2)
-                        ids.size > 1 -> need(ids[0], ids[1], w - 40)
+                        else -> {
+                            val first = ids.min()
+                            val last = ids.max()
+                            if (first != last) {
+                                need(first, last, w - 40)
+                            } else {
+                                val sideRoom = max(0.0, (w - heads[first].w) / 2)
+                                if (first == 0) leftRoom = max(leftRoom, sideRoom)
+                                else need(first - 1, first, w / 2 + heads[first - 1].w / 2 + 12)
+                                if (last == heads.size - 1) rightRoom = max(rightRoom, sideRoom)
+                                else need(last, last + 1, w / 2 + heads[last + 1].w / 2 + 12)
+                            }
+                        }
                     }
 
                     Prepared(item, text)
@@ -2391,10 +2430,11 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
         }
     }
 
+    val width = ceil(max(widest, if (titleBlock != null) titleBlock.width + MARGIN * 2 else 0.0))
     if (titleBlock != null) {
         items.add(
             TextItem(
-                x = widest / 2,
+                x = width / 2,
                 y = MARGIN + titleBlock.height / 2,
                 lines = titleBlock.lines,
                 size = TITLE_FONT,
@@ -2414,7 +2454,7 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
     items.addAll(participants)
     val count = diagram.participants.size
     return Scene(
-        ceil(max(widest, if (titleBlock != null) titleBlock.width + MARGIN * 2 else 0.0)),
+        width,
         ceil(bottomTop + headHeight + MARGIN),
         items,
         diagram.title
@@ -2500,11 +2540,13 @@ internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
     val radius = 92.0
     val inner = 56.0
     val cx = MARGIN + radius
-    val cy = top + radius
+    val visible = diagram.slices.filter { it.value > 0 }
+    val rowHeight = 24.0
+    val legendHeight = visible.size * rowHeight
+    val cy = top + max(radius, legendHeight / 2)
     fun format(value: Double) = jsLocaleNumber(jsRound(value * 100) / 100)
 
     var angle = 0.0
-    val visible = diagram.slices.filter { it.value > 0 }
     visible.forEachIndexed { position, slice ->
         val sweep = (slice.value / total) * PI * 2
         val paint = tone("series-${position % SERIES}")
@@ -2571,8 +2613,6 @@ internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
     )
 
     val legendX = cx + radius + 32
-    val rowHeight = 24.0
-    val legendHeight = visible.size * rowHeight
     var legendY = cy - legendHeight / 2 + rowHeight / 2
     var legendWidth = 0.0
     for ((position, slice) in visible.withIndex()) {
