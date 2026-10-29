@@ -161,7 +161,8 @@ Une conversation qu’un agent autorisé à déléguer crée depuis une conversa
 éventuellement sur un autre agent de code et un autre modèle, pour un travail qui
 lui revient. Elle garde sa conversation demandeuse, s’exécute dans son propre
 espace avec les droits de son agent, que l’agent demandeur doit couvrir, et ne
-délègue pas à son tour.
+délègue pas à son tour. L’accès à l’agent de sa conversation demandeuse suffit pour la
+poursuivre ou répondre à ses questions, tant que cette conversation existe.
 _Avoid_ : sous-agent (réservé aux sous-agents natifs d’un agent de code), parent, enfant
 
 **Mise de côté d’un résultat** :

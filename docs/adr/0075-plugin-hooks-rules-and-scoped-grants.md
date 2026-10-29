@@ -124,12 +124,13 @@ revient, par ce qu’il peut faire, à avoir accès à tous les agents (les vér
 d’accès restent celles des accès accordés), et ce qu’un membre lui fait créer, hors
 ses règles, survit à son départ (une mission a le propriétaire pour auteur).
 
-Seul le propriétaire donne ou retire ces accès, et seulement depuis le web et
-Android : comme la gestion des membres, ils sont exclus du MCP public et de
-`cairn_installation`, pour qu’aucun agent ni client externe ne puisse le faire. Le
-propriétaire a accès à tous les agents ; un nouvel agent n’est accessible qu’à lui. À
-la mise en place, les membres gardent l’accès aux agents existants. Ces accès
-appartiennent à une adhésion : réinviter un membre ne les rend pas.
+Seul le propriétaire donne ou retire ces accès, et l’interface le prévient quand
+l’agent a l’accès à l’installation, et seulement depuis le web et Android : comme la
+gestion des membres, ils sont exclus du MCP public et de `cairn_installation`, pour
+qu’aucun agent ni client externe ne puisse le faire. Le propriétaire a accès à tous
+les agents ; un nouvel agent n’est accessible qu’à lui. À la mise en place, les
+membres gardent l’accès aux agents existants. Ces accès appartiennent à une adhésion :
+réinviter un membre ne les rend pas.
 
 Les personnes externes (un auteur Discord) n’ont ni identité ni droit dans Cairn :
 elles ne sont qu’une donnée de la payload, que les conditions d’une règle examinent.
@@ -186,8 +187,8 @@ qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l’arbre.
   origine.
 - **Versions** : un déclenchement garde la version de la règle avec laquelle il a
   commencé ; une modification ne vaut que pour les événements suivants.
-- **Historique** : chacun voit l’état des déclenchements des règles qu’il voit ; leur
-  détail (payload et résultats des actions) n’est visible que du créateur, du
+- **Historique** : chaque membre voit l’état des déclenchements de toutes les règles ;
+  leur détail (payload et résultats des actions) n’est visible que du créateur, du
   propriétaire et des membres qui ont accès à l’agent d’exécution. Une conversation
   démarrée par une règle reste visible de tous les membres, avec ce qu’elle contient.
 - **Échecs** : une erreur dont le service confirme que rien n’a été fait (limite de
@@ -223,7 +224,7 @@ indépendamment des autres :
 | Désactivée | son créateur, ou une duplication (le duplicata démarre ainsi) ; arrête les déclenchements en cours | son créateur |
 | Pause d’urgence | le propriétaire ; arrête aussi les déclenchements en cours | le propriétaire |
 | Budget épuisé | un plafond horaire dépassé ; le créateur est prévenu | son créateur ou le propriétaire |
-| Droits perdus | le créateur perd l’accès à l’agent d’exécution ou à un agent que la règle démarre, ou l’agent d’exécution perd le hook de plugin écouté | le retour du droit, de lui-même, ou le créateur qui choisit un autre agent d’exécution |
+| Droits perdus | le créateur perd l’accès à l’agent d’exécution ou à un agent que la règle démarre, ou l’agent d’exécution perd le hook de plugin écouté | le retour du droit, de lui-même, ou le créateur qui modifie la règle (autre agent d’exécution ou autre agent démarré) |
 | Adhésion terminée | le créateur est retiré, part ou est supprimé ; le réinviter n’y change rien | jamais : il reste à dupliquer |
 
 Un agent qui a l’accès à l’installation n’écrit des règles que dans une conversation
@@ -271,10 +272,10 @@ autorité conservée et l’autorité native actuelle du créateur ; sans elles
 renouvellement de bail de tout travail natif.
 
 Fusionner ou supprimer des agents ([guide](../AGENT-MERGE.md)) met les règles dont
-l’agent d’exécution disparaît en « Droits perdus » jusqu’à ce que leur créateur en
-choisisse un autre ; une conversation déplacée vers un autre agent ne permet plus
-d’écrire de règles. Les accès des comptes à l’agent fusionné ne passent pas à l’agent
-qui le reçoit : seul le propriétaire les accorde.
+l’agent d’exécution, ou un agent qu’elles démarrent, disparaît en « Droits perdus »
+jusqu’à ce que leur créateur les modifie ; une conversation déplacée vers un autre
+agent ne permet plus d’écrire de règles. Les accès des comptes à l’agent fusionné ne
+passent pas à l’agent qui le reçoit : seul le propriétaire les accorde.
 
 ### Budget du moteur
 
@@ -338,16 +339,16 @@ désignent des ressources et la liste qui fournit leur hiérarchie. Un package a
 reste donc de confiance pour ces déclarations, comme il l’était pour l’admission.
 
 Une règle qui ne teste pas l’auteur ouvre son agent à n’importe qui : l’éditeur, le
-MCP public, `cairn_installation` et l’installation d’un modèle préviennent son
-créateur quand l’agent démarré a des droits de plugin ou l’accès à l’installation,
-comme le faisait l’assistant des bots
-([ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md)).
+MCP public, `cairn_installation` (par une notification à la personne pour qui l’agent
+écrit) et l’installation d’un modèle préviennent son créateur quand l’agent démarré a
+des droits de plugin ou l’accès à l’installation, comme le faisait l’assistant des
+bots ([ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md)).
 
 Avant qu’un droit élargisse un agent (droits de plugin, accès à l’installation), la
 revue du propriétaire, sur le web, Android et le MCP public, liste les comptes qui ont
-accès à cet agent et les règles de tous les comptes qui le démarrent ou l’orientent ;
-ce que l’agent peut alors faire pour des inconnus est ainsi visible au moment de
-l’accorder.
+accès à cet agent et les règles de tous les comptes qui le démarrent, l’orientent ou
+l’utilisent comme agent d’exécution ; ce que l’agent peut alors faire pour des
+inconnus est ainsi visible au moment de l’accorder.
 
 Les risques d’un droit trop large relèvent du propriétaire ; Cairn doit en revanche
 rendre ces droits lisibles et n’en accorder aucun par défaut. Les capacités d’un
