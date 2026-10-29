@@ -321,14 +321,14 @@ def main():
                 output.write(text + '\n')
             return sample.get('storage', {})
 
-        def pressure_wait(label, current_run, attempt, expected):
+        def pressure_wait(label, current_run, attempt, expected, timeout=25):
             last = [0]
             def check():
                 if time.monotonic() - last[0] < 0.5:
                     return False
                 last[0] = time.monotonic()
                 return pressure_diagnostics(label, current_run, attempt).get('paused') is expected
-            eventually(check, timeout=25)
+            eventually(check, timeout=timeout)
 
         def start_controller():
             nonlocal controller_started
@@ -740,7 +740,7 @@ def main():
             pressure_policy = dict(contexts[run]['policy'], reserveMiB=16 * 1024 * 1024)
             storage_policy(pressure_policy)
             eventually(lambda: api('/disks/' + run + '/storage-status')['waitingFor'] == 'disk-space', timeout=25)
-            eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is True)
+            pressure_wait('first-paused-wait', run, resumed, True, timeout=60)
             pressure_diagnostics('first-frozen', run, resumed)
             size = descendant.stat().st_size
             time.sleep(0.5)
@@ -1045,9 +1045,10 @@ def main():
                 pressure_diagnostics('failure-before-cleanup', run, resumed)
                 records = []
                 for unit in (supervisor, 'cairn-native-' + resumed + '.service'):
-                    record = subprocess.run(['journalctl', '--no-pager', '--output=cat', '--lines=200', '--unit=' + unit], capture_output=True, text=True, timeout=10).stdout
+                    record = subprocess.run(['journalctl', '--no-pager', '--output=cat', '--since=-5 minutes', '--unit=' + unit], capture_output=True, text=True, timeout=10).stdout
                     for secret in (SECRET, token, contexts[run]['grant']):
                         record = record.replace(secret, '[fixture-secret]')
+                    record = '\n'.join(line for line in record.splitlines() if 'cairn_performance:' not in line)[-100000:]
                     records.append(unit + ':\n' + record)
                 (evidence / 'failure-journal.txt').write_text('\n'.join(records))
             raise
