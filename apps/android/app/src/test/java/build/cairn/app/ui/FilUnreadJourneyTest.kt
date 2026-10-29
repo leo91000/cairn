@@ -511,7 +511,7 @@ class FilUnreadJourneyTest {
                 compose.waitUntil(10000) {
                     compose.onAllNodes(isRoot()).fetchSemanticsNodes()
                     compose
-                        .onAllNodesWithTag("chat-page:question")
+                        .onAllNodesWithTag("chat-page:765886cd-efa2-5d30-bdce-99340ee87a3d")
                         .fetchSemanticsNodes()
                         .isNotEmpty()
                 }

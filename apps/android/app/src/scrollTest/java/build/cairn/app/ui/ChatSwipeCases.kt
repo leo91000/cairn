@@ -128,8 +128,14 @@ abstract class ChatSwipeCases {
             moveTo(Offset(this.width * .48f, height * .4f), 350)
         }
         compose.waitForIdle()
-        val current = compose.onNodeWithTag("chat-page:recent").getUnclippedBoundsInRoot()
-        val next = compose.onNodeWithTag("chat-page:middle").getUnclippedBoundsInRoot()
+        val current =
+            compose
+                .onNodeWithTag("chat-page:35bcbcf2-6d5f-5c5e-955f-b5256afbdffc")
+                .getUnclippedBoundsInRoot()
+        val next =
+            compose
+                .onNodeWithTag("chat-page:bd8d3a56-d149-50fb-add8-e245382bdd5b")
+                .getUnclippedBoundsInRoot()
         Assert.assertTrue(
             "The current screen follows the finger",
             current.left.value < -width * .25f,
@@ -150,7 +156,11 @@ abstract class ChatSwipeCases {
         waitForChat("Chat récent")
         Assert.assertEquals(
             0f,
-            compose.onNodeWithTag("chat-page:recent").getUnclippedBoundsInRoot().left.value,
+            compose
+                .onNodeWithTag("chat-page:35bcbcf2-6d5f-5c5e-955f-b5256afbdffc")
+                .getUnclippedBoundsInRoot()
+                .left
+                .value,
             1f,
         )
         history.performTouchInput { swipeLeft() }
@@ -160,8 +170,14 @@ abstract class ChatSwipeCases {
             moveTo(Offset(this.width * .52f, height * .4f), 350)
         }
         compose.waitForIdle()
-        val previous = compose.onNodeWithTag("chat-page:recent").getUnclippedBoundsInRoot()
-        val middle = compose.onNodeWithTag("chat-page:middle").getUnclippedBoundsInRoot()
+        val previous =
+            compose
+                .onNodeWithTag("chat-page:35bcbcf2-6d5f-5c5e-955f-b5256afbdffc")
+                .getUnclippedBoundsInRoot()
+        val middle =
+            compose
+                .onNodeWithTag("chat-page:bd8d3a56-d149-50fb-add8-e245382bdd5b")
+                .getUnclippedBoundsInRoot()
         Assert.assertTrue(
             "The previous screen is visible while swiping right",
             previous.right.value in 1f..width * .85f,

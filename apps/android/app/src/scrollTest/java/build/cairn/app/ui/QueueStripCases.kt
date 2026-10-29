@@ -343,11 +343,16 @@ abstract class QueueStripCases {
             compose.onNodeWithText("Annuler").performClick()
 
             compose.waitUntil(10000) {
-                compose.onAllNodesWithTag("chat-page:neighbour").fetchSemanticsNodes().isNotEmpty()
+                compose
+                    .onAllNodesWithTag("chat-page:0788c8fb-8e0a-5fbf-a792-d3e259e21e5b")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
             }
             compose.onAllNodesWithTag("queued-message").onFirst().performTouchInput { swipeLeft() }
             compose.onNodeWithText("Retirer", substring = false).assertIsDisplayed()
-            compose.onNodeWithTag("chat-page:chat").assert(isSelected())
+            compose
+                .onNodeWithTag("chat-page:6cc6efab-10af-54c7-a91b-dcff664166a1")
+                .assert(isSelected())
             assertTrue("A swipe only reveals removal", calls.none { it.first == "DELETE" })
             compose.onNodeWithText("Retirer", substring = false).performClick()
             compose.onNodeWithText("Confirmer").performClick()
