@@ -201,3 +201,6 @@ pub use waits::*;
 mod delegated_tasks;
 
 pub use delegated_tasks::*;
+
+#[cfg(test)]
+mod a8_contract_tests;

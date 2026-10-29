@@ -74,7 +74,9 @@ fn main() {
     )
     .unwrap();
 
+    export::<DelegationProject>(root, &mut generator, Contract::Deserialize);
     export::<DelegateTaskInput>(root, &mut generator, Contract::Deserialize);
+    export::<TaskCancelInput>(root, &mut generator, Contract::Deserialize);
     export::<TaskStatusInput>(root, &mut generator, Contract::Deserialize);
     export::<DelegatedTask>(root, &mut generator, Contract::Deserialize);
     export::<TaskStatusOutput>(root, &mut generator, Contract::Deserialize);

@@ -13,14 +13,10 @@ pub struct DelegateTaskInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub agent_id: Option<AgentId>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "project_choice"
-    )]
-    #[schemars(with = "Option<ProjectId>")]
-    #[ts(optional = nullable,type="string | null")]
-    pub project_id: Option<Option<ProjectId>>,
+    /// Omission inherits the requester project. An explicit choice can clear it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub project: Option<DelegationProject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<String>", pattern("^(codex|claude|opencode)$"))]
     #[ts(optional)]
@@ -39,10 +35,17 @@ pub struct DelegateTaskInput {
     pub request_id: Option<String>,
 }
 
-fn project_choice<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Option<ProjectId>>, D::Error> {
-    Option::<ProjectId>::deserialize(deserializer).map(Some)
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum DelegationProject {
+    Inherit,
+    None,
+    Selected { project_id: ProjectId },
 }
 
 impl DelegateTaskInput {
@@ -57,6 +60,21 @@ impl DelegateTaskInput {
             return Err(
                 "Provide a self-contained task and a title of at most 90 characters.".into(),
             );
+        }
+        if self.model.as_ref().is_some_and(|model| {
+            model.chars().count() > 120
+                || !model
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_./:[]-".contains(c))
+        }) || self.reasoning.as_ref().is_some_and(|reasoning| {
+            !reasoning.is_empty()
+                && (reasoning.chars().count() > 40
+                    || !reasoning.starts_with(|c: char| c.is_ascii_lowercase())
+                    || !reasoning
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_-".contains(c)))
+        }) {
+            return Err("Invalid model or reasoning choice.".into());
         }
         if let Some(id) = &self.request_id {
             uuid::Uuid::parse_str(id).map_err(|_| "Invalid delegation request identity.")?;
@@ -112,4 +130,10 @@ pub struct DelegatedTask {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 pub struct TaskStatusOutput {
     pub tasks: Vec<DelegatedTask>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskCancelInput {
+    pub chat_id: ConversationId,
 }

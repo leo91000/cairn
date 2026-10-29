@@ -54,18 +54,18 @@ class ChatJourneyTest {
             var answered = false
             var edited = false
             val question =
-                ChatQuestion(
+                questionFixture(
                     "question",
                     chatId,
                     blocking = true,
                     fields =
                         listOf(
-                            QuestionField(
+                            fieldFixture(
                                 "scope",
                                 "Quelle portée pour la revue ?",
                                 options =
                                     listOf(
-                                        QuestionOption(
+                                        optionFixture(
                                             "Application entière",
                                             "Inclure le client Android et le serveur",
                                             id = "application",

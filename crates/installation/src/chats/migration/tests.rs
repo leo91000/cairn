@@ -7,7 +7,8 @@ const CHAT: &str = "00000000-0000-4000-8000-000000000001";
 // Exact affected version-14 DDL from 57855b96, the last pre-A7 main. Other
 // domain tables retain their current schemas, matching the inventory migration's fixture.
 pub(crate) fn version14(db: &Connection) {
-    db.execute_batch("DROP TABLE conversation_engine_switches; DROP TABLE message_attachments; DROP TABLE chat_messages; DROP TABLE conversations; DROP TABLE conversation_retention;
+    db.execute_batch("DROP TABLE question_answer_choices; DROP TABLE question_answers; DROP TABLE question_answer_deliveries; DROP TABLE question_options; DROP TABLE question_fields; DROP TABLE question_import_metadata; DROP TABLE chat_questions; DROP TABLE wait_conditions; DROP TABLE durable_wakeups; DROP TABLE conversation_lineage;
+DROP TABLE conversation_engine_switches; DROP TABLE message_attachments; DROP TABLE chat_messages; DROP TABLE conversations; DROP TABLE conversation_retention;
 DROP TABLE records;
 CREATE TABLE records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('agentAccounts','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX records_kind ON records(kind,updated_at DESC);
@@ -50,7 +51,7 @@ fn conversation() -> Value {
         "nativePrincipals":["second","first"],"nativeAuthorityNodes":["node-b","node-a"],
         "nativeParentRunId":"parent-run","nativeParentAccess":"owner-proof",
         "nativeProvenanceUnknown":false,"nativePluginGrants":[],
-        "wakeup":{"kind":"delay","privateState":"retained"},
+        "wakeup":{"id":"retained-wait","messageId":null,"reason":"Retained delay","seconds":60,"createdAt":51,"wakeAt":60051},
         "environmentState":"cleaning","environmentExpiredAt":60,"environmentRetryAfter":65,
         "environmentError":"retry"
     })
@@ -769,7 +770,7 @@ async fn actual_version14_preserves_conversations_accounts_leases_and_credential
         assert_eq!(
             db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            15
+            16
         );
         assert_eq!(snapshot(&db), retained);
         for before in &chats {

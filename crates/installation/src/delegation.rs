@@ -14,7 +14,7 @@ use crate::{
     store::Db,
     validation::{text, uuid},
 };
-use cairn_contracts::EventKind;
+use cairn_contracts::{DelegateTaskInput, EventKind, TaskCancelInput};
 use serde_json::{Value, json};
 
 /// Delegated conversations of one requester that may work at the same time.
@@ -82,7 +82,7 @@ pub fn tools() -> Vec<Value> {
             "description": "Hand a self-contained task to a new Cairn conversation that reports \
                 back to this one. It runs with the chosen agent's access (this agent by default; \
                 another agent only when this agent's access covers it), in its own workspace, on \
-                the chosen coding agent and model or the agent's defaults. Discover models \
+                the chosen coding agent and model or the agent's defaults. Omit project or use type inherit for this conversation's project; use type none for no project, or type selected with projectId. Discover models \
                 with task_models first; use OpenCode model entries' auto/… ids to let Cairn \
                 choose a connection. Pin a provider/model route only when explicitly requested. \
                 It does not see this \
@@ -108,12 +108,8 @@ pub fn tools() -> Vec<Value> {
             "name": "task_cancel",
             "description": "Stop a task this conversation delegated: interrupt its current turn, \
                 cancel its wait and hold its queued messages. Its conversation and report remain.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "chatId": { "type": "string", "format": "uuid" } },
-                "required": ["chatId"],
-                "additionalProperties": false,
-            },
+            "inputSchema": cairn_contracts::schema_for::<TaskCancelInput>(cairn_contracts::Contract::Deserialize),
+            "outputSchema": cairn_contracts::schema_for::<cairn_contracts::DelegatedTask>(cairn_contracts::Contract::Serialize),
         }),
     ]
 }
@@ -198,10 +194,11 @@ fn working(db: &Db<'_>, chat: &Value) -> Result<bool> {
 }
 
 /// The target agent, which must not reach anything the requester's agent cannot.
-fn target_agent(db: &Db<'_>, run: &Value, input: &Value) -> Result<Value> {
+fn target_agent(db: &Db<'_>, run: &Value, input: &DelegateTaskInput) -> Result<Value> {
     let requesting = &run["snapshot"]["agent"];
-    let agent_id = input["agentId"]
-        .as_str()
+    let selected_agent = input.agent_id.as_ref().map(ToString::to_string);
+    let agent_id = selected_agent
+        .as_deref()
         .unwrap_or_else(|| text(requesting, "id"));
     let current = required(
         db.agent_snapshot(text(requesting, "id"))?,
@@ -250,18 +247,18 @@ fn select_engine(agent: &Value, message: &Value) -> Result<Value> {
     Ok(snapshot["snapshot"]["agent"].clone())
 }
 
-fn task_message(input: &Value) -> Result<Value> {
+fn task_message(input: &DelegateTaskInput) -> Result<Value> {
     chats::parse_message(json!({
         "id": id(),
-        "text": input["task"],
-        "provider": input["provider"].as_str().unwrap_or_default(),
-        "model": input["model"].as_str().unwrap_or_default(),
-        "reasoning": input["reasoning"].as_str().unwrap_or_default(),
+        "text": input.task,
+        "provider": input.provider.as_ref().map(|p| match p { cairn_contracts::AgentProvider::Codex=>"codex",cairn_contracts::AgentProvider::Claude=>"claude",cairn_contracts::AgentProvider::Opencode=>"opencode" }).unwrap_or_default(),
+        "model": input.model.as_deref().unwrap_or_default(),
+        "reasoning": input.reasoning.as_deref().unwrap_or_default(),
     }))
 }
 
-fn repeated(db: &Db<'_>, requesting: &Value, input: &Value) -> Result<Option<Value>> {
-    if let Some(request_id) = input["requestId"].as_str()
+fn repeated(db: &Db<'_>, requesting: &Value, input: &DelegateTaskInput) -> Result<Option<Value>> {
+    if let Some(request_id) = input.request_id.as_deref()
         && let Some(existing) = children(db, requesting)?
             .into_iter()
             .find(|chat| chat["requestedBy"]["requestId"] == request_id)
@@ -271,9 +268,9 @@ fn repeated(db: &Db<'_>, requesting: &Value, input: &Value) -> Result<Option<Val
     Ok(None)
 }
 
-fn create(db: &Db<'_>, bearer: &str, input: &Value, checked: &Value) -> Result<Value> {
+fn create(db: &Db<'_>, bearer: &str, input: &DelegateTaskInput, checked: &Value) -> Result<Value> {
     let (run, requesting) = requester(db, bearer)?;
-    let request_id = input["requestId"].as_str();
+    let request_id = input.request_id.as_deref();
     // A retried call returns the task it already created.
     if let Some(existing) = repeated(db, &requesting, input)? {
         return Ok(existing);
@@ -299,9 +296,12 @@ fn create(db: &Db<'_>, bearer: &str, input: &Value, checked: &Value) -> Result<V
     for key in ["provider", "model", "reasoning"] {
         message[key] = engine[key].clone();
     }
-    let project = match input.get("projectId") {
-        Some(project) => project.clone(),
-        None => requesting["projectId"].clone(),
+    let project = match &input.project {
+        Some(cairn_contracts::DelegationProject::None) => Value::Null,
+        Some(cairn_contracts::DelegationProject::Selected { project_id }) => {
+            serde_json::to_value(project_id)?
+        }
+        None | Some(cairn_contracts::DelegationProject::Inherit) => requesting["projectId"].clone(),
     };
 
     // The requester's run is the origin: delegated work keeps its callers' native bounds.
@@ -320,7 +320,7 @@ fn create(db: &Db<'_>, bearer: &str, input: &Value, checked: &Value) -> Result<V
     });
     db.save_conversation_boundary(&chat)?;
     chats::send(db, &chat_id, message, None, &origin)?;
-    if let Some(title) = input["title"].as_str() {
+    if let Some(title) = input.title.as_deref() {
         let mut chat = required(db.conversation_boundary(&chat_id)?, "Chat not found")?;
         chat["title"] = title.trim().into();
         db.save_conversation_boundary(&chat)?;
@@ -343,7 +343,7 @@ fn create(db: &Db<'_>, bearer: &str, input: &Value, checked: &Value) -> Result<V
             "agentName": delegated["agentName"],
             "provider": delegated["provider"],
             "model": delegated["model"],
-            "task": input["task"],
+            "task": input.task,
         })),
     )?;
     db.audit(
@@ -361,7 +361,7 @@ fn create(db: &Db<'_>, bearer: &str, input: &Value, checked: &Value) -> Result<V
 pub async fn delegate(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
     let command:cairn_contracts::DelegateTaskInput=serde_json::from_value(input.clone()).map_err(|_|Error::bad("Provide a self-contained task and valid optional agent, project and engine choices."))?;
     command.validate().map_err(Error::bad)?;
-    let input = &serde_json::to_value(command)?;
+    let input = &command;
     // Resolve defaults and permissions before discovery, then recheck in the creation
     // transaction. A retry must still return its task if its connection changed meanwhile.
     let (token, request) = (bearer.to_owned(), input.clone());
@@ -515,7 +515,9 @@ pub async fn status(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
 }
 
 pub async fn cancel(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
-    let chat_id = text(input, "chatId").to_owned();
+    let command: TaskCancelInput = serde_json::from_value(input.clone())
+        .map_err(|_| Error::bad("Provide a valid delegated chatId."))?;
+    let chat_id = command.chat_id.to_string();
     let token = bearer.to_owned();
     let target = chat_id.clone();
     s.worker

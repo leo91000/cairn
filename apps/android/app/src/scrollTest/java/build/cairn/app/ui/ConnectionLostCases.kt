@@ -373,10 +373,10 @@ abstract class ConnectionLostCases {
                     }
                 }
             val question =
-                ChatQuestion(
+                questionFixture(
                     "question",
                     "chat",
-                    fields = listOf(QuestionField("answer", "Votre choix")),
+                    fields = listOf(fieldFixture("answer", "Votre choix")),
                 )
             val vm =
                 connect(server) { model, state ->

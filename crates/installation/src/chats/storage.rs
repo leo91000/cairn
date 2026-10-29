@@ -415,6 +415,7 @@ impl Db<'_> {
         }
         self.0.execute_batch("SAVEPOINT conversation_record")?;
         let before = self.0.total_changes();
+        let discarded_before = self.discarded_change_count()?;
         let result = self.write_conversation(conversation);
         match result {
             Ok(conversation) => {
@@ -425,10 +426,7 @@ impl Db<'_> {
                 self.0.execute_batch(
                     "ROLLBACK TO conversation_record; RELEASE conversation_record",
                 )?;
-                let discarded = self.0.total_changes() - before;
-                if discarded > 0 && self.0.query_row("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='cairn_discarded_changes')", [], |r| r.get::<_, bool>(0))? {
-                    self.0.query_row("SELECT cairn_discarded_changes(?)", [i64::try_from(discarded).unwrap_or(i64::MAX)], |_| Ok(()))?;
-                }
+                self.discard_savepoint_changes(before, discarded_before)?;
                 Err(error)
             }
         }
@@ -653,6 +651,7 @@ impl Db<'_> {
         }
         self.0.execute_batch("SAVEPOINT conversation_message")?;
         let before = self.0.total_changes();
+        let discarded_before = self.discarded_change_count()?;
         let result = self.write_message(message);
         match result {
             Ok(message) => {
@@ -663,10 +662,7 @@ impl Db<'_> {
                 self.0.execute_batch(
                     "ROLLBACK TO conversation_message; RELEASE conversation_message",
                 )?;
-                let discarded = self.0.total_changes() - before;
-                if discarded > 0 && self.0.query_row("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='cairn_discarded_changes')", [], |r| r.get::<_, bool>(0))? {
-                    self.0.query_row("SELECT cairn_discarded_changes(?)", [i64::try_from(discarded).unwrap_or(i64::MAX)], |_| Ok(()))?;
-                }
+                self.discard_savepoint_changes(before, discarded_before)?;
                 Err(error)
             }
         }

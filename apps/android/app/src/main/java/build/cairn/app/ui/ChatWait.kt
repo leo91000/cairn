@@ -584,7 +584,8 @@ internal fun waitProgress(wait: ActivityWait, live: LiveWait?): WaitProgress {
     // Plugin condition polling records the result on the pending wakeup too, which matters when
     // its event is unloaded. Another run's result is only computed when the conversation resumes.
     val observation =
-        if (wait.observed) wait.observation else if (current) live?.wakeup?.observationJson else null
+        if (wait.observed) wait.observation
+        else if (current) live?.wakeup?.observationJson else null
     val finished = wait.finished || observation != null
     val replaced = wait.ended == "replaced"
     // Live state, when known, is authoritative: stopping a wait leaves no event in the history.

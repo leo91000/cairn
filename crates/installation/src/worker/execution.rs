@@ -139,7 +139,7 @@ async fn record_failure(
     }
     let mut patch = failure_changes(status, needs_fence, &summary);
     if status != RunStatus::Queued {
-        patch.boundary = Some(json!({ "wakeup": null }));
+        patch.wakeup = Some(None);
     }
     let kind = if s.shutdown.is_cancelled() {
         EventKind::Status

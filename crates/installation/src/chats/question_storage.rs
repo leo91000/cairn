@@ -20,6 +20,13 @@ CREATE TABLE chat_questions(
 );
 CREATE INDEX chat_questions_chat ON chat_questions(chat_id,created_at,id);
 CREATE INDEX chat_questions_run ON chat_questions(run_id,status);
+-- Opaque metadata from retired engine questions is retained privately on import.
+-- It never supplies current question definitions or public response material.
+CREATE TABLE question_import_metadata(
+    question_id TEXT PRIMARY KEY NOT NULL REFERENCES chat_questions(id) ON DELETE CASCADE,
+    expires INTEGER,
+    metadata TEXT NOT NULL CHECK(json_valid(metadata) AND json_type(metadata)='object')
+) WITHOUT ROWID;
 CREATE TABLE question_fields(
     question_id TEXT NOT NULL REFERENCES chat_questions(id) ON DELETE CASCADE,
     id TEXT NOT NULL CHECK(length(id) BETWEEN 1 AND 200),
@@ -36,12 +43,12 @@ CREATE TABLE question_fields(
 CREATE TABLE question_options(
     question_id TEXT NOT NULL,
     field_id TEXT NOT NULL,
-    id TEXT NOT NULL CHECK(length(id) BETWEEN 1 AND 200),
+    id TEXT NOT NULL CHECK(length(id)<=200),
     position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 29),
     label TEXT NOT NULL CHECK(length(label) BETWEEN 1 AND 2000),
     description TEXT NOT NULL CHECK(length(description)<=4000),
     recommended INTEGER NOT NULL CHECK(recommended IN (0,1)),
-    PRIMARY KEY(question_id,field_id,id), UNIQUE(question_id,field_id,position),
+    PRIMARY KEY(question_id,field_id,position),
     FOREIGN KEY(question_id,field_id) REFERENCES question_fields(question_id,id) ON DELETE CASCADE
 ) WITHOUT ROWID;
 CREATE TABLE question_answers(
@@ -83,13 +90,16 @@ impl Db<'_> {
             tx.commit()?;
             return Ok(result);
         }
-        let filter = if id.is_some() {
+        let identity = if id.is_some() {
             "q.chat_id=?1 AND q.id=?2"
         } else {
             "q.chat_id=?1 AND ?2 IS NULL"
         };
+        let filter = format!(
+            "{identity} AND NOT EXISTS(SELECT 1 FROM question_import_metadata m WHERE m.question_id=q.id AND m.expires<=?3)"
+        );
         let mut questions = self.0.prepare_cached(&format!("SELECT q.id,q.chat_id,q.run_id,q.blocking,q.source,q.status,q.created_at,q.message_id FROM chat_questions q WHERE {filter} ORDER BY q.created_at,q.id"))?
-            .query_map(params![chat,id], |r| {
+            .query_map(params![chat,id,crate::config::now()], |r| {
                 let status: String = r.get(5)?;
                 Ok(ChatQuestion {
                     id:r.get(0)?,chat_id:r.get(1)?,run_id:r.get(2)?,blocking:r.get(3)?,source:r.get(4)?,
@@ -99,7 +109,7 @@ impl Db<'_> {
             })?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut options = HashMap::<(String, String), Vec<QuestionOption>>::new();
         let mut statement = self.0.prepare_cached(&format!("SELECT o.question_id,o.field_id,o.id,o.label,o.description,o.recommended FROM question_options o JOIN chat_questions q ON q.id=o.question_id WHERE {filter} ORDER BY o.question_id,o.field_id,o.position"))?;
-        for value in statement.query_map(params![chat, id], |r| {
+        for value in statement.query_map(params![chat, id, crate::config::now()], |r| {
             Ok((
                 r.get(0)?,
                 r.get(1)?,
@@ -116,7 +126,7 @@ impl Db<'_> {
         }
         let mut fields = HashMap::<String, Vec<QuestionField>>::new();
         let mut statement = self.0.prepare_cached(&format!("SELECT f.question_id,f.id,f.title,f.secret,f.mode,f.min_choices,f.max_choices FROM question_fields f JOIN chat_questions q ON q.id=f.question_id WHERE {filter} ORDER BY f.question_id,f.position"))?;
-        for value in statement.query_map(params![chat, id], |r| {
+        for value in statement.query_map(params![chat, id, crate::config::now()], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 QuestionField {
@@ -155,23 +165,31 @@ impl Db<'_> {
         }
         self.0.execute_batch("SAVEPOINT question_write")?;
         let before = self.0.total_changes();
+        let discarded_before = self.discarded_change_count()?;
         let result = self.write_question(question);
         match result {
             Ok(()) => self.0.execute_batch("RELEASE question_write")?,
             Err(error) => {
                 self.0
                     .execute_batch("ROLLBACK TO question_write; RELEASE question_write")?;
-                let discarded = self.0.total_changes() - before;
-                if discarded>0&&self.0.query_row("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='cairn_discarded_changes')",[],|r|r.get::<_,bool>(0))? {
-                    self.0.query_row("SELECT cairn_discarded_changes(?)",[i64::try_from(discarded).unwrap_or(i64::MAX)],|_|Ok(()))?;
-                }
+                self.discard_savepoint_changes(before, discarded_before)?;
                 return Err(error);
             }
         }
         Ok(())
     }
 
+    /// The only caller is the atomic v15 importer. Retired engine options had
+    /// no selection identity; retain their labels/order without inventing one.
+    pub(super) fn import_question(&self, question: &ChatQuestion) -> Result<()> {
+        if question.source == "cairn" {
+            cairn_contracts::validate_question_fields(&question.fields).map_err(Error::bad)?;
+        }
+        self.write_question(question)
+    }
+
     fn write_question(&self, q: &ChatQuestion) -> Result<()> {
+        self.0.execute("DELETE FROM chat_questions WHERE id=?1 AND EXISTS(SELECT 1 FROM question_import_metadata m WHERE m.question_id=?1 AND m.expires<=?2)", params![q.id,crate::config::now()])?;
         let existing = self.question(&q.chat_id, &q.id)?;
         self.0.prepare_cached("INSERT INTO chat_questions VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET blocking=excluded.blocking,status=excluded.status,message_id=excluded.message_id WHERE chat_questions.chat_id=excluded.chat_id AND chat_questions.run_id=excluded.run_id")?
             .execute(params![q.id,q.chat_id,q.run_id,q.blocking,q.source,q.status.as_str(),q.created_at,q.message_id])?;

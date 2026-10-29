@@ -127,7 +127,13 @@ pub(crate) fn cancel_for_run(db: &Db<'_>, run: &str) -> Result<bool> {
     if let Some(record) = db.run(run)? {
         let waiting = record["wakeup"].is_object();
         if waiting {
-            db.update_run_boundary(run, &json!({ "wakeup": null }))?;
+            db.change_run(
+                run,
+                crate::runs::RunChanges {
+                    wakeup: Some(None),
+                    ..Default::default()
+                },
+            )?;
         }
         return Ok(waiting);
     }

@@ -64,8 +64,8 @@
           "type": "string"
         },
         "id": {
+          "default": "",
           "maxLength": 200,
-          "minLength": 1,
           "type": "string"
         },
         "label": {
@@ -79,7 +79,6 @@
         }
       },
       "required": [
-        "id",
         "label"
       ],
       "type": "object"

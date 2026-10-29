@@ -1776,7 +1776,7 @@ mod tests {
             .execute_batch(
                 "ALTER TABLE chat_messages RENAME TO retained_messages;
 CREATE VIEW chat_messages AS SELECT rowid AS rowid,id,chat_id,revision,purge_marker(text) AS text,
-provider,model,reasoning,speed,mode,status,created_at,question_id,answers FROM retained_messages;",
+provider,model,reasoning,speed,mode,status,created_at,question_id FROM retained_messages;",
             )
             .unwrap();
         connection
@@ -1787,7 +1787,7 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,answers FROM r
                 move |context| {
                     let text: String = context.get(0)?;
                     rusqlite::Connection::open(&path)?.execute(
-                        "DELETE FROM kv WHERE key='chat-question:chat:private-question'",
+                        "DELETE FROM chat_questions WHERE chat_id='chat' AND id='private-question'",
                         [],
                     )?;
                     Ok(text)
@@ -1800,7 +1800,7 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,answers FROM r
         assert!(connection.is_autocommit());
         assert!(
             Db(&connection)
-                .kv("chat-question:chat:private-question")
+                .question("chat", "private-question")
                 .unwrap()
                 .is_none()
         );
@@ -2066,18 +2066,11 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,answers FROM r
                             "agentId": crate::config::MAIN_AGENT_ID,
                         });
                         db.save_conversation_boundary(&chat)?;
-                        db.set(
-                            "chat-question:chat:old-session",
-                            &json!({
-                                "id": "old-session",
-                                "chatId": "chat",
-                                "runId": "run",
-                                "status": "pending",
-                                "blocking": true,
-                                "fields": [],
-                            }),
-                            None,
-                        )?;
+                        db.save_question(&serde_json::from_value(json!({
+                            "id": "old-session", "chatId":"chat", "runId":"run",
+                            "source":"cairn", "status":"pending", "blocking":true,
+                            "fields":[{"id":"field","title":"Question from previous session"}],
+                        }))?)?;
                         let mut prepared =
                             json!({ "isolated": isolated, "workspace": "preserved" });
                         if native {
@@ -2118,7 +2111,8 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,answers FROM r
                         assert!(checkpoint["controllerRecoveries"].is_null());
                         let chat = db.conversation_boundary("chat")?.unwrap();
                         assert_eq!(chat["sessionRestartRequested"], false);
-                        let question = db.kv("chat-question:chat:old-session")?.unwrap();
+                        let question =
+                            serde_json::to_value(db.question("chat", "old-session")?.unwrap())?;
                         assert_eq!(question["status"], "cancelled");
                         assert_eq!(question["blocking"], false);
 

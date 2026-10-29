@@ -25,7 +25,10 @@ impl QuestionStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct QuestionOption {
-    #[schemars(length(min = 1, max = 200))]
+    // Retired engine questions may have label-only options. Current commands
+    // require nonempty unique IDs in validate_question_fields.
+    #[serde(default)]
+    #[schemars(length(max = 200))]
     pub id: String,
     #[schemars(length(min = 1, max = 2000))]
     pub label: String,

@@ -1244,7 +1244,7 @@ impl Execution<'_> {
                 patch.resume_available = Some(true);
                 patch.boundary.as_mut().unwrap()["outcome"] = Value::Null;
             } else if current["trigger"] != "chat" {
-                patch.boundary.as_mut().unwrap()["wakeup"] = Value::Null;
+                patch.wakeup = Some(None);
             }
             db.change_run(&id, patch)?;
             let details = details.filter(|_| status == RunStatus::Failed);

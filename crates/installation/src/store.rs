@@ -160,8 +160,8 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             rusqlite::functions::FunctionFlags::SQLITE_UTF8,
             move |context| {
                 let rows = context.get::<i64>(0)?;
-                discarded.fetch_add(rows as u64, Ordering::Relaxed);
-                Ok(0_i64)
+                let total = discarded.fetch_add(rows as u64, Ordering::Relaxed) + rows as u64;
+                Ok(i64::try_from(total).unwrap_or(i64::MAX))
             },
         )?;
         let mut readers = Vec::new();
@@ -389,6 +389,39 @@ pub const RUN_SUMMARY: &str = "summary_data";
 pub struct Db<'a>(pub &'a Connection);
 
 impl Db<'_> {
+    pub(crate) fn discarded_change_count(&self) -> Result<u64> {
+        let registered: bool = self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='cairn_discarded_changes')",
+            [], |row| row.get(0),
+        )?;
+        if !registered {
+            return Ok(0);
+        }
+        Ok(self
+            .0
+            .query_row("SELECT cairn_discarded_changes(0)", [], |row| {
+                row.get::<_, i64>(0)
+            })? as u64)
+    }
+
+    pub(crate) fn discard_savepoint_changes(
+        &self,
+        before: u64,
+        discarded_before: u64,
+    ) -> Result<()> {
+        let already_discarded = self
+            .discarded_change_count()?
+            .saturating_sub(discarded_before);
+        let discarded = (self.0.total_changes() - before).saturating_sub(already_discarded);
+        if discarded > 0 && self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='cairn_discarded_changes')",
+            [], |row| row.get::<_, bool>(0),
+        )? {
+            self.0.query_row("SELECT cairn_discarded_changes(?)", [i64::try_from(discarded).unwrap_or(i64::MAX)], |_| Ok(()))?;
+        }
+        Ok(())
+    }
+
     /// First column of at most one row, decoded from its JSON text.
     fn json_row<T: DeserializeOwned>(
         &self,
@@ -591,12 +624,23 @@ impl Db<'_> {
         offset: i64,
     ) -> Result<Vec<Box<serde_json::value::RawValue>>> {
         let (query, values) = Self::run_query(status, task, limit, offset, false);
+        let query = query.replacen("SELECT ", "SELECT runs.id,", 1);
+        let mut wakeups = self.wakeups(false, None)?;
         let mut statement = self.0.prepare_cached(&query)?;
         statement
             .query_map(rusqlite::params_from_iter(values), |row| {
-                row.get::<_, String>(0)
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
-            .map(|row| Ok(serde_json::value::RawValue::from_string(row?)?))
+            .map(|row| {
+                let (id, mut data) = row?;
+                // The SQL projection is an object. Append its typed continuation
+                // without decoding/re-encoding the unrelated run boundary.
+                data.pop();
+                data.push_str(",\"wakeup\":");
+                data.push_str(&serde_json::to_string(&wakeups.remove(&id))?);
+                data.push('}');
+                Ok(serde_json::value::RawValue::from_string(data)?)
+            })
             .collect()
     }
 

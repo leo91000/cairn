@@ -38,6 +38,7 @@ pub const RUN_FIELDS: &[&str] = &[
     "requestedBy",
     "retry",
     "snapshot",
+    "wakeup",
 ];
 
 // One projection of lifecycle columns; the full and summary views share it.
@@ -389,8 +390,10 @@ impl Db<'_> {
         // transaction. A savepoint keeps scalar, snapshot and boundary writes atomic.
         self.0.execute_batch("SAVEPOINT run_transition")?;
         let before = self.0.total_changes();
+        let discarded_before = self.discarded_change_count()?;
         let result = (|| {
             let mut state = required(self.run_state(id)?, "Run not found")?;
+            let wakeup = change.wakeup.clone();
             let (snapshot, boundary) = change.apply(&mut state);
             if let Some(snapshot) = snapshot {
                 self.0.execute(
@@ -399,6 +402,9 @@ impl Db<'_> {
                 )?;
             }
             self.write_run_state(&state)?;
+            if let Some(wakeup) = wakeup {
+                self.save_wakeup(false, id, wakeup.as_ref())?;
+            }
             if let Some(boundary) = boundary {
                 self.write_run_boundary(id, &boundary)?;
             }
@@ -412,20 +418,7 @@ impl Db<'_> {
             Err(error) => {
                 self.0
                     .execute_batch("ROLLBACK TO run_transition; RELEASE run_transition")?;
-                let discarded = self.0.total_changes() - before;
-                // Standalone Db connections have no live subscribers. Store's writer
-                // registers this connection-local counter for rolled-back rows.
-                if discarded > 0 && self.0.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='cairn_discarded_changes')",
-                    [],
-                    |row| row.get::<_, bool>(0),
-                )? {
-                    self.0.query_row(
-                        "SELECT cairn_discarded_changes(?)",
-                        [i64::try_from(discarded).unwrap_or(i64::MAX)],
-                        |_| Ok(()),
-                    )?;
-                }
+                self.discard_savepoint_changes(before, discarded_before)?;
                 Err(error)
             }
         }
@@ -495,12 +488,7 @@ impl Db<'_> {
                     row.get(0)
                 })?;
         let mut boundary: Value = serde_json::from_str(&boundary)?;
-        let mut patch = patch.clone();
-        if let Some(wakeup) = patch.as_object_mut().unwrap().remove("wakeup") {
-            let wakeup: Option<cairn_contracts::ChatWakeup> = serde_json::from_value(wakeup)?;
-            self.save_wakeup(false, id, wakeup.as_ref())?;
-        }
-        crate::store::merge(&mut boundary, &patch);
+        crate::store::merge(&mut boundary, patch);
         self.0.execute(
             "UPDATE runs SET boundary=? WHERE id=?",
             params![serde_json::to_string(&boundary)?, id],

@@ -31,7 +31,7 @@ class MissionChatDeviceTest {
                 status = "waiting",
                 trigger = "manual",
                 wakeup =
-                    ChatWakeup(
+                    wakeupFixture(
                         "wake",
                         reason = "Attendre la CI de la mission",
                         seconds = 420,

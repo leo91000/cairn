@@ -24,7 +24,7 @@ class ChatWaitTest {
     }
 
     private fun wakeup(condition: JsonObject? = null, wakeAt: Long = 1_800_000) =
-        ChatWakeup(
+        wakeupFixture(
             "wake",
             "first",
             "Merger après la CI",
@@ -96,21 +96,13 @@ class ChatWaitTest {
         // A plugin that gives no wording, or an unexpected one, still reads as a condition.
         assertEquals(
             WaitTarget(WaitKind.CONDITION, "Attente d’une condition", "Condition", emptyList()),
-            waitTarget(wakeup(checks).copy(display = null)),
+            waitTarget(wakeup(checks).withWaitProgress(display = null)),
         )
-        assertEquals(
-            WaitTarget(WaitKind.CONDITION, "Attente d’une condition", "Condition", emptyList()),
-            waitTarget(
-                wakeup(checks)
-                    .copy(
-                        display =
-                            buildJsonObject {
-                                put("title", 3)
-                                put("details", "abc")
-                            }
-                    )
-            ),
-        )
+        assertThrows(kotlinx.serialization.SerializationException::class.java) {
+            wireJson.decodeFromString<build.cairn.contracts.WaitDisplay>(
+                """{"title":3,"details":"abc"}"""
+            )
+        }
         val run = buildJsonObject {
             put("type", "run_finished")
             put("runId", "run")
@@ -411,7 +403,7 @@ class ChatWaitTest {
             put("type", "github_pr_checks")
             put("conclusion", "success")
         }
-        val scheduled = wakeup(checks).copy(observation = observation)
+        val scheduled = wakeup(checks).withWaitProgress(observation = observation)
         val ready = event("chat.wait_ready", observation).copy(text = "Wait condition resolved")
         val entries =
             timelineEntries(listOf(ready, event("chat.wakeup", scheduled.json())), chat = true)
@@ -618,7 +610,8 @@ class ChatWaitTest {
         assertEquals(
             "Reprise imminente",
             waitStatus(
-                wakeup(checks).copy(observation = buildJsonObject { put("state", "completed") }),
+                wakeup(checks)
+                    .withWaitProgress(observation = buildJsonObject { put("state", "completed") }),
                 600_000,
             ),
         )
@@ -682,7 +675,8 @@ class ChatWaitTest {
                 taskId = "",
             )
         val answered =
-            wakeup(checks, 9000).copy(observation = buildJsonObject { put("state", "completed") })
+            wakeup(checks, 9000)
+                .withWaitProgress(observation = buildJsonObject { put("state", "completed") })
         val feed =
             buildFeed(
                 listOf(
@@ -719,7 +713,10 @@ class ChatWaitTest {
         assertFalse(paused.pending || paused.pausable)
         val result = buildJsonObject { put("state", "completed") }
         val answered =
-            waitProgress(ActivityWait(pending), LiveWait(pending.copy(observation = result), false))
+            waitProgress(
+                ActivityWait(pending),
+                LiveWait(pending.withWaitProgress(observation = result), false),
+            )
         assertTrue(answered.finished && answered.pausable)
         assertFalse(answered.pending)
         assertEquals(result, answered.observation)
@@ -890,7 +887,7 @@ class ChatWaitTest {
     }
 
     private fun groupWakeup(mode: String, vararg members: JsonObject) =
-        wakeup(group(mode)).copy(display = null, members = JsonArray(members.toList()))
+        wakeup(group(mode)).withWaitProgress(display = null, members = JsonArray(members.toList()))
 
     private fun groupResult(state: String, mode: String, vararg results: JsonElement) =
         buildJsonObject {
@@ -1023,7 +1020,7 @@ class ChatWaitTest {
         val members =
             waitMembers(
                 wakeup(group)
-                    .copy(
+                    .withWaitProgress(
                         members =
                             JsonArray(
                                 listOf(

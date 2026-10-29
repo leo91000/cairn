@@ -47,20 +47,20 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.SecureFlagPolicy
 import build.cairn.app.data.*
 import build.cairn.contracts.AnswerChatQuestionInput
-import build.cairn.contracts.QuestionAnswerInput
-import build.cairn.contracts.ChatQuestionInput
-import build.cairn.contracts.answerChatQuestion
-import build.cairn.contracts.cancelChatQuestion
 import build.cairn.contracts.ChatInput
 import build.cairn.contracts.ChatMessageInput
 import build.cairn.contracts.ChatMessageReference
+import build.cairn.contracts.ChatQuestionInput
 import build.cairn.contracts.ConfirmChatInput
 import build.cairn.contracts.CreateChatInput
 import build.cairn.contracts.EditChatMessage
 import build.cairn.contracts.EditChatMessageInput
+import build.cairn.contracts.QuestionAnswerInput
 import build.cairn.contracts.ResumeRunInput
 import build.cairn.contracts.SendChatMessageInput
 import build.cairn.contracts.SetChatPausedInput
+import build.cairn.contracts.answerChatQuestion
+import build.cairn.contracts.cancelChatQuestion
 import build.cairn.contracts.compactChat
 import build.cairn.contracts.createChat
 import build.cairn.contracts.deleteChatMessage
@@ -2020,7 +2020,12 @@ internal fun QuestionDialog(
                         TextButton(
                             onClick = {
                                 vm.perform {
-                                    api.cancelChatQuestion(ChatQuestionInput(chatId=question.chatId,questionId=question.id))
+                                    api.cancelChatQuestion(
+                                        ChatQuestionInput(
+                                            chatId = question.chatId,
+                                            questionId = question.id,
+                                        )
+                                    )
                                     answers = emptyMap()
                                     selected = emptyMap()
                                     close()
@@ -2061,10 +2066,17 @@ internal fun QuestionDialog(
                                     submissionKey = values.toString()
                                     submission = UUID.randomUUID().toString()
                                 }
-                                api.answerChatQuestion(AnswerChatQuestionInput(
-                                    chatId=question.chatId,questionId=question.id,
-                                    answer=QuestionAnswerInput(id=submission, answers=wireJson.decodeFromJsonElement(values)),
-                                ))
+                                api.answerChatQuestion(
+                                    AnswerChatQuestionInput(
+                                        chatId = question.chatId,
+                                        questionId = question.id,
+                                        answer =
+                                            QuestionAnswerInput(
+                                                id = submission,
+                                                answers = wireJson.decodeFromJsonElement(values),
+                                            ),
+                                    )
+                                )
                                 answers = emptyMap()
                                 selected = emptyMap()
                                 close()

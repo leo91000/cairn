@@ -2716,12 +2716,16 @@
             "null"
           ]
         },
-        "projectId": {
-          "format": "uuid",
-          "type": [
-            "string",
-            "null"
-          ]
+        "project": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DelegationProject"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Omission inherits the requester project. An explicit choice can clear it."
         },
         "provider": {
           "pattern": "^(codex|claude|opencode)$",
@@ -2872,6 +2876,54 @@
         "finishedAt"
       ],
       "type": "object"
+    },
+    "DelegationProject": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "inherit",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "none",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "projectId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "selected",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "projectId"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "DeleteAgentOutput": {
       "additionalProperties": false,
@@ -8329,8 +8381,8 @@
           "type": "string"
         },
         "id": {
+          "default": "",
           "maxLength": 200,
-          "minLength": 1,
           "type": "string"
         },
         "label": {
@@ -10288,6 +10340,19 @@
         "requestId",
         "turnId",
         "provider"
+      ],
+      "type": "object"
+    },
+    "TaskCancelInput": {
+      "additionalProperties": false,
+      "properties": {
+        "chatId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "chatId"
       ],
       "type": "object"
     },

@@ -7,7 +7,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class QuestionOption(
     val description: String = "",
-    val id: String,
+    val id: String = "",
     val label: String,
     val recommended: Boolean = false,
 ) {

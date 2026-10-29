@@ -109,7 +109,12 @@ impl Db<'_> {
             return Ok(result);
         }
         let kind = if chat { "chat" } else { "mission" };
-        let mut rows = self.0.prepare_cached("SELECT owner_id,id,message_id,reason,seconds,created_at,wake_at,group_mode,time_kind,time_seconds,time_date,observation,display,next_check_at,last_error FROM durable_wakeups WHERE owner_kind=?1 AND (?2 IS NULL OR owner_id=?2)")?
+        let filter = if id.is_some() {
+            "owner_kind=?1 AND owner_id=?2"
+        } else {
+            "owner_kind=?1 AND ?2 IS NULL"
+        };
+        let mut rows = self.0.prepare_cached(&format!("SELECT owner_id,id,message_id,reason,seconds,created_at,wake_at,group_mode,time_kind,time_seconds,time_date,observation,display,next_check_at,last_error FROM durable_wakeups WHERE {filter}"))?
             .query_map(params![kind,id], |r| {
                 let time_kind: Option<String> = r.get(8)?;
                 let time_condition = match time_kind.as_deref() {
@@ -123,7 +128,7 @@ impl Db<'_> {
                 }))
             })?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut conditions = HashMap::<String, Vec<(WaitCondition, WaitMemberProgress)>>::new();
-        let mut statement = self.0.prepare_cached("SELECT owner_id,kind,target_run_id,target_chat_id,plugin_id,condition_type,project_id,plugin_input,observation,display,next_check_at,last_error FROM wait_conditions WHERE owner_kind=?1 AND (?2 IS NULL OR owner_id=?2) ORDER BY owner_id,position")?;
+        let mut statement = self.0.prepare_cached(&format!("SELECT owner_id,kind,target_run_id,target_chat_id,plugin_id,condition_type,project_id,plugin_input,observation,display,next_check_at,last_error FROM wait_conditions WHERE {filter} ORDER BY owner_id,position"))?;
         for value in statement.query_map(params![kind, id], |r| {
             let kind: String = r.get(1)?;
             let condition = match kind.as_str() {
@@ -180,6 +185,7 @@ impl Db<'_> {
         }
         self.0.execute_batch("SAVEPOINT durable_wait_write")?;
         let before = self.0.total_changes();
+        let discarded_before = self.discarded_change_count()?;
         let result = self.write_wakeup(chat, owner_id, wakeup);
         match result {
             Ok(()) => {
@@ -189,10 +195,7 @@ impl Db<'_> {
             Err(error) => {
                 self.0
                     .execute_batch("ROLLBACK TO durable_wait_write; RELEASE durable_wait_write")?;
-                let discarded = self.0.total_changes() - before;
-                if discarded>0&&self.0.query_row("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='cairn_discarded_changes')",[],|r|r.get::<_,bool>(0))? {
-                    self.0.query_row("SELECT cairn_discarded_changes(?)",[i64::try_from(discarded).unwrap_or(i64::MAX)],|_|Ok(()))?;
-                }
+                self.discard_savepoint_changes(before, discarded_before)?;
                 Err(error)
             }
         }
@@ -328,7 +331,12 @@ impl Db<'_> {
         &self,
         id: Option<&str>,
     ) -> Result<HashMap<String, cairn_contracts::ConversationRequester>> {
-        Ok(self.0.prepare_cached("SELECT chat_id,requester_chat_id,requester_run_id,request_id FROM conversation_lineage WHERE ?1 IS NULL OR chat_id=?1")?
+        let filter = if id.is_some() {
+            "chat_id=?1"
+        } else {
+            "?1 IS NULL"
+        };
+        Ok(self.0.prepare_cached(&format!("SELECT chat_id,requester_chat_id,requester_run_id,request_id FROM conversation_lineage WHERE {filter}"))?
             .query_map([id],|r|Ok((r.get(0)?,cairn_contracts::ConversationRequester {chat_id:r.get(1)?,run_id:r.get(2)?,request_id:r.get(3)?})))?.collect::<rusqlite::Result<_>>()?)
     }
 

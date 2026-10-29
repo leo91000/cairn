@@ -1,0 +1,363 @@
+{
+  "asks": [
+    {
+      "requestId": "00000000-0000-4000-8000-000000000001",
+      "questions": [
+        {
+          "id": "layout",
+          "title": "Quel affichage ?",
+          "mode": "multiple",
+          "minChoices": 1,
+          "maxChoices": 2,
+          "options": [
+            {
+              "id": "compact",
+              "label": "Compact",
+              "recommended": true
+            },
+            {
+              "id": "wide",
+              "label": "Large",
+              "description": "Deux colonnes"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "requestId": "00000000-0000-4000-8000-000000000001",
+      "questions": [
+        {
+          "id": "text",
+          "title": "Pourquoi ?"
+        }
+      ]
+    }
+  ],
+  "invalidAsks": [
+    {
+      "requestId": "00000000-0000-4000-8000-000000000001",
+      "questions": [
+        {
+          "id": "bad"
+        }
+      ]
+    },
+    {
+      "requestId": "00000000-0000-4000-8000-000000000001",
+      "questions": [
+        {
+          "id": "bad",
+          "title": "Bad",
+          "mode": "unknown"
+        }
+      ]
+    },
+    {
+      "requestId": "00000000-0000-4000-8000-000000000001",
+      "questions": [
+        {
+          "id": "bad",
+          "title": "Bad",
+          "maxChoices": 31
+        }
+      ]
+    }
+  ],
+  "serverInvalidAsks": [
+    {
+      "requestId": "00000000-0000-4000-8000-000000000001",
+      "questions": [
+        {
+          "id": "layout",
+          "title": "Quel affichage ?",
+          "mode": "multiple",
+          "minChoices": 1,
+          "maxChoices": 2,
+          "options": [
+            {
+              "id": "compact",
+              "label": "Compact",
+              "recommended": true
+            },
+            {
+              "id": "wide",
+              "label": "Large",
+              "description": "Deux colonnes"
+            }
+          ]
+        },
+        {
+          "id": "layout",
+          "title": "Quel affichage ?",
+          "mode": "multiple",
+          "minChoices": 1,
+          "maxChoices": 2,
+          "options": [
+            {
+              "id": "compact",
+              "label": "Compact",
+              "recommended": true
+            },
+            {
+              "id": "wide",
+              "label": "Large",
+              "description": "Deux colonnes"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "requestId": "00000000-0000-4000-8000-000000000001",
+      "questions": [
+        {
+          "id": "layout",
+          "title": "Quel affichage ?",
+          "mode": "multiple",
+          "minChoices": 3,
+          "maxChoices": 2,
+          "options": [
+            {
+              "id": "compact",
+              "label": "Compact",
+              "recommended": true
+            },
+            {
+              "id": "wide",
+              "label": "Large",
+              "description": "Deux colonnes"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "chatId": "00000000-0000-4000-8000-000000000001",
+      "runId": "00000000-0000-4000-8000-000000000001",
+      "source": "cairn",
+      "blocking": false,
+      "status": "pending",
+      "createdAt": 123,
+      "fields": [
+        {
+          "id": "layout",
+          "title": "Quel affichage ?",
+          "mode": "multiple",
+          "minChoices": 1,
+          "maxChoices": 2,
+          "options": [
+            {
+              "id": "compact",
+              "label": "Compact",
+              "recommended": true
+            },
+            {
+              "id": "wide",
+              "label": "Large",
+              "description": "Deux colonnes"
+            }
+          ]
+        },
+        {
+          "id": "secret",
+          "title": "Accès",
+          "secret": true
+        }
+      ]
+    }
+  ],
+  "answers": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "answers": {
+        "layout": {
+          "selected": [
+            "wide",
+            "compact"
+          ],
+          "comment": "Les deux"
+        },
+        "secret": {
+          "comment": "synthetic private"
+        }
+      }
+    }
+  ],
+  "wakeups": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "messageId": "00000000-0000-4000-8000-000000000001",
+      "reason": "Reprendre après CI",
+      "seconds": 3600,
+      "createdAt": 123,
+      "wakeAt": 3600123,
+      "condition": {
+        "type": "group",
+        "mode": "any",
+        "conditions": [
+          {
+            "type": "plugin",
+            "pluginId": "github",
+            "conditionType": "github_workflow",
+            "projectId": "00000000-0000-4000-8000-000000000001",
+            "input": {
+              "runId": 40972562294,
+              "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "future": {
+                "new": []
+              }
+            }
+          },
+          {
+            "type": "run_finished",
+            "runId": "00000000-0000-4000-8000-000000000001"
+          }
+        ]
+      },
+      "members": [
+        {
+          "observation": {
+            "state": "completed",
+            "type": "github_workflow",
+            "pluginResult": {
+              "pluginId": "github",
+              "runId": 40972562294,
+              "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "conclusion": "failure",
+              "nested": {
+                "new": []
+              }
+            },
+            "display": {
+              "tone": "error",
+              "title": "Workflow failed",
+              "detail": ""
+            }
+          }
+        },
+        {
+          "nextCheckAt": 123,
+          "lastError": "Temporary error"
+        }
+      ],
+      "observation": {
+        "state": "completed",
+        "type": "group",
+        "mode": "any",
+        "members": [
+          {
+            "condition": {
+              "type": "plugin",
+              "pluginId": "github",
+              "conditionType": "github_workflow",
+              "projectId": "00000000-0000-4000-8000-000000000001",
+              "input": {
+                "runId": 40972562294,
+                "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "future": {
+                  "new": []
+                }
+              }
+            },
+            "result": {
+              "state": "completed",
+              "type": "github_workflow",
+              "pluginResult": {
+                "pluginId": "github",
+                "runId": 40972562294,
+                "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "conclusion": "failure",
+                "nested": {
+                  "new": []
+                }
+              },
+              "display": {
+                "tone": "error",
+                "title": "Workflow failed",
+                "detail": ""
+              }
+            }
+          },
+          {
+            "condition": {
+              "type": "run_finished",
+              "runId": "00000000-0000-4000-8000-000000000001"
+            },
+            "result": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "messageId": null,
+      "reason": "Attendre une date",
+      "seconds": 1,
+      "createdAt": 123,
+      "wakeAt": 124,
+      "timeCondition": {
+        "type": "at",
+        "date": "2026-10-30T10:00:00+01:00"
+      }
+    }
+  ],
+  "delegates": [
+    {
+      "task": "Review this branch"
+    },
+    {
+      "task": "Review without a project",
+      "project": {
+        "type": "none"
+      }
+    },
+    {
+      "task": "Use the requester project",
+      "project": {
+        "type": "inherit"
+      }
+    },
+    {
+      "task": "Review this project",
+      "project": {
+        "type": "selected",
+        "projectId": "00000000-0000-4000-8000-000000000001"
+      },
+      "provider": "codex",
+      "reasoning": "high",
+      "model": "gpt-6",
+      "requestId": "00000000-0000-4000-8000-000000000001"
+    }
+  ],
+  "invalidDelegates": [
+    {
+      "task": "Review",
+      "project": {
+        "type": "selected",
+        "projectId": "bad"
+      }
+    },
+    {
+      "task": "Review",
+      "project": {
+        "type": "unknown"
+      }
+    },
+    {
+      "task": "Review",
+      "provider": "unknown"
+    },
+    {
+      "task": "Review",
+      "reasoning": "BAD!"
+    },
+    {
+      "task": "Review",
+      "model": "bad;command"
+    }
+  ]
+}

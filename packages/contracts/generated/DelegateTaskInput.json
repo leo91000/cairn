@@ -1,6 +1,56 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
+  "definitions": {
+    "DelegationProject": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "inherit",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "none",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "projectId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "selected",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "projectId"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
   "properties": {
     "agentId": {
       "format": "uuid",
@@ -17,12 +67,16 @@
         "null"
       ]
     },
-    "projectId": {
-      "format": "uuid",
-      "type": [
-        "string",
-        "null"
-      ]
+    "project": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DelegationProject"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Omission inherits the requester project. An explicit choice can clear it."
     },
     "provider": {
       "pattern": "^(codex|claude|opencode)$",

@@ -1079,12 +1079,12 @@ async fn public_questionnaire_answers_preserve_choices_comments_and_withdrawal_a
         "chatId": chat_id,
         "questionId": pending,
     });
-    let forbidden = reader.call("withdraw_chat_question", args.clone()).await;
+    let forbidden = reader.call("cancel_chat_question", args.clone()).await;
     assert!(forbidden["error"].is_object() || forbidden["result"]["isError"] == true);
-    let withdrawn = mcp.call("withdraw_chat_question", args.clone()).await;
+    let withdrawn = mcp.call("cancel_chat_question", args.clone()).await;
     assert_eq!(result(&withdrawn)["status"], "cancelled", "{withdrawn}");
     assert_eq!(
-        result(&mcp.call("withdraw_chat_question", args).await)["status"],
+        result(&mcp.call("cancel_chat_question", args).await)["status"],
         "cancelled"
     );
     assert_eq!(

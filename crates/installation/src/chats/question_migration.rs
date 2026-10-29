@@ -20,17 +20,80 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     tx.execute_batch(crate::waits::sql::SCHEMA)?;
     migrate_waits_and_lineage(&tx)?;
     migrate_answers(&tx)?;
+    migrate_wait_snapshots(&tx)?;
     let rows = tx
-        .prepare("SELECT key,data FROM kv WHERE key LIKE 'chat-question:%' ORDER BY key")?
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .prepare("SELECT key,data,expires FROM kv WHERE key LIKE 'chat-question:%' ORDER BY key")?
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+            ))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (key, data) in rows {
+    for (key, data, expires) in rows {
         let question: cairn_contracts::ChatQuestion =
             serde_json::from_str(&data).map_err(|_| invalid())?;
         if key != format!("chat-question:{}:{}", question.chat_id, question.id) {
             return Err(invalid());
         }
-        Db(&tx).save_question(&question).map_err(|_| invalid())?;
+        Db(&tx).import_question(&question).map_err(|_| invalid())?;
+        let mut metadata: serde_json::Value = serde_json::from_str(&data).map_err(|_| invalid())?;
+        for key in [
+            "id",
+            "chatId",
+            "runId",
+            "blocking",
+            "source",
+            "status",
+            "createdAt",
+            "messageId",
+        ] {
+            metadata.as_object_mut().ok_or_else(invalid)?.remove(key);
+        }
+        if let Some(fields) = metadata["fields"].as_array_mut() {
+            for field in fields {
+                for key in ["id", "title", "secret", "mode", "minChoices", "maxChoices"] {
+                    field.as_object_mut().ok_or_else(invalid)?.remove(key);
+                }
+                if let Some(options) = field["options"].as_array_mut() {
+                    for option in options {
+                        for key in ["id", "label", "description", "recommended"] {
+                            option.as_object_mut().ok_or_else(invalid)?.remove(key);
+                        }
+                    }
+                }
+            }
+        }
+        // Keep extension data and the previous expiry without exposing either in
+        // the generated public model. The normalized columns remain authoritative.
+        if let Some(fields) = metadata["fields"].as_array_mut() {
+            for field in fields.iter_mut() {
+                if field
+                    .get("options")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|options| {
+                        options
+                            .iter()
+                            .all(|option| option.as_object().is_some_and(|o| o.is_empty()))
+                    })
+                {
+                    field.as_object_mut().unwrap().remove("options");
+                }
+            }
+            if fields
+                .iter()
+                .all(|field| field.as_object().is_some_and(|o| o.is_empty()))
+            {
+                metadata.as_object_mut().unwrap().remove("fields");
+            }
+        }
+        if expires.is_some() || metadata != serde_json::json!({}) {
+            tx.execute(
+                "INSERT INTO question_import_metadata VALUES(?,?,?)",
+                rusqlite::params![question.id, expires, serde_json::to_string(&metadata)?],
+            )?;
+        }
     }
     tx.execute_batch("CREATE TABLE kv_v16(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%' AND key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key NOT LIKE 'chat-question:%' AND key!='conversation-expiration'),data TEXT NOT NULL,expires INTEGER);
 INSERT INTO kv_v16 SELECT * FROM kv WHERE key NOT LIKE 'chat-question:%';
@@ -44,29 +107,103 @@ ALTER TABLE kv_v16 RENAME TO kv;")?;
     Ok(())
 }
 
-fn wakeup(data: &str) -> Result<cairn_contracts::ChatWakeup> {
-    let mut value: serde_json::Value = serde_json::from_str(data).map_err(|_| invalid())?;
+// Retained events are snapshots, not current authority. Convert their owned
+// condition/result fields without dropping event metadata or plugin payloads.
+fn observation(value: &mut serde_json::Value) -> Result<()> {
+    if !value.is_object() {
+        return Err(invalid());
+    }
+    if value["pluginId"].is_string() {
+        let object = value.as_object_mut().unwrap();
+        let mut plugin = serde_json::Map::new();
+        let keys = object.keys().cloned().collect::<Vec<_>>();
+        for key in keys {
+            if !["state", "type", "message", "display", "reason", "immediate"]
+                .contains(&key.as_str())
+            {
+                plugin.insert(key.clone(), object.remove(&key).unwrap());
+            }
+        }
+        object.insert("pluginResult".into(), plugin.into());
+    }
+    if value["condition"].is_object() {
+        value["condition"] = serde_json::to_value(
+            crate::waits::condition_from_wire(&value["condition"]).map_err(|_| invalid())?,
+        )?;
+    }
+    if value["type"] == "group" {
+        let members = value["members"].as_array_mut().ok_or_else(invalid)?;
+        for member in members {
+            member["condition"] = serde_json::to_value(
+                crate::waits::condition_from_wire(&member["condition"]).map_err(|_| invalid())?,
+            )?;
+            if !member["result"].is_null() {
+                observation(&mut member["result"])?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn wakeup_snapshot(value: &mut serde_json::Value) -> Result<()> {
     if value["condition"].is_object() {
         value["condition"] = serde_json::to_value(
             crate::waits::condition_from_wire(&value["condition"]).map_err(|_| invalid())?,
         )?;
     }
     if value["observation"].is_object() {
-        value["observation"] = serde_json::to_value(
-            crate::waits::observed_from_wire(&value["observation"]).map_err(|_| invalid())?,
-        )?;
+        observation(&mut value["observation"])?;
     }
     if let Some(members) = value["members"].as_array_mut() {
         for member in members {
             if member["observation"].is_object() {
-                member["observation"] = serde_json::to_value(
-                    crate::waits::observed_from_wire(&member["observation"])
-                        .map_err(|_| invalid())?,
-                )?;
+                observation(&mut member["observation"])?;
             }
         }
     }
+    Ok(())
+}
+
+fn wakeup(data: &str) -> Result<cairn_contracts::ChatWakeup> {
+    let mut value: serde_json::Value = serde_json::from_str(data).map_err(|_| invalid())?;
+    wakeup_snapshot(&mut value)?;
     serde_json::from_value(value).map_err(|_| invalid())
+}
+
+fn migrate_wait_snapshots(tx: &Connection) -> Result<()> {
+    let events = tx.prepare("SELECT id,type,payload FROM events WHERE type IN ('chat.wait','chat.wait_ready','chat.wakeup','run.wait','run.wait_ready','run.wakeup') AND payload IS NOT NULL")?
+        .query_map([], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, kind, payload) in events {
+        let mut value: serde_json::Value = serde_json::from_str(&payload).map_err(|_| invalid())?;
+        if kind.ends_with("wait_ready") {
+            observation(&mut value)?;
+        } else {
+            wakeup_snapshot(&mut value)?;
+        }
+        tx.execute(
+            "UPDATE events SET payload=? WHERE id=?",
+            rusqlite::params![serde_json::to_string(&value)?, id],
+        )?;
+    }
+    let runs = tx.prepare("SELECT id,boundary FROM runs WHERE json_type(boundary,'$.waitContinuation')='object' OR json_type(boundary,'$.chatExecution.wakeup')='object'")?
+        .query_map([], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, boundary) in runs {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&boundary).map_err(|_| invalid())?;
+        if value["waitContinuation"].is_object() {
+            wakeup_snapshot(&mut value["waitContinuation"])?;
+        }
+        if value["chatExecution"]["wakeup"].is_object() {
+            wakeup_snapshot(&mut value["chatExecution"]["wakeup"])?;
+        }
+        tx.execute(
+            "UPDATE runs SET boundary=? WHERE id=?",
+            rusqlite::params![serde_json::to_string(&value)?, id],
+        )?;
+    }
+    Ok(())
 }
 
 fn migrate_waits_and_lineage(tx: &Connection) -> Result<()> {

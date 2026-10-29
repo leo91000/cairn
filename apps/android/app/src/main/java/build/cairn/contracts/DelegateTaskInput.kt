@@ -11,7 +11,7 @@ data class DelegateTaskInput(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val model: String? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
-    val projectId: String? = null,
+    val project: DelegationProject? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val provider: String? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
@@ -25,7 +25,6 @@ data class DelegateTaskInput(
     init {
         agentId?.let { java.util.UUID.fromString(it) }
         model?.let { require(Regex("^[\\w./:\\[\\]-]*\$").containsMatchIn(it)) }
-        projectId?.let { java.util.UUID.fromString(it) }
         provider?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
         reasoning?.let { require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(it)) }
         requestId?.let { java.util.UUID.fromString(it) }

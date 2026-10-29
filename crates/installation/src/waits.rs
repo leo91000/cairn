@@ -1010,7 +1010,13 @@ impl Owner {
         if self.chat {
             db.save_conversation_boundary(&record)?;
         } else {
-            db.update_run_boundary(text(&record, "id"), &json!({"wakeup":self.wakeup}))?;
+            db.change_run(
+                text(&record, "id"),
+                crate::runs::RunChanges {
+                    wakeup: Some(self.wakeup.clone()),
+                    ..Default::default()
+                },
+            )?;
         }
         Ok(())
     }
@@ -1155,7 +1161,8 @@ pub(crate) async fn tick_missions(s: &Service, active: &HashSet<String>) -> Resu
                     error: Some(None),
                     retry : Some(None),
                     account_wait_reason: Some(None),
-                    boundary: Some(json!({"missionTurnId": wakeup["id"],"waitContinuation": wakeup,"wakeup": null,"outcome": null})),
+                    wakeup: Some(None),
+                    boundary: Some(json!({"missionTurnId": wakeup["id"],"waitContinuation": wakeup,"outcome": null})),
                     ..Default::default()
                 })?;
                 db.event(
