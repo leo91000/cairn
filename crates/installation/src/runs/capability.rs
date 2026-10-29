@@ -48,7 +48,7 @@ pub(crate) const RUN_OPERATIONS: &[RunOperation] = &[
     RunOperation {
         name: "read_run_history",
         scope: "read",
-        description: "Read the previous byte-bounded window of a run's history. Pass history from get_run and use oldest as the next before cursor while hasOlder is true. Reconnect when the history revision changes.",
+        description: "Read a previous history window selected with a 256 KiB gzip budget, at most 1,000 events and a decoded-size ceiling. Tool responses retain bounded previews; read truncated events with read_run_content. Pass history from get_run and use oldest as the next before cursor while hasOlder is true. Reconnect when the history revision changes.",
     },
     RunOperation {
         name: "read_run_content",

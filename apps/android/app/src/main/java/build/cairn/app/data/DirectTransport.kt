@@ -11,6 +11,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import java.util.zip.GZIPInputStream
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -391,6 +392,8 @@ class DirectChannel(
             "/api/" +
                 request.url.encodedPath.removePrefix(prefix) +
                 (request.url.encodedQuery?.let { "?$it" } ?: "")
+        val route = path.substringBefore('?')
+        val streamedRoute = route.endsWith("/stream") || route.startsWith("/api/shared-artifacts/")
         val frame = buildJsonObject {
             put("type", "request")
             put("id", id)
@@ -401,6 +404,12 @@ class DirectChannel(
             put(
                 "headers",
                 buildJsonArray {
+                    add(
+                        buildJsonArray {
+                            add("accept-encoding")
+                            add(if (streamedRoute) "identity" else "gzip")
+                        }
+                    )
                     for (name in
                         listOf(
                             "accept",
@@ -555,7 +564,23 @@ class DirectChannel(
                     )
                     .build()
             }
-            return builder.body(bytes.toResponseBody()).build()
+            val decoded =
+                if (request.method != "HEAD" && responseHeaders["content-encoding"] == "gzip") {
+                    builder.removeHeader("content-encoding").removeHeader("content-length")
+                    GZIPInputStream(bytes.inputStream()).use { input ->
+                        val output = ByteArrayOutputStream()
+                        val buffer = ByteArray(8192)
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count == -1) break
+                            if (output.size() + count > MAX_BODY)
+                                throw IOException("Réponse trop volumineuse")
+                            output.write(buffer, 0, count)
+                        }
+                        output.toByteArray()
+                    }
+                } else bytes
+            return builder.body(decoded.toResponseBody()).build()
         } catch (error: IOException) {
             runCatching { control("cancel", id) }
             throw error
