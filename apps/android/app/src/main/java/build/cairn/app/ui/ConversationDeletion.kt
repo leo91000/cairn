@@ -36,10 +36,10 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import build.cairn.app.data.*
+import build.cairn.contracts.ConfirmChatInput
+import build.cairn.contracts.deleteChat
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 
 /** The app-wide snackbar, so screens can show feedback without owning a Scaffold. */
 internal val LocalSnackbar = staticCompositionLocalOf<SnackbarHostState?> { null }
@@ -70,11 +70,7 @@ internal fun rememberConversationTrash(
             { confirming = null },
         ) {
             vm.perform {
-                api.request(
-                    "DELETE",
-                    "/chats/${segment(id)}",
-                    buildJsonObject { put("confirm", true) },
-                )
+                api.deleteChat(ConfirmChatInput(chatId = id, confirm = true))
                 historyCache.clear()
                 chatDrafts.remove(id)
                 hidden = hidden + id

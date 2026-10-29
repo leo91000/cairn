@@ -8,6 +8,31 @@ use sqlx_core::query::query;
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
 
+#[tokio::test]
+async fn fixture_requests_reach_its_bound_listener_when_localhost_is_dual_stack() {
+    let app = Fixture::new().await;
+    let port = reqwest::Url::parse(&app.url).unwrap().port().unwrap();
+    let other = tokio::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    let other = tokio::spawn(async move {
+        axum::serve(
+            other,
+            axum::Router::new().fallback(|| async { axum::http::StatusCode::IM_A_TEAPOT }),
+        )
+        .await
+        .unwrap();
+    });
+    let response = app
+        .client
+        .get(format!("{}/api/account/session", app.url))
+        .send()
+        .await
+        .unwrap();
+    other.abort();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
 // SoftPasskey signs real WebAuthn proofs but lacks resident-key storage. This client
 // adapter retains the credential/user handle and supplies them locally when the
 // server sends an empty discovery list, as a resident authenticator would do.
