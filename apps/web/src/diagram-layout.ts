@@ -1,6 +1,7 @@
 import type {
   Diagram,
   DiagramStyle,
+  Direction,
   EdgeHead,
   GraphDiagram,
   GraphEdge,
@@ -340,32 +341,6 @@ function nodeBox(node: GraphNode, horizontal: boolean, measure: TextMeasure): No
   }
 }
 
-/** Distance from a node's center to its bottom (or top) outline at horizontal offset dx. */
-function outline(shape: NodeShape, w: number, h: number, dx: number) {
-  const hw = w / 2
-  const hh = h / 2
-  const t = Math.min(1, Math.abs(dx) / hw)
-  if (shape === 'diamond' || shape === 'choice')
-    return hh * (1 - t)
-  if (shape === 'circle' || shape === 'doublecircle' || shape === 'start' || shape === 'end')
-    return hh * Math.sqrt(Math.max(0, 1 - t * t))
-  if (shape === 'stadium') {
-    const flat = hw - hh
-    if (Math.abs(dx) <= flat)
-      return hh
-    const e = (Math.abs(dx) - flat) / hh
-    return hh * Math.sqrt(Math.max(0, 1 - e * e))
-  }
-
-  if (shape === 'hexagon') {
-    const inset = h / 2
-    const flat = hw - inset
-    return Math.abs(dx) <= flat ? hh : hh * (hw - Math.abs(dx)) / inset
-  }
-
-  return hh
-}
-
 function shapePaths(shape: NodeShape, cx: number, cy: number, w: number, h: number) {
   const x = cx - w / 2
   const y = cy - h / 2
@@ -461,6 +436,77 @@ function shapePaths(shape: NodeShape, cx: number, cy: number, w: number, h: numb
   }
 
   return { outlines, details }
+}
+
+/** Intersect canonical node contours with a ray in the graph's layout coordinates. */
+function outlineExtents(outlines: PathCommand[][], direction: Direction, axis: 'x' | 'y', side: 1 | -1, offsets: number[]) {
+  const project = (x: number, y: number): [number, number] => {
+    const across = direction === 'LR' || direction === 'RL' ? y : x
+    const rank = direction === 'BT' ? -y : direction === 'LR' ? x : direction === 'RL' ? -x : y
+    return axis === 'x' ? [side * across, rank] : [side * rank, across]
+  }
+
+  const cubic = (a: number, b: number, c: number, d: number, t: number) => {
+    const u = 1 - t
+    return u * u * u * a + 3 * u * u * t * b + 3 * u * t * t * c + t * t * t * d
+  }
+
+  return offsets.map((offset) => {
+    let extent = -Infinity
+    for (const path of outlines) {
+      let current: [number, number] = [0, 0]
+      let first = current
+      const advance = (end: [number, number], c1?: [number, number], c2?: [number, number]) => {
+        if (offset >= Math.min(current[1], end[1]) && offset <= Math.max(current[1], end[1])) {
+          if (current[1] === end[1]) {
+            extent = Math.max(extent, current[0], end[0])
+          }
+          else if (c1 && c2) {
+            // Generated outline cubics are monotone on both axes; bisection stays bounded.
+            let low = 0
+            let high = 1
+            for (let iteration = 0; iteration < 32; iteration++) {
+              const middle = (low + high) / 2
+              const value = cubic(current[1], c1[1], c2[1], end[1], middle)
+              if ((value < offset) === (end[1] > current[1]))
+                low = middle
+              else
+                high = middle
+            }
+
+            extent = Math.max(extent, cubic(current[0], c1[0], c2[0], end[0], (low + high) / 2))
+          }
+          else {
+            const t = (offset - current[1]) / (end[1] - current[1])
+            extent = Math.max(extent, current[0] + (end[0] - current[0]) * t)
+          }
+        }
+
+        current = end
+      }
+
+      for (const command of path) {
+        switch (command[0]) {
+          case 'M':
+            first = current = project(command[1], command[2])
+            break
+          case 'L':
+            advance(project(command[1], command[2]))
+            break
+          case 'C':
+            advance(project(command[5], command[6]), project(command[1], command[2]), project(command[3], command[4]))
+            break
+          case 'Z':
+            advance(first)
+            break
+        }
+      }
+    }
+
+    if (!Number.isFinite(extent))
+      throw new DiagramError('This node outline cannot be drawn.')
+    return extent
+  })
 }
 
 function headPaths(head: EdgeHead, tip: [number, number], direction: [number, number], paint: Paint, width: number): PathItem[] {
@@ -1588,6 +1634,17 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
   const edgePaint = (edge: GraphEdge): Paint => edge.style?.stroke ? { color: edge.style.stroke } : { tone: 'edge' }
   const edgeWidth = (edge: GraphEdge) => edge.style?.strokeWidth ?? (edge.line === 'thick' ? 3 : 1.5)
 
+  const nodeOutlines = new Map<string, PathCommand[][]>()
+  const outlineFor = (node: LNode) => {
+    let paths = nodeOutlines.get(node.key)
+    if (!paths) {
+      paths = shapePaths(node.node!.shape, 0, 0, node.box!.w, node.box!.h).outlines
+      nodeOutlines.set(node.key, paths)
+    }
+
+    return paths
+  }
+
   for (const edge of edges) {
     const { edge: source } = edge
     if (source.line === 'invisible')
@@ -1600,12 +1657,10 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         return [node.x, node.y]
       const shape = node.node.shape
       const w = node.box ? horizontal ? node.box.h : node.box.w : node.w
-      const h = node.box ? horizontal ? node.box.w : node.box.h : node.h
       const round = shape === 'circle' || shape === 'doublecircle' || shape === 'diamond' || shape === 'choice' || shape === 'start' || shape === 'end'
       const reach = Math.max(0, round ? w * 0.2 : w / 2 - 12)
       const dx = Math.max(-reach, Math.min(reach, toward - node.x))
-      // Transposed outlines only match for symmetric shapes; others leave from their flat side.
-      const depth = horizontal && !round ? h / 2 : outline(shape, w, h, dx)
+      const depth = outlineExtents(outlineFor(node), graph.direction, 'y', side, [dx])[0]!
       return [node.x + dx, node.y + side * depth]
     }
 
@@ -1703,12 +1758,16 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     const right = node.x + node.w / 2
     const reach = loop.reach
     const bend = (24 + Math.min(node.h, 40) / 2) * 0.7
-    const top = node.y - Math.min(node.h / 4, 10)
-    const bottom = node.y + Math.min(node.h / 4, 10)
+    const offset = Math.min(node.h / 4, 10)
+    const top = node.y - offset
+    const bottom = node.y + offset
+    const sides = outlineExtents(outlineFor(node), graph.direction, 'x', 1, [-offset, offset])
+    const startX = node.x + sides[0]!
+    const endX = node.x + sides[1]!
     const inset = headInset(edge.end)
     const d: PathCommand[] = [
-      ['M', ...transform([right + headInset(edge.start), top])],
-      ['C', ...transform([right + reach, top - bend]), ...transform([right + reach, bottom + bend]), ...transform([right + inset, bottom])],
+      ['M', ...transform([startX + headInset(edge.start), top])],
+      ['C', ...transform([right + reach, top - bend]), ...transform([right + reach, bottom + bend]), ...transform([endX + inset, bottom])],
     ]
     const paint = edgePaint(edge)
     const width = edgeWidth(edge)
@@ -1722,8 +1781,8 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
       })
       const [x0, y0] = transform([0, 0])
       const [x1, y1] = transform([-1, 0])
-      edgeItems.push(...headPaths(edge.end, transform([right, bottom]), [x1 - x0, y1 - y0], paint, width))
-      edgeItems.push(...headPaths(edge.start, transform([right, top]), [x1 - x0, y1 - y0], paint, width))
+      edgeItems.push(...headPaths(edge.end, transform([endX, bottom]), [x1 - x0, y1 - y0], paint, width))
+      edgeItems.push(...headPaths(edge.start, transform([startX, top]), [x1 - x0, y1 - y0], paint, width))
       if (loop.label) {
         const at = transform([right + reach * 0.75 + (horizontal ? loop.label.height : loop.label.width) / 2 + 6, node.y])
         labelItems.push(...edgeLabel(loop.label, at))

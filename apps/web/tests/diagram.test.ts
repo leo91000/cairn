@@ -156,6 +156,34 @@ describe('diagram layout', () => {
     }
   })
 
+  it.each(['TB', 'BT', 'LR', 'RL'].flatMap(direction => ['diamond', 'circle', 'choice'].map(shape => ({ direction, shape }))))('attaches $shape loops to their outline in $direction', ({ direction, shape }) => {
+    const node = shape === 'diamond' ? 'A{Ready?}' : 'A((Ready?))'
+    const source = shape === 'choice' ? `stateDiagram-v2\ndirection ${direction}\nstate A <<choice>>\nA --> A : retry` : `flowchart ${direction}\n${node} -->|retry| A`
+    const scene = layoutDiagram(parseDiagram(source), measure)
+    const outline = scene.items.find((item): item is PathItem => item.kind === 'path' && !!item.shadow)!
+    const vertices = points(outline)
+    const left = Math.min(...vertices.map(([x]) => x))
+    const right = Math.max(...vertices.map(([x]) => x))
+    const top = Math.min(...vertices.map(([, y]) => y))
+    const bottom = Math.max(...vertices.map(([, y]) => y))
+    const curve = scene.items.find((item): item is PathItem => item.kind === 'path' && !item.fill && !!item.stroke && 'tone' in item.stroke && item.stroke.tone === 'edge')!
+    const head = scene.items.find((item): item is PathItem => item.kind === 'path' && !!item.fill && 'tone' in item.fill && item.fill.tone === 'edge')!
+    for (const [x, y] of [points(curve)[0]!, points(head)[0]!]) {
+      const dx = (x - (left + right) / 2) / ((right - left) / 2)
+      const dy = (y - (top + bottom) / 2) / ((bottom - top) / 2)
+      const boundary = shape !== 'circle' ? Math.abs(dx) + Math.abs(dy) : dx * dx + dy * dy
+      expect(boundary).toBeCloseTo(1, shape !== 'circle' ? 6 : 2)
+    }
+  })
+
+  it('attaches horizontal links to a slanted node edge', () => {
+    const scene = layoutDiagram(parseDiagram('flowchart LR\nA[/Ready?/] --> B[Done]'), measure)
+    const node = scene.items.find((item): item is PathItem => item.kind === 'path' && !!item.shadow)!
+    const vertices = points(node)
+    const edge = scene.items.find((item): item is PathItem => item.kind === 'path' && !item.fill && !!item.stroke && 'tone' in item.stroke && item.stroke.tone === 'edge')!
+    expect(points(edge)[0]![0]).toBeCloseTo((vertices[1]![0] + vertices[2]![0]) / 2, 6)
+  })
+
   it('draws every flowchart node, link and label', () => {
     const scene = layoutDiagram(parseDiagram('flowchart LR\n  A[One] -->|go| B{Two?}\n  B --> C((Three))'), measure)
     const texts = scene.items.flatMap(item => item.kind === 'text' ? item.lines : [])

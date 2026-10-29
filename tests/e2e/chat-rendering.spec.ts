@@ -392,3 +392,25 @@ test('nested activations stay inside the SVG and clear the next lifeline', async
     expect(result).toEqual({ bars: depth, contained: true, separated: true })
   }
 })
+
+test('graph links and loops meet every supported shape outline in all directions', async ({ page }) => {
+  const shapes = ['rect', 'rounded', 'stadium', 'subroutine', 'cylinder', 'circle', 'double-circle', 'diamond', 'hexagon', 'lean-r', 'lean-l', 'trap-b', 'trap-t', 'flag', 'doc', 'start', 'stop', 'fork', 'choice']
+  for (const direction of ['TB', 'BT', 'LR', 'RL']) {
+    for (const shape of shapes) {
+      const node = `A@{shape: ${shape}, label: "Ready?"}`
+      const header = shape === 'choice' ? `stateDiagram-v2\ndirection ${direction}\nstate A <<choice>>` : `flowchart ${direction}`
+      const graphs = shape === 'choice' ? ['A --> A : retry', 'A --> B', 'B --> A'] : [`${node} -->|retry| A`, `${node} --> B[Peer]`, `B[Peer] --> ${node}`]
+      for (const graph of graphs) {
+        await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${header}\n${graph}\n\`\`\``)
+        const attached = await page.locator('#app figure.diagram svg').evaluate((svg) => {
+          const paths = [...svg.querySelectorAll('path')]
+          const curve = paths.find(path => path.style.stroke === 'var(--dg-edge)' && path.style.fill === 'none')!
+          const head = paths.find(path => path.style.fill === 'var(--dg-edge)')!
+          const outlines = paths.filter(path => !path.closest('defs') && path.style.stroke && path.style.stroke !== 'none' && path.style.stroke !== 'var(--dg-edge)')
+          return [curve.getPointAtLength(0), head.getPointAtLength(0)].every(point => outlines.some(path => path.isPointInStroke(new DOMPoint(point.x, point.y))))
+        })
+        expect(attached, `${direction} ${shape}: ${graph}`).toBe(true)
+      }
+    }
+  }
+})

@@ -353,6 +353,56 @@ class DiagramCorpusTest {
     }
 
     @Test
+    fun `attaches diamond and circle loops to their outlines in every direction`() {
+        for (direction in Direction.entries) for (shape in listOf("diamond", "circle", "choice")) {
+            val node = if (shape == "diamond") "A{Ready?}" else "A((Ready?))"
+            val source =
+                if (shape == "choice")
+                    "stateDiagram-v2\ndirection $direction\nstate A <<choice>>\nA --> A : retry"
+                else "flowchart $direction\n$node -->|retry| A"
+            val scene = layoutDiagram(parseDiagram(source), measure)
+            val outline = scene.items.filterIsInstance<PathItem>().first { it.shadow }
+            val vertices = points(outline)
+            val left = vertices.minOf { it.first }
+            val right = vertices.maxOf { it.first }
+            val top = vertices.minOf { it.second }
+            val bottom = vertices.maxOf { it.second }
+            val curve =
+                scene.items.filterIsInstance<PathItem>().first {
+                    it.fill == null && it.stroke == DiagramPaint.Tone("edge")
+                }
+            val head =
+                scene.items.filterIsInstance<PathItem>().first {
+                    it.fill == DiagramPaint.Tone("edge")
+                }
+            for ((x, y) in listOf(points(curve).first(), points(head).first())) {
+                val dx = (x - (left + right) / 2) / ((right - left) / 2)
+                val dy = (y - (top + bottom) / 2) / ((bottom - top) / 2)
+                val boundary =
+                    if (shape != "circle") kotlin.math.abs(dx) + kotlin.math.abs(dy)
+                    else dx * dx + dy * dy
+                assertEquals(1.0, boundary, if (shape != "circle") 0.000001 else 0.001)
+            }
+        }
+    }
+
+    @Test
+    fun `attaches horizontal links to a slanted node edge`() {
+        val scene = layoutDiagram(parseDiagram("flowchart LR\nA[/Ready?/] --> B[Done]"), measure)
+        val node = scene.items.filterIsInstance<PathItem>().first { it.shadow }
+        val vertices = points(node)
+        val edge =
+            scene.items.filterIsInstance<PathItem>().first {
+                it.fill == null && it.stroke == DiagramPaint.Tone("edge")
+            }
+        assertEquals(
+            (vertices[1].first + vertices[2].first) / 2,
+            points(edge).first().first,
+            0.000001,
+        )
+    }
+
+    @Test
     fun `orders whole subgraphs beyond 400 member constraints`() {
         val source =
             cases("parse")

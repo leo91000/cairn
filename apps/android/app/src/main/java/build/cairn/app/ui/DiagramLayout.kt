@@ -385,35 +385,6 @@ private fun nodeBox(node: GraphNode, horizontal: Boolean, measure: TextMeasure):
     }
 }
 
-/** Distance from a node's center to its bottom (or top) outline at horizontal offset dx. */
-private fun outline(shape: NodeShape, w: Double, h: Double, dx: Double): Double {
-    val hw = w / 2
-    val hh = h / 2
-    val t = min(1.0, abs(dx) / hw)
-    if (shape == NodeShape.DIAMOND || shape == NodeShape.CHOICE) return hh * (1 - t)
-    if (
-        shape == NodeShape.CIRCLE ||
-            shape == NodeShape.DOUBLE_CIRCLE ||
-            shape == NodeShape.START ||
-            shape == NodeShape.END
-    )
-        return hh * sqrt(max(0.0, 1 - t * t))
-    if (shape == NodeShape.STADIUM) {
-        val flat = hw - hh
-        if (abs(dx) <= flat) return hh
-        val e = (abs(dx) - flat) / hh
-        return hh * sqrt(max(0.0, 1 - e * e))
-    }
-
-    if (shape == NodeShape.HEXAGON) {
-        val inset = h / 2
-        val flat = hw - inset
-        return if (abs(dx) <= flat) hh else hh * (hw - abs(dx)) / inset
-    }
-
-    return hh
-}
-
 private class ShapePaths(
     val outlines: List<List<PathCommand>>,
     val details: List<List<PathCommand>>,
@@ -514,6 +485,75 @@ private fun shapePaths(shape: NodeShape, cx: Double, cy: Double, w: Double, h: D
     }
 
     return ShapePaths(outlines, details)
+}
+
+/** Intersect canonical node contours with a ray in the graph's layout coordinates. */
+private fun outlineExtents(
+    outlines: List<List<PathCommand>>,
+    direction: Direction,
+    axis: Char,
+    side: Int,
+    offsets: List<Double>,
+): List<Double> {
+    fun project(x: Double, y: Double): Pt {
+        val point =
+            when (direction) {
+                Direction.BT -> Pt(x, -y)
+                Direction.LR -> Pt(y, x)
+                Direction.RL -> Pt(y, -x)
+                else -> Pt(x, y)
+            }
+        return if (axis == 'x') Pt(side * point.x, point.y) else Pt(side * point.y, point.x)
+    }
+    fun cubic(a: Double, b: Double, c: Double, d: Double, t: Double): Double {
+        val u = 1 - t
+        return u * u * u * a + 3 * u * u * t * b + 3 * u * t * t * c + t * t * t * d
+    }
+    return offsets.map { offset ->
+        var extent = Double.NEGATIVE_INFINITY
+        for (path in outlines) {
+            var current = Pt(0.0, 0.0)
+            var first = current
+            fun advance(end: Pt, c1: Pt? = null, c2: Pt? = null) {
+                if (offset >= min(current.y, end.y) && offset <= max(current.y, end.y)) {
+                    if (current.y == end.y) extent = max(extent, max(current.x, end.x))
+                    else if (c1 != null && c2 != null) {
+                        // Generated outline cubics are monotone on both axes; bisection stays
+                        // bounded.
+                        var low = 0.0
+                        var high = 1.0
+                        repeat(32) {
+                            val middle = (low + high) / 2
+                            val value = cubic(current.y, c1.y, c2.y, end.y, middle)
+                            if ((value < offset) == (end.y > current.y)) low = middle
+                            else high = middle
+                        }
+                        extent = max(extent, cubic(current.x, c1.x, c2.x, end.x, (low + high) / 2))
+                    } else {
+                        val t = (offset - current.y) / (end.y - current.y)
+                        extent = max(extent, current.x + (end.x - current.x) * t)
+                    }
+                }
+                current = end
+            }
+            for (command in path) when (command) {
+                is PathCommand.Move -> {
+                    current = project(command.x, command.y)
+                    first = current
+                }
+                is PathCommand.Line -> advance(project(command.x, command.y))
+                is PathCommand.Cubic ->
+                    advance(
+                        project(command.x, command.y),
+                        project(command.x1, command.y1),
+                        project(command.x2, command.y2),
+                    )
+                PathCommand.Close -> advance(first)
+            }
+        }
+        if (!extent.isFinite()) throw DiagramError("This node outline cannot be drawn.")
+        extent
+    }
 }
 
 private fun headPaths(
@@ -1705,6 +1745,13 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     fun edgeWidth(edge: GraphEdge) =
         edge.style?.strokeWidth ?: (if (edge.line == EdgeLine.THICK) 3.0 else 1.5)
 
+    val nodeOutlines = HashMap<String, List<List<PathCommand>>>()
+    fun outlineFor(node: LNode): List<List<PathCommand>> =
+        nodeOutlines.getOrPut(node.key) {
+            val box = node.box!!
+            shapePaths(node.node!!.shape, 0.0, 0.0, box.w, box.h).outlines
+        }
+
     for (edge in edges) {
         val source = edge.edge
         if (source.line == EdgeLine.INVISIBLE) continue
@@ -1714,7 +1761,6 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         fun port(node: LNode, toward: Double, side: Int): Pt {
             val shape = node.node?.shape ?: return Pt(node.x, node.y)
             val w = node.box?.let { if (horizontal) it.h else it.w } ?: node.w
-            val h = node.box?.let { if (horizontal) it.w else it.h } ?: node.h
             val round =
                 shape == NodeShape.CIRCLE ||
                     shape == NodeShape.DOUBLE_CIRCLE ||
@@ -1724,9 +1770,8 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
                     shape == NodeShape.END
             val reach = max(0.0, if (round) w * 0.2 else w / 2 - 12)
             val dx = max(-reach, min(reach, toward - node.x))
-            // Transposed outlines only match for symmetric shapes; others leave from their flat
-            // side.
-            val depth = if (horizontal && !round) h / 2 else outline(shape, w, h, dx)
+            val depth =
+                outlineExtents(outlineFor(node), graph.direction, 'y', side, listOf(dx)).first()
             return Pt(node.x + dx, node.y + side * depth)
         }
 
@@ -1862,13 +1907,18 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         val right = node.x + node.w / 2
         val reach = loop.reach
         val bend = (24 + min(node.h, 40.0) / 2) * 0.7
-        val top = node.y - min(node.h / 4, 10.0)
-        val bottom = node.y + min(node.h / 4, 10.0)
+        val offset = min(node.h / 4, 10.0)
+        val top = node.y - offset
+        val bottom = node.y + offset
+        val sides =
+            outlineExtents(outlineFor(node), graph.direction, 'x', 1, listOf(-offset, offset))
+        val startX = node.x + sides[0]
+        val endX = node.x + sides[1]
         val inset = headInset(edge.end)
-        val start = transform(Pt(right + headInset(edge.start), top))
+        val start = transform(Pt(startX + headInset(edge.start), top))
         val control1 = transform(Pt(right + reach, top - bend))
         val control2 = transform(Pt(right + reach, bottom + bend))
-        val end = transform(Pt(right + inset, bottom))
+        val end = transform(Pt(endX + inset, bottom))
         val d =
             listOf(
                 PathCommand.Move(start.x, start.y),
@@ -1893,7 +1943,7 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
             edgeItems.addAll(
                 headPaths(
                     edge.end,
-                    transform(Pt(right, bottom)),
+                    transform(Pt(endX, bottom)),
                     Pt(back.x - origin.x, back.y - origin.y),
                     paint,
                     strokeWidth,
@@ -1902,7 +1952,7 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
             edgeItems.addAll(
                 headPaths(
                     edge.start,
-                    transform(Pt(right, top)),
+                    transform(Pt(startX, top)),
                     Pt(back.x - origin.x, back.y - origin.y),
                     paint,
                     strokeWidth,

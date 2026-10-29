@@ -5594,6 +5594,686 @@
         "height": 189,
         "items": 89
       }
+    },
+    {
+      "name": "diamond-loop-outline-TB",
+      "source": "flowchart TB\nA{Ready?} -->|retry| A",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Ready?",
+            "shape": "diamond"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "retry",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 205,
+        "height": 88,
+        "items": 6
+      }
+    },
+    {
+      "name": "circle-loop-outline-TB",
+      "source": "flowchart TB\nA((Ready?)) -->|retry| A",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Ready?",
+            "shape": "circle"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "retry",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 187,
+        "height": 103,
+        "items": 6
+      }
+    },
+    {
+      "name": "slanted-outline-out-TB",
+      "source": "flowchart TB\nA[/Ready?/] --> B[Peer]",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Ready?",
+            "shape": "parallelogram"
+          },
+          {
+            "id": "B",
+            "label": "Peer",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 136,
+        "height": 160,
+        "items": 6
+      }
+    },
+    {
+      "name": "slanted-outline-in-TB",
+      "source": "flowchart TB\nB[Peer] --> A[/Ready?/]",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "B",
+            "label": "Peer",
+            "shape": "rect"
+          },
+          {
+            "id": "A",
+            "label": "Ready?",
+            "shape": "parallelogram"
+          }
+        ],
+        "edges": [
+          {
+            "from": "B",
+            "to": "A",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 136,
+        "height": 160,
+        "items": 6
+      }
+    },
+    {
+      "name": "diamond-loop-outline-BT",
+      "source": "flowchart BT\nA{Ready?} -->|retry| A",
+      "diagram": {
+        "kind": "graph",
+        "direction": "BT",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Ready?",
+            "shape": "diamond"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "retry",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 205,
+        "height": 88,
+        "items": 6
+      }
+    },
+    {
+      "name": "circle-loop-outline-BT",
+      "source": "flowchart BT\nA((Ready?)) -->|retry| A",
+      "diagram": {
+        "kind": "graph",
+        "direction": "BT",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Ready?",
+            "shape": "circle"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "retry",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 187,
+        "height": 103,
+        "items": 6
+      }
+    },
+    {
+      "name": "slanted-outline-out-BT",
+      "source": "flowchart BT\nA[/Ready?/] --> B[Peer]",
+      "diagram": {
+        "kind": "graph",
+        "direction": "BT",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Ready?",
+            "shape": "parallelogram"
+          },
+          {
+            "id": "B",
+            "label": "Peer",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 136,
+        "height": 160,
+        "items": 6
+      }
+    },
+    {
+      "name": "slanted-outline-in-BT",
+      "source": "flowchart BT\nB[Peer] --> A[/Ready?/]",
+      "diagram": {
+        "kind": "graph",
+        "direction": "BT",
+        "nodes": [
+          {
+            "id": "B",
+            "label": "Peer",
+            "shape": "rect"
+          },
+          {
+            "id": "A",
+            "label": "Ready?",
+            "shape": "parallelogram"
+          }
+        ],
+        "edges": [
+          {
+            "from": "B",
+            "to": "A",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 136,
+        "height": 160,
+        "items": 6
+      }
+    },
+    {
+      "name": "diamond-loop-outline-LR",
+      "source": "flowchart LR\nA{Ready?} -->|retry| A",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Ready?",
+            "shape": "diamond"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "retry",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 121,
+        "height": 156,
+        "items": 6
+      }
+    },
+    {
+      "name": "circle-loop-outline-LR",
+      "source": "flowchart LR\nA((Ready?)) -->|retry| A",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Ready?",
+            "shape": "circle"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "retry",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 103,
+        "height": 171,
+        "items": 6
+      }
+    },
+    {
+      "name": "slanted-outline-out-LR",
+      "source": "flowchart LR\nA[/Ready?/] --> B[Peer]",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Ready?",
+            "shape": "parallelogram"
+          },
+          {
+            "id": "B",
+            "label": "Peer",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 251,
+        "height": 66,
+        "items": 6
+      }
+    },
+    {
+      "name": "slanted-outline-in-LR",
+      "source": "flowchart LR\nB[Peer] --> A[/Ready?/]",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "B",
+            "label": "Peer",
+            "shape": "rect"
+          },
+          {
+            "id": "A",
+            "label": "Ready?",
+            "shape": "parallelogram"
+          }
+        ],
+        "edges": [
+          {
+            "from": "B",
+            "to": "A",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 251,
+        "height": 66,
+        "items": 6
+      }
+    },
+    {
+      "name": "diamond-loop-outline-RL",
+      "source": "flowchart RL\nA{Ready?} -->|retry| A",
+      "diagram": {
+        "kind": "graph",
+        "direction": "RL",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Ready?",
+            "shape": "diamond"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "retry",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 121,
+        "height": 156,
+        "items": 6
+      }
+    },
+    {
+      "name": "circle-loop-outline-RL",
+      "source": "flowchart RL\nA((Ready?)) -->|retry| A",
+      "diagram": {
+        "kind": "graph",
+        "direction": "RL",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Ready?",
+            "shape": "circle"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "retry",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 103,
+        "height": 171,
+        "items": 6
+      }
+    },
+    {
+      "name": "slanted-outline-out-RL",
+      "source": "flowchart RL\nA[/Ready?/] --> B[Peer]",
+      "diagram": {
+        "kind": "graph",
+        "direction": "RL",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "Ready?",
+            "shape": "parallelogram"
+          },
+          {
+            "id": "B",
+            "label": "Peer",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 251,
+        "height": 66,
+        "items": 6
+      }
+    },
+    {
+      "name": "slanted-outline-in-RL",
+      "source": "flowchart RL\nB[Peer] --> A[/Ready?/]",
+      "diagram": {
+        "kind": "graph",
+        "direction": "RL",
+        "nodes": [
+          {
+            "id": "B",
+            "label": "Peer",
+            "shape": "rect"
+          },
+          {
+            "id": "A",
+            "label": "Ready?",
+            "shape": "parallelogram"
+          }
+        ],
+        "edges": [
+          {
+            "from": "B",
+            "to": "A",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 251,
+        "height": 66,
+        "items": 6
+      }
+    },
+    {
+      "name": "choice-loop-outline-TB",
+      "source": "stateDiagram-v2\ndirection TB\nstate A <<choice>>\nA --> A : retry",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "",
+            "shape": "choice"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "retry",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 132,
+        "height": 93,
+        "items": 5
+      }
+    },
+    {
+      "name": "choice-loop-outline-BT",
+      "source": "stateDiagram-v2\ndirection BT\nstate A <<choice>>\nA --> A : retry",
+      "diagram": {
+        "kind": "graph",
+        "direction": "BT",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "",
+            "shape": "choice"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "retry",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 132,
+        "height": 93,
+        "items": 5
+      }
+    },
+    {
+      "name": "choice-loop-outline-LR",
+      "source": "stateDiagram-v2\ndirection LR\nstate A <<choice>>\nA --> A : retry",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "",
+            "shape": "choice"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "retry",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 69,
+        "height": 116,
+        "items": 5
+      }
+    },
+    {
+      "name": "choice-loop-outline-RL",
+      "source": "stateDiagram-v2\ndirection RL\nstate A <<choice>>\nA --> A : retry",
+      "diagram": {
+        "kind": "graph",
+        "direction": "RL",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "",
+            "shape": "choice"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "A",
+            "label": "retry",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 69,
+        "height": 116,
+        "items": 5
+      }
     }
   ],
   "errors": [
