@@ -95,6 +95,9 @@ export interface Chat {
   sessionRestartRequested?: boolean
   canRequestNewSession?: boolean
   lifecycleError?: string | null
+  environmentState?: 'cleaning' | 'expired' | null
+  environmentExpiredAt?: number | null
+  environmentError?: string | null
   pendingMessages?: number
   /** The conversation whose agent delegated this one, and its retry key. */
   requestedBy?: { runId: string, chatId: string, requestId?: string | null } | null

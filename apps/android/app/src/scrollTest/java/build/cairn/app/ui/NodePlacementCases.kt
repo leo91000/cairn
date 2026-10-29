@@ -942,6 +942,16 @@ abstract class NodePlacementCases {
             }
             compose.onNodeWithText("Travail local · sauvegardé après l’arrêt").assertDoesNotExist()
             compose.onNodeWithText("Synchronisé il y a 2 min").assertExists()
+            compose.runOnIdle {
+                run.value =
+                    run.value.copy(
+                        storage =
+                            RunStorage(mode = "on-demand", dirtyBytes = 4096, backupDegraded = true)
+                    )
+            }
+            compose
+                .onNodeWithText("Synchronisation en retard · travail conservé sur cette node")
+                .assertExists()
             compose.waitUntil(20000) {
                 compose.onAllNodesWithText("Node : Bureau GPU").fetchSemanticsNodes().isNotEmpty()
             }
@@ -1158,7 +1168,12 @@ abstract class NodePlacementCases {
         backendMigrationCompletion(true)
     }
 
-    private fun backendMigrationCompletion(automatic: Boolean) {
+    @Test
+    fun expiredBackendChangeConfirmsAnEmptyEnvironmentAndPreservesTheConversation() {
+        backendMigrationCompletion(false, expired = true)
+    }
+
+    private fun backendMigrationCompletion(automatic: Boolean, expired: Boolean = false) {
         MockWebServer().use { server ->
             val submitted = CopyOnWriteArrayList<JsonObject>()
             val completed = AtomicBoolean(false)
@@ -1177,7 +1192,7 @@ abstract class NodePlacementCases {
                                     "{}"
                                 }
                                 path.endsWith("/backend-migration") ->
-                                    """{"required":${!automatic && !completed.get()},"optional":$automatic,"fromBackend":"${if (completed.get()) "native" else "firecracker"}","toBackend":"${if (automatic && completed.get()) "firecracker" else "native"}","pending":${submitted.isNotEmpty() && !completed.get()},"nodes":[{"id":"475328ca-1491-5a74-abfb-fb52c2e04160","name":"Desktop GPU"}]}"""
+                                    """{"required":${!automatic && !completed.get()},"optional":$automatic,"environmentExpired":$expired,"fromBackend":"${if (completed.get()) "native" else "firecracker"}","toBackend":"${if (automatic && completed.get()) "firecracker" else "native"}","pending":${submitted.isNotEmpty() && !completed.get()},"nodes":[{"id":"475328ca-1491-5a74-abfb-fb52c2e04160","name":"Desktop GPU"}]}"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path.endsWith("/overview") -> "{}"
@@ -1246,6 +1261,20 @@ abstract class NodePlacementCases {
             compose
                 .onNodeWithText("Le prochain message ouvre une nouvelle session", substring = true)
                 .assertExists()
+            if (expired) {
+                compose
+                    .onNodeWithText("un nouvel environnement vide", substring = true)
+                    .assertExists()
+                compose
+                    .onNodeWithText(
+                        "Le fil, l’historique, les pièces jointes et les livrables sont conservés",
+                        substring = true,
+                    )
+                    .assertExists()
+                compose
+                    .onNodeWithText("L’environnement d’origine est conservé", substring = true)
+                    .assertDoesNotExist()
+            }
             assertTrue(submitted.isEmpty())
             capture("backend-migration-confirm")
             compose.onNodeWithText("Confirmer").performClick()

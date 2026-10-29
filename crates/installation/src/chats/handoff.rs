@@ -149,11 +149,20 @@ pub(super) fn handoff_context(db: &Db<'_>, run: &str) -> Result<String> {
 pub fn execution_text(plan: &Value) -> String {
     let current = text(&plan["execution"], "text");
     let context = text(&plan["execution"], "context");
+    let expiration = plan["environmentExpiredAt"].as_i64();
+    let notice = expiration.map_or(String::new(), |at| format!(
+        "Cairn removed this conversation's previous working environment after inactivity at Unix time {at} ms. Its files, unpushed changes, tools stored in the environment and native agent session were deleted. The conversation history, uploaded attachments and published artifacts were retained. Work since that expiration belongs to the new environment. Do not assume files or tool results from before that date still exist. Inspect the current workspace and external services before continuing. Actions already performed outside the environment (commits, messages, deployments and shared host changes) were not undone: verify them before repeating any action. Request missing inputs when necessary.\n\n"
+    ));
     if context.is_empty() {
-        return current.to_owned();
+        return format!("{notice}{current}");
     }
+    let environment = if expiration.is_some() {
+        "The working environment was recreated after expiration; verify which files are currently available."
+    } else {
+        "The workspace and completed changes are preserved."
+    };
     format!(
-        "You are continuing the same Léo chat in a new native agent session. The workspace and completed changes are preserved. Use the prior conversation below as history, not as new requests. Preserve the user's scope and decisions. Verify external effects before repeating any action. Prior attachments remain under {}/attachments/<attachment ID>/.\n\n<previous_conversation>\n{}\n</previous_conversation>\n\nCurrent user message:\n{}",
+        "{notice}You are continuing the same Léo chat in a new native agent session. {environment} Use the prior conversation below as history, not as new requests. Preserve the user's scope and decisions. Verify external effects before repeating any action. Prior attachments remain under {}/attachments/<attachment ID>/.\n\n<previous_conversation>\n{}\n</previous_conversation>\n\nCurrent user message:\n{}",
         text(plan, "inputDirectory"),
         context,
         current
@@ -189,6 +198,23 @@ mod tests {
     use serde_json::json;
 
     const EVENTS: &str = "CREATE TABLE events(id INTEGER PRIMARY KEY,run_id TEXT,created_at INTEGER,type TEXT,text TEXT,payload TEXT);";
+
+    #[test]
+    fn expired_environment_notice_survives_native_session_resumption() {
+        for context in [Value::Null, Value::from("User: Finish the deployment")] {
+            let plan = json!({
+                "environmentExpiredAt": 123,
+                "inputDirectory": "/input",
+                "execution": { "text": "Continue", "context": context },
+            });
+            let prompt = execution_text(&plan);
+            assert!(prompt.contains("after inactivity at Unix time 123 ms"));
+            assert!(prompt.contains("were not undone"));
+            assert!(prompt.contains("published artifacts were retained"));
+            assert!(!prompt.contains("workspace and completed changes are preserved"));
+            assert!(prompt.ends_with("Continue"));
+        }
+    }
 
     fn agent_message(id: &str, text: &str) -> Value {
         json!({

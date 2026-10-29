@@ -10,6 +10,26 @@ import {
   workspacePath,
 } from './fixtures'
 
+test('expired environments retain the conversation and explain fresh resumption and cleanup retries', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  workspace.service.store.put('chats', { ...chat, environmentState: 'expired', environmentExpiredAt: Date.now() })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const notice = page.getByRole('status').filter({ hasText: 'Working environment expired' })
+  await expect(notice).toContainText('Your next message starts a fresh environment')
+  await expect(notice).toContainText('published files and shared links are retained')
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible()
+  workspace.service.store.put('chats', {
+    ...chat,
+    environmentState: 'cleaning',
+    environmentRetryAfter: Date.now() + 3600_000,
+    environmentError: 'Node unavailable',
+  })
+  await page.reload()
+  await expect(notice).toContainText('Please wait before sending another message')
+  await expect(notice).toContainText('Cleanup will retry: Node unavailable')
+})
+
 test('a lost message acknowledgement retries the same submission without duplicating it', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const attempts: { id: string, chatId: string }[] = []

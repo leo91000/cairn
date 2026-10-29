@@ -47,26 +47,25 @@ class LiveTest {
                                 taskId = "",
                             )
                     )
-                for (id in listOf(12L, 13L)) {
-                    server.enqueue(
-                        MockResponse()
-                            .setHeader("Content-Type", "text/event-stream")
-                            .setBody(
-                                frame(
-                                    id,
-                                    LiveBatch(
-                                        listOf(message(id, "Message $id", itemId = "m$id")),
-                                        state,
-                                        false,
-                                        false,
-                                        history,
-                                        oldest = 12,
-                                        hasOlder = true,
-                                    ),
-                                )
+                fun response(id: Long) =
+                    MockResponse()
+                        .setHeader("Content-Type", "text/event-stream")
+                        .setBody(
+                            frame(
+                                id,
+                                LiveBatch(
+                                    listOf(message(id, "Message $id", itemId = "m$id")),
+                                    state,
+                                    false,
+                                    false,
+                                    history,
+                                    oldest = 12,
+                                    hasOlder = true,
+                                ),
                             )
-                    )
-                }
+                        )
+
+                server.enqueue(response(12))
                 server.start()
                 val api = CairnApi(server.url("/"), MemoryVault())
                 val session = LiveSession().also { it.followsLatest = false }
@@ -94,8 +93,18 @@ class LiveTest {
                                         )
                                 }
                                 pages.display(snapshot).also {
-                                    if (it.status == "Reconnexion…" && it.cursor == 12L)
+                                    if (
+                                        reconnect == null &&
+                                            it.status == "Reconnexion…" &&
+                                            it.cursor == 12L
+                                    ) {
                                         reconnect = it
+                                        // Complete snapshots are conflated: wait until the
+                                        // collector
+                                        // observes reconnect before allowing the final frame
+                                        // through.
+                                        server.enqueue(response(13))
+                                    }
                                 }
                             }
                             .first { it.cursor == 13L }

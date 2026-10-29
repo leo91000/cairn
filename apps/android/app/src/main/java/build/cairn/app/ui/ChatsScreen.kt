@@ -1216,6 +1216,9 @@ internal fun ChatPage(
                             .align(Alignment.CenterHorizontally)
                     ) {
                         // Labels align with the error banner above.
+                        chat?.environmentState?.let { state ->
+                            EnvironmentExpirationNotice(state, chat.environmentError)
+                        }
                         if (chat?.canRequestNewSession == true)
                             TextButton(
                                 { newSession = true },

@@ -12,15 +12,41 @@ import {
   workspacePath,
 } from './fixtures'
 
+async function fits(page: Page) {
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+  await expectSingleScroll(page)
+  const missingIcons = await page.locator('.ui-icon').evaluateAll(elements => elements.filter((element) => {
+    const style = getComputedStyle(element)
+    const rect = element.getBoundingClientRect()
+    return rect.width > 0 && rect.height > 0 && style.maskImage === 'none' && style.backgroundImage === 'none'
+  }).map(element => element.className))
+  expect(missingIcons).toEqual([])
+  for (const dialog of await page.locator('dialog[open]').all()) {
+    const bounds = await dialog.boundingBox()
+    expect(Math.abs(bounds!.x + bounds!.width / 2 - page.viewportSize()!.width / 2)).toBeLessThan(2)
+  }
+}
+
+async function screenshotLayout(page: Page, testInfo: TestInfo, name: string, colorScheme: 'light' | 'dark') {
+  await page.evaluate(() => document.fonts.ready)
+  await fits(page)
+  if (colorScheme === 'dark') {
+    const brightSurfaces = await page.locator('.run-facts, .settings-section, .resource-card, .mission-card, .skill-card, .connection-card, dialog[open], .vs-popup:popover-open').evaluateAll(elements => elements.filter((el) => {
+      const color = getComputedStyle(el).backgroundColor.match(/[\d.]+/g)?.map(Number)
+      return color && color.length >= 3 && (color[3] ?? 1) > 0.5 && Math.min(...color.slice(0, 3)) > 180
+    }).map(el => el.className))
+    expect(brightSurfaces).toEqual([])
+  }
+
+  const overlay = await page.locator('dialog[open], .sidebar.open').count()
+  await page.screenshot({ path: testInfo.outputPath(`${name}.png`), fullPage: !overlay, animations: 'disabled' })
+}
+
 async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: TestInfo, colorScheme: 'light' | 'dark' = 'light') {
   await page.emulateMedia({ colorScheme })
   test.setTimeout(180000)
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
-  let virtualAgents: object[] | undefined
-  // Changing WebKit's interception while a background poll is in flight can cancel it.
-  // Install the route before navigation and only switch the fixture it returns.
-  await page.route('**/api/agents', route => virtualAgents ? route.fulfill({ json: { agents: virtualAgents } }) : route.continue())
   await page.goto(workspacePath('/'))
   await authenticateWorkspace(page)
   await expect(page.locator('.shell')).toBeVisible()
@@ -29,13 +55,20 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
 
   // The rail (desktop) or the dock (phone) leads to the Fil, Missions and the Atelier.
   async function navigate(url: string) {
+    const documentStarted = await page.evaluate(() => performance.timeOrigin)
     const destination = url.startsWith('/runs/') ? '/runs' : url === '/settings/installation' ? '/settings' : url
     const place = destination === '/' ? 'Fil' : destination === '/tasks' ? 'Missions' : 'Atelier'
     const navigation = page.getByRole('navigation', { name: /^(Workspace|Quick) navigation$/ }).filter({ visible: true })
-    if (await navigation.count())
-      await navigation.getByRole('link', { name: place, exact: true }).click()
-    else
-      await page.goto(workspacePath(place === 'Atelier' ? '/atelier' : destination))
+    if (!await navigation.count()) {
+      // Phone reading screens hide the dock. Return through their SPA controls:
+      // reloading here can race a poll and make WebKit report an access-control error.
+      const back = page.getByRole('link', { name: /^Back to (?:runs|agents)$/ }).or(
+        page.getByRole('button', { name: 'Back to settings', exact: true }),
+      )
+      await back.click()
+    }
+
+    await navigation.getByRole('link', { name: place, exact: true }).click()
     const sections: Record<string, string> = {
       '/runs': 'Runs',
       '/agents': 'Agents',
@@ -69,37 +102,11 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
       await page.locator(`.run-table a[href="${workspacePath(url)}"]`).first().click()
       await expect(page.locator('.run-title-meta')).toBeVisible()
     }
+
+    expect(await page.evaluate(() => performance.timeOrigin), 'Workspace navigation keeps the current document and its background polls').toBe(documentStarted)
   }
 
-  async function fits() {
-    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
-    await expectSingleScroll(page)
-    const missingIcons = await page.locator('.ui-icon').evaluateAll(elements => elements.filter((element) => {
-      const style = getComputedStyle(element)
-      const rect = element.getBoundingClientRect()
-      return rect.width > 0 && rect.height > 0 && style.maskImage === 'none' && style.backgroundImage === 'none'
-    }).map(element => element.className))
-    expect(missingIcons).toEqual([])
-    for (const dialog of await page.locator('dialog[open]').all()) {
-      const bounds = await dialog.boundingBox()
-      expect(Math.abs(bounds!.x + bounds!.width / 2 - page.viewportSize()!.width / 2)).toBeLessThan(2)
-    }
-  }
-
-  async function screenshot(name: string) {
-    await page.evaluate(() => document.fonts.ready)
-    await fits()
-    if (colorScheme === 'dark') {
-      const brightSurfaces = await page.locator('.run-facts, .settings-section, .resource-card, .mission-card, .skill-card, .connection-card, dialog[open], .vs-popup:popover-open').evaluateAll(elements => elements.filter((el) => {
-        const color = getComputedStyle(el).backgroundColor.match(/[\d.]+/g)?.map(Number)
-        return color && color.length >= 3 && (color[3] ?? 1) > 0.5 && Math.min(...color.slice(0, 3)) > 180
-      }).map(el => el.className))
-      expect(brightSurfaces).toEqual([])
-    }
-
-    const overlay = await page.locator('dialog[open], .sidebar.open').count()
-    await page.screenshot({ path: testInfo.outputPath(`${name}.png`), fullPage: !overlay, animations: 'disabled' })
-  }
+  const screenshot = (name: string) => screenshotLayout(page, testInfo, name, colorScheme)
 
   const screens = [
     ['overview', '/', '.fil'],
@@ -292,49 +299,6 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   await page.keyboard.press('Enter')
   await expect(dock.getByRole('link', { name: 'Missions', exact: true })).toHaveAttribute('aria-current', 'page')
   await expect(page.locator('.mission-card').first()).toBeVisible()
-  virtualAgents = Array.from({ length: 10000 }, (_, index) => ({
-    id: `virtual-${index}`,
-    name: index === 4999 ? 'Équipe sécurité' : `Agent ${index.toString().padStart(5, '0')}`,
-    description: `Maintains project ${index}`,
-    // A current installation marks its agents as holding their live grants.
-    model: '',
-    reasoning: 'high',
-    access: {
-      projects: null,
-      skills: null,
-      sandbox: 'yolo',
-    },
-  }))
-  await page.goto(workspacePath('/tasks'))
-  await page.getByRole('button', { name: 'New mission', exact: true }).click()
-  const agentSelect = page.getByRole('combobox', { name: 'Agent', exact: true })
-  await agentSelect.click()
-  await expect(page.getByRole('option').first()).toBeVisible()
-  expect(await page.getByRole('option').count()).toBeLessThan(20)
-  await agentSelect.press('End')
-  await expect(page.getByRole('option', { name: 'Agent 09999', exact: true })).toBeVisible()
-  expect(await page.getByRole('option').count()).toBeLessThan(20)
-  await screenshot('select-10000-options')
-  await agentSelect.press('Enter')
-  await expect(agentSelect).toHaveValue('Agent 09999')
-  await expect(page.getByRole('dialog')).toBeVisible()
-  await agentSelect.click()
-  await agentSelect.fill('equipe')
-  await expect(page.getByRole('option')).toHaveCount(1)
-  await agentSelect.press('Enter')
-  await expect(agentSelect).toHaveValue('Équipe sécurité')
-  await agentSelect.click()
-  await agentSelect.fill('does-not-exist')
-  await expect(page.getByText('No matches found', { exact: true })).toBeVisible()
-  await screenshot('select-no-results')
-  await agentSelect.press('Escape')
-  await expect(agentSelect).toHaveValue('Équipe sécurité')
-  await agentSelect.click()
-  await agentSelect.press('Tab')
-  await expect(page.getByRole('listbox')).not.toBeVisible()
-  await expect(page.getByRole('textbox', { name: /^Tags/ })).toBeFocused()
-  await page.keyboard.press('Escape')
-  virtualAgents = undefined
 
   const outcomeRun = workspace.service.store.addRun({
     ...workspace.service.store.run(run.id),
@@ -418,7 +382,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   ]
   for (const event of outcomeEvents)
     workspace.service.store.event(outcomeRun.id, event.type, event.text, event.payload)
-  await page.goto(workspacePath(`/runs/${outcomeRun.id}`))
+  await navigate(`/runs/${outcomeRun.id}`)
   // Expected outcomes and a recovered connection are not failures: only the test run counts.
   await expect(page.getByTestId('agent-actions')).toContainText('1 failure')
   for (const [step, label] of [['Connection restored', 'Recovered'], ['rg needle src', 'No matches'], ['diff before after', 'Differences found']]) {
@@ -436,4 +400,59 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
 test('pages, dialogs, navigation and activity', async ({ page, workspace }, testInfo) => {
   await useRelayForHttpMocks(page)
   await checkMobileLayouts(page, workspace, testInfo, testInfo.project.use.colorScheme === 'dark' ? 'dark' : 'light')
+})
+
+test('large agent selector layouts', async ({ page, workspace }, testInfo) => {
+  await useRelayForHttpMocks(page)
+  const colorScheme = testInfo.project.use.colorScheme === 'dark' ? 'dark' : 'light'
+  await page.setViewportSize({ width: 390, height: 664 })
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  const agents = Array.from({ length: 10000 }, (_, index) => ({
+    id: `virtual-${index}`,
+    name: index === 4999 ? 'Équipe sécurité' : `Agent ${index.toString().padStart(5, '0')}`,
+    description: `Maintains project ${index}`,
+    // A current installation marks its agents as holding their live grants.
+    model: '',
+    reasoning: 'high',
+    access: {
+      projects: null,
+      skills: null,
+      sandbox: 'yolo',
+    },
+  }))
+  await page.route('**/api/agents', route => route.fulfill({ json: { agents } }))
+  await page.goto(workspacePath('/tasks'))
+  await workspace.signIn(page)
+  await expect(page.locator('.shell')).toBeVisible()
+  await page.getByRole('button', { name: 'New mission', exact: true }).click()
+  const agentSelect = page.getByRole('combobox', { name: 'Agent', exact: true })
+  await agentSelect.click()
+  await expect(page.getByRole('option').first()).toBeVisible()
+  expect(await page.getByRole('option').count()).toBeLessThan(20)
+  await agentSelect.press('End')
+  await expect(page.getByRole('option', { name: 'Agent 09999', exact: true })).toBeVisible()
+  expect(await page.getByRole('option').count()).toBeLessThan(20)
+  await screenshotLayout(page, testInfo, 'select-10000-options', colorScheme)
+  await agentSelect.press('Enter')
+  await expect(agentSelect).toHaveValue('Agent 09999')
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await agentSelect.click()
+  await agentSelect.fill('equipe')
+  await expect(page.getByRole('option')).toHaveCount(1)
+  await agentSelect.press('Enter')
+  await expect(agentSelect).toHaveValue('Équipe sécurité')
+  await agentSelect.click()
+  await agentSelect.fill('does-not-exist')
+  await expect(page.getByText('No matches found', { exact: true })).toBeVisible()
+  await screenshotLayout(page, testInfo, 'select-no-results', colorScheme)
+  await agentSelect.press('Escape')
+  await expect(agentSelect).toHaveValue('Équipe sécurité')
+  await agentSelect.click()
+  await agentSelect.press('Tab')
+  await expect(page.getByRole('listbox')).not.toBeVisible()
+  await expect(page.getByRole('textbox', { name: /^Tags/ })).toBeFocused()
+  await page.keyboard.press('Escape')
+
+  expect(errors).toEqual([])
 })

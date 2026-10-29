@@ -35,7 +35,10 @@ required permissions before launching the controller. Verify the immutable image
 healthy manager and execution nodes, native Firecracker data drives, conversation
 recovery and no owned fixture devices after tests.
 
-The next release requires the [complete reinstallation](../PRODUCTION-CAIRN.md#réinstallation-complète).
+Version-11 manager databases now support the
+[data-preserving upgrade](../PRODUCTION-CAIRN.md#data-preserving-upgrades).
+That documented path supersedes the historical blanket reinstallation requirement;
+other schema/storage layouts still need explicit compatibility checks.
 
 ## Qualification
 

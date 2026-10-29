@@ -126,7 +126,11 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
         run.backup?.error != null ||
             run.movementError != null ||
             run.storage?.waitingFor == "integrity"
-    val pending = dirty > 0 || run.backup?.status == "saving" || run.storage?.waitingFor != null
+    val pending =
+        dirty > 0 ||
+            run.backup?.status == "saving" ||
+            run.storage?.waitingFor != null ||
+            run.storage?.backupDegraded == true
     val sync =
         when {
             run.movementError != null -> "Déplacement en échec"
@@ -135,6 +139,8 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
             exclusive != null -> "Suspendue pour une réservation exclusive"
             run.nodeState != null -> nodeStates[run.nodeState] ?: run.nodeState
             run.capacityWaitUntil != null -> "En attente de capacité"
+            run.storage?.backupDegraded == true ->
+                "Synchronisation en retard · travail conservé sur cette node"
             run.backup?.status == "saving" -> "Synchronisation…"
             dirty > 0 -> "${formatBytes(dirty)} non synchronisés"
             // Native ublk disks synchronize while running like VM disks; only legacy file

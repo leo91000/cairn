@@ -92,12 +92,20 @@ upstream SQLx migration macro is imported directly from `sqlx-macros`: the full
 builds. A build script tracks the directory so adding a migration recompiles it.
 Rate limits are shared through Postgres.
 
-### Next release: recreate the Beacon database
+<a id="next-release-recreate-the-beacon-database"></a>
+
+### Beacon database compatibility and historical reset
 
 The refactor campaign replaces all 28 historical migrations with one initial
-schema. The owner has accepted losing the Beacon database at the next release;
-there is no ledger rewrite or automatic upgrade path. During that release's
-maintenance window:
+schema. Databases with an incompatible historical SQLx ledger have no automatic
+upgrade path in this refactor. Check the persisted ledger against the exact image
+before promotion. A mismatch blocks routine rollout until a data-preserving
+migration is prepared; it does not authorize deleting Beacon data. The installation
+database's [11 → 12 upgrade](migrations/0012-typed-node-inventory.md) is independent.
+
+The destructive historical reset below requires a separate explicit instruction
+to discard Beacon accounts and access state. It is not part of a routine release
+or installation upgrade. Only for that separately authorized reset:
 
 1. Stop Beacon and keep its public ingress closed.
 2. Recreate its database as an empty database, retaining the configured database
@@ -105,12 +113,12 @@ maintenance window:
 3. Start the new Beacon binary with its matching web bundle. Startup applies the
    initial migration. Verify account sign-in on the empty database before reopening
    ingress, then reconnect Android with the matching app version.
-4. Recreate accounts and claim the newly reinstalled installations. Sessions,
+4. Recreate accounts and explicitly recover or claim the retained installations. Sessions,
    passkeys, sharing, MCP grants and notification registrations must be set up again.
 
-This runbook is for the next authorized release, not an instruction to alter a
-running production service during the refactor. Existing databases intentionally
-fail SQLx validation. Beacon, installations and apps must use the current protocol;
+Historical incompatible ledgers fail SQLx validation; preserve them for migration
+and recovery rather than recreating them during a routine rollout. Beacon,
+installations and apps must use the current protocol;
 a different version is rejected with an update-required message.
 
 Only **one beacon relay process** is supported for deployment. Route all browser
@@ -423,8 +431,9 @@ other device. Revoking the current session also clears its cookie. Mutations
 require the exact origin and CSRF, are limited to 30 per minute per account,
 and close that session's relay bodies before returning. Other sessions and
 already admitted agent work continue. Session creation and expiry remain the
-same for email, OAuth and passkeys. The database recreation required for this
-release ends all existing Beacon sessions; users must sign in again.
+same for email, OAuth and passkeys. Routine upgrades preserve the database and
+existing sessions. A separately authorized destructive database reset ends all
+existing Beacon sessions; users must sign in again after that reset.
 
 Deletion requires typing the verified account email and confirmation in the
 web. `POST /api/account/delete` accepts `{ "email": "…" }`, uses the caller's
@@ -506,8 +515,8 @@ The journal is **not append-only at database level**: account deletion updates
 its audience IDs to NULL and maintenance deletes expired records. Application
 mutations use a closed action enum and named event fields; operators with write
 access can still alter the database. The initial schema includes the actor index
-and proof column. The release recreation procedure above removes the previous
-Beacon database and its audit history.
+and proof column. Only a separately authorized destructive database reset removes
+the Beacon database and its audit history; routine releases preserve them.
 Reads enforce retention immediately; hourly maintenance removes expired rows.
 
 Operators investigate the full retained history using their protected Postgres
@@ -652,8 +661,9 @@ requires the original Cairn session's recent independent email/passkey proof.
 The app session is checked before the provider callback and again under the
 account lock at consent, then at the final exchange. Browser consent does not
 replace this proof. Google native linking applies the same checks before its
-quota, before JWT/JWKS verification and after the account lock. Recreating Beacon
-ends all in-flight handovers; users must restart sign-in. Never log handover URLs,
+quota, before JWT/JWKS verification and after the account lock. A separately
+authorized database reset ends all in-flight handovers; users must restart sign-in.
+Never log handover URLs,
 confirmation proofs or secrets.
 
 Set `CAIRN_BEACON_ANDROID_CERTIFICATES` to comma-separated SHA-256 fingerprints
