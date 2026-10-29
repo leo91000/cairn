@@ -274,10 +274,27 @@ pub struct Mounted {
     mounted: bool,
     completed: bool,
     aborted: bool,
+    flush_failed: bool,
 
     device: Arc<std::sync::Mutex<storage::ublk::MountedDisk>>,
     _owner: Option<environment::OwnerLease>,
     _physical: Option<crate::file_lock::Guard>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Completion {
+    Flushed,
+    Aborted,
+    FailedFlush,
+}
+
+impl Completion {
+    pub fn exit_code(self, previous: i32) -> i32 {
+        if self == Self::FailedFlush {
+            return crate::runner::CONTROLLER_FAILED;
+        }
+        previous
+    }
 }
 
 pub async fn mount(
@@ -404,6 +421,7 @@ pub async fn mount(
             retained_usage: None,
             completed: false,
             aborted,
+            flush_failed: false,
             device,
             _owner: Some(owner),
             _physical: Some(physical),
@@ -519,9 +537,9 @@ impl Mounted {
     /// Keep this object owned on every error: an uncertain flush/unmount cannot
     /// release its physical lease or terminate a backend still serving a mount.
     pub async fn abort_io(&mut self) -> Result<()> {
-        // Abort only after cancellation during preparation or a failed systemd
-        // fence. A later non-lazy unmount remains mandatory. The retained journal
-        // then represents a crash prefix, like a forcibly stopped guest.
+        // Abort after cancellation during preparation, a failed systemd fence,
+        // or a fenced filesystem's terminal read-only flush failure. A later
+        // non-lazy unmount remains mandatory. The journal is a crash prefix.
         self.aborted = true;
         self.volume.stop.cancel();
 
@@ -539,11 +557,18 @@ impl Mounted {
         Ok(())
     }
 
-    pub async fn close(&mut self) -> Result<()> {
+    pub async fn close(&mut self) -> Result<Completion> {
         if self.mounted {
             if !self.aborted {
-                sync(&self.target).await?;
-                self.retained_usage = used_bytes(&self.target).ok();
+                match sync_io(&self.target).await {
+                    Ok(()) => self.retained_usage = used_bytes(&self.target).ok(),
+                    Err(error) if matches!(error.raw_os_error(), Some(libc::EROFS | libc::EIO)) => {
+                        tracing::error!(%error, "Native filesystem flush failed; retaining a crash prefix after fencing");
+                        self.flush_failed = true;
+                        self.abort_io().await?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             }
             unmount(&self.target).await?;
             self.mounted = false;
@@ -588,7 +613,13 @@ impl Mounted {
         }
         // No mount or backend can still use this controller-private attachment.
         retire_attachment(&self.jail).await?;
-        Ok(())
+        Ok(if self.flush_failed {
+            Completion::FailedFlush
+        } else if self.aborted {
+            Completion::Aborted
+        } else {
+            Completion::Flushed
+        })
     }
 }
 
@@ -610,18 +641,39 @@ async fn retire_attachment(jail: &Path) -> Result<()> {
 }
 
 pub async fn sync(path: &Path) -> Result<()> {
+    sync_io(path).await.map_err(Into::into)
+}
+
+async fn sync_io(path: &Path) -> std::io::Result<()> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         use std::os::fd::AsRawFd;
         let directory = std::fs::File::open(path)?;
+        require_writable(&directory)?;
         if unsafe { libc::syncfs(directory.as_raw_fd()) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(())
+        // An error can remount ext4 during this very flush, while syncfs still
+        // returns success. Check both sides before claiming completion.
+        require_writable(&directory)
     })
     .await
-    .map_err(Error::internal)?
-    .map_err(Into::into)
+    .map_err(std::io::Error::other)?
+}
+
+fn require_writable(directory: &std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    // Native workspaces are mounted writable. ext4 can return success from
+    // syncfs after shutdown, so a read-only mount is also a terminal failure.
+    let mut status = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::fstatvfs(directory.as_raw_fd(), status.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { status.assume_init() }.f_flag & libc::ST_RDONLY != 0 {
+        return Err(std::io::Error::from_raw_os_error(libc::EROFS));
+    }
+    Ok(())
 }
 
 pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> Result<()> {
@@ -1057,6 +1109,20 @@ pub fn used_bytes(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_close_preserves_cancellation_without_a_flush_failure() {
+        for (completion, previous, expected) in [
+            (Completion::Flushed, 0, 0),
+            (Completion::Flushed, 143, 143),
+            (Completion::Aborted, 143, 143),
+            (Completion::Aborted, 70, 70),
+            (Completion::FailedFlush, 0, 70),
+            (Completion::FailedFlush, 143, 70),
+        ] {
+            assert_eq!(completion.exit_code(previous), expected);
+        }
+    }
 
     #[tokio::test]
     async fn native_disks_resume_with_current_tools_and_keep_the_platform_boundary() {

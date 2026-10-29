@@ -1504,6 +1504,9 @@ pub async fn daemon(
     directory: &std::path::Path,
     stop: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
+    if crate::native::enabled() {
+        crate::native::limits::configure()?;
+    }
     let runner_stop = stop.child_token();
     let mut runner = tokio::spawn(async move {
         if crate::native::enabled() {
