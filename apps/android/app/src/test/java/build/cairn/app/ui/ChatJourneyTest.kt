@@ -243,14 +243,20 @@ class ChatJourneyTest {
                                             models =
                                                 listOf(
                                                     CodingAgentModel(
-                                                        "gpt-fixture",
+                                                        model = "gpt-fixture",
                                                         displayName = "Modèle du serveur",
                                                         isDefault = true,
                                                         supportedReasoningEfforts =
                                                             listOf(
-                                                                ReasoningOption("low"),
-                                                                ReasoningOption("high"),
-                                                                ReasoningOption("max"),
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "low"
+                                                                ),
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "high"
+                                                                ),
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "max"
+                                                                ),
                                                             ),
                                                     )
                                                 )

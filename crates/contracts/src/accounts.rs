@@ -195,8 +195,64 @@ pub struct AccountCodeInput {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
-pub struct AccountMutationOutput {
-    pub done: bool,
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AccountMutationOutput {
+    Completed { done: bool },
+    HumanRequired { message: String, path: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RefreshAccountsOutput {
+    Refreshed { overview: CodingAgentAccounts },
+    HumanRequired { message: String, path: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum OrderAccountsOutput {
+    Ordered {
+        overview: CodingAgentAccounts,
+    },
+    Unsupported {
+        #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+        provider: AgentProvider,
+        capability: String,
+        message: String,
+    },
+}
+
+/// Progress of an owner-started sign-in, never its challenge or credential.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSignInProgress {
+    pub account_id: String,
+    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    pub provider: AgentProvider,
+    #[schemars(with = "String", pattern("^(pending|complete|failed|cancelled)$"))]
+    pub state: SignInState,
+    #[schemars(with = "String", pattern("^(starting|authorizing|verifying)$"))]
+    pub phase: SignInPhase,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSignInProgressOutput {
+    pub sign_in: Option<AccountSignInProgress>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AccountProvidersOutput {
+    Available {
+        providers: Vec<ApiKeyProvider>,
+    },
+    Unsupported {
+        #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+        provider: AgentProvider,
+        capability: String,
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
@@ -213,9 +269,22 @@ pub struct ApiKeyProvider {
     rename_all_fields = "camelCase"
 )]
 pub enum ConnectAccountOutput {
-    SignIn { sign_in: AccountSignIn },
-    Connected { account: Box<CodingAgentAccount> },
-    HumanRequired { message: String, path: String },
+    SignIn {
+        sign_in: AccountSignIn,
+    },
+    Connected {
+        account: Box<CodingAgentAccount>,
+    },
+    HumanRequired {
+        message: String,
+        path: String,
+    },
+    Unsupported {
+        #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+        provider: AgentProvider,
+        capability: String,
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]

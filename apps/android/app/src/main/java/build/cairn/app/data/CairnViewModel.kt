@@ -6,11 +6,13 @@ import androidx.lifecycle.viewModelScope
 import build.cairn.app.BuildConfig
 import build.cairn.contracts.AccountSignInMethod
 import build.cairn.contracts.ListMissionsInput
+import build.cairn.contracts.ListModelsInput
 import build.cairn.contracts.ListProjectsInput
 import build.cairn.contracts.listAccountMethods
 import build.cairn.contracts.listAgents
 import build.cairn.contracts.listMcps
 import build.cairn.contracts.listMissions
+import build.cairn.contracts.listModels
 import build.cairn.contracts.listProjects
 import build.cairn.contracts.listUsableAgents
 import java.io.IOException
@@ -803,7 +805,7 @@ constructor(
             agent.provider to
                 async {
                     try {
-                        target.get<ModelCatalog>("/${agent.provider}/models")
+                        target.listModels(ListModelsInput(agent.provider))
                     } catch (e: Exception) {
                         if (e is CancellationException || (e is ApiException && e.status == 401))
                             throw e
@@ -895,7 +897,7 @@ constructor(
         codingAgent(provider)
         val target = api
         try {
-            val catalog = target.get<ModelCatalog>("/$provider/models")
+            val catalog = target.listModels(ListModelsInput(provider))
             // A request started before sign-out or a server change must not restore old data.
             if (connection === target && state.value.session.authenticated)
                 mutable.update {

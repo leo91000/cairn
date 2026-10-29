@@ -42,14 +42,28 @@ fn main() {
     export::<ApiKeyProvider>(root, &mut generator, Contract::Deserialize);
     export::<AccountProviderInput>(root, &mut generator, Contract::Deserialize);
     export::<ConnectAccountOutput>(root, &mut generator, Contract::Deserialize);
+    export::<ModelCatalog>(root, &mut generator, Contract::Deserialize);
+    export::<CodingAgentModel>(root, &mut generator, Contract::Deserialize);
+    export::<ModelRoute>(root, &mut generator, Contract::Deserialize);
+    export::<ServiceTier>(root, &mut generator, Contract::Deserialize);
+    export::<ReasoningOption>(root, &mut generator, Contract::Deserialize);
+    export::<ListModelsInput>(root, &mut generator, Contract::Deserialize);
+    export::<AccountProvidersOutput>(root, &mut generator, Contract::Deserialize);
+    export::<AccountSignInProgressOutput>(root, &mut generator, Contract::Deserialize);
+    export::<AccountSignInProgress>(root, &mut generator, Contract::Deserialize);
+    export::<OrderAccountsOutput>(root, &mut generator, Contract::Deserialize);
+    export::<RefreshAccountsOutput>(root, &mut generator, Contract::Deserialize);
     let account_clients = serde_json::json!([
+        {"name":"listModels","input":"ListModelsInput","output":"ModelCatalog","method":"GET","path":"/{provider}/models"},
+        {"name":"listCodingAgentAccountProviders","input":"AccountProviderInput","output":"AccountProvidersOutput","method":"GET","path":"/accounts/providers/{provider}"},
+        {"name":"getCodingAgentAccountSignIn","input":"ListAccountsInput","output":"AccountSignInProgressOutput","method":"GET","path":"/accounts/sign-in"},
         {"name":"listCodingAgentAccounts","input":"ListAccountsInput","output":"CodingAgentAccounts","method":"GET","path":"/accounts"},
-        {"name":"refreshCodingAgentAccounts","input":"ListAccountsInput","output":"CodingAgentAccounts","method":"POST","path":"/accounts/refresh"},
+        {"name":"refreshCodingAgentAccounts","input":"ListAccountsInput","output":"RefreshAccountsOutput","method":"POST","path":"/accounts/refresh"},
         {"name":"connectCodingAgentAccount","input":"ConnectAccountInput","output":"ConnectAccountOutput","method":"POST","path":"/accounts"},
         {"name":"reconnectCodingAgentAccount","input":"AccountInput","output":"ConnectAccountOutput","method":"POST","path":"/accounts/{accountId}/sign-in"},
         {"name":"replaceCodingAgentAccountKey","input":"ReplaceAccountKeyInput","output":"ConnectAccountOutput","method":"POST","path":"/accounts/{accountId}/api-key"},
         {"name":"replaceCodingAgentAccount","input":"ReplaceAccountInput","output":"CodingAgentAccount","method":"PUT","path":"/accounts/{accountId}"},
-        {"name":"orderCodingAgentAccounts","input":"OrderAccountsInput","output":"CodingAgentAccounts","method":"POST","path":"/accounts/order"},
+        {"name":"orderCodingAgentAccounts","input":"OrderAccountsInput","output":"OrderAccountsOutput","method":"POST","path":"/accounts/order"},
         {"name":"deleteCodingAgentAccount","input":"AccountInput","output":"AccountMutationOutput","method":"DELETE","path":"/accounts/{accountId}"},
         {"name":"submitCodingAgentAccountCode","input":"AccountCodeInput","output":"AccountMutationOutput","method":"POST","path":"/accounts/sign-in/code"},
         {"name":"cancelCodingAgentAccountSignIn","input":"ListAccountsInput","output":"AccountMutationOutput","method":"DELETE","path":"/accounts/sign-in"}
@@ -762,6 +776,7 @@ fn main() {
     // The public output schemas above still describe the serialized wire shape.
     let mut account_decoder = SchemaSettings::draft07().for_deserialize().into_generator();
     account_decoder.subschema_for::<CodingAgentAccounts>();
+    account_decoder.subschema_for::<ModelCatalog>();
     for (name, schema) in account_decoder.take_definitions(true) {
         if name != "AgentProvider" {
             definitions.insert(name, schema);

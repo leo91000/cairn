@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ReasoningOption": {
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "properties": {
+    "billing": {
+      "default": "key",
+      "pattern": "^(subscription|credits|key)$",
+      "type": "string"
+    },
+    "hidden": {
+      "default": false,
+      "type": "boolean"
+    },
+    "model": {
+      "default": "",
+      "type": "string"
+    },
+    "provider": {
+      "default": "",
+      "type": "string"
+    },
+    "providerName": {
+      "default": "",
+      "type": "string"
+    },
+    "supportedReasoningEfforts": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/ReasoningOption"
+      },
+      "type": "array"
+    }
+  },
+  "title": "ModelRoute",
+  "type": "object"
+}
