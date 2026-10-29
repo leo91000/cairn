@@ -312,3 +312,14 @@ accounts/OpenCode/Claude journeys qualify the corresponding native presentations
 Manual account refresh retains the authenticated owner policy on both apps: it can
 refresh credentials and redeem a banked reset. Agent tools expose the same operation
 with an explicit human-required refusal; automatic usage remains readable.
+
+B2 (#417) : les 11 opérations de comptes utilisent le registre commun et ses clients
+générés, y compris les fournisseurs de clés, l'ordre et le refresh. Les catalogues
+Codex/Claude/OpenCode remplacent les modèles manuels des deux apps par les contrats
+Rust générés ; présentation et choix natifs conservés. Les capacités absentes d'un
+fournisseur renvoient `unsupported`. Le MCP public et `cairn_installation` lisent les
+mêmes catalogues et un suivi `accountId/provider/state/phase` d'une connexion déjà
+lancée par le propriétaire, sans URL ni code. Connexion, remplacement de clé,
+code, annulation, suppression et refresh manuel renvoient `humanRequired` aux
+agents ; les apps gardent leur preuve de propriétaire. Aucun flux de confirmation
+ponctuelle du propriétaire n'est ajouté.

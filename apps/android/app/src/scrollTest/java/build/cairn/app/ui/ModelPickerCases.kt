@@ -23,24 +23,34 @@ abstract class ModelPickerCases {
             models =
                 listOf(
                     CodingAgentModel(
-                        "large",
-                        "Grand modèle",
+                        model = "large",
+                        displayName = "Grand modèle",
                         isDefault = true,
                         defaultReasoningEffort = "medium",
                         supportedReasoningEfforts =
                             listOf("low", "medium", "high", "max", "ultra").map {
-                                ReasoningOption(it)
+                                ReasoningOption(reasoningEffort = it)
                             },
                     ),
                     CodingAgentModel(
-                        "fast",
-                        "Modèle rapide",
+                        model = "fast",
+                        displayName = "Modèle rapide",
                         defaultReasoningEffort = "low",
                         supportedReasoningEfforts =
-                            listOf(ReasoningOption("low"), ReasoningOption("high")),
+                            listOf(
+                                ReasoningOption(reasoningEffort = "low"),
+                                ReasoningOption(reasoningEffort = "high"),
+                            ),
                     ),
-                    CodingAgentModel("hidden", "Modèle masqué", hidden = true),
-                ) + (1..5).map { CodingAgentModel("extra-$it", "Modèle annexe $it") }
+                    CodingAgentModel(
+                        model = "hidden",
+                        displayName = "Modèle masqué",
+                        hidden = true,
+                    ),
+                ) +
+                    (1..5).map {
+                        CodingAgentModel(model = "extra-$it", displayName = "Modèle annexe $it")
+                    }
         )
 
     protected open fun captureReasoning() = Unit
@@ -132,15 +142,16 @@ abstract class ModelPickerCases {
     fun claudeDefaultAliasIsMergedIntoTheDefaultRow() {
         val claude =
             ModelCatalog(
-                listOf(
-                    CodingAgentModel(
-                        "default",
-                        "Default (recommended)",
-                        "Opus avec 1M de contexte",
-                        isDefault = true,
-                    ),
-                    CodingAgentModel("sonnet", "Sonnet"),
-                )
+                models =
+                    listOf(
+                        CodingAgentModel(
+                            model = "default",
+                            displayName = "Default (recommended)",
+                            description = "Opus avec 1M de contexte",
+                            isDefault = true,
+                        ),
+                        CodingAgentModel(model = "sonnet", displayName = "Sonnet"),
+                    )
             )
         compose.setContent {
             CairnTheme("light") {
@@ -169,10 +180,16 @@ abstract class ModelPickerCases {
                 SurfaceForTest {
                     ModelPicker(
                         ModelCatalog(
-                            listOf(
-                                CodingAgentModel("default", name, description, isDefault = true),
-                                CodingAgentModel("sonnet", "Sonnet"),
-                            )
+                            models =
+                                listOf(
+                                    CodingAgentModel(
+                                        model = "default",
+                                        displayName = name,
+                                        description = description,
+                                        isDefault = true,
+                                    ),
+                                    CodingAgentModel(model = "sonnet", displayName = "Sonnet"),
+                                )
                         ),
                         model,
                         reasoning,
@@ -269,33 +286,35 @@ abstract class ModelPickerCases {
 
     @Test
     fun inheritedPinnedModelDropsRouteOnlyReasoningWhenReturningToAuto() {
-        val shared = listOf("medium", "high").map { ReasoningOption(it) }
+        val shared = listOf("medium", "high").map { ReasoningOption(reasoningEffort = it) }
         val catalog =
             ModelCatalog(
-                listOf(
-                    CodingAgentModel(
-                        "auto/sonnet",
-                        displayName = "Sonnet",
-                        supportedReasoningEfforts = shared,
-                        routes =
-                            listOf(
-                                ModelRoute(
-                                    "opencode-go/sonnet",
-                                    "opencode-go",
-                                    "OpenCode Go",
-                                    "subscription",
-                                    supportedReasoningEfforts = shared,
+                models =
+                    listOf(
+                        CodingAgentModel(
+                            model = "auto/sonnet",
+                            displayName = "Sonnet",
+                            supportedReasoningEfforts = shared,
+                            routes =
+                                listOf(
+                                    ModelRoute(
+                                        model = "opencode-go/sonnet",
+                                        provider = "opencode-go",
+                                        providerName = "OpenCode Go",
+                                        billing = "subscription",
+                                        supportedReasoningEfforts = shared,
+                                    ),
+                                    ModelRoute(
+                                        model = "opencode/sonnet",
+                                        provider = "opencode",
+                                        providerName = "OpenCode Zen",
+                                        billing = "credits",
+                                        supportedReasoningEfforts =
+                                            shared + ReasoningOption(reasoningEffort = "max"),
+                                    ),
                                 ),
-                                ModelRoute(
-                                    "opencode/sonnet",
-                                    "opencode",
-                                    "OpenCode Zen",
-                                    "credits",
-                                    supportedReasoningEfforts = shared + ReasoningOption("max"),
-                                ),
-                            ),
+                        )
                     )
-                )
             )
         var chosen: Pair<String, String>? = null
         compose.setContent {

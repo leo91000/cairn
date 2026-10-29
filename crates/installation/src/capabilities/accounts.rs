@@ -17,6 +17,14 @@ pub(crate) struct AccountOperation {
 
 pub(crate) const ACCOUNT_OPERATIONS: &[AccountOperation] = &[
     AccountOperation {
+        name: "list_models",
+        scope: "read",
+    },
+    AccountOperation {
+        name: "get_coding_agent_account_sign_in",
+        scope: "read",
+    },
+    AccountOperation {
         name: "list_coding_agent_account_providers",
         scope: "read",
     },
@@ -69,6 +77,7 @@ pub(crate) fn account_operation(name: &str) -> Option<&'static AccountOperation>
 impl AccountOperation {
     pub(crate) fn descriptor(&self) -> Value {
         let input = match self.name {
+            "list_models" => schema_for::<ListModelsInput>(Contract::Deserialize),
             "list_coding_agent_account_providers" => {
                 schema_for::<AccountProviderInput>(Contract::Deserialize)
             }
@@ -93,8 +102,16 @@ impl AccountOperation {
             _ => schema_for::<ListAccountsInput>(Contract::Deserialize),
         };
         let output = match self.name {
+            "list_models" => schema_for::<ModelCatalog>(Contract::Serialize),
+            "get_coding_agent_account_sign_in" => {
+                schema_for::<AccountSignInProgressOutput>(Contract::Serialize)
+            }
+            "refresh_coding_agent_accounts" => {
+                schema_for::<RefreshAccountsOutput>(Contract::Serialize)
+            }
+            "order_coding_agent_accounts" => schema_for::<OrderAccountsOutput>(Contract::Serialize),
             "list_coding_agent_account_providers" => {
-                schema_for::<Vec<ApiKeyProvider>>(Contract::Serialize)
+                schema_for::<AccountProvidersOutput>(Contract::Serialize)
             }
             "replace_coding_agent_account" => schema_for::<CodingAgentAccount>(Contract::Serialize),
             "connect_coding_agent_account"
@@ -109,13 +126,30 @@ impl AccountOperation {
             }
             _ => schema_for::<CodingAgentAccounts>(Contract::Serialize),
         };
+        let description = match self.name {
+            "list_models" => {
+                "List the models a coding agent offers on its enabled accounts: reasoning levels and, for Codex, the speeds (service tiers) each model offers with Codex's own description of their usage. Use a serviceTiers id, or \"standard\", as an agent or message speed. A tier marked limited is not confirmed by every account able to run the model; runs that ask for it prefer an account that confirms it. Before each turn attempt the run checks the tier against its Codex process model list and records a status event when the outcome changes: speed.applied is standard when the turn runs at Standard, speed.confirmed when the Codex process and the account's recent catalog both list the tier and the turn asks for it, speed.unconfirmed when it cannot be confirmed for the account and model (a model list could not be read or does not name the model exactly, or the account's catalog is unknown or older than 30 minutes)."
+            }
+            "get_coding_agent_account_sign_in" => {
+                "Read account identity, provider, state and phase of a sign-in already started by the human owner. Never returns its challenge URL, code, credentials or errors containing provider details."
+            }
+            _ => {
+                "Read model catalogs (including reasoning levels, routes and Codex service tiers), connection progress, account metadata and usage, or manage account settings/order with account policies. Refreshing credentials/usage, connecting, replacing credentials, submitting codes, cancelling sign-in and deleting credentials require an authenticated human owner; an installation grant is not human proof. Agents never receive sign-in challenges or credentials."
+            }
+        };
         json!({
             "name": self.name,
-            "description": "Manage coding-agent account metadata and usage with account policies. Refreshing credentials/usage, connecting, replacing credentials, submitting codes, cancelling sign-in and deleting credentials require an authenticated human owner; an installation grant is not human proof. Agents never receive sign-in challenges or credentials.",
+            "description": description,
             "inputSchema": input,
             "outputSchema": output,
-            "_meta": { "securitySchemes": [{ "type":"oauth2", "scopes":[self.scope] }] },
-            "annotations": { "readOnlyHint": self.scope=="read", "destructiveHint": self.scope!="read", "openWorldHint": self.scope!="read" }
+            "_meta": {
+                "securitySchemes": [{ "type": "oauth2", "scopes": [self.scope] }]
+            },
+            "annotations": {
+                "readOnlyHint": self.scope == "read",
+                "destructiveHint": self.scope != "read",
+                "openWorldHint": self.scope != "read"
+            }
         })
     }
 
@@ -157,18 +191,53 @@ impl AccountOperation {
         // Preserve the human owner policy before entering any Driver or lock wait.
         if !human && self.name == "refresh_coding_agent_accounts" {
             let _: ListAccountsInput = decode(input)?;
-            return Err(Error::forbidden(
-                "An authenticated installation owner must refresh accounts in Connections. Agents can read the automatically refreshed usage.",
-            ));
+            return Ok(serde_json::to_value(RefreshAccountsOutput::HumanRequired {
+                message: "An authenticated installation owner must refresh accounts in Connections. Agents can read the automatically refreshed usage.".into(),
+                path: "/connections".into(),
+            })?);
         }
         s.accounts.initialize(s).await?;
         let result = match self.name {
+            "list_models" => {
+                let input: ListModelsInput = decode(input)?;
+                let provider: crate::provider::Provider = input.provider.into();
+                let catalog: ModelCatalog = serde_json::from_value(
+                    provider.adapter().model_catalog(s).await?,
+                )
+                .map_err(|_| {
+                    Error::bad_gateway("The coding agent returned an invalid model catalog.")
+                })?;
+                serde_json::to_value(catalog)?
+            }
+            "get_coding_agent_account_sign_in" => {
+                let _: ListAccountsInput = decode(input)?;
+                let sign_in = s
+                    .accounts
+                    .sign_in()
+                    .await
+                    .map(|sign_in| AccountSignInProgress {
+                        account_id: sign_in.account_id,
+                        provider: sign_in.provider,
+                        state: sign_in.state,
+                        phase: sign_in.phase,
+                    });
+                serde_json::to_value(AccountSignInProgressOutput { sign_in })?
+            }
             "list_coding_agent_account_providers" => {
                 let input: AccountProviderInput = decode(input)?;
                 let provider: crate::provider::Provider = input.provider.into();
-                let values: Vec<ApiKeyProvider> =
-                    decode(provider.driver().api_key_providers(s).await?)?;
-                serde_json::to_value(values)?
+                let output = if provider.driver().accepts_api_keys() {
+                    AccountProvidersOutput::Available {
+                        providers: decode(provider.driver().api_key_providers(s).await?)?,
+                    }
+                } else {
+                    AccountProvidersOutput::Unsupported {
+                        provider: input.provider,
+                        capability: "apiKey".into(),
+                        message: "This coding agent does not accept API keys.".into(),
+                    }
+                };
+                serde_json::to_value(output)?
             }
             "list_coding_agent_accounts" | "refresh_coding_agent_accounts" => {
                 let _: ListAccountsInput = decode(input)?;
@@ -179,7 +248,11 @@ impl AccountOperation {
                 if !human {
                     result.sign_in = None;
                 }
-                serde_json::to_value(result)?
+                if self.name == "refresh_coding_agent_accounts" {
+                    serde_json::to_value(RefreshAccountsOutput::Refreshed { overview: result })?
+                } else {
+                    serde_json::to_value(result)?
+                }
             }
             "replace_coding_agent_account" => {
                 let input: ReplaceAccountInput = decode(input)?;
@@ -202,6 +275,14 @@ impl AccountOperation {
                 for id in &input.ids {
                     uuid(id)?;
                 }
+                let provider: crate::provider::Provider = input.provider.into();
+                if !provider.driver().ordered() {
+                    return Ok(serde_json::to_value(OrderAccountsOutput::Unsupported {
+                        provider: input.provider,
+                        capability: "order".into(),
+                        message: "This coding agent does not order its accounts.".into(),
+                    })?);
+                }
                 let mut result = s
                     .accounts
                     .reorder_authorized(
@@ -215,7 +296,7 @@ impl AccountOperation {
                 if !human {
                     result.sign_in = None;
                 }
-                serde_json::to_value(result)?
+                serde_json::to_value(OrderAccountsOutput::Ordered { overview: result })?
             }
             "connect_coding_agent_account"
             | "reconnect_coding_agent_account"
@@ -241,7 +322,15 @@ impl AccountOperation {
                         "connect_coding_agent_account" => {
                             let input: ConnectAccountInput = decode(input)?;
                             let provider: crate::provider::Provider = input.provider.into();
-                            if provider.driver().accepts_api_keys() {
+                            if !provider.driver().accepts_api_keys()
+                                && (input.api_key.is_some() || input.model_provider.is_some())
+                            {
+                                ConnectAccountOutput::Unsupported {
+                                    provider: input.provider,
+                                    capability: "apiKey".into(),
+                                    message: "This coding agent does not accept API keys.".into(),
+                                }
+                            } else if provider.driver().accepts_api_keys() {
                                 ConnectAccountOutput::Connected {
                                     account: Box::new(
                                         s.accounts
@@ -265,27 +354,43 @@ impl AccountOperation {
                         "reconnect_coding_agent_account" => {
                             let input: AccountInput = decode(input)?;
                             uuid(&input.account_id)?;
-                            ConnectAccountOutput::SignIn {
-                                sign_in: s.accounts.reconnect(s, &input.account_id).await?,
+                            let account = s.accounts.account(s, &input.account_id).await?;
+                            if account.provider.driver().accepts_api_keys() {
+                                ConnectAccountOutput::Unsupported {
+                                    provider: account.provider.into(), capability: "signIn".into(),
+                                    message: "Reconnect this coding agent by replacing its provider API key.".into(),
+                                }
+                            } else {
+                                ConnectAccountOutput::SignIn {
+                                    sign_in: s.accounts.reconnect(s, &input.account_id).await?,
+                                }
                             }
                         }
                         _ => {
                             let input: ReplaceAccountKeyInput = decode(input)?;
                             uuid(&input.account_id)?;
                             let account = s.accounts.account(s, &input.account_id).await?;
-                            ConnectAccountOutput::Connected {
-                                account: Box::new(
-                                    s.accounts
-                                        .connect_api_key(
-                                            s,
-                                            account.provider,
-                                            &account.name,
-                                            &input.model_provider,
-                                            &input.api_key,
-                                            Some(&input.account_id),
-                                        )
-                                        .await?,
-                                ),
+                            if !account.provider.driver().accepts_api_keys() {
+                                ConnectAccountOutput::Unsupported {
+                                    provider: account.provider.into(),
+                                    capability: "apiKey".into(),
+                                    message: "This coding agent does not accept API keys.".into(),
+                                }
+                            } else {
+                                ConnectAccountOutput::Connected {
+                                    account: Box::new(
+                                        s.accounts
+                                            .connect_api_key(
+                                                s,
+                                                account.provider,
+                                                &account.name,
+                                                &input.model_provider,
+                                                &input.api_key,
+                                                Some(&input.account_id),
+                                            )
+                                            .await?,
+                                    ),
+                                }
                             }
                         }
                     };
@@ -294,9 +399,22 @@ impl AccountOperation {
             }
             _ => {
                 if !human {
-                    return Err(Error::forbidden(
-                        "An authenticated installation owner is required to manage account credentials or sign-in.",
-                    ));
+                    match self.name {
+                        "submit_coding_agent_account_code" => {
+                            let _: AccountCodeInput = decode(input)?;
+                        }
+                        "cancel_coding_agent_account_sign_in" => {
+                            let _: ListAccountsInput = decode(input)?;
+                        }
+                        _ => {
+                            let input: AccountInput = decode(input)?;
+                            uuid(&input.account_id)?;
+                        }
+                    }
+                    return Ok(serde_json::to_value(AccountMutationOutput::HumanRequired {
+                        message: "An authenticated installation owner is required to manage account credentials or sign-in.".into(),
+                        path: "/connections".into(),
+                    })?);
                 }
                 match self.name {
                     "submit_coding_agent_account_code" => {
@@ -322,7 +440,7 @@ impl AccountOperation {
                         s.accounts.remove(s, &input.account_id).await?;
                     }
                 }
-                serde_json::to_value(AccountMutationOutput { done: true })?
+                serde_json::to_value(AccountMutationOutput::Completed { done: true })?
             }
         };
         s.store
@@ -356,6 +474,7 @@ pub(crate) async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
     let mut body = input.body.clone();
     let name = match (input.method.as_str(), parts.as_slice()) {
         ("GET", []) => "list_coding_agent_accounts",
+        ("GET", ["sign-in"]) => "get_coding_agent_account_sign_in",
         ("POST", []) => "connect_coding_agent_account",
         ("POST", ["order"]) => "order_coding_agent_accounts",
         ("POST", ["refresh"]) => "refresh_coding_agent_accounts",

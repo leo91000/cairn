@@ -1,0 +1,10 @@
+{
+  "catalogs": [
+    { "models": [], "checkedAt": null, "stale": true, "error": "Connect an account." },
+    { "models": [{ "model": "fixture-fast", "displayName": "Fixture", "description": "", "isDefault": true, "supportedReasoningEfforts": [{ "reasoningEffort": "high", "description": "More reasoning" }], "serviceTiers": [{ "id": "priority", "name": "Fast", "description": "Increased usage", "limited": true }], "defaultServiceTier": "priority" }], "checkedAt": 1720000000000, "stale": false, "error": "" },
+    { "models": [{ "model": "auto/fixture", "routes": [{ "model": "opencode/fixture", "provider": "opencode", "providerName": "Zen", "billing": "credits", "hidden": false, "supportedReasoningEfforts": [] }, { "model": "openai/fixture", "provider": "openai", "providerName": "OpenAI", "billing": "key", "hidden": false, "supportedReasoningEfforts": [] }] }], "stale": false, "error": "" },
+    { "models": [{ "model": "opus", "resolvedModel": "claude-opus-fixture", "serviceTiers": [] }], "stale": false, "error": "" }
+  ],
+  "inputs": [{}, { "provider": "codex" }, { "provider": "claude" }, { "provider": "opencode" }],
+  "invalidInputs": [{ "provider": "unknown" }, { "provider": null }, { "provider": 42 }, { "provider": "codex", "apiKey": "forged" }]
+}

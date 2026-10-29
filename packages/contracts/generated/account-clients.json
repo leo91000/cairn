@@ -1,5 +1,26 @@
 [
   {
+    "input": "ListModelsInput",
+    "method": "GET",
+    "name": "listModels",
+    "output": "ModelCatalog",
+    "path": "/{provider}/models"
+  },
+  {
+    "input": "AccountProviderInput",
+    "method": "GET",
+    "name": "listCodingAgentAccountProviders",
+    "output": "AccountProvidersOutput",
+    "path": "/accounts/providers/{provider}"
+  },
+  {
+    "input": "ListAccountsInput",
+    "method": "GET",
+    "name": "getCodingAgentAccountSignIn",
+    "output": "AccountSignInProgressOutput",
+    "path": "/accounts/sign-in"
+  },
+  {
     "input": "ListAccountsInput",
     "method": "GET",
     "name": "listCodingAgentAccounts",
@@ -10,7 +31,7 @@
     "input": "ListAccountsInput",
     "method": "POST",
     "name": "refreshCodingAgentAccounts",
-    "output": "CodingAgentAccounts",
+    "output": "RefreshAccountsOutput",
     "path": "/accounts/refresh"
   },
   {
@@ -45,7 +66,7 @@
     "input": "OrderAccountsInput",
     "method": "POST",
     "name": "orderCodingAgentAccounts",
-    "output": "CodingAgentAccounts",
+    "output": "OrderAccountsOutput",
     "path": "/accounts/order"
   },
   {

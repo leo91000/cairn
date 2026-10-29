@@ -8,8 +8,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SpeedsTest {
-    private val fast = ServiceTier("priority", "Fast", "2x speed, increased usage")
-    private val astra = CodingAgentModel("gpt-6-astra", serviceTiers = listOf(fast))
+    private val fast =
+        ServiceTier(id = "priority", name = "Fast", description = "2x speed, increased usage")
+    private val astra = CodingAgentModel(model = "gpt-6-astra", serviceTiers = listOf(fast))
 
     @Test
     fun usesTheChosenSpeedThenTheInheritedOneThenStandard() {

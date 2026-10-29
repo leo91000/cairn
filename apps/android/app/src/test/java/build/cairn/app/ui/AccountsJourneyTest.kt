@@ -171,7 +171,7 @@ class AccountsJourneyTest {
                             """{"accountId":"studio","provider":"claude","state":"complete","phase":"verifying"}"""
                         server.accounts[1] =
                             """{"id":"studio","provider":"claude","name":"Studio","email":"studio@example.test","plan":"max","state":"ready","status":"next","stale":false,"remainingPercent":40.0,"usage":{"checkedAt":1,"windows":[{"id":"five_hour","label":"5-hour window","usedPercent":25,"durationMins":300},{"id":"seven_day","label":"Weekly","usedPercent":60,"durationMins":10080}]}}"""
-                        """{"done":true}"""
+                        """{"kind":"completed","done":true}"""
                     }
                     else -> null
                 }
@@ -358,7 +358,7 @@ class AccountsJourneyTest {
                         request.path == "/api/installations/fixture/api/accounts/sign-in"
                 ) {
                     server.signIn = "null"
-                    """{"done":true}"""
+                    """{"kind":"completed","done":true}"""
                 } else null
             },
         ) {
@@ -389,7 +389,7 @@ class AccountsJourneyTest {
             { request, _ ->
                 when ("${request.method} ${request.path}") {
                     "GET /api/installations/fixture/api/accounts/providers/opencode" ->
-                        """[{"id":"opencode","name":"OpenCode Zen"},{"id":"openai","name":"OpenAI"}]"""
+                        """{"kind":"available","providers":[{"id":"opencode","name":"OpenCode Zen"},{"id":"openai","name":"OpenAI"}]}"""
                     "POST /api/installations/fixture/api/accounts" -> {
                         assertEquals("fixture", request.getHeader("X-CSRF-Token"))
                         val account =

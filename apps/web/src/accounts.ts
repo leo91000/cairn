@@ -6,6 +6,7 @@ import type {
   SignIn,
   UsageWindow,
 } from '../../../packages/contracts/accounts'
+import type { AccountMutationOutput } from '../../../packages/contracts/generated/typescript/AccountMutationOutput'
 import type { IconName } from './icons'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { cancelCodingAgentAccountSignIn } from '../../../packages/contracts/generated/cancelCodingAgentAccountSignIn'
@@ -98,6 +99,11 @@ export function resetsIn(seconds: number | null | undefined, now = Date.now()) {
 }
 
 /** Accounts of every coding agent and the sign-in in progress, kept current while mounted. */
+function requireCompleted(result: AccountMutationOutput) {
+  if (result.kind === 'humanRequired')
+    throw new Error(result.message)
+}
+
 export function useAccounts() {
   const accounts = ref<Account[]>([])
   const signIn = ref<SignIn | null>(null)
@@ -173,7 +179,12 @@ export function useAccounts() {
     loaded,
     busy,
     error,
-    refresh: () => action(async () => apply(await refreshCodingAgentAccounts(api, {}))),
+    refresh: () => action(async () => {
+      const result = await refreshCodingAgentAccounts(api, {})
+      if (result.kind === 'humanRequired')
+        throw new Error(result.message)
+      apply(result.overview)
+    }),
     add: (provider: Provider, name: string) => action(async () => {
       const result = await connectCodingAgentAccount(api, {
         provider,
@@ -183,7 +194,7 @@ export function useAccounts() {
       })
       if (result.kind === 'signIn')
         return result.signIn
-      throw new Error('Connect this account in Connections with an owner session.')
+      throw new Error(result.kind === 'connected' ? 'Connect this account in Connections with an owner session.' : result.message)
     }),
     connectKey: (provider: Provider, name: string, modelProvider: string, apiKey: string, id?: string) => action(async () => {
       const result = id
@@ -196,19 +207,19 @@ export function useAccounts() {
           })
       if (result.kind === 'connected')
         return result.account
-      throw new Error('Connect this account in Connections with an owner session.')
+      throw new Error(result.kind === 'signIn' ? 'Connect this account in Connections with an owner session.' : result.message)
     }),
     reconnect: (id: string) => action(async () => {
       const result = await reconnectCodingAgentAccount(api, { accountId: id })
       if (result.kind === 'signIn')
         return result.signIn
-      throw new Error('Reconnect this account in Connections with an owner session.')
+      throw new Error(result.kind === 'connected' ? 'Reconnect this account in Connections with an owner session.' : result.message)
     }),
     submitCode: (code: string) => action(async () => {
-      await submitCodingAgentAccountCode(api, { code })
+      requireCompleted(await submitCodingAgentAccountCode(api, { code }))
       return true
     }),
-    cancel: () => action(() => cancelCodingAgentAccountSignIn(api, {})),
+    cancel: () => action(async () => requireCompleted(await cancelCodingAgentAccountSignIn(api, {}))),
     update: (id: string, patch: Partial<Pick<Account, 'name' | 'enabled' | 'maxConcurrentRuns'>>) => action(() => {
       const account = accounts.value.find(account => account.id === id)
       if (!account)
@@ -224,9 +235,14 @@ export function useAccounts() {
         },
       })
     }),
-    reorder: (provider: Provider, ids: string[]) => action(async () => apply(await orderCodingAgentAccounts(api, { provider, ids }))),
+    reorder: (provider: Provider, ids: string[]) => action(async () => {
+      const result = await orderCodingAgentAccounts(api, { provider, ids })
+      if (result.kind === 'unsupported')
+        throw new Error(result.message)
+      apply(result.overview)
+    }),
     remove: (id: string) => action(async () => {
-      await deleteCodingAgentAccount(api, { accountId: id })
+      requireCompleted(await deleteCodingAgentAccount(api, { accountId: id }))
       return true
     }),
   }

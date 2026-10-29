@@ -1,28 +1,5 @@
 [
   {
-    "name": "list_models",
-    "description": "List the models a coding agent offers on its enabled accounts: reasoning levels and, for Codex, the speeds (service tiers) each model offers with Codex's own description of their usage. Use a serviceTiers id, or \"standard\", as an agent or message speed. A tier marked limited is not confirmed by every account able to run the model; runs that ask for it prefer an account that confirms it. Before each turn attempt the run checks the tier against its Codex process model list and records a status event when the outcome changes: speed.applied is standard when the turn runs at Standard, speed.confirmed when the Codex process and the account's recent catalog both list the tier and the turn asks for it, speed.unconfirmed when it cannot be confirmed for the account and model (a model list could not be read or does not name the model exactly, or the account's catalog is unknown or older than 30 minutes).",
-    "scope": "read",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "provider": {
-          "type": "string",
-          "enum": [
-            "codex",
-            "claude",
-            "opencode"
-          ],
-          "default": "codex"
-        }
-      },
-      "required": [],
-      "additionalProperties": false
-    }
-  },
-  {
     "name": "list_skills",
     "description": "List global .agents skills or the skills for one registered project. Each item includes usageCount: the number of delivered messages invoking its $name among the installation's last 1000 chat messages (once per message, excluding code). Sort descending by usageCount to prefer frequently used skills; counts are shared across scopes with the same name.",
     "scope": "read",
