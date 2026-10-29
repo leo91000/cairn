@@ -1,3 +1,5 @@
+> Statut : l’édition des droits des agents n’est plus réservée à l’éditeur d’agent du propriétaire : [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) l’expose au MCP public, et `cairn_installation` peut la lire et la réduire dans les limites d’ADR-0075.
+
 # Generic plugin OAuth, private transfers and Gmail
 
 Date: 2026-10-21.
