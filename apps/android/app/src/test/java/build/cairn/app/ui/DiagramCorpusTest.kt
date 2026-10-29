@@ -148,6 +148,21 @@ class DiagramCorpusTest {
     }
 
     @Test
+    fun `keeps text readable on author fills in either theme`() {
+        for (case in cases("colors")) {
+            val fill = case.getValue("fill").jsonPrimitive.content
+            val ink = case.getValue("ink").jsonPrimitive.content
+            val source = "flowchart TD\nA[Readable label]\nstyle A fill:$fill"
+            val label =
+                layoutDiagram(parseDiagram(source), measure)
+                    .items
+                    .filterIsInstance<TextItem>()
+                    .first { it.lines.first() == "Readable label" }
+            assertEquals(fill, DiagramPaint.Literal(ink), label.fill)
+        }
+    }
+
+    @Test
     fun `wraps long labels between words and inside long words`() {
         assertEquals(
             listOf("alpha", "beta", "gamma"),

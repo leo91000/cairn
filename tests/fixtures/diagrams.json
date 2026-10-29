@@ -2096,6 +2096,139 @@
         "height": 984,
         "items": 162
       }
+    },
+    {
+      "name": "sequence-long-frame",
+      "source": "sequenceDiagram\nparticipant A\nloop Wait until the asynchronous job completes\nA->>A: poll\nend",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "block",
+            "kind": "loop",
+            "label": "Wait until the asynchronous job completes"
+          },
+          {
+            "type": "message",
+            "from": "A",
+            "to": "A",
+            "label": "poll",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          },
+          {
+            "type": "end"
+          }
+        ]
+      },
+      "layout": {
+        "width": 294,
+        "height": 268,
+        "items": 12
+      }
+    },
+    {
+      "name": "sequence-nested-frames",
+      "source": "sequenceDiagram\nparticipant A\nalt Ready\nloop Wait until the asynchronous job completes\nA->>A: poll\nend\nelse Wait until the asynchronous job completes\nA->>A: wait\nend",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "block",
+            "kind": "alt",
+            "label": "Ready"
+          },
+          {
+            "type": "block",
+            "kind": "loop",
+            "label": "Wait until the asynchronous job completes"
+          },
+          {
+            "type": "message",
+            "from": "A",
+            "to": "A",
+            "label": "poll",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          },
+          {
+            "type": "end"
+          },
+          {
+            "type": "branch",
+            "kind": "else",
+            "label": "Wait until the asynchronous job completes"
+          },
+          {
+            "type": "message",
+            "from": "A",
+            "to": "A",
+            "label": "wait",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          },
+          {
+            "type": "end"
+          }
+        ]
+      },
+      "layout": {
+        "width": 308,
+        "height": 423,
+        "items": 21
+      }
+    },
+    {
+      "name": "sequence-empty-frame",
+      "source": "sequenceDiagram\nparticipant A\nloop Wait until the asynchronous job completes\nend",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "block",
+            "kind": "loop",
+            "label": "Wait until the asynchronous job completes"
+          },
+          {
+            "type": "end"
+          }
+        ]
+      },
+      "layout": {
+        "width": 294,
+        "height": 206,
+        "items": 9
+      }
     }
   ],
   "errors": [
@@ -2138,6 +2271,10 @@
     {
       "name": "state-self-parent",
       "source": "stateDiagram-v2\nstate S {\nstate S {\nA\n}\n}"
+    },
+    {
+      "name": "expanded-subgraph-work-limit",
+      "source": "flowchart TD\nsubgraph G\na0\na1\na2\na3\na4\na5\na6\na7\na8\na9\na10\na11\na12\na13\na14\na15\na16\na17\na18\na19\na20\na21\na22\na23\na24\na25\na26\na27\na28\na29\na30\na31\na32\na33\na34\na35\na36\na37\na38\na39\na40\na41\na42\na43\na44\na45\na46\na47\na48\na49\na50\na51\na52\na53\na54\na55\na56\na57\na58\na59\na60\na61\na62\na63\na64\na65\na66\na67\na68\na69\na70\na71\na72\na73\na74\na75\na76\na77\na78\na79\na80\na81\na82\na83\na84\na85\na86\na87\na88\na89\na90\na91\na92\na93\na94\na95\na96\na97\na98\na99\na100\na101\na102\na103\na104\na105\na106\na107\na108\na109\na110\na111\na112\na113\na114\na115\na116\na117\na118\na119\na120\na121\na122\na123\na124\nend\nsubgraph H\nb0\nb1\nb2\nb3\nb4\nb5\nb6\nb7\nb8\nb9\nb10\nb11\nb12\nb13\nb14\nb15\nb16\nb17\nb18\nb19\nb20\nb21\nb22\nb23\nb24\nb25\nb26\nb27\nb28\nb29\nb30\nb31\nb32\nb33\nb34\nb35\nb36\nb37\nb38\nb39\nb40\nb41\nb42\nb43\nb44\nb45\nb46\nb47\nb48\nb49\nb50\nb51\nb52\nb53\nb54\nb55\nb56\nb57\nb58\nb59\nb60\nb61\nb62\nb63\nb64\nb65\nb66\nb67\nb68\nb69\nb70\nb71\nb72\nb73\nb74\nb75\nb76\nb77\nb78\nb79\nb80\nb81\nb82\nb83\nb84\nb85\nb86\nb87\nb88\nb89\nb90\nb91\nb92\nb93\nb94\nb95\nb96\nb97\nb98\nb99\nb100\nb101\nb102\nb103\nb104\nb105\nb106\nb107\nb108\nb109\nb110\nb111\nb112\nb113\nb114\nb115\nb116\nb117\nb118\nb119\nb120\nb121\nb122\nb123\nb124\nend\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\nG-->H\n"
     }
   ],
   "unsupported": [
@@ -2145,5 +2282,51 @@
     "classDiagram\n  Animal <|-- Duck",
     "erDiagram\n  A ||--o{ B : has",
     "not a diagram"
+  ],
+  "colors": [
+    {
+      "fill": "white",
+      "ink": "#16151d"
+    },
+    {
+      "fill": "navy",
+      "ink": "#ffffff"
+    },
+    {
+      "fill": "rebeccapurple",
+      "ink": "#ffffff"
+    },
+    {
+      "fill": "hsl(0, 0%, 100%)",
+      "ink": "#16151d"
+    },
+    {
+      "fill": "hsl(240, 100%, 25%)",
+      "ink": "#ffffff"
+    },
+    {
+      "fill": "rgb(100%, 100%, 100%)",
+      "ink": "#16151d"
+    },
+    {
+      "fill": "rgb(0% 0% 50%)",
+      "ink": "#ffffff"
+    },
+    {
+      "fill": "rgba(255 255 255 / 100%)",
+      "ink": "#16151d"
+    },
+    {
+      "fill": "hsla(240 100% 25% / 100%)",
+      "ink": "#ffffff"
+    },
+    {
+      "fill": "gray",
+      "ink": "#16151d"
+    },
+    {
+      "fill": "rgb(50%, 50%, 50%)",
+      "ink": "#16151d"
+    }
   ]
 }

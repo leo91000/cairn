@@ -99,6 +99,7 @@ private const val RANK_GAP = 26.0
 private const val CLUSTER_PAD = 16.0
 private const val ARROW = 8.0
 internal const val MAX_LAYOUT_NODES = 4000
+private const val MAX_LAYOUT_CONSTRAINTS = 10000
 
 internal fun layoutDiagram(diagram: Diagram, measure: TextMeasure): Scene =
     when (diagram) {
@@ -275,28 +276,16 @@ private fun arc(
     return commands
 }
 
-private val HEX_COLOR = Regex("#([0-9A-Fa-f]{3,8})")
-private val RGB_COLOR =
-    Regex("^[Rr][Gg][Bb][Aa]?\\($SPACE*([0-9.]+)[$SPACE_CHARS,]+([0-9.]+)[$SPACE_CHARS,]+([0-9.]+)")
-
 // Author colors stay readable: text on a custom fill picks ink by the fill's luminance.
 private fun luminance(color: String): Double? {
-    val hex = HEX_COLOR.matchEntire(color)?.groupValues?.get(1)
-    val rgb =
-        if (hex != null) {
-            val full =
-                if (hex.length <= 4) hex.take(3).map { "$it$it" }.joinToString("") else hex.take(6)
-            listOf(0, 2, 4).map {
-                full.substring(it, min(it + 2, full.length)).toIntOrNull(16)?.toDouble()
-                    ?: Double.NaN
-            }
-        } else {
-            RGB_COLOR.find(color)?.groupValues?.drop(1)?.map(::jsNumber) ?: return null
-        }
-
+    if (color.equals("currentcolor", ignoreCase = true)) return null
+    val argb = cssColor(color, 0) ?: return null
+    // A translucent fill depends on the theme beneath it; keep the theme's normal ink.
+    if (argb ushr 24 != 255) return null
+    val rgb = listOf((argb ushr 16) and 255, (argb ushr 8) and 255, argb and 255)
     val (r, g, b) =
         rgb.map { value ->
-            val channel = value / 255
+            val channel = value / 255.0
             if (channel <= 0.03928) channel / 12.92 else ((channel + 0.055) / 1.055).pow(2.4)
         }
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
@@ -306,7 +295,12 @@ private fun textOn(style: DiagramStyle?, fallback: String): DiagramPaint {
     if (style?.color != null) return DiagramPaint.Literal(style.color)
     if (style?.fill != null) {
         val light = luminance(style.fill)
-        if (light != null) return DiagramPaint.Literal(if (light > 0.4) "#16151d" else "#ffffff")
+        if (light != null) {
+            val darkInk = "#16151d"
+            val darkContrast = (light + 0.05) / (luminance(darkInk)!! + 0.05)
+            val lightContrast = 1.05 / (light + 0.05)
+            return DiagramPaint.Literal(if (darkContrast >= lightContrast) darkInk else "#ffffff")
+        }
     }
 
     return tone(fallback)
@@ -789,7 +783,11 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         var count = 0
         for (u in ends(from)) {
             for (v in ends(to)) {
-                if (u != v && count++ < 400) constraints.add(Constraint(u, v, link.edge.length * 2))
+                if (u != v && count++ < 400) {
+                    if (constraints.size >= MAX_LAYOUT_CONSTRAINTS)
+                        throw DiagramError("This diagram has too many expanded links to draw.")
+                    constraints.add(Constraint(u, v, link.edge.length * 2))
+                }
             }
         }
     }
@@ -1969,6 +1967,12 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
     val active = diagram.participants.map { mutableListOf<Double>() }
     val activations = mutableListOf<Activation>()
     val stack = mutableListOf<Frame>()
+    fun frameStartX(frame: Frame): Double {
+        val columns =
+            if (frame.columns.isNotEmpty()) frame.columns.toList() else centers.indices.toList()
+        val columnLeft = minimum(columns.map { centers[it] }) - 52 + frame.depth * 6
+        return max(MARGIN / 2 + frame.depth * 6, min(columnLeft, frame.low - 14))
+    }
     val finished = mutableListOf<Frame>()
     var y = top + headHeight + 26
 
@@ -2190,6 +2194,16 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                 if (frame != null) {
                     y += 6
                     frame.end = y
+                    if (frame.kind != BlockKind.RECT) {
+                        val left = frameStartX(frame)
+                        val tagWidth = measure.width(frame.kind.id, LABEL_FONT, 700) + 18
+                        val headerRight = left + tagWidth + 10 + (frame.label?.width ?: 0.0)
+                        val branchRight =
+                            left +
+                                10 +
+                                (frame.branches.maxOfOrNull { it.label?.width ?: 0.0 } ?: 0.0)
+                        frame.high = max(frame.high, max(headerRight, branchRight))
+                    }
                     finished.add(frame)
                     for (parent in stack) {
                         parent.columns.addAll(frame.columns)
@@ -2215,9 +2229,8 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
     for (frame in finished) {
         val columns =
             if (frame.columns.isNotEmpty()) frame.columns.toList() else centers.indices.toList()
-        var frameLeft = minimum(columns.map { centers[it] }) - 52 + frame.depth * 6
+        val frameLeft = frameStartX(frame)
         var frameRight = maximum(columns.map { centers[it] }) + 52 - frame.depth * 6
-        frameLeft = max(MARGIN / 2 + frame.depth * 6, min(frameLeft, frame.low - 14))
         frameRight = max(max(frameRight, frameLeft + 140), frame.high + 14)
         widest = max(widest, frameRight + MARGIN / 2)
         val left = frameLeft

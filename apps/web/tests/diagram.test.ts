@@ -109,6 +109,12 @@ describe('diagram layout', () => {
     expect(label?.kind === 'text' && label.fill).toEqual({ color: '#ffffff' })
   })
 
+  it.each(corpus.colors)('keeps text readable on $fill in either theme', ({ fill, ink }) => {
+    const scene = layoutDiagram(parseDiagram(`flowchart TD\nA[Readable label]\nstyle A fill:${fill}`), measure)
+    const label = scene.items.find(item => item.kind === 'text' && item.lines[0] === 'Readable label')
+    expect(label?.kind === 'text' && label.fill).toEqual({ color: ink })
+  })
+
   it('wraps long labels between words and inside long words', () => {
     expect(wrapText('alpha beta gamma', 10, 400, 50, measure)).toEqual(['alpha', 'beta', 'gamma'])
     expect(wrapText('abcdefghijklmnop', 10, 400, 30, measure)).toEqual(['abcde', 'fghij', 'klmno', 'p'])

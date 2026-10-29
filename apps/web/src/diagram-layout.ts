@@ -10,6 +10,7 @@ import type {
   SequenceDiagram,
 } from './diagram'
 import { DiagramError } from './diagram'
+import { diagramColor } from './diagram-color'
 
 // Lays a parsed diagram out as a flat scene of paths and text. Renderers only map tones to
 // theme colors, so the web and Android (DiagramLayout.kt) draw the same geometry.
@@ -88,6 +89,7 @@ const RANK_GAP = 26
 const CLUSTER_PAD = 16
 const ARROW = 8
 const MAX_LAYOUT_NODES = 4000
+const MAX_LAYOUT_CONSTRAINTS = 10_000
 
 export function layoutDiagram(diagram: Diagram, measure: TextMeasure): Scene {
   if (diagram.kind === 'graph')
@@ -233,21 +235,11 @@ function arc(cx: number, cy: number, r: number, a0: number, a1: number, move: bo
 
 // Author colors stay readable: text on a custom fill picks ink by the fill's luminance.
 function luminance(color: string) {
-  let match = /^#([\da-f]{3,8})$/i.exec(color)
-  let rgb: number[] | undefined
-  if (match) {
-    const hex = match[1]!
-    const full = hex.length <= 4 ? [...hex.slice(0, 3)].map(c => c + c).join('') : hex.slice(0, 6)
-    rgb = [0, 2, 4].map(index => Number.parseInt(full.slice(index, index + 2), 16))
-  }
-  else {
-    match = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(color)
-    if (match)
-      rgb = match.slice(1, 4).map(Number)
-  }
-
-  if (!rgb)
+  const argb = diagramColor(color)
+  // A translucent fill depends on the theme beneath it; keep the theme's normal ink.
+  if (argb === undefined || argb >>> 24 !== 255)
     return undefined
+  const rgb = [(argb >>> 16) & 255, (argb >>> 8) & 255, argb & 255]
   const [r, g, b] = rgb.map((value) => {
     const channel = value / 255
     return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
@@ -260,8 +252,12 @@ function textOn(style: DiagramStyle | undefined, fallback: Tone): Paint {
     return { color: style.color }
   if (style?.fill) {
     const light = luminance(style.fill)
-    if (light !== undefined)
-      return { color: light > 0.4 ? '#16151d' : '#ffffff' }
+    if (light !== undefined) {
+      const darkInk = '#16151d'
+      const darkContrast = (light + 0.05) / (luminance(darkInk)! + 0.05)
+      const lightContrast = 1.05 / (light + 0.05)
+      return { color: darkContrast >= lightContrast ? darkInk : '#ffffff' }
+    }
   }
 
   return { tone: fallback }
@@ -607,10 +603,18 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     titles.set(cluster.id, textBlock(cluster.label, CLUSTER_FONT, 600, 240, measure))
 
   // An empty cluster still draws its box around a placeholder.
+  function append<K, V>(map: Map<K, V[]>, key: K, value: V) {
+    const values = map.get(key)
+    if (values)
+      values.push(value)
+    else
+      map.set(key, [value])
+  }
+
   const members = new Map<string, string[]>()
   for (const node of graph.nodes) {
     for (const id of chainOf(node.parent))
-      members.set(id, [...(members.get(id) ?? []), node.id])
+      append(members, id, node.id)
   }
 
   for (const cluster of graph.clusters) {
@@ -631,7 +635,7 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
       extra: 0,
     })
     for (const id of chainOf(cluster.id))
-      members.set(id, [...(members.get(id) ?? []), key])
+      append(members, id, key)
   }
 
   // Rank constraints. A link to or from a subgraph constrains every member, so the whole
@@ -682,7 +686,7 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
   const linkState = new Map<string, 1 | 2>()
   const linksFrom = new Map<string, typeof links>()
   for (const link of links)
-    linksFrom.set(link.edge.from, [...(linksFrom.get(link.edge.from) ?? []), link])
+    append(linksFrom, link.edge.from, link)
   for (const start of [...graph.nodes.map(node => node.id), ...clusters.keys()]) {
     if (linkState.has(start))
       continue
@@ -714,15 +718,18 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     let count = 0
     for (const u of ends(from)) {
       for (const v of ends(to)) {
-        if (u !== v && count++ < 400)
+        if (u !== v && count++ < 400) {
+          if (constraints.length >= MAX_LAYOUT_CONSTRAINTS)
+            throw new DiagramError('This diagram has too many expanded links to draw.')
           constraints.push({ u, v, minlen: link.edge.length * 2 })
+        }
       }
     }
   }
 
   const outgoing = new Map<string, Constraint[]>()
   for (const constraint of constraints)
-    outgoing.set(constraint.u, [...(outgoing.get(constraint.u) ?? []), constraint])
+    append(outgoing, constraint.u, constraint)
   const state = new Map<string, 1 | 2>()
   const backward = new Set<Constraint>()
   for (const start of nodes.keys()) {
@@ -758,8 +765,8 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
   const ins = new Map<string, Constraint[]>()
   const outs = new Map<string, Constraint[]>()
   for (const constraint of constraints) {
-    ins.set(constraint.v, [...(ins.get(constraint.v) ?? []), constraint])
-    outs.set(constraint.u, [...(outs.get(constraint.u) ?? []), constraint])
+    append(ins, constraint.v, constraint)
+    append(outs, constraint.u, constraint)
   }
 
   const indegree = new Map([...nodes.keys()].map(key => [key, ins.get(key)?.length ?? 0]))
@@ -1813,6 +1820,12 @@ export function layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): 
   }
 
   const stack: Frame[] = []
+  const frameStartX = (frame: Frame) => {
+    const columns = frame.columns.size ? [...frame.columns] : centers.map((_, column) => column)
+    const columnLeft = Math.min(...columns.map(column => centers[column]!)) - 52 + frame.depth * 6
+    return Math.max(MARGIN / 2 + frame.depth * 6, Math.min(columnLeft, frame.low - 14))
+  }
+
   const finished: (Frame & { end: number })[] = []
   let y = top + headHeight + 26
 
@@ -2017,6 +2030,14 @@ export function layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): 
       const frame = stack.pop()
       if (frame) {
         y += 6
+        if (frame.kind !== 'rect') {
+          const left = frameStartX(frame)
+          const tagWidth = measure.width(frame.kind, LABEL_FONT, 700) + 18
+          const headerRight = left + tagWidth + 10 + (frame.label?.width ?? 0)
+          const branchRight = left + 10 + Math.max(0, ...frame.branches.map(branch => branch.label?.width ?? 0))
+          frame.high = Math.max(frame.high, headerRight, branchRight)
+        }
+
         finished.push({ ...frame, end: y })
         for (const parent of stack) {
           for (const column of frame.columns)
@@ -2041,9 +2062,8 @@ export function layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): 
   let widest = right
   for (const frame of finished.sort((a, b) => a.depth - b.depth)) {
     const columns = frame.columns.size ? [...frame.columns] : centers.map((_, column) => column)
-    let frameLeft = Math.min(...columns.map(column => centers[column]!)) - 52 + frame.depth * 6
+    const frameLeft = frameStartX(frame)
     let frameRight = Math.max(...columns.map(column => centers[column]!)) + 52 - frame.depth * 6
-    frameLeft = Math.max(MARGIN / 2 + frame.depth * 6, Math.min(frameLeft, frame.low - 14))
     frameRight = Math.max(frameRight, frameLeft + 140, frame.high + 14)
     widest = Math.max(widest, frameRight + MARGIN / 2)
     const left = frameLeft
