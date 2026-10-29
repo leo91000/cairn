@@ -5,6 +5,7 @@ import type {
   NodeEnrollment,
   NodeSyncSettings,
   RunnerObservation,
+  UnreadyObservations,
 } from '../../../../packages/contracts/nodes'
 import {
   computed,
@@ -19,11 +20,10 @@ import { revokeNode } from '../../../../packages/contracts/generated/revokeNode'
 import {
   diskCapacity,
   fleetClock,
+  fleetSummary,
   formatMiB,
-  nodeHealth,
   observeRunner,
-  runnerStale,
-  slotCapacity,
+  observeUnready,
 } from '../../../../packages/contracts/nodes'
 import { nodeBackend } from '../agent-access'
 import {
@@ -116,12 +116,9 @@ const visible = computed(() => showRevoked.value ? nodes.value : active.value)
 // When the built-in runner's contact last changed, as seen by this device: an unchanged contact means it went stale.
 const runner = ref<RunnerObservation | null>(null)
 const clock = computed(() => fleetClock(nodes.value, runner.value))
-const healths = computed(() => active.value.map(node => nodeHealth(node, Date.now(), clock.value, runner.value)))
-// Connected machines answer heartbeats; the built-in runner too, unless its contact went stale.
-const live = computed(() => active.value.filter((node, index) => (node.local || node.status === 'online') && healths.value[index].state !== 'offline' && !runnerStale(node, clock.value, runner.value)))
-const totalSlots = computed(() => live.value.reduce((total, node) => total + slotCapacity(node), 0))
-const usedSlots = computed(() => live.value.reduce((total, node) => total + Math.min(node.occupiedSlots ?? 0, slotCapacity(node)), 0))
-const attention = computed(() => healths.value.filter(health => ['offline', 'attention', 'setup'].includes(health.state)).length)
+// How long each machine has stayed unready without a reported error, across successful listings.
+const unready = ref<UnreadyObservations>({})
+const summary = computed(() => fleetSummary(nodes.value, Date.now(), clock.value, runner.value, unready.value))
 let timer: ReturnType<typeof setInterval> | undefined
 
 // A dialog opens on a clean slate: errors from earlier actions are not its own.
@@ -138,6 +135,7 @@ async function load() {
   try {
     nodes.value = await api<ExecutionNode[]>('/nodes')
     runner.value = observeRunner(nodes.value, runner.value)
+    unready.value = observeUnready(nodes.value, unready.value)
     loaded.value = true
     refreshError.value = ''
   }
@@ -464,7 +462,7 @@ function revoke() {
             connected
           </dt>
           <dd class="font-heading text-xl font-bold tabular-nums">
-            {{ live.length }}<span class="text-sm font-normal text-muted"> / {{ active.length }}</span>
+            {{ summary.connected }}<span class="text-sm font-normal text-muted"> / {{ summary.machines }}</span>
           </dd>
         </div>
         <div class="rounded-xl border border-line bg-surface flex flex-col-reverse px-4 py-3 phone:px-3">
@@ -472,15 +470,15 @@ function revoke() {
             slots in use
           </dt>
           <dd class="font-heading text-xl font-bold tabular-nums">
-            {{ usedSlots }}<span class="text-sm font-normal text-muted"> / {{ totalSlots }}</span>
+            {{ summary.usedSlots }}<span class="text-sm font-normal text-muted"> / {{ summary.totalSlots }}</span>
           </dd>
         </div>
-        <div class="rounded-xl border bg-surface flex flex-col-reverse px-4 py-3 phone:px-3" :class="attention ? 'border-coral/40' : 'border-line'">
+        <div class="rounded-xl border bg-surface flex flex-col-reverse px-4 py-3 phone:px-3" :class="summary.attention ? 'border-coral/40' : 'border-line'">
           <dt class="text-xs text-muted">
-            {{ attention === 1 ? 'needs attention' : 'need attention' }}
+            {{ summary.attention === 1 ? 'needs attention' : 'need attention' }}
           </dt>
-          <dd class="font-heading text-xl font-bold tabular-nums" :class="{ 'text-coral': attention }">
-            {{ attention }}
+          <dd class="font-heading text-xl font-bold tabular-nums" :class="{ 'text-coral': summary.attention }">
+            {{ summary.attention }}
           </dd>
         </div>
       </dl>
@@ -588,6 +586,7 @@ function revoke() {
             :node="node"
             :clock="clock"
             :runner="runner"
+            :unready="unready"
             :selected="node.id === openedId"
             @open="openNode(node)"
           />
@@ -615,6 +614,7 @@ function revoke() {
       :node="opened"
       :clock="clock"
       :runner="runner"
+      :unready="unready"
       :return-focus="visible.some(node => node.id === opened!.id) ? undefined : machinesHeading"
       :busy="busy"
       :error="errorNodeId === opened.id ? error : ''"

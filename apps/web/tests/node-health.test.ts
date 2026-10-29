@@ -2,12 +2,15 @@ import type { ExecutionNode } from '../../../packages/contracts/nodes'
 import { describe, expect, it } from 'vitest'
 import {
   fleetClock,
+  fleetSummary,
   freeSlots,
   nodeAdministrator,
   nodeDiagnostics,
   nodeHealth,
   observeRunner,
+  observeUnready,
   runnerStale,
+  slotCapacity,
   usedPercent,
 } from '../../../packages/contracts/nodes'
 
@@ -222,6 +225,64 @@ describe('node health', () => {
       occupiedSlots: 2,
       availableSlots: 2,
     }))).toEqual({ state: 'full', label: 'Full', detail: 'All 2 slots in use' })
+  })
+
+  it('escalates an unready runtime without a reported error once it lasts across listings', () => {
+    const waiting = node({ executionReady: false })
+    const first = observeUnready([waiting], {}, 1_000)
+    expect(first).toEqual({ node: { since: 1_000, checkedAt: 1_000 } })
+    expect(nodeHealth(waiting, 0, null, null, first).state).toBe('updating')
+    const later = observeUnready([waiting], first, 1_000 + 5 * 60_000)
+    expect(nodeHealth(waiting, 0, null, null, later)).toEqual({ state: 'attention', label: 'Needs attention', detail: 'Not ready for over 5 minutes' })
+    // Recovery, or a reported error, starts over.
+    expect(observeUnready([node()], later, 400_000)).toEqual({})
+    expect(observeUnready([node({ executionReady: false, budgetError: 'cgroup' })], later, 400_000)).toEqual({})
+  })
+
+  it('reads partial payloads like the Kotlin contract and the server', () => {
+    const partial = node()
+    delete (partial as Partial<ExecutionNode>).status
+    expect(nodeHealth(partial).state).toBe('offline')
+    expect(slotCapacity(node({ slots: null, runtimeSlots: 3 }))).toBe(3)
+    expect(slotCapacity(node({ slots: null, runtimeSlots: null }))).toBe(4)
+  })
+
+  it('summarizes the fleet as placement sees it', () => {
+    const runner = node({
+      id: 'runner',
+      local: true,
+      status: 'local',
+      lastSeen: 0,
+      slots: 4,
+      runtimeSlots: 2,
+      occupiedSlots: 3,
+      availableSlots: 1,
+    })
+    const online = node({ id: 'online', status: 'online', lastSeen: 120_000 })
+    const setup = node({
+      id: 'setup',
+      status: 'online',
+      lastSeen: 120_000,
+      agents: [],
+    })
+    const offline = node({ id: 'offline', status: 'offline', lastSeen: 0 })
+    const gone = node({ id: 'gone', revoked: true })
+    // The runner's contact lags the online machines: it went silent and leaves the totals.
+    expect(fleetSummary([runner, online, setup, offline, gone], 0, 120_000)).toEqual({
+      machines: 4,
+      connected: 2,
+      usedSlots: 2,
+      totalSlots: 8,
+      attention: 3,
+    })
+    // Fresh, its slots count within the runtime pool, used ones capped by that capacity.
+    expect(fleetSummary([{ ...runner, lastSeen: 120_000 }, online], 0, 120_000)).toEqual({
+      machines: 2,
+      connected: 2,
+      usedSlots: 3,
+      totalSlots: 6,
+      attention: 0,
+    })
   })
 
   it('bounds usage to the limit', () => {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ExecutionNode, RunnerObservation } from '../../../../packages/contracts/nodes'
+import type { ExecutionNode, RunnerObservation, UnreadyObservations } from '../../../../packages/contracts/nodes'
 import {
   computed,
   nextTick,
@@ -45,6 +45,7 @@ const props = defineProps<{
   // Where focus goes when the panel closes, if its row is gone.
   returnFocus?: HTMLElement
   runner?: RunnerObservation | null
+  unready?: UnreadyObservations | null
 }>()
 const emit = defineEmits<{
   close: []
@@ -81,7 +82,7 @@ const sections: { value: Section, label: string }[] = [
   { value: 'storage', label: 'Storage' },
   { value: 'settings', label: 'Settings' },
 ]
-const health = computed(() => nodeHealth(props.node, Date.now(), props.clock ?? null, props.runner ?? null))
+const health = computed(() => nodeHealth(props.node, Date.now(), props.clock ?? null, props.runner ?? null, props.unready ?? null))
 // Offline or silent machines show their last report.
 const live = computed(() => !['offline', 'revoked'].includes(health.value.state) && !runnerStale(props.node, props.clock ?? null, props.runner ?? null))
 const diagnostics = computed(() => nodeDiagnostics(props.node, Date.now(), props.clock ?? null, props.runner ?? null))
@@ -328,7 +329,8 @@ const reserve = computed(() => {
           </section>
         </template>
 
-        <template v-else-if="section === 'access'">
+        <!-- Access stays mounted, so a privilege preview started there still opens after switching sections. -->
+        <div v-show="section === 'access'">
           <section class="border-b border-line px-6.5 py-5 phone:px-5" :aria-label="`Agents on ${node.name}`">
             <div class="mb-3.5 flex items-baseline justify-between gap-3">
               <h3 class="eyebrow">
@@ -384,9 +386,9 @@ const reserve = computed(() => {
               Review agent access to this host
             </UiButton>
           </section>
-        </template>
+        </div>
 
-        <template v-else-if="section === 'storage'">
+        <template v-if="section === 'storage'">
           <section v-if="node.diskAccounting" class="border-b border-line px-6.5 py-5 phone:px-5" aria-label="Disk capacity details">
             <h3 class="eyebrow mb-3.5">
               Disk capacity
@@ -479,7 +481,7 @@ const reserve = computed(() => {
           </section>
         </template>
 
-        <template v-else>
+        <template v-if="section === 'settings'">
           <section class="border-b border-line px-6.5 py-5 phone:px-5" aria-labelledby="node-settings">
             <h3 id="node-settings" class="eyebrow mb-3.5">
               Configuration

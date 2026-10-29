@@ -36,10 +36,38 @@ export function freeSlots(node: ExecutionNode) {
   return Math.max(0, Math.min(node.availableSlots ?? 0, slotCapacity(node) - (node.occupiedSlots ?? 0)))
 }
 
-/** Slots placement can use: the configured ones, within the runtime's pool once it reports one. */
+/** Slots placement can use: the configured ones (the server defaults them to the pool, then 4), within the runtime's pool. */
 export function slotCapacity(node: ExecutionNode) {
-  const slots = node.slots ?? 0
+  const slots = node.slots ?? node.runtimeSlots ?? 4
   return Math.min(slots, node.runtimeSlots ?? slots)
+}
+
+/** A runtime unready without a reported error: usually on its way, but some causes last (image, pool, data root). */
+function unexplainedUnready(node: ExecutionNode) {
+  return !node.revoked && !node.executionReady && node.budgetError == null && node.updateError == null
+}
+
+/** Unready machines without a reported error, first seen and last confirmed by successful listings. */
+export type UnreadyObservations = Record<string, { since: number, checkedAt: number }>
+
+/** How long an unexplained unready state may last before it needs the owner. */
+export const LASTING_UNREADY_MS = 5 * 60_000
+
+/** Follows unexplained unready states across successful listings; a recovered machine starts over. */
+export function observeUnready(nodes: ExecutionNode[], previous: UnreadyObservations, now = Date.now()): UnreadyObservations {
+  const next: UnreadyObservations = {}
+  for (const node of nodes) {
+    if (unexplainedUnready(node))
+      next[node.id] = { since: previous[node.id]?.since ?? now, checkedAt: now }
+  }
+
+  return next
+}
+
+/** How long a machine has stayed unready without a reported error, as successful listings saw it. */
+export function unreadyFor(node: ExecutionNode, unready: UnreadyObservations | null) {
+  const seen = unready?.[node.id]
+  return seen ? seen.checkedAt - seen.since : 0
 }
 
 /** Percentage of a limit in use, between 0 and 100. */
@@ -180,12 +208,13 @@ function runnerSilence(node: ExecutionNode, clock: number | null) {
  * Online follows the server's 60-second heartbeat timeout; placement wants a heartbeat within 30 seconds,
  * so a machine that just stopped answering can read Ready for up to half a minute.
  */
-export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number | null = null, runner: RunnerObservation | null = null): NodeHealth {
+export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number | null = null, runner: RunnerObservation | null = null, unready: UnreadyObservations | null = null): NodeHealth {
   if (node.revoked)
     return { state: 'revoked', label: 'Revoked', detail: 'No longer has access' }
   // Ages use the server clock when the fleet shows it, so device clock drift does not shift them.
   const reference = clock ?? now
-  if (!node.local && node.status === 'offline')
+  // Other machines are online or offline; a missing status reads offline, like the Kotlin contract.
+  if (!node.local && node.status !== 'online')
     return { state: 'offline', label: 'Offline', detail: node.lastSeen != null ? `Last contact ${relativeAge(node.lastSeen, Math.max(reference, node.lastSeen))}` : 'Never connected' }
   if (runnerStale(node, clock, runner)) {
     const silence = runnerSilence(node, clock)
@@ -220,6 +249,8 @@ export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number 
       return { state: 'attention', label: 'Needs attention', detail: 'The shared budget could not be applied' }
     if (node.updateError != null)
       return { state: 'attention', label: 'Needs attention', detail: 'The update failed' }
+    if (unreadyFor(node, unready) >= LASTING_UNREADY_MS)
+      return { state: 'attention', label: 'Needs attention', detail: 'Not ready for over 5 minutes' }
     return { state: 'updating', label: 'Not ready', detail: 'The runtime is not ready yet' }
   }
 
@@ -244,6 +275,32 @@ export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number 
   return { state: 'ready', label: 'Ready', detail: running ? `${running} running · ${free} of ${slots} slots free` : `${free} of ${slots} slots free` }
 }
 
+export interface FleetSummary {
+  machines: number
+  connected: number
+  usedSlots: number
+  totalSlots: number
+  attention: number
+}
+
+/**
+ * The fleet at a glance. Connected machines answer heartbeats, the built-in runner too unless it went
+ * silent; their slots are counted as placement sees them. Offline machines, those needing attention and
+ * those waiting for setup need the owner.
+ */
+export function fleetSummary(nodes: ExecutionNode[], now = Date.now(), clock: number | null = null, runner: RunnerObservation | null = null, unready: UnreadyObservations | null = null): FleetSummary {
+  const active = nodes.filter(node => !node.revoked)
+  const healths = active.map(node => nodeHealth(node, now, clock, runner, unready))
+  const live = active.filter((node, index) => (node.local || node.status === 'online') && healths[index].state !== 'offline' && !runnerStale(node, clock, runner))
+  return {
+    machines: active.length,
+    connected: live.length,
+    usedSlots: live.reduce((total, node) => total + Math.min(node.occupiedSlots ?? 0, slotCapacity(node)), 0),
+    totalSlots: live.reduce((total, node) => total + slotCapacity(node), 0),
+    attention: healths.filter(health => ['offline', 'attention', 'setup'].includes(health.state)).length,
+  }
+}
+
 /** A native privilege change keeps the runtime unready until the supervisor confirms it. */
 function privilegeReason(node: ExecutionNode) {
   if (node.capabilities.backend !== 'native')
@@ -266,7 +323,7 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now(), clock: nu
     reasons.push(`The built-in runner's last usable report was ${silence ?? 'over a minute ago'}: check that it is running, at the same version as the server.`)
   }
 
-  if (!node.local && node.status === 'offline')
+  if (!node.local && node.status !== 'online')
     reasons.push(node.lastSeen != null ? `No contact since ${relativeAge(node.lastSeen, Math.max(reference, node.lastSeen))}: check that the machine is on, online and that the ${node.capabilities.backend === 'native' ? 'cairn-native-node' : 'cairn-node'} service is running.` : 'The machine has never connected: run the installation command on it.')
   if (node.capabilities.backend !== 'native' && !node.capabilities.kvm)
     reasons.push('KVM is unavailable: enable virtualization in the BIOS and load the kvm module.')

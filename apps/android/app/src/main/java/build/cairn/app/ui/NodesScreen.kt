@@ -34,6 +34,8 @@ fun NodesScreen(
     // When the built-in runner's contact last changed, as seen by this device: an unchanged
     // contact means it went stale.
     var runner by remember { mutableStateOf<RunnerObservation?>(null) }
+    // How long each machine has stayed unready without a reported error, across listings.
+    var unready by remember { mutableStateOf<Map<String, UnreadyObservation>>(emptyMap()) }
     var adding by remember { mutableStateOf(false) }
     var storage by remember { mutableStateOf<ExecutionNode?>(null) }
     var name by remember { mutableStateOf("") }
@@ -71,6 +73,7 @@ fun NodesScreen(
     suspend fun load() {
         nodes = vm.api.get("/nodes")
         runner = observeRunner(nodes, runner)
+        unready = observeUnready(nodes, unready)
         if (nodes.any { it.capabilities.backend == "native" })
             nativeCallers = vm.api.get("/nodes/native-callers")
         val invitation = enrollment ?: return
@@ -108,24 +111,13 @@ fun NodesScreen(
             "Nodes",
             "Gérez vos machines et leur capacité. L’accès des agents se règle sur leur fiche.",
         )
-        val active = nodes.filter { !it.revoked }
         val clock = fleetClock(nodes, runner)
-        // Connected machines answer heartbeats; the built-in runner too, unless its contact went
-        // stale.
-        val live = active.filter {
-            (it.local || it.status == "online") &&
-                nodeHealth(it, clock = clock, runner = runner).state != NodeHealthState.OFFLINE &&
-                !runnerStale(it, clock, runner)
-        }
-        val attention = active.count {
-            nodeHealth(it, clock = clock, runner = runner).state in
-                listOf(NodeHealthState.OFFLINE, NodeHealthState.ATTENTION, NodeHealthState.SETUP)
-        }
+        val summary = fleetSummary(nodes, clock = clock, runner = runner, unready = unready)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "${live.size}/${active.size} connectée${if (live.size > 1) "s" else ""} · " +
-                    "${live.sumOf { minOf(it.occupiedSlots, slotCapacity(it)) }}/${live.sumOf { slotCapacity(it) }} slots utilisés" +
-                    if (attention > 0) " · $attention à vérifier" else "",
+                "${summary.connected}/${summary.machines} connectée${if (summary.connected > 1) "s" else ""} · " +
+                    "${summary.usedSlots}/${summary.totalSlots} slots utilisés" +
+                    if (summary.attention > 0) " · ${summary.attention} à vérifier" else "",
                 Modifier.weight(1f),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -142,7 +134,7 @@ fun NodesScreen(
             .filter { showRevoked || !it.revoked }
             .forEach { node ->
                 Panel {
-                    val health = nodeHealth(node, clock = clock, runner = runner)
+                    val health = nodeHealth(node, clock = clock, runner = runner, unready = unready)
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),

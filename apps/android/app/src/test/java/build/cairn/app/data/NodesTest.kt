@@ -247,6 +247,62 @@ class NodesTest {
     }
 
     @Test
+    fun lastingUnreadyAndFleetSummaryMatchTheWeb() {
+        val ready = node.copy(slots = 4, availableSlots = 3, occupiedSlots = 1)
+        val waiting = ready.copy(executionReady = false)
+        val first = observeUnready(listOf(waiting), emptyMap(), 1_000)
+        assertEquals(mapOf(waiting.id to UnreadyObservation(1_000, 1_000)), first)
+        assertEquals(NodeHealthState.UPDATING, nodeHealth(waiting, 0, null, null, first).state)
+        val later = observeUnready(listOf(waiting), first, 1_000 + LASTING_UNREADY_MS)
+        assertEquals(
+            NodeHealth(
+                NodeHealthState.ATTENTION,
+                "À vérifier",
+                "Pas prête depuis plus de 5 minutes",
+            ),
+            nodeHealth(waiting, 0, null, null, later),
+        )
+        assertTrue(observeUnready(listOf(ready), later, 400_000).isEmpty())
+        assertTrue(
+            observeUnready(listOf(waiting.copy(budgetError = "cgroup")), later, 400_000).isEmpty()
+        )
+        assertEquals(3L, slotCapacity(ready.copy(slots = null, runtimeSlots = 3)))
+        assertEquals(4L, slotCapacity(ready.copy(slots = null, runtimeSlots = null)))
+
+        val runner =
+            ready.copy(
+                id = "8d0f1c3e-2a4b-5c6d-8e7f-9a0b1c2d3e4f",
+                local = true,
+                status = "local",
+                lastSeen = 0,
+                runtimeSlots = 2,
+                occupiedSlots = 3,
+                availableSlots = 1,
+            )
+        val online = ready.copy(lastSeen = 120_000)
+        val setup =
+            ready.copy(
+                id = "1a2b3c4d-5e6f-5a7b-8c9d-0e1f2a3b4c5d",
+                lastSeen = 120_000,
+                agents = emptyList(),
+            )
+        val offline =
+            ready.copy(
+                id = "2b3c4d5e-6f7a-5b8c-9d0e-1f2a3b4c5d6e",
+                status = "offline",
+                lastSeen = 0,
+            )
+        assertEquals(
+            FleetSummary(machines = 4, connected = 2, usedSlots = 2, totalSlots = 8, attention = 3),
+            fleetSummary(listOf(runner, online, setup, offline), 0, 120_000),
+        )
+        assertEquals(
+            FleetSummary(machines = 2, connected = 2, usedSlots = 3, totalSlots = 6, attention = 0),
+            fleetSummary(listOf(runner.copy(lastSeen = 120_000), online), 0, 120_000),
+        )
+    }
+
+    @Test
     fun sizesAndAgesAreReadable() {
         assertEquals("512 Mio", formatMiB(512))
         assertEquals("32 Gio", formatMiB(32768))

@@ -193,11 +193,43 @@ fun fleetClock(nodes: List<ExecutionNode>, runner: RunnerObservation? = null): L
 fun freeSlots(node: ExecutionNode): Long =
     maxOf(0, minOf(node.availableSlots, slotCapacity(node) - node.occupiedSlots))
 
-/** Slots placement can use: the configured ones, within the runtime's pool once it reports one. */
+/**
+ * Slots placement can use: the configured ones (the server defaults them to the pool, then 4),
+ * within the runtime's pool.
+ */
 fun slotCapacity(node: ExecutionNode): Long {
-    val slots = node.slots ?: 0
+    val slots = node.slots ?: node.runtimeSlots ?: 4
     return minOf(slots, node.runtimeSlots ?: slots)
 }
+
+/** An unready machine without a reported error, first seen and last confirmed by listings. */
+data class UnreadyObservation(val since: Long, val checkedAt: Long)
+
+/** How long an unexplained unready state may last before it needs the owner. */
+const val LASTING_UNREADY_MS = 5 * 60_000L
+
+/**
+ * A runtime unready without a reported error: usually on its way, but some causes last (image,
+ * pool, data root).
+ */
+private fun unexplainedUnready(node: ExecutionNode) =
+    !node.revoked && !node.executionReady && node.budgetError == null && node.updateError == null
+
+/**
+ * Follows unexplained unready states across successful listings; a recovered machine starts over.
+ */
+fun observeUnready(
+    nodes: List<ExecutionNode>,
+    previous: Map<String, UnreadyObservation>,
+    now: Long = System.currentTimeMillis(),
+): Map<String, UnreadyObservation> =
+    nodes
+        .filter { unexplainedUnready(it) }
+        .associate { it.id to UnreadyObservation(previous[it.id]?.since ?: now, now) }
+
+/** How long a machine has stayed unready without a reported error, as listings saw it. */
+fun unreadyFor(node: ExecutionNode, unready: Map<String, UnreadyObservation>?): Long =
+    unready?.get(node.id)?.let { it.checkedAt - it.since } ?: 0
 
 /** The built-in runner's last contact, and when this device first saw that value. */
 data class RunnerObservation(
@@ -259,6 +291,7 @@ fun nodeHealth(
     now: Long = System.currentTimeMillis(),
     clock: Long? = null,
     runner: RunnerObservation? = null,
+    unready: Map<String, UnreadyObservation>? = null,
 ): NodeHealth {
     if (node.revoked) return NodeHealth(NodeHealthState.REVOKED, "Révoquée", "N’a plus accès")
     // Ages use the server clock when the fleet shows it, so device clock drift does not shift them.
@@ -332,6 +365,12 @@ fun nodeHealth(
                     "À vérifier",
                     "La mise à jour a échoué",
                 )
+            unreadyFor(node, unready) >= LASTING_UNREADY_MS ->
+                NodeHealth(
+                    NodeHealthState.ATTENTION,
+                    "À vérifier",
+                    "Pas prête depuis plus de 5 minutes",
+                )
             else ->
                 NodeHealth(
                     NodeHealthState.UPDATING,
@@ -380,6 +419,50 @@ fun nodeHealth(
         "Prête",
         if (running > 0) "$running en cours · $free slots libres sur $slots"
         else "$free slots libres sur $slots",
+    )
+}
+
+data class FleetSummary(
+    val machines: Int,
+    val connected: Int,
+    val usedSlots: Long,
+    val totalSlots: Long,
+    val attention: Int,
+)
+
+/**
+ * The fleet at a glance. Connected machines answer heartbeats, the built-in runner too unless it
+ * went silent; their slots are counted as placement sees them. Offline machines, those needing
+ * attention and those waiting for setup need the owner.
+ */
+fun fleetSummary(
+    nodes: List<ExecutionNode>,
+    now: Long = System.currentTimeMillis(),
+    clock: Long? = null,
+    runner: RunnerObservation? = null,
+    unready: Map<String, UnreadyObservation>? = null,
+): FleetSummary {
+    val active = nodes.filter { !it.revoked }
+    val healths = active.associateWith { nodeHealth(it, now, clock, runner, unready) }
+    val live = active.filter {
+        (it.local || it.status == "online") &&
+            healths.getValue(it).state != NodeHealthState.OFFLINE &&
+            !runnerStale(it, clock, runner)
+    }
+    return FleetSummary(
+        machines = active.size,
+        connected = live.size,
+        usedSlots = live.sumOf { minOf(it.occupiedSlots, slotCapacity(it)) },
+        totalSlots = live.sumOf { slotCapacity(it) },
+        attention =
+            healths.values.count {
+                it.state in
+                    listOf(
+                        NodeHealthState.OFFLINE,
+                        NodeHealthState.ATTENTION,
+                        NodeHealthState.SETUP,
+                    )
+            },
     )
 }
 

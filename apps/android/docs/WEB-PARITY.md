@@ -35,8 +35,11 @@ attention, and leaves the connected count, when its last usable report lags
 machines the server reports online by the heartbeat timeout, or stays unchanged
 for a minute of device time (it is refreshed on every listing when healthy); a
 runner already stale when the page opens is found within a minute, and device
-clock offset never matters. The first blocker wins, in the same order on both
-platforms (`nodeHealth` in `packages/contracts/nodes.ts` and `data/Nodes.kt`); the
+clock offset never matters. A runtime unready without a reported error reads not
+ready, then needs attention once successful listings have seen it so for five
+minutes. The fleet summary is computed by the shared `fleetSummary` on both
+platforms. The first blocker wins, in the same order on both platforms
+(`nodeHealth` in `packages/contracts/nodes.ts` and `data/Nodes.kt`); the
 diagnostics list keeps its reasons, gains the stale-runner one and dates offline
 machines with the same server-time reference when one exists (an online machine,
 or a runner contact that changed while watched), and with the device clock

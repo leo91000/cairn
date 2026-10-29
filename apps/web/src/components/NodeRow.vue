@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ExecutionNode, RunnerObservation } from '../../../../packages/contracts/nodes'
+import type { ExecutionNode, RunnerObservation, UnreadyObservations } from '../../../../packages/contracts/nodes'
 import { computed } from 'vue'
 import {
   formatMiB,
@@ -23,9 +23,10 @@ const props = defineProps<{
   selected?: boolean
   clock?: number | null
   runner?: RunnerObservation | null
+  unready?: UnreadyObservations | null
 }>()
 defineEmits<{ open: [] }>()
-const health = computed(() => nodeHealth(props.node, Date.now(), props.clock ?? null, props.runner ?? null))
+const health = computed(() => nodeHealth(props.node, Date.now(), props.clock ?? null, props.runner ?? null, props.unready ?? null))
 const live = computed(() => !['offline', 'revoked'].includes(health.value.state) && !runnerStale(props.node, props.clock ?? null, props.runner ?? null))
 const slots = computed(() => slotCapacity(props.node))
 const free = computed(() => freeSlots(props.node))
