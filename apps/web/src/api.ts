@@ -279,6 +279,10 @@ async function requestOnce<T = any>(
   if (!response.ok) {
     if (response.status === 401)
       state.authenticated = false
+    // A refused change may come from access the owner just removed: show what remains.
+    const method = (options.method || 'GET').toUpperCase()
+    if (response.status === 403 && method !== 'GET' && method !== 'HEAD')
+      void refreshUsableAgents()
     const message = typeof data?.error === 'string' ? data.error : ''
     const failure = new ApiError(message || 'Request failed. Please try again.', response.status)
     if (response.status >= 502 && response.status <= 504 && (!message || relayUnavailable.has(message.replace(/\.$/, ''))))
@@ -450,6 +454,28 @@ export async function refresh() {
     usableAgents,
     workspaceLoaded: true,
   })
+}
+
+let usableRefresh: Promise<void> | null = null
+
+/** A member's usable agents change whenever the owner gives or removes access (ADR-0075). */
+export function refreshUsableAgents() {
+  if (state.installationRole !== 'member' || !state.authenticated || state.signingOut)
+    return Promise.resolve()
+  usableRefresh ??= (async () => {
+    const scope = connectionScope()
+    try {
+      const output = await listUsableAgents(api, {})
+      if (connectionScope() === scope && state.authenticated && !state.signingOut)
+        state.usableAgents = output.agentIds
+    }
+    // The last known list stays; the server still decides.
+    catch {}
+    finally {
+      usableRefresh = null
+    }
+  })()
+  return usableRefresh
 }
 
 export function date(value: number | null | undefined) {

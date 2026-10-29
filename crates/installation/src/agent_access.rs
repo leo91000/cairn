@@ -248,8 +248,9 @@ fn gate(
                 .as_str()
                 .unwrap_or(crate::config::MAIN_AGENT_ID),
         ),
-        // Deleting needs the conversation's own agent, even for a delegated task.
-        ("DELETE", ["chats", id]) => {
+        // Deleting, and restoring what was deleted, needs the conversation's own agent, even
+        // for a delegated task.
+        ("DELETE", ["chats", id]) | ("POST", ["chats", id, "restore"]) => {
             let chat = required(db.get("chats", id)?, "Chat not found")?;
             require_agent(db, identity, text(&chat, "agentId"))
         }

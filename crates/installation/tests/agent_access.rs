@@ -7,7 +7,7 @@ use cairn_installation::{
     config::MAIN_AGENT_ID,
     service::Service,
 };
-use common::{AgentFixture, relay_fixture};
+use common::{AgentFixture, relay_fixture, run_fixture::DbRunFixture};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -184,6 +184,24 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
 
     let (_, chat) = owner(&s, "POST", "/api/chats", json!({ "agentId": reviewer })).await;
     let chat = chat["id"].as_str().unwrap().to_owned();
+    // A conversation's finished run, which a retry would start again.
+    let chat_run = cairn_installation::config::id();
+    let record = json!({
+        "id": chat_run,
+        "taskId": chat,
+        "createdAt": 0,
+        "status": "failed",
+        "nativeProvenanceUnknown": true,
+        "nativePrincipals": [],
+        "nativeAuthorityNodes": [],
+    });
+    s.store
+        .transaction(move |db| db.add_run_fixture(&record, None))
+        .await
+        .unwrap();
+    let mut record = s.get("chats", &chat).await.unwrap();
+    record["runId"] = chat_run.clone().into();
+    s.store.put("chats", record).await.unwrap();
     let settings = json!({ "name": "Review", "prompt": "Review the changes", "agentId": reviewer });
     let (_, task) = owner(&s, "POST", "/api/tasks", json!({ "settings": settings })).await;
     let run = s
@@ -221,6 +239,8 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
         ),
         ("POST", format!("/api/runs/{run}/resume"), json!({})),
         ("POST", format!("/api/runs/{run}/chat"), json!({})),
+        ("POST", format!("/api/runs/{chat_run}/retry"), json!({})),
+        ("POST", format!("/api/chats/{chat}/restore"), json!({})),
     ];
 
     // Each route reaches its own handler, whatever it then decides, only with access.
@@ -341,11 +361,22 @@ async fn members_manage_tasks_only_on_agents_they_can_use_and_lost_access_suspen
         StatusCode::FORBIDDEN
     );
 
-    // The returned access lifts the suspension by itself.
+    // The returned access lifts the suspension by itself, and the next occurrence runs.
     assert_eq!(owner(&s, "PUT", &grant, json!({})).await.0, StatusCode::OK);
     let (status, resumed) = member(&s, "POST", &state, resumed).await;
     assert_eq!(status, StatusCode::OK, "{resumed}");
     assert!(resumed["scheduleWaitReason"].is_null());
+    let due = id.clone();
+    s.store
+        .transaction(move |db| {
+            db.0.execute("UPDATE missions SET next_run=1 WHERE id=?", [&due])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    s.schedule().await.unwrap();
+    let (_, runs) = owner(&s, "GET", &format!("/api/runs?taskId={id}"), Value::Null).await;
+    assert_eq!(runs.as_array().unwrap().len(), 1, "{runs}");
 }
 
 #[tokio::test]
@@ -482,10 +513,17 @@ async fn a_delegated_task_follows_its_requesting_conversation_until_it_is_delete
     .await;
     assert_eq!(status, StatusCode::OK, "{sent}");
 
-    // Deleting it still needs its own agent.
+    // Deleting it, or restoring it once deleted, still needs its own agent.
     let detail = format!("/api/chats/{}", delegated["id"].as_str().unwrap());
     let (status, _) = member(&s, "DELETE", &detail, json!({ "confirm": true })).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, deleted) = owner(&s, "DELETE", &detail, json!({ "confirm": true })).await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    let restore = format!("{detail}/restore");
+    let (status, _) = member(&s, "POST", &restore, json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, restored) = owner(&s, "POST", &restore, json!({})).await;
+    assert_ne!(status, StatusCode::FORBIDDEN, "{restored}");
 
     let requester = format!("/api/chats/{}", requesting["id"].as_str().unwrap());
     let (status, _) = owner(&s, "DELETE", &requester, json!({ "confirm": true })).await;
@@ -538,6 +576,49 @@ async fn existing_members_keep_existing_agents_at_rollout_only() {
     )
     .await;
     assert_eq!(later_usable["agentIds"], json!([]));
+}
+
+#[tokio::test]
+async fn a_members_scheduled_task_keeps_running_after_the_rollout() {
+    let root = tempfile::tempdir().unwrap();
+    let task = {
+        let s = service(root.path()).await;
+        let existing = agent(&s, "Existing").await;
+        relay_fixture::allow_member(&s, MEMBER, &existing).await;
+        let settings = json!({
+            "name": "Nightly review",
+            "prompt": "Review the changes",
+            "agentId": existing,
+            "cron": "0 3 * * *",
+        });
+        let (status, task) =
+            member(&s, "POST", "/api/tasks", json!({ "settings": settings })).await;
+        assert_eq!(status, StatusCode::OK, "{task}");
+        task["id"].as_str().unwrap().to_owned()
+    };
+
+    // The same membership, on a version-14 database without account access.
+    let db = rusqlite::Connection::open(root.path().join("data/manager.db")).unwrap();
+    db.execute_batch("DROP TABLE agent_account_access; PRAGMA user_version=14;")
+        .unwrap();
+    drop(db);
+
+    let s = Service::new(common::config(root.path())).await.unwrap();
+    relay_fixture::claimed(&s).await.unwrap();
+    s.synchronize_task_authors().await.unwrap();
+    let mission = s.store.mission(&task).await.unwrap().unwrap();
+    assert!(mission.schedule_wait_reason.is_none());
+    let due = task.clone();
+    s.store
+        .transaction(move |db| {
+            db.0.execute("UPDATE missions SET next_run=1 WHERE id=?", [&due])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    s.schedule().await.unwrap();
+    let (_, runs) = owner(&s, "GET", &format!("/api/runs?taskId={task}"), Value::Null).await;
+    assert_eq!(runs.as_array().unwrap().len(), 1, "{runs}");
 }
 
 async fn tool(app: &axum::Router, endpoint: &str, bearer: &str, name: &str, input: Value) -> Value {

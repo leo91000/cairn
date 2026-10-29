@@ -13,6 +13,7 @@ import { useAgentPortraits } from './agent-avatars'
 import {
   ownerPage,
   refresh,
+  refreshUsableAgents,
   signOut,
   state,
 } from './api'
@@ -127,8 +128,19 @@ onMounted(async () => {
   }
 
   document.addEventListener('keydown', key)
+  document.addEventListener('visibilitychange', visible)
 })
-onBeforeUnmount(() => document.removeEventListener('keydown', key))
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', key)
+  document.removeEventListener('visibilitychange', visible)
+})
+
+// The owner may have given or removed access to agents while this tab was away.
+function visible() {
+  if (!document.hidden && state.authenticated)
+    void refreshUsableAgents()
+}
+
 watch(() => route.fullPath, () => {
   paletteOpen.value = false
 })

@@ -72,7 +72,7 @@ internal class AgentPeople {
             val input = AgentAccountInput(accountId = accountId, agentId = agentId)
             val output =
                 if (allow) vm.api.grantAgentAccount(input) else vm.api.revokeAgentAccount(input)
-            allowed = output.accounts.map { it.accountId }
+            allowed = withAccess(allowed, accountId, output.accounts.map { it.accountId })
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             failure = accountId to (e.message ?: "L’accès n’a pas pu être modifié.")

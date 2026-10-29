@@ -196,6 +196,9 @@ constructor(
         } else {
             mutable.update { it.copy(error = error.message ?: "Connexion impossible. Réessayez.") }
             val source = connection
+            // A refusal may come from agent access the owner just removed: show what remains.
+            if (error is ApiException && error.status == 403 && source != null)
+                viewModelScope.launch { refreshUsableAgents() }
             if (error is ApiException && error.status in setOf(403, 404) && source != null) {
                 viewModelScope.launch {
                     state.first { !it.busy }
@@ -838,6 +841,22 @@ constructor(
                     modelCatalogs = updated.modelCatalogs,
                 )
             }
+    }
+
+    /** A member's usable agents change whenever the owner gives or removes access (ADR-0075). */
+    suspend fun refreshUsableAgents() {
+        val target = connection ?: return
+        if (state.value.isOwner || !state.value.session.authenticated) return
+        val usable =
+            try {
+                target.listUsableAgents(build.cairn.contracts.ListAgentsInput()).agentIds
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                // The last known list stays; the server still decides.
+                return
+            }
+        if (connection === target && state.value.session.authenticated)
+            mutable.update { it.copy(usableAgents = usable) }
     }
 
     /** The installation's members, which the Beacon lists to its owner only. */

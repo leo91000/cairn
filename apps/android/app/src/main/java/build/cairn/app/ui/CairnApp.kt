@@ -21,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.*
@@ -28,6 +29,7 @@ import build.cairn.app.data.*
 import build.cairn.app.diagnostics.PerfConnection
 import build.cairn.app.diagnostics.PerfScreen
 import build.cairn.app.diagnostics.Performance
+import kotlinx.coroutines.launch
 
 /** Top-level destinations reached from the dock; everything else is a pushed screen. */
 private val topLevel = setOf("fil", "missions", "atelier")
@@ -109,6 +111,12 @@ private fun CairnAppContent(
     }
     val pushReenrollmentRequired by
         vm.notifications.nativeReenrollmentRequired.collectAsStateWithLifecycle(false)
+    // The owner may have given or removed access to agents while the app was away.
+    val lifecycleScope = rememberCoroutineScope()
+    LifecycleStartEffect(state.installation?.id) {
+        lifecycleScope.launch { vm.refreshUsableAgents() }
+        onStopOrDispose {}
+    }
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(state.notice) {
         state.notice?.let {

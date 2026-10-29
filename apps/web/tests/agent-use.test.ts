@@ -6,6 +6,7 @@ import {
   canDirectChat,
   canUseAgent,
   defaultAgent,
+  withAccess,
 } from '../src/agent-use'
 
 const reviewer = '00000000-0000-4000-8000-000000000002'
@@ -59,4 +60,12 @@ it('lists every member once and keeps entries of former members removable', () =
   expect(accessSummary(0)).toEqual({ short: 'Only you', long: 'Only you' })
   expect(accessSummary(1)).toEqual({ short: 'You + 1', long: 'You and 1 member' })
   expect(accessSummary(2)).toEqual({ short: 'You + 2', long: 'You and 2 members' })
+})
+
+it('applies only the changed member when responses arrive out of order', () => {
+  // Two quick grants: the first response, listing only its own member, arrives last.
+  const afterSecond = withAccess([], 'b', ['a', 'b'])
+  expect(withAccess(afterSecond, 'a', ['a'])).toEqual(['b', 'a'])
+  expect(withAccess(['a', 'b'], 'a', ['b'])).toEqual(['b'])
+  expect(withAccess(['a'], 'a', ['a'])).toEqual(['a'])
 })

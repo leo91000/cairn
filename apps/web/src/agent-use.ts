@@ -55,6 +55,16 @@ export function accessRows(members: readonly Member[], allowed: readonly string[
   }))]
 }
 
+/**
+ * Applies one member's change from a response and keeps the other rows as shown, so responses to
+ * several quick changes cannot undo each other when they arrive out of order.
+ */
+export function withAccess(allowed: readonly string[], accountId: string, accounts: readonly string[]) {
+  if (!accounts.includes(accountId))
+    return allowed.filter(account => account !== accountId)
+  return allowed.includes(accountId) ? [...allowed] : [...allowed, accountId]
+}
+
 export function accessSummary(allowed: number) {
   if (!allowed)
     return { short: 'Only you', long: 'Only you' }

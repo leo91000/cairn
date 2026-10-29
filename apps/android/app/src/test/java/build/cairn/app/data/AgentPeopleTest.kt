@@ -74,4 +74,13 @@ class AgentPeopleTest {
         assertEquals("Vous et 1 membre", agentAccessSummary(1))
         assertEquals("Vous et 3 membres", agentAccessSummary(3))
     }
+
+    @Test
+    fun aResponseChangesOnlyItsOwnMember() {
+        // Two quick grants: the first response, listing only its own member, arrives last.
+        val afterSecond = withAccess(emptyList(), "b", listOf("a", "b"))
+        assertEquals(listOf("b", "a"), withAccess(afterSecond, "a", listOf("a")))
+        assertEquals(listOf("b"), withAccess(listOf("a", "b"), "a", listOf("b")))
+        assertEquals(listOf("a"), withAccess(listOf("a"), "a", listOf("a")))
+    }
 }

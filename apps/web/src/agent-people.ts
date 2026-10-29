@@ -4,7 +4,7 @@ import { computed, ref } from 'vue'
 import { grantAgentAccount } from '../../../packages/contracts/generated/grantAgentAccount'
 import { listAgentAccounts } from '../../../packages/contracts/generated/listAgentAccounts'
 import { revokeAgentAccount } from '../../../packages/contracts/generated/revokeAgentAccount'
-import { accessRows } from './agent-use'
+import { accessRows, withAccess } from './agent-use'
 import { api, state } from './api'
 
 // Members come from the Beacon, which owns the installation's sharing; the installation
@@ -75,7 +75,7 @@ export function useAgentPeople(agentId: Ref<string | null>) {
       const input = { agentId: agent, accountId }
       const output = allow ? await grantAgentAccount(api, input) : await revokeAgentAccount(api, input)
       if (agentId.value === agent)
-        allowed.value = output.accounts.map(account => account.accountId)
+        allowed.value = withAccess(allowed.value, accountId, output.accounts.map(account => account.accountId))
     }
     catch (cause) {
       failure.value = { accountId, message: cause instanceof Error ? cause.message : 'Access could not be changed.' }

@@ -300,7 +300,8 @@ test('owner shares an installation and member works without management controls'
     await page.goto(`${installationUrl}agents/${agents[0].id}?section=people`)
     await page.getByRole('list', { name: 'People who can use this agent' }).getByRole('switch', { name: `Allow ${memberEmail} to use ${agents[0].name}`, exact: true }).uncheck()
     await expect(page.getByRole('list', { name: 'People who can use this agent' }).getByText('No access', { exact: true })).toBeVisible()
-    await member.reload()
+    // Coming back to the open tab shows the removed access without a reload.
+    await member.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
     await expect(member.getByRole('heading', { name: 'Shared conversation', exact: true })).toBeVisible()
     await expect(member.getByRole('note').filter({ hasText: 'You can follow this conversation' })).toBeVisible()
     await expect(member.getByRole('textbox', { name: 'Message', exact: true })).toBeDisabled()

@@ -46,6 +46,17 @@ fun agentAccessRows(
             .filter { account -> members.none { it.id == account } }
             .map { AgentAccessRow(it, "Ancien membre", known = false, allowed = true) }
 
+/**
+ * Applies one member's change from a response and keeps the other rows as shown, so responses to
+ * several quick changes cannot undo each other when they arrive out of order.
+ */
+fun withAccess(allowed: List<String>, accountId: String, accounts: List<String>): List<String> =
+    when {
+        accountId !in accounts -> allowed - accountId
+        accountId in allowed -> allowed
+        else -> allowed + accountId
+    }
+
 fun agentAccessSummary(allowed: Int): String =
     when (allowed) {
         0 -> "Vous seul"
