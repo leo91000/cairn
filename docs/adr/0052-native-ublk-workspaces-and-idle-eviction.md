@@ -60,6 +60,20 @@ An explicitly aborted I/O path records only the durable crash prefix after fenci
 and non-lazy unmount; it does not claim a successful filesystem flush. Publication
 can then run asynchronously across a following turn under the stable disk grant.
 
+A fenced filesystem whose flush reports `EIO` or `EROFS`, or that became read-only,
+follows that explicit
+abort path. Retrying a terminal ext4 journal error must not retain execution slots
+forever. The controller reports a failed execution, retains the durable crash
+prefix, and still requires non-lazy unmount and device retirement before ownership
+release. Other flush errors remain retryable with ownership held.
+
+Before opening native storage, the daemon provisions a soft open-file limit of
+at least 65,536 within its inherited hard limit. This also applies when an older
+installed systemd unit launches an updated binary. New units explicitly configure
+that budget; an insufficient hard limit prevents startup with a diagnostic.
+Segment handles remain retained until publication retirement, so this budget does
+not remove the need to monitor unpublished journal accumulation.
+
 Generated runtime configuration, credentials and frozen skills stay in per-attempt
 staging and are bound into the workload. Their underlying disk mount targets contain
 no generated secret bytes. Claude's broker atomically refreshes its credential
