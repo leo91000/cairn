@@ -594,6 +594,136 @@ test('sequence message labels clear wide badges and nested activations', async (
   }
 })
 
+test('PNG export preserves invisible fills and labels while drawing their outline', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'light' })
+  await page.evaluate(text => window.chatRendering.markdown(text), '\`\`\`mermaid\nflowchart TD\nA[Hidden]\nstyle A fill:none,stroke:red,color:none,stroke-width:2\n\`\`\`')
+  await page.getByRole('button', { name: 'Open diagram' }).click()
+  const download = page.waitForEvent('download')
+  await page.getByRole('dialog', { name: 'Flowchart', exact: true }).getByRole('button', { name: 'PNG', exact: true }).click()
+  const file = await download
+  const parts = []
+  for await (const part of (await file.createReadStream())!)
+    parts.push(part)
+  const pixels = await page.evaluate(async (data) => {
+    const image = new Image()
+    image.src = data
+    await image.decode()
+    const canvas = document.createElement('canvas')
+    canvas.width = image.width
+    canvas.height = image.height
+    const ctx = canvas.getContext('2d')!
+    ctx.drawImage(image, 0, 0)
+    const rgba = ctx.getImageData(0, 0, image.width, image.height).data
+    let red = 0
+    let black = 0
+    for (let offset = 0; offset < rgba.length; offset += 4) {
+      if (rgba[offset + 3]! > 200 && rgba[offset]! > 200 && rgba[offset + 1]! < 30 && rgba[offset + 2]! < 30)
+        red++
+      if (rgba[offset + 3]! > 200 && rgba[offset]! < 30 && rgba[offset + 1]! < 30 && rgba[offset + 2]! < 30)
+        black++
+    }
+
+    return { red, black }
+  }, `data:image/png;base64,${Buffer.concat(parts).toString('base64')}`)
+  expect(pixels.red).toBeGreaterThan(0)
+  expect(pixels.black).toBe(0)
+})
+
+test('standalone SVG and PNG exports preserve measured text without app fonts', async ({ page, context }) => {
+  const label = `${'l'.repeat(100)} Łódź`
+  await page.evaluate(async (text) => {
+    await document.fonts.load('500 13px "DM Sans Variable"', text)
+    await document.fonts.ready
+    await window.chatRendering.markdown(`\`\`\`mermaid\npie\n"${text}":1\n\`\`\``)
+  }, label)
+  await page.getByRole('button', { name: 'Open diagram' }).click()
+  const viewer = page.getByRole('dialog', { name: 'Pie chart', exact: true })
+  let failFonts = true
+  await page.route(/\.woff2(?:\?|$)/, route => failFonts && route.request().resourceType() === 'fetch'
+    ? route.fulfill({ status: 503, body: 'Temporary font failure' })
+    : route.continue())
+  await viewer.getByRole('button', { name: 'SVG', exact: true }).click()
+  await expect(viewer.getByRole('alert')).toHaveText('Couldn’t export this diagram. Please try again.')
+  await expect(viewer.getByRole('button', { name: 'SVG', exact: true })).toBeEnabled()
+  failFonts = false
+  const svgDownload = page.waitForEvent('download')
+  await viewer.getByRole('button', { name: 'SVG', exact: true }).click()
+  const svgFile = await svgDownload
+  const svgParts = []
+  for await (const part of (await svgFile.createReadStream())!)
+    svgParts.push(part)
+  const xml = Buffer.concat(svgParts).toString()
+  const standalone = await context.newPage()
+  let metrics: {
+    x: number
+    y: number
+    width: number
+    height: number
+    detail: number
+    sceneWidth: number
+    ink: number[]
+  }
+  try {
+    await standalone.route(/^https?:\/\//, route => route.abort())
+    await standalone.setContent(xml)
+    metrics = await standalone.evaluate(async (label) => {
+      await document.fonts.ready
+      const svg = document.querySelector('svg')!
+      const texts = [...svg.querySelectorAll('text')]
+      const text = texts.find(item => item.textContent === label)!
+      const box = text.getBBox()
+      const detail = texts.find(item => item.textContent === '100%' && item.getBBox().x > box.x)!.getBBox()
+      return {
+        x: box.x,
+        y: box.y,
+        width: box.width,
+        height: box.height,
+        detail: detail.x,
+        sceneWidth: svg.viewBox.baseVal.width,
+        ink: getComputedStyle(text).fill.match(/\d+/g)!.slice(0, 3).map(Number),
+      }
+    }, label)
+    expect(metrics.x + metrics.width).toBeLessThan(metrics.detail)
+    expect(metrics.x + metrics.width).toBeLessThan(metrics.sceneWidth)
+    expect(xml).toContain('data:font/woff2;base64,')
+    expect(await standalone.evaluate(() => [...document.fonts].filter(face => face.family.includes('DM Sans') && face.status === 'loaded').length)).toBeGreaterThan(0)
+  }
+  finally {
+    await standalone.close()
+  }
+
+  const pngDownload = page.waitForEvent('download')
+  await viewer.getByRole('button', { name: 'PNG', exact: true }).click()
+  const pngFile = await pngDownload
+  const pngParts = []
+  for await (const part of (await pngFile.createReadStream())!)
+    pngParts.push(part)
+  const pixels = await page.evaluate(async ({ data, metrics }) => {
+    const image = new Image()
+    image.src = data
+    await image.decode()
+    const canvas = document.createElement('canvas')
+    canvas.width = image.width
+    canvas.height = image.height
+    const ctx = canvas.getContext('2d')!
+    ctx.drawImage(image, 0, 0)
+    const ratio = image.width / metrics.sceneWidth
+    const rgba = ctx.getImageData(0, 0, image.width, image.height).data
+    let right = -1
+    for (let y = Math.max(0, Math.floor(metrics.y * ratio) - 2); y < Math.min(image.height, Math.ceil((metrics.y + metrics.height) * ratio) + 2); y++) {
+      for (let x = Math.max(0, Math.floor(metrics.x * ratio)); x < image.width; x++) {
+        const offset = (y * image.width + x) * 4
+        if (rgba[offset + 3]! > 200 && metrics.ink.every((value, channel) => Math.abs(rgba[offset + channel]! - value) < 12))
+          right = Math.max(right, x)
+      }
+    }
+
+    return { right: right / ratio, detail: metrics.detail, expectedRight: metrics.x + metrics.width }
+  }, { data: `data:image/png;base64,${Buffer.concat(pngParts).toString('base64')}`, metrics })
+  expect(pixels.right).toBeGreaterThan(pixels.expectedRight - 6)
+  expect(pixels.right).toBeLessThan(pixels.detail)
+})
+
 test('large two-dimensional scenes remain visible in a card and the full-screen viewer', async ({ page }) => {
   const source = `flowchart LR\n${
     Array.from({ length: 90 }, (_, index) => `N${index}[${'W'.repeat(28)}]-->N${index + 1}`).join('\n')

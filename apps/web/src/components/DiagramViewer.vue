@@ -10,6 +10,7 @@ import {
 import { apiResourceUrl } from '../api'
 import { artifactLink } from '../deliverables'
 import { diagramKind } from '../diagram'
+import { diagramExport } from '../diagram-export'
 import { sceneFor, sceneSvg } from '../diagram-svg'
 import {
   Check,
@@ -45,6 +46,8 @@ const scale = ref(1)
 const x = ref(0)
 const y = ref(0)
 const copied = ref(false)
+const exporting = ref(false)
+const exportError = ref('')
 const percent = computed(() => `${Math.round(scale.value * 100)}%`)
 const pointers = new Map<number, { x: number, y: number, dragging: boolean }>()
 let suppressClick = false
@@ -206,30 +209,34 @@ async function copySource() {
   copiedTimer = setTimeout(() => copied.value = false, 1500)
 }
 
-/** Theme variables only resolve inside the page, so exports carry literal colors. */
-function exportSvg() {
+/** Capture colors before awaiting font resources, including when the viewer closes meanwhile. */
+function exportColors() {
   const probe = document.createElement('span')
   drawing.value!.append(probe)
   const colors = new Map<string, string>()
-  const svg = sceneSvg(scene!, (tone) => {
+  const resolve = (tone: string) => {
     if (!colors.has(tone)) {
       probe.style.color = `var(--dg-${tone})`
       colors.set(tone, getComputedStyle(probe).color)
     }
 
     return colors.get(tone)!
-  })
-  probe.remove()
-  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
-  const background = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
-  background.setAttribute('width', '100%')
-  background.setAttribute('height', '100%')
-  probe.style.color = 'var(--dg-canvas)'
-  drawing.value!.append(probe)
-  background.setAttribute('fill', getComputedStyle(probe).color)
-  probe.remove()
-  svg.prepend(background)
-  return new XMLSerializer().serializeToString(svg)
+  }
+
+  try {
+    resolve('canvas')
+    for (const item of scene!.items) {
+      for (const paint of item.kind === 'path' ? [item.fill, item.stroke] : [item.fill]) {
+        if (paint && 'tone' in paint)
+          resolve(paint.tone)
+      }
+    }
+  }
+  finally {
+    probe.remove()
+  }
+
+  return (tone: string) => colors.get(tone)!
 }
 
 function save(blob: Blob, extension: string) {
@@ -240,27 +247,20 @@ function save(blob: Blob, extension: string) {
   setTimeout(() => URL.revokeObjectURL(link.href), 1000)
 }
 
-function downloadSvg() {
-  save(new Blob([exportSvg()], { type: 'image/svg+xml' }), 'svg')
-}
-
-async function downloadPng() {
-  const image = new Image()
-  image.src = URL.createObjectURL(new Blob([exportSvg()], { type: 'image/svg+xml' }))
+async function download(format: 'svg' | 'png') {
+  if (!scene || exporting.value)
+    return
+  exporting.value = true
+  exportError.value = ''
   try {
-    await image.decode()
-    const { width, height } = scene!
-    const ratio = Math.min(2, Math.sqrt(16_000_000 / (width * height)), 8192 / Math.max(width, height))
-    const canvas = document.createElement('canvas')
-    canvas.width = Math.max(1, Math.round(width * ratio))
-    canvas.height = Math.max(1, Math.round(height * ratio))
-    canvas.getContext('2d')!.drawImage(image, 0, 0, canvas.width, canvas.height)
-    const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'))
-    if (blob)
-      save(blob, 'png')
+    const blob = await diagramExport(props.source, format, exportColors())
+    save(blob, format)
+  }
+  catch {
+    exportError.value = 'Couldn’t export this diagram. Please try again.'
   }
   finally {
-    URL.revokeObjectURL(image.src)
+    exporting.value = false
   }
 }
 
@@ -348,19 +348,25 @@ onBeforeUnmount(() => {
         </button>
         <button
           class="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-muted hover:bg-hover hover:text-ink"
-          :disabled="!scene"
-          @click="downloadSvg"
+          :disabled="!scene || exporting"
+          @click="download('svg')"
         >
           <Icon :name="Download" :size="16" /> SVG
         </button>
         <button
           class="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-muted hover:bg-hover hover:text-ink"
-          :disabled="!scene"
-          @click="downloadPng"
+          :disabled="!scene || exporting"
+          @click="download('png')"
         >
           <Icon :name="Download" :size="16" /> PNG
         </button>
       </div>
+      <p v-if="exporting" role="status" class="border-b border-line px-4 py-2 text-sm text-muted">
+        Preparing export…
+      </p>
+      <p v-if="exportError" role="alert" class="border-b border-line px-4 py-2 text-sm text-danger">
+        {{ exportError }}
+      </p>
       <p v-if="openingLink" role="status" class="border-b border-line px-4 py-2 text-sm text-muted">
         Opening file…
       </p>

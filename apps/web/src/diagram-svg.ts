@@ -17,7 +17,7 @@ import {
 } from './icons'
 
 const SVG = 'http://www.w3.org/2000/svg'
-const FONT = '"DM Sans Variable", system-ui, sans-serif'
+export const DIAGRAM_FONT = '"DM Sans Variable", system-ui, sans-serif'
 
 const widths = new Map<string, number>()
 
@@ -41,7 +41,7 @@ export const canvasMeasure: TextMeasure = {
     context ??= document.createElement('canvas').getContext('2d')
     let width = text.length * size * 0.56
     if (context) {
-      context.font = `${weight} ${size}px ${FONT}`
+      context.font = `${weight} ${size}px ${DIAGRAM_FONT}`
       width = context.measureText(text).width
     }
 
@@ -121,7 +121,7 @@ export function sceneSvg(scene: Scene, resolve?: (tone: string) => string) {
     text.style.fontSize = `${item.size}px`
     text.style.fontWeight = String(item.weight)
     if (resolve)
-      text.style.fontFamily = FONT
+      text.style.fontFamily = DIAGRAM_FONT
     const height = lineHeight(item.size)
     item.lines.forEach((line, index) => {
       const span = document.createElementNS(SVG, 'tspan')
