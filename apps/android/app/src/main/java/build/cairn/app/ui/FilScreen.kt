@@ -578,8 +578,13 @@ fun FilScreen(
                     now,
                     !state.busy,
                     { open(item) },
-                    // Relaunching needs access to the mission's agent.
-                    { retry(item) }.takeIf { canUseAgent(state.usableAgents, item.agentKey) },
+                    // Relaunching needs access to the mission's current agent.
+                    { retry(item) }.takeIf {
+                        canUseAgent(
+                            state.usableAgents,
+                            state.tasks.find { it.id == item.taskId }?.agentId ?: item.agentKey,
+                        )
+                    },
                     { vm.markRead(listOf(item.read)) },
                     dismiss = { setAside(item) },
                     snooze = { setAside(item, tomorrowMorning(now)) },

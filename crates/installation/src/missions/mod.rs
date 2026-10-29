@@ -469,21 +469,33 @@ impl Service {
         if self.store.due_missions(now()).await?.is_empty() {
             return Ok(());
         }
-        let wait = match self.missions.observe(self).await {
-            Ok(Some(_)) => None,
-            Ok(None) => Some(
+        let observed = match self.missions.observe(self).await {
+            Ok(Some(policy)) => Ok(policy),
+            Ok(None) => Err(
                 "Installation is not claimed. Run cairn claim before scheduling work.".to_owned(),
             ),
-            Err(error) => Some(error.message),
+            Err(error) => Err(error.message),
         };
-        if let Some(reason) = wait {
-            for mission in self.store.due_missions(now()).await? {
-                self.schedule_wait(&mission, Some(reason.clone())).await?;
+        let observed = match observed {
+            Ok(policy) => policy,
+            Err(reason) => {
+                for mission in self.store.due_missions(now()).await? {
+                    self.schedule_wait(&mission, Some(reason.clone())).await?;
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
+        };
         for mission in self.store.due_missions(now()).await? {
-            let prepared = self.prepare_run(&mission.id.to_string(), "schedule").await;
+            // A suspended task skips this occurrence without being prepared or failing.
+            let suspended = self
+                .missions
+                .suspended(self, &mission, observed.clone())
+                .await?;
+            let prepared = if suspended {
+                Err(Error::conflict(crate::agent_access::SUSPENDED))
+            } else {
+                self.prepare_run(&mission.id.to_string(), "schedule").await
+            };
             let admission = match prepared {
                 Ok(run) => {
                     let policy = match self.missions.require_author(self, &mission).await {
@@ -508,12 +520,8 @@ impl Service {
                     }
                 }
                 Err(error) => {
-                    // A suspended task keeps its reason while its preparation fails.
-                    if mission.schedule_wait_reason.as_deref()
-                        != Some(crate::agent_access::SUSPENDED)
-                    {
-                        self.schedule_wait(&mission, None).await?;
-                    }
+                    let reason = suspended.then(|| crate::agent_access::SUSPENDED.to_owned());
+                    self.schedule_wait(&mission, reason).await?;
                     Err(error)
                 }
             };

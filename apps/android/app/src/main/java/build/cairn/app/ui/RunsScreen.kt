@@ -265,10 +265,20 @@ fun RunScreen(
                                     details = true
                                 },
                             )
+                            // Members direct only runs whose agent they may use; a retry
+                            // starts the task again on its current agent (ADR-0075).
+                            val directable =
+                                canUseAgent(state.usableAgents, current.snapshot?.agent?.id)
+                            val retryable =
+                                state.tasks
+                                    .find { it.id == current.taskId }
+                                    ?.let { canUseAgent(state.usableAgents, it.agentId) }
+                                    ?: directable
                             if (
                                 !current.active &&
                                     current.resumeAvailable &&
-                                    current.trigger != "chat"
+                                    current.trigger != "chat" &&
+                                    directable
                             )
                                 DropdownMenuItem(
                                     text = { Text("Reprendre") },
@@ -278,7 +288,7 @@ fun RunScreen(
                                         vm.perform { api.resumeRun(ResumeRunInput(id)) }
                                     },
                                 )
-                            if (!current.active && current.trigger != "chat")
+                            if (!current.active && current.trigger != "chat" && retryable)
                                 DropdownMenuItem(
                                     text = { Text("Relancer") },
                                     enabled = !state.busy,
@@ -300,6 +310,7 @@ fun RunScreen(
                                 )
                             if (
                                 current.trigger != "chat" &&
+                                    directable &&
                                     current.status == "succeeded" &&
                                     current.sessionId != null &&
                                     current.workspaceCleanedAt == null

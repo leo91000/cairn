@@ -41,7 +41,9 @@ offers every agent and the installation decides.
 Platform differences: web labels are English and Android labels French; Android
 shows the switches in a Material card list. Per AGENTS.md, giving and removing access
 is owner-only on web/Android and excluded from public MCP and `cairn_installation`;
-both tool surfaces read it through `list_agent_accounts`. Validation: the
+both tool surfaces read it through `list_agent_accounts`. The apps' `GET /usable-agents`
+only shapes what a member is offered; it has no tool equivalent because the public MCP
+and `cairn_installation` act with the owner's reach. Validation: the
 `agent_access` Rust suite, browser `beacon-sharing` journey, web `agent-use` unit
 tests, Android `AgentPeopleTest` and `AgentPageCases` (JVM and device).
 
