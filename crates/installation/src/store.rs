@@ -859,6 +859,7 @@ const HISTORY_PAGE_DECODED_BYTES: usize = 4 * 1024 * 1024;
 
 type EventRow = (i64, String, i64, String, String, Option<String>);
 
+#[derive(Clone, Copy)]
 enum EventBudget {
     Raw(usize),
     Gzip(usize),

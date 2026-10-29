@@ -339,7 +339,7 @@ async fn compressed_history_budget_measurement() {
                     "cpuUs":{"warm12":warm_cpu,"cold12IncludingOpen":cold_cpu,"write100":write_cpu},
                     "coldDefinition":"fresh SQLite connection; warm OS cache",
                     "writePath":"unchanged current event writer, one committed event per transaction",
-                    "profile":"test, debug assertions enabled"
+                    "debugAssertions":cfg!(debug_assertions)
                 })
             );
         }

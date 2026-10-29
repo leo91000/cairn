@@ -86,6 +86,7 @@ async fn history_compression_is_negotiated_and_preserved_through_the_relay() {
 #[tokio::test]
 #[ignore = "local endpoint measurement; run alone with --ignored --nocapture --test-threads=1"]
 async fn history_endpoint_measurement() {
+    assert!(cairn_protocol::request_header("accept-encoding"));
     use rand::{RngCore, SeedableRng};
     use std::time::Instant;
     for workload in ["repetitive", "mixed", "noise"] {
@@ -175,6 +176,8 @@ async fn history_endpoint_measurement() {
             "HISTORY_ENDPOINT {}",
             json!({
                 "label":std::env::var("CAIRN_HISTORY_MEASUREMENT_LABEL").unwrap_or_else(|_|"candidate".into()),
+                "sourceRoot":env!("CARGO_MANIFEST_DIR"),
+                "forwardsEncoding":cairn_protocol::request_header("accept-encoding"),
                 "workload":workload,"rows":1500,"openingEvents":opening["events"].as_array().unwrap().len(),
                 "openingTransferredBytes":encoded,"openingDecodedBytes":decoded,
                 "coldUs":cold_us,"warmP50Us":warm[6],"warmP95Us":warm[11],

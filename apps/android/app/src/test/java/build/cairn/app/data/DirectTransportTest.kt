@@ -76,13 +76,26 @@ class DirectTransportTest {
                                     )
                                 },
                             )
-                            put("body", Base64.getEncoder().encodeToString(compressed))
+                            put(
+                                "body",
+                                if (request["method"]!!.jsonPrimitive.content == "HEAD") ""
+                                else Base64.getEncoder().encodeToString(compressed),
+                            )
                         }
                         channel.receive(singleFramePacket(frame.toString().toByteArray()))
                     },
                     {},
                 )
             api.transport.attach(channel)
+            val head =
+                Request.Builder()
+                    .url(server.url("/api/installations/test/api/chats"))
+                    .head()
+                    .build()
+            channel.request(head, "/api/installations/test/api/", { false }).use {
+                assertEquals("gzip", it.header("content-encoding"))
+                assertEquals("", it.body.string())
+            }
             assertEquals(expected, api.request("GET", "/runs/r/history?before=42&history=v1:r:1"))
             assertEquals("direct", api.transport.route.value)
             assertEquals(0, server.requestCount)

@@ -563,7 +563,7 @@ class DirectChannel(
                     .build()
             }
             val decoded =
-                if (responseHeaders["content-encoding"] == "gzip") {
+                if (request.method != "HEAD" && responseHeaders["content-encoding"] == "gzip") {
                     builder.removeHeader("content-encoding").removeHeader("content-length")
                     GZIPInputStream(bytes.inputStream()).use { input ->
                         val output = ByteArrayOutputStream()

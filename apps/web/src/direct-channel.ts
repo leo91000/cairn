@@ -37,6 +37,7 @@ interface Pending {
   started: boolean
   credited: boolean
   streaming: boolean
+  head: boolean
   sent: boolean
   cleanup: () => void
 }
@@ -241,6 +242,7 @@ export class DirectChannel {
         resolve,
         reject,
         streaming,
+        head: options.method?.toUpperCase() === 'HEAD',
         sent: false,
         started: false,
         credited: false,
@@ -364,7 +366,7 @@ export class DirectChannel {
           return
         }
 
-        let response = new Response([204, 205, 304].includes(frame.status!) ? null : body, { status: frame.status, headers })
+        let response = new Response(pending.head || [204, 205, 304].includes(frame.status!) ? null : body, { status: frame.status, headers })
         if (headers.get('content-encoding') === 'gzip' && response.body) {
           let size = 0
           const decoded = response.body

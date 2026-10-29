@@ -221,6 +221,31 @@ it('requests identity when browser gzip decompression is unavailable', async () 
   expect(await response).toEqual({ events: [] })
 })
 
+it('keeps compressed HEAD heartbeat responses bodyless', async () => {
+  const { DirectChannel } = await import('../src/direct-channel')
+  const channel = new Channel()
+  channel.readyState = 'open'
+  channel.respondToHeartbeats = false
+  const transport = new DirectChannel(channel as unknown as RTCDataChannel, { account_id: 'a', role: 'owner' }, () => {})
+  try {
+    const pending = transport.request('/api/chats', { method: 'HEAD' })
+    await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+    const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
+    reply(channel, {
+      type: 'response',
+      id: request.id,
+      status: 200,
+      headers: [['content-encoding', 'gzip']],
+      body: '',
+    })
+    const response = await pending
+    expect(response.body).toBeNull()
+    expect(await response.text()).toBe('')
+    expect(response.headers.get('content-encoding')).toBe('gzip')
+  }
+  finally { transport.close() }
+})
+
 it.each(['corrupt', 'too large'])('rejects a %s gzip response on the direct channel', async (kind) => {
   const { DirectChannel } = await import('../src/direct-channel')
   const channel = new Channel()

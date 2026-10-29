@@ -1,6 +1,6 @@
 import type { BrowserContext, Page } from '@playwright/test'
 import type { RunEvent } from '../../packages/contracts/contracts'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   signIn as authenticateWorkspace,
   expect,
@@ -12,6 +12,12 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+
+// Keep these chaining fixtures byte-limited even with a 1,000-event page cap.
+// Output stays inside collapsed tools, so the visible rows still fold tightly.
+function historyNoise(id: string) {
+  return Array.from({ length: 128 }, (_, index) => createHash('sha256').update(`${id}:${index}`).digest('hex')).join('')
+}
 
 test('chat groups visible calls despite diagnostics, updates and global event ID gaps', async ({ page, workspace }) => {
   const original = workspace.service.store.runs().find(run => run.status === 'succeeded')!
@@ -177,6 +183,7 @@ for (const kind of ['chat', 'task'] as const) {
           type: 'command_execution',
           command: 'cat README.md',
           exit_code: 0,
+          aggregated_output: historyNoise(`fold-${i}`),
         },
       })
     }
@@ -268,6 +275,7 @@ test('automatic history pauses on errors and resumes only after retry', async ({
         type: 'command_execution',
         command: 'cat README.md',
         exit_code: 0,
+        aggregated_output: historyNoise(`retry-${i}`),
       },
     })
   }
@@ -692,7 +700,15 @@ test('following the latest output resumes a long backlog on the recent window, w
 
 test('recent history loads older pages without moving the reader and survives a blocked reconnect', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
-  const run = workspace.service.store.runs()[0]
+  // Earlier chaining fixtures contain noisy tool output. Keep this cache roundtrip
+  // within the decoded cache budget rather than inheriting their retained prefix.
+  const original = workspace.service.store.runs()[0]!
+  const run = workspace.service.store.addRun({
+    ...original,
+    id: randomUUID(),
+    taskId: randomUUID(),
+    trigger: 'history-cache-fixture',
+  })
   for (let i = 0; i < 350; i++) {
     const text = `Paged line ${String(i).padStart(3, '0')}. A paragraph to retain a stable reading position.`
     workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `page-${i}`, type: 'agent_message', text } })

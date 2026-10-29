@@ -45,10 +45,11 @@ opens immediately; otherwise the reader waits for the stream’s first snapshot.
   stream's first snapshot. The saved copy then only resumes the stream from its cursor, and
   still shows when there is no connection. The header names the conversation from the Fil.
 - « Updating… » appears only when revalidating a saved copy takes more than a second.
-- The reader relies on browser scroll anchoring and pins the end while following. Only a
+- The reader uses browser scroll anchoring and pins the end while following. Only a
   reader scrolling up pauses following; positions the feed sets and anchoring adjustments do
-  not. The previous manual offset remains for a page arriving at the very top, where
-  browsers do not anchor, and for engines without anchoring. `column-reverse` was evaluated
+  not. Before prepending history it records a visible row's pixel offset, then corrects
+  any movement the browser did not absorb. This covers large pages that suppress
+  native anchoring, the very top and engines without anchoring. `column-reverse` was evaluated
   and not used: with anchoring, both directions keep the reader's text in place in Chromium,
   WebKit and Firefox, and the normal direction keeps scroll offsets, saved reading positions
   and their tests unchanged.
