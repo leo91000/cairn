@@ -10,6 +10,7 @@ import http.client
 import http.server
 import importlib.util
 import importlib.metadata
+import traceback
 import hashlib
 import json
 import os
@@ -167,8 +168,8 @@ def main():
         metrics['dockerVolumeHostReference'] = json.loads(command(str(probe), 'io', str(reference)).stdout)
         metrics['filesystem'] = command('stat', '-f', '-c', '%T', str(root)).stdout.strip()
 
-        def api(path, body=None, method='POST', raw=False):
-            connection = host.UnixControllerConnection(state / 'controller.sock', timeout=120)
+        def api(path, body=None, method='POST', raw=False, timeout=120):
+            connection = host.UnixControllerConnection(state / 'controller.sock', timeout=timeout)
             try:
                 connection.request(method, path, body=json.dumps(body or {}).encode() if method != 'GET' else None,
                     headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
@@ -603,6 +604,18 @@ def main():
             metrics.setdefault('exclusiveReservations', []).append(dict(mode=current_mode['mode'],
                 descendantFrozen=True, admissionBlocked=True, released=True, expired=True))
 
+        def workload_stopped(attempt):
+            result = subprocess.run(['systemctl', 'show', 'cairn-native-' + attempt + '.service',
+                '--property=ActiveState,MainPID,ControlGroup'], capture_output=True, text=True, timeout=5)
+            properties = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+            if properties.get('ActiveState') not in ('inactive', 'failed') or properties.get('MainPID') != '0':
+                return False
+            group = properties.get('ControlGroup', '')
+            if not group:
+                return True
+            events = Path('/sys/fs/cgroup') / group.lstrip('/') / 'cgroup.events'
+            return not events.exists() or 'populated 1' not in events.read_text().splitlines()
+
         def fenced(run, attempt, timeout=90):
             eventually(lambda: (state / (attempt + '.exit')).exists(), timeout=timeout)
             # Completion writes the exit marker before retiring admission. Use
@@ -756,9 +769,29 @@ def main():
             storage_policy(pressure_policy)
             eventually(lambda: api('/disks/' + run + '/storage-status')['waitingFor'] == 'disk-space', timeout=25)
             pressure_wait('second-paused-wait', run, resumed, True)
-            api('/runs/' + resumed, method='DELETE')
-            fenced(run, resumed)
+            progress('pressure-stop-start')
+            stop_finished = threading.Event()
+            stop_errors = []
+            def stop_protected_workload():
+                try:
+                    api('/runs/' + resumed, method='DELETE')
+                except Exception as error:
+                    stop_errors.append(error)
+                finally:
+                    stop_finished.set()
+            threading.Thread(target=stop_protected_workload, daemon=True).start()
+            # DELETE must thaw and fence every workload process while reserve
+            # pressure remains active. Its durable checkpoint may still need I/O.
+            eventually(lambda: workload_stopped(resumed), timeout=25)
+            pressure_diagnostics('pressure-workload-stopped', run, resumed)
+            # Release only this fixture's artificial reserve after CPU fencing,
+            # so pending ext4 writes can flush before ownership is released.
             storage_policy(contexts[run]['policy'])
+            assert stop_finished.wait(120), 'Protected stop did not finish after reserve pressure was released.'
+            if stop_errors:
+                raise stop_errors[0]
+            fenced(run, resumed)
+            progress('pressure-stop-completed')
             assert api('/disks/' + run + '/storage-status')['dirtyBytes'] > 0
             try:
                 api('/disks/' + run + '/evict', receipt)
@@ -1041,6 +1074,9 @@ def main():
             evidence = Path(os.environ['NATIVE_STORAGE_EVIDENCE_DIR'])
             evidence.mkdir(parents=True, exist_ok=True)
             (evidence / 'partial-metrics.json').write_text(json.dumps(metrics, indent=2))
+            failure = traceback.format_exc()
+            (evidence / 'failure-traceback.txt').write_text(failure)
+            print(failure, file=sys.stderr, flush=True)
             if 'resumed' in locals():
                 pressure_diagnostics('failure-before-cleanup', run, resumed)
                 records = []
@@ -1053,6 +1089,13 @@ def main():
                 (evidence / 'failure-journal.txt').write_text('\n'.join(records))
             raise
         finally:
+            # An impossible test reserve must not keep kernel writeback blocked
+            # while fixture cleanup waits for the controller to stop.
+            try:
+                policy_generation += 1
+                api('/storage-policy', dict(generation=policy_generation, policy=contexts[runs[0]]['policy']), timeout=5)
+            except Exception:
+                pass
             helper.stdin.close()
             try:
                 helper.wait(timeout=10)
