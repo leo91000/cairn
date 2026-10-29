@@ -29,14 +29,14 @@ jobs:
           test "$ARTIFACT_RUN" = 40840084692
           source_sha=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACT_RUN" --jq .head_sha)
           test "$source_sha" = 1b79e3fc25c48a6488e68c5c0322af4de2f41c9e
-          git fetch --no-tags origin "$source_sha" 4655f1de082d1b2d7ec9572044e20af01d32a5bf
+          git fetch --no-tags origin "$source_sha" 3e20de835b92aa202037ac6b1e403a540d32db18
           SOURCE_SHA="$source_sha" python3 - <<'PY'
           import os
           import subprocess
-          allowed = {'.github/workflows/ci.yaml', 'scripts/tests/node_s3_test.py', 'scripts/tests/test_native_s3_memory.py'}
+          allowed = {'.github/workflows/ci.yaml', 'scripts/tests/node_s3_test.py', 'scripts/tests/test_native_s3_memory.py', 'scripts/tests/native_runtime_test.py'}
           changed = set(subprocess.check_output(['git', 'diff', '--name-only', os.environ['SOURCE_SHA'], 'HEAD'], text=True).splitlines())
           assert changed <= allowed, 'Candidate runtime or unrelated fixtures changed'
-          fixed = set(subprocess.check_output(['git', 'diff', '--name-only', '4655f1de082d1b2d7ec9572044e20af01d32a5bf', 'HEAD'], text=True).splitlines())
+          fixed = set(subprocess.check_output(['git', 'diff', '--name-only', '3e20de835b92aa202037ac6b1e403a540d32db18', 'HEAD'], text=True).splitlines())
           assert fixed <= {'.github/workflows/ci.yaml'}, 'Qualification fixture differs from reviewed PR source'
           PY
       - uses: actions/download-artifact@v8.0.1

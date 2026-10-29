@@ -21,6 +21,7 @@ import select
 import shutil
 import stat
 import socketserver
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,41 @@ import urllib.error
 import urllib.request
 import uuid
 import zipfile
+
+
+def fixture_garbage_inventory(root):
+    root = Path(root)
+    database = root / 'manager/manager.db'
+    if not (root / 'disposable-fixture').is_file() or not database.is_file():
+        raise RuntimeError('Garbage clock requires the private disposable manager fixture.')
+    with sqlite3.connect(f'file:{database}?mode=ro', uri=True) as db:
+        now = int(time.time() * 1000)
+        states = [dict(state=state, objects=count, unused=unused, deferred=deferred, referenced=referenced)
+                  for state, count, unused, deferred, referenced in db.execute('''
+                    SELECT state,count(*),sum(unused_at IS NOT NULL),sum(retry_at>?),
+                      sum(EXISTS(SELECT 1 FROM shared_references r WHERE r.object=o.id))
+                    FROM shared_objects o GROUP BY state''', (now,))]
+        return dict(states=states,
+                    references=db.execute('SELECT count(*) FROM shared_references').fetchone()[0],
+                    remoteDeletions=db.execute('SELECT count(*) FROM remote_deletions').fetchone()[0])
+
+
+def advance_fixture_garbage_clock(root):
+    before = fixture_garbage_inventory(root)
+    # Every fixture publisher has stopped and its disk has been deleted. Advance
+    # the isolated GC schedule as well as orphan grace and capability expiry.
+    # Keep references, states, and uncertain PUT tombstones intact: the production
+    # collector must perform the real version listing/deletion and retain safety.
+    with sqlite3.connect(Path(root) / 'manager/manager.db') as db:
+        db.execute('''UPDATE shared_objects SET unused_at=0,retry_at=0
+                      WHERE unused_at IS NOT NULL
+                      AND NOT EXISTS(SELECT 1 FROM shared_references r WHERE r.object=shared_objects.id)''')
+        db.execute('UPDATE remote_deletions SET retry_at=0')
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_storage_grants'").fetchone():
+            db.execute('''UPDATE direct_storage_grants SET expires_at=0
+                          WHERE object IN (SELECT id FROM shared_objects WHERE unused_at IS NOT NULL
+                            AND NOT EXISTS(SELECT 1 FROM shared_references r WHERE r.object=shared_objects.id))''')
+    return before
 
 SPEC = importlib.util.spec_from_file_location('native_host', Path(__file__).resolve().parents[2] / 'deploy/nodes/native-host.py')
 host = importlib.util.module_from_spec(SPEC)
@@ -1005,14 +1041,18 @@ def main():
             for index, current in enumerate(runs):
                 progress('purge-' + str(index + 1) + '-of-' + str(len(runs)))
                 manager('purge', run=current)
+                api('/disks/' + current + '/delete')
                 if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
                     # Backup purge and permanent local disk deletion are
                     # separate operations; exercise both before checking state.
-                    api('/disks/' + current + '/delete')
                     docker_runtime_path = state / 'native' / current / 'docker-runtime'
                     assert not docker_runtime_path.exists() and not docker_runtime_path.is_symlink(), 'Permanent deletion retained Docker runtime state.'
             if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
                 metrics['dockerRuntimeCleanupVerified'] = True
+            metrics['garbageBeforeFinalSweep'] = advance_fixture_garbage_clock(root)
+            manager('purge', run=runs[-1])
+            metrics['garbageAfterFinalSweep'] = fixture_garbage_inventory(root)
+            metrics['s3ObjectsAfterPurge'] = s3.list_objects_v2(Bucket='cairn-node-test').get('KeyCount', 0)
             progress('purge-completed')
             metrics['harnessCpuSeconds'] = resource.getrusage(resource.RUSAGE_SELF).ru_utime
             metrics['host']['loadAverageEnd'] = os.getloadavg()

@@ -2,9 +2,12 @@
 import copy
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import json
 import os
 from pathlib import Path
 import resource
+import select
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -12,6 +15,8 @@ import textwrap
 from threading import Event
 from types import SimpleNamespace
 import unittest
+import uuid
+import time
 from unittest.mock import Mock, patch
 
 import boto3
@@ -52,6 +57,76 @@ class NativeRuntimeEntrypointTests(unittest.TestCase):
 
 
 class NativeS3MemoryTests(unittest.TestCase):
+    def test_fixture_clock_collects_deferred_garbage_and_retains_uncertain_tombstones(self):
+        binary = Path(os.environ.get('CAIRN_TEST_NATIVE_QUALIFIER',
+                      str(Path(__file__).resolve().parents[2] / 'target/debug/examples/native_storage_qualifier')))
+        self.assertTrue(binary.is_file(), 'Build/download the candidate manager fixture first.')
+        binary.chmod(binary.stat().st_mode | 0o100)
+        server = fixture.s3_server(native=True)
+        host, port = server.get_host_and_port()
+        endpoint = f'http://{host}:{port}'
+        client = boto3.client('s3', endpoint_url=endpoint, region_name='us-east-1',
+                              aws_access_key_id='node-fixture', aws_secret_access_key='node-fixture-secret')
+        client.create_bucket(Bucket='cairn-node-test')
+        helper = None
+        try:
+            with tempfile.TemporaryDirectory(prefix='native-gc-clock-') as directory:
+                root = Path(directory)
+                (root / 'disposable-fixture').touch()
+                (root / 'data').mkdir()
+                (root / 'data/runner-secret').write_text('synthetic-fixture-secret')
+                # A minimal child environment cannot inherit a coding agent's
+                # live authentication broker or cloud credentials.
+                environment = dict(PATH=str(Path(sys.executable).parent) + os.pathsep + os.environ['PATH'],
+                                   CAIRN_NATIVE_DISPOSABLE_HOST='1', CAIRN_NODE_TEST_S3_ENDPOINT=endpoint,
+                                   AWS_ACCESS_KEY_ID='node-fixture', AWS_SECRET_ACCESS_KEY='node-fixture-secret',
+                                   AWS_REGION='us-east-1', AWS_ENDPOINT_URL_S3=endpoint, AWS_EC2_METADATA_DISABLED='true',
+                                   AWS_CONFIG_FILE='/dev/null', AWS_SHARED_CREDENTIALS_FILE='/dev/null')
+                helper = subprocess.Popen([str(binary), str(root), 'http://127.0.0.1:9'], env=environment,
+                                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+                def manager(op, **values):
+                    helper.stdin.write(json.dumps(dict(op=op, **values)) + '\n')
+                    helper.stdin.flush()
+                    self.assertTrue(select.select([helper.stdout], [], [], 20)[0], 'Manager fixture timed out.')
+                    response = json.loads(helper.stdout.readline())
+                    self.assertTrue(response['ok'], response)
+
+                manager('metrics')
+                object_id, run = str(uuid.uuid4()), str(uuid.uuid4())
+                block_hash = 'b3-' + 'a' * 64
+                key = f'shared-blocks/v3/{block_hash}/{object_id}'
+                client.put_object(Bucket='cairn-node-test', Key=key, Body=b'garbage')
+                database = root / 'manager/manager.db'
+                with sqlite3.connect(database) as db:
+                    location = json.dumps(dict(destination='s3', bucket='cairn-node-test', endpoint=None, blockEnvelope=3))
+                    db.execute("INSERT INTO shared_objects VALUES(?,?,?,?,?,'deleting',0,?)",
+                               (object_id, 'fixture', block_hash, 4096, location, int(time.time() * 1000) + 3600000))
+                    db.execute('INSERT INTO direct_storage_grants VALUES(?,0,0)', (object_id,))
+                manager('purge', run=run)
+                self.assertEqual(client.list_objects_v2(Bucket='cairn-node-test')['KeyCount'], 1,
+                                 'The deferred retry must reproduce the final bucket-empty failure.')
+                before = runtime.advance_fixture_garbage_clock(root)
+                self.assertEqual(before['states'][0]['deferred'], 1)
+                manager('purge', run=run)
+                self.assertEqual(client.list_objects_v2(Bucket='cairn-node-test')['KeyCount'], 0)
+                with sqlite3.connect(database) as db:
+                    state, retry, settled = db.execute('''SELECT o.state,o.retry_at,g.settled FROM shared_objects o
+                        JOIN direct_storage_grants g ON g.object=o.id WHERE o.id=?''', (object_id,)).fetchone()
+                    self.assertEqual((state, settled), ('deleting', 0))
+                    self.assertGreater(retry, int(time.time() * 1000))
+        finally:
+            if helper:
+                helper.stdin.close()
+                try:
+                    helper.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    helper.kill()
+                    helper.wait()
+                helper.stdout.close()
+                helper.stderr.close()
+            server.stop()
+
     def test_version_listing_survives_a_concurrent_real_delete(self):
         server = fixture.s3_server(native=True)
         host, port = server.get_host_and_port()
