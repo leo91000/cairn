@@ -1308,7 +1308,15 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     const contentRight = Math.max(...inside.map(node => node.x + node.w / 2 + node.extra))
     const leftRoom = contentLeft - entry.left[0]!.x - CLUSTER_PAD - (horizontal ? titles.get(cluster.id)!.height + 6 : 0)
     const rightRoom = entry.right[0]!.x - contentRight - CLUSTER_PAD
-    const shift = (rightRoom - leftRoom) / 2
+    let shift = (rightRoom - leftRoom) / 2
+    const moving = new Set(inside)
+    // Every rank keeps its separation constraints when the whole cluster moves together.
+    for (const node of inside) {
+      const right = layers[node.rank]![node.order + 1]
+      if (right && !moving.has(right))
+        shift = Math.min(shift, right.x - node.x - separation(node, right))
+    }
+
     if (shift > 0.5) {
       for (const node of inside)
         node.x += shift

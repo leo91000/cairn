@@ -234,6 +234,25 @@ class DiagramCorpusTest {
     }
 
     @Test
+    fun `compact circle and cross heads keep target IDs`() {
+        val graph = parseDiagram("flowchart LR\nA---oB\nB---xC") as GraphDiagram
+        assertEquals(listOf("A", "B", "C"), graph.nodes.map { it.id })
+        assertEquals(listOf(EdgeHead.CIRCLE, EdgeHead.CROSS), graph.edges.map { it.end })
+    }
+
+    @Test
+    fun `style properties do not absorb subsequent graph statements`() {
+        val graph =
+            parseDiagram(
+                "flowchart TD\nclassDef default fill:red;stroke:navy; A-->B\nstyle A fill:blue; B-->C"
+            )
+                as GraphDiagram
+        assertEquals(listOf("A", "B", "C"), graph.nodes.map { it.id })
+        assertEquals(DiagramStyle(fill = "blue", stroke = "navy"), graph.nodes.first().style)
+        assertEquals(listOf("A" to "B", "B" to "C"), graph.edges.map { it.from to it.to })
+    }
+
+    @Test
     fun `wraps long labels between words and inside long words`() {
         assertEquals(
             listOf("alpha", "beta", "gamma"),

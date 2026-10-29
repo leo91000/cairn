@@ -289,3 +289,24 @@ test('large diagrams export a bounded readable PNG', async ({ page }) => {
   }, png.toString('base64'))
   expect(hasDrawing).toBe(true)
 })
+
+test('inline styling keeps later transitions and compact heads keep their node names', async ({ page }) => {
+  const source = 'flowchart LR\nclassDef default fill:red;stroke:navy; A---oB\nstyle A fill:blue; B---xC'
+  await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)
+  await expect(page.locator('#app .diagram-error')).toHaveCount(0)
+  await expect(page.locator('#app figure.diagram svg text')).toContainText(['A', 'B', 'C'])
+})
+
+test('centering subgraphs preserves separation from unrelated nodes', async ({ page }) => {
+  const graph = 'subgraph S0\nN2\nN6\nend\nsubgraph S2\nN0\nN8\nend\nN1-->N8\nN8-->N6\nN8-->N7\nN7-->N0'
+  for (const direction of ['LR', 'RL']) {
+    await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\nflowchart ${direction}\n${graph}\n\`\`\``)
+    const separated = await page.locator('#app figure.diagram svg').evaluate((svg) => {
+      const labels = [...svg.querySelectorAll('text')]
+      const a = labels.find(text => text.textContent === 'N6')!.getBoundingClientRect()
+      const b = labels.find(text => text.textContent === 'N7')!.getBoundingClientRect()
+      return a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top
+    })
+    expect(separated).toBe(true)
+  }
+})

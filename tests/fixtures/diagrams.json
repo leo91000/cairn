@@ -3009,6 +3009,530 @@
         "height": 1762,
         "items": 98
       }
+    },
+    {
+      "name": "cluster-centering-LR",
+      "source": "flowchart LR\nsubgraph S0\nN2\nN6\nend\nsubgraph S2\nN0\nN8\nend\nN1-->N8\nN8-->N6\nN8-->N7\nN7-->N0",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "N2",
+            "label": "N2",
+            "shape": "rect",
+            "parent": "S0"
+          },
+          {
+            "id": "N6",
+            "label": "N6",
+            "shape": "rect",
+            "parent": "S0"
+          },
+          {
+            "id": "N0",
+            "label": "N0",
+            "shape": "rect",
+            "parent": "S2"
+          },
+          {
+            "id": "N8",
+            "label": "N8",
+            "shape": "rect",
+            "parent": "S2"
+          },
+          {
+            "id": "N1",
+            "label": "N1",
+            "shape": "rect"
+          },
+          {
+            "id": "N7",
+            "label": "N7",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "N1",
+            "to": "N8",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N8",
+            "to": "N6",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N8",
+            "to": "N7",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N7",
+            "to": "N0",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "S0",
+            "label": "S0"
+          },
+          {
+            "id": "S2",
+            "label": "S2"
+          }
+        ]
+      },
+      "layout": {
+        "width": 468,
+        "height": 565,
+        "items": 26
+      }
+    },
+    {
+      "name": "cluster-centering-RL",
+      "source": "flowchart RL\nsubgraph S0\nN2\nN6\nend\nsubgraph S2\nN0\nN8\nend\nN1-->N8\nN8-->N6\nN8-->N7\nN7-->N0",
+      "diagram": {
+        "kind": "graph",
+        "direction": "RL",
+        "nodes": [
+          {
+            "id": "N2",
+            "label": "N2",
+            "shape": "rect",
+            "parent": "S0"
+          },
+          {
+            "id": "N6",
+            "label": "N6",
+            "shape": "rect",
+            "parent": "S0"
+          },
+          {
+            "id": "N0",
+            "label": "N0",
+            "shape": "rect",
+            "parent": "S2"
+          },
+          {
+            "id": "N8",
+            "label": "N8",
+            "shape": "rect",
+            "parent": "S2"
+          },
+          {
+            "id": "N1",
+            "label": "N1",
+            "shape": "rect"
+          },
+          {
+            "id": "N7",
+            "label": "N7",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "N1",
+            "to": "N8",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N8",
+            "to": "N6",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N8",
+            "to": "N7",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N7",
+            "to": "N0",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "S0",
+            "label": "S0"
+          },
+          {
+            "id": "S2",
+            "label": "S2"
+          }
+        ]
+      },
+      "layout": {
+        "width": 468,
+        "height": 565,
+        "items": 26
+      }
+    },
+    {
+      "name": "cluster-centering-TD",
+      "source": "flowchart TD\nsubgraph S0\nN2\nN6\nend\nsubgraph S2\nN0\nN8\nend\nN1-->N8\nN8-->N6\nN8-->N7\nN7-->N0",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "N2",
+            "label": "N2",
+            "shape": "rect",
+            "parent": "S0"
+          },
+          {
+            "id": "N6",
+            "label": "N6",
+            "shape": "rect",
+            "parent": "S0"
+          },
+          {
+            "id": "N0",
+            "label": "N0",
+            "shape": "rect",
+            "parent": "S2"
+          },
+          {
+            "id": "N8",
+            "label": "N8",
+            "shape": "rect",
+            "parent": "S2"
+          },
+          {
+            "id": "N1",
+            "label": "N1",
+            "shape": "rect"
+          },
+          {
+            "id": "N7",
+            "label": "N7",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "N1",
+            "to": "N8",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N8",
+            "to": "N6",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N8",
+            "to": "N7",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N7",
+            "to": "N0",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "S0",
+            "label": "S0"
+          },
+          {
+            "id": "S2",
+            "label": "S2"
+          }
+        ]
+      },
+      "layout": {
+        "width": 586,
+        "height": 454,
+        "items": 26
+      }
+    },
+    {
+      "name": "cluster-centering-BT",
+      "source": "flowchart BT\nsubgraph S0\nN2\nN6\nend\nsubgraph S2\nN0\nN8\nend\nN1-->N8\nN8-->N6\nN8-->N7\nN7-->N0",
+      "diagram": {
+        "kind": "graph",
+        "direction": "BT",
+        "nodes": [
+          {
+            "id": "N2",
+            "label": "N2",
+            "shape": "rect",
+            "parent": "S0"
+          },
+          {
+            "id": "N6",
+            "label": "N6",
+            "shape": "rect",
+            "parent": "S0"
+          },
+          {
+            "id": "N0",
+            "label": "N0",
+            "shape": "rect",
+            "parent": "S2"
+          },
+          {
+            "id": "N8",
+            "label": "N8",
+            "shape": "rect",
+            "parent": "S2"
+          },
+          {
+            "id": "N1",
+            "label": "N1",
+            "shape": "rect"
+          },
+          {
+            "id": "N7",
+            "label": "N7",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "N1",
+            "to": "N8",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N8",
+            "to": "N6",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N8",
+            "to": "N7",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N7",
+            "to": "N0",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "S0",
+            "label": "S0"
+          },
+          {
+            "id": "S2",
+            "label": "S2"
+          }
+        ]
+      },
+      "layout": {
+        "width": 586,
+        "height": 454,
+        "items": 26
+      }
+    },
+    {
+      "name": "compact-link-heads",
+      "source": "flowchart LR\nA---oB\nB---xC",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "rect"
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "shape": "rect"
+          },
+          {
+            "id": "C",
+            "label": "C",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "circle",
+            "length": 2
+          },
+          {
+            "from": "B",
+            "to": "C",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "cross",
+            "length": 2
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 400,
+        "height": 66,
+        "items": 10
+      }
+    },
+    {
+      "name": "style-inline-statements",
+      "source": "flowchart TD\nclassDef default fill:red;stroke:navy; A-->B\nstyle A fill:blue;stroke-width:2; B-->C\nlinkStyle 0 stroke:blue; C-->D",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "rect",
+            "style": {
+              "fill": "blue",
+              "stroke": "navy",
+              "strokeWidth": 2
+            }
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "shape": "rect",
+            "style": {
+              "fill": "red",
+              "stroke": "navy"
+            }
+          },
+          {
+            "id": "C",
+            "label": "C",
+            "shape": "rect",
+            "style": {
+              "fill": "red",
+              "stroke": "navy"
+            }
+          },
+          {
+            "id": "D",
+            "label": "D",
+            "shape": "rect",
+            "style": {
+              "fill": "red",
+              "stroke": "navy"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1,
+            "style": {
+              "stroke": "blue"
+            }
+          },
+          {
+            "from": "B",
+            "to": "C",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "C",
+            "to": "D",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 80,
+        "height": 348,
+        "items": 14
+      }
     }
   ],
   "errors": [

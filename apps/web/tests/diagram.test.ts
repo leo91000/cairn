@@ -159,6 +159,19 @@ describe('diagram layout', () => {
     expect(Math.hypot(width / 2, height / 2)).toBeLessThan(innerRadius)
   })
 
+  it('parses compact circle/cross heads without changing target IDs', () => {
+    const graph = parseDiagram('flowchart LR\nA---oB\nB---xC')
+    expect(graph.kind === 'graph' && graph.nodes.map(node => node.id)).toEqual(['A', 'B', 'C'])
+    expect(graph.kind === 'graph' && graph.edges.map(edge => edge.end)).toEqual(['circle', 'cross'])
+  })
+
+  it('retains graph statements after semicolon-separated styling properties', () => {
+    const graph = parseDiagram('flowchart TD\nclassDef default fill:red;stroke:navy; A-->B\nstyle A fill:blue; B-->C')
+    expect(graph.kind === 'graph' && graph.nodes.map(node => node.id)).toEqual(['A', 'B', 'C'])
+    expect(graph.kind === 'graph' && graph.nodes[0]!.style).toEqual({ fill: 'blue', stroke: 'navy' })
+    expect(graph.kind === 'graph' && graph.edges.map(edge => [edge.from, edge.to])).toEqual([['A', 'B'], ['B', 'C']])
+  })
+
   it('wraps long labels between words and inside long words', () => {
     expect(wrapText('alpha beta gamma', 10, 400, 50, measure)).toEqual(['alpha', 'beta', 'gamma'])
     expect(wrapText('abcdefghijklmnop', 10, 400, 30, measure)).toEqual(['abcde', 'fghij', 'klmno', 'p'])

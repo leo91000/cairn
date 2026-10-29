@@ -697,11 +697,6 @@ const HEADS: Record<string, EdgeHead> = {
   'x': 'cross',
 }
 
-/** Whether a link head at `index` ends there: `o` and `x` are heads only before a gap. */
-function boundary(text: string, index: number) {
-  return index >= text.length || /[\s|]/.test(text[index]!)
-}
-
 function run(text: string, from: number, char: string) {
   let end = from
   while (text[end] === char)
@@ -712,7 +707,7 @@ function run(text: string, from: number, char: string) {
 function headEnd(text: string, index: number) {
   if (text[index] === '>')
     return index + 1
-  return (text[index] === 'o' || text[index] === 'x') && boundary(text, index + 1) ? index + 1 : -1
+  return (text[index] === 'o' || text[index] === 'x') ? index + 1 : -1
 }
 
 /** End of an unlabelled link body starting at `at` (`-->`, `---`, `-.->`, `==>`, `~~~`…), or -1. */
@@ -841,7 +836,7 @@ function shapeLink(startHead: string | undefined, body: string, label: string): 
 function splitStatements(lines: string[]) {
   const result: string[] = []
   for (const line of lines) {
-    // Semicolons separate statements outside quoted labels and style values.
+    const parts: string[] = []
     let depth = 0
     let quoted = false
     let start = 0
@@ -856,16 +851,30 @@ function splitStatements(lines: string[]) {
       else if (!quoted && '])}'.includes(char!)) {
         depth = Math.max(0, depth - 1)
       }
-      else if (!quoted && depth === 0 && char === ';' && !/^\s*(?:classDef|style|linkStyle)\b/.test(line)) {
-        result.push(line.slice(start, index).trim())
+      else if (!quoted && depth === 0 && char === ';') {
+        parts.push(line.slice(start, index).trim())
         start = index + 1
       }
     }
 
-    result.push(line.slice(start).trim())
+    parts.push(line.slice(start).trim())
+
+    // Preserve semicolon-separated CSS properties, but never absorb the next graph statement.
+    let styling = false
+    for (const part of parts) {
+      if (!part)
+        continue
+      if (styling && /^[a-z][a-z-]*\s*:/i.test(part)) {
+        result[result.length - 1] += `;${part}`
+      }
+      else {
+        result.push(part)
+        styling = /^(?:classDef|style|linkStyle)\b/.test(part)
+      }
+    }
   }
 
-  return result.filter(Boolean)
+  return result
 }
 
 function parseFlowchart(source: string): GraphDiagram {

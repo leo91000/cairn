@@ -1392,7 +1392,14 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
                 CLUSTER_PAD -
                 (if (horizontal) titles.getValue(cluster.id).height + 6 else 0.0)
         val rightRoom = entry.right[0].x - contentRight - CLUSTER_PAD
-        val shift = (rightRoom - leftRoom) / 2
+        var shift = (rightRoom - leftRoom) / 2
+        val moving = inside.toSet()
+        // Every rank keeps its separation constraints when the whole cluster moves together.
+        for (node in inside) {
+            val right = layers[node.rank].getOrNull(node.order + 1)
+            if (right != null && right !in moving)
+                shift = min(shift, right.x - node.x - separation(node, right))
+        }
         if (shift > 0.5) {
             for (node in inside) node.x += shift
         }

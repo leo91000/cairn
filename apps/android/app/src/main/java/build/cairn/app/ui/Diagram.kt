@@ -772,10 +772,6 @@ private val HEADS =
         'x' to EdgeHead.CROSS,
     )
 
-/** Whether a link head at `index` ends there: `o` and `x` are heads only before a gap. */
-private fun boundary(text: String, index: Int) =
-    index >= text.length || isJsSpace(text[index]) || text[index] == '|'
-
 private fun run(text: String, from: Int, char: Char): Int {
     var end = from
     while (text.getOrNull(end) == char) end++
@@ -785,7 +781,7 @@ private fun run(text: String, from: Int, char: Char): Int {
 private fun headEnd(text: String, index: Int): Int {
     val char = text.getOrNull(index)
     if (char == '>') return index + 1
-    return if ((char == 'o' || char == 'x') && boundary(text, index + 1)) index + 1 else -1
+    return if ((char == 'o' || char == 'x')) index + 1 else -1
 }
 
 /** End of an unlabelled link body starting at `at` (`-->`, `---`, `-.->`, `==>`, `~~~`…), or -1. */
@@ -912,32 +908,40 @@ private fun shapeLink(startHead: Char?, body: String, label: String): LinkRef {
 
 private val STYLE_STATEMENT = Regex("^$SPACE*(?:classDef|style|linkStyle)$WORD_END")
 
+private val STYLE_PROPERTY = Regex("^[A-Za-z][A-Za-z-]*$SPACE*:")
+
 private fun splitStatements(lines: List<String>): List<String> {
     val result = mutableListOf<String>()
     for (line in lines) {
-        // Semicolons separate statements outside quoted labels and style values.
-        val styling by lazy { STYLE_STATEMENT.containsMatchIn(line) }
+        val parts = mutableListOf<String>()
         var depth = 0
         var quoted = false
         var start = 0
         for (index in line.indices) {
             val char = line[index]
-            if (char == '"') {
-                quoted = !quoted
-            } else if (!quoted && "[({".indexOf(char) >= 0) {
-                depth++
-            } else if (!quoted && "])}".indexOf(char) >= 0) {
-                depth = maxOf(0, depth - 1)
-            } else if (!quoted && depth == 0 && char == ';' && !styling) {
-                result.add(jsTrim(line.substring(start, index)))
+            if (char == '"') quoted = !quoted
+            else if (!quoted && "[({".indexOf(char) >= 0) depth++
+            else if (!quoted && "])}".indexOf(char) >= 0) depth = maxOf(0, depth - 1)
+            else if (!quoted && depth == 0 && char == ';') {
+                parts.add(jsTrim(line.substring(start, index)))
                 start = index + 1
             }
         }
+        parts.add(jsTrim(line.substring(start)))
 
-        result.add(jsTrim(line.substring(start)))
+        // Preserve semicolon-separated CSS properties, but never absorb the next graph statement.
+        var styling = false
+        for (part in parts) {
+            if (part.isEmpty()) continue
+            if (styling && STYLE_PROPERTY.containsMatchIn(part)) {
+                result[result.lastIndex] += ";$part"
+            } else {
+                result.add(part)
+                styling = STYLE_STATEMENT.containsMatchIn(part)
+            }
+        }
     }
-
-    return result.filter { it.isNotEmpty() }
+    return result
 }
 
 private val FLOWCHART_DIRECTION = Regex("^[^$SPACE_CHARS]+$SPACE+([A-Za-z0-9_]+)")
