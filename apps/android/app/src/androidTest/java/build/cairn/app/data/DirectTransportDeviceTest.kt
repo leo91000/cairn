@@ -464,6 +464,8 @@ class DirectTransportDeviceTest {
                         }
                     }
                     suspendedControl = true
+
+                    awaitDirect()
                     val largeRequest = runCatching {
                         api.request(
                             "POST",
@@ -480,8 +482,10 @@ class DirectTransportDeviceTest {
                         413,
                         (largeRequest as? ApiException)?.status,
                     )
-                    assertEquals("direct", api.transport.route.value)
-                    read()
+                    // An ID-backed POST may safely replay on relay under write pressure.
+                    // The route records that response; observe a fresh direct read before
+                    // asserting recovery, rather than requiring the rejection to stay direct.
+                    awaitDirect()
                     assertEquals("direct", api.transport.route.value)
 
                     // Real selected-installation UI exercises the asynchronous startup/indicator.
