@@ -182,6 +182,9 @@ impl LazyDisk {
     }
 
     pub fn captured_block(&self, generation: i64, hash: &str) -> io::Result<Vec<u8>> {
+        let metadata = crate::performance::publication::start(
+            crate::performance::publication::Stage::NodeMetadata,
+        );
         let _publication = self.publication.read().map_err(failure)?;
         let manifest: String = self
             .db
@@ -207,6 +210,7 @@ impl LazyDisk {
             .as_u64()
             .filter(|size| *size <= BLOCK)
             .ok_or_else(|| failure("Invalid extent"))?;
+        metadata.finish(0);
         let mut bytes = vec![0; length as usize];
         self.read_generation(generation, offset, &mut bytes)?;
         if !super::super::digest::matches(hash, &bytes) {

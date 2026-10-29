@@ -1,3 +1,5 @@
+> Statut : précisée par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) : avoir accès à un agent qui a l’accès à l’installation revient à avoir accès à tous les agents ; un tel agent ne peut ni donner ni retirer à un compte l’accès à un agent, et il n’écrit des règles que dans une conversation dont toutes les entrées, depuis sa création, viennent d’une même personne, au nom de cette personne, et selon les autres limites qu’ADR-0075 énumère.
+
 # Accès explicite d’un agent à l’installation courante
 
 Date : 2026-10-11.

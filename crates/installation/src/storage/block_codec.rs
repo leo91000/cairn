@@ -1,6 +1,7 @@
 //! Authenticated S3 block representations; content identity always names decoded bytes.
 //! CPU work runs off Tokio's executor, with permits retained even if a caller cancels.
 use super::{digest, metrics::Counter};
+use crate::performance::publication::{self as diagnostic, Stage};
 use crate::{
     error::{Error, Result},
     nodes::snapshots::BLOCK,
@@ -72,6 +73,7 @@ impl BlockCodec {
     }
 
     pub async fn encode(&self, vault: Vault, scope: String, bytes: Vec<u8>) -> Result<Vec<u8>> {
+        let diagnostic_admission = diagnostic::start(Stage::CodecAdmission);
         let admission = self.metrics.admission.start();
         let permit = self
             .workers
@@ -80,9 +82,10 @@ impl BlockCodec {
             .await
             .map_err(Error::internal)?;
         admission.finish(0);
+        diagnostic_admission.finish(0);
         let metrics = self.metrics.clone();
 
-        tokio::task::spawn_blocking(move || {
+        diagnostic::blocking(move || {
             let _permit = permit;
             let sample = metrics.encode.start();
             let (encoded, codec) = encode(&vault, &scope, &bytes)?;
@@ -120,6 +123,7 @@ impl BlockCodec {
     /// includes the CPU queue, so completed GETs cannot accumulate unbounded bytes.
     /// It is independent of CPU admission: a blocked GET never occupies a CPU slot.
     pub(crate) async fn read_permit(&self) -> Result<OwnedSemaphorePermit> {
+        let diagnostic_admission = diagnostic::start(Stage::RecoveryAdmission);
         let sample = self.metrics.read_admission.start();
         let permit = self
             .reads
@@ -128,6 +132,7 @@ impl BlockCodec {
             .await
             .map_err(Error::internal)?;
         sample.finish(0);
+        diagnostic_admission.finish(0);
         Ok(permit)
     }
 
@@ -140,6 +145,7 @@ impl BlockCodec {
         encoded: Vec<u8>,
         read_permit: OwnedSemaphorePermit,
     ) -> Result<Vec<u8>> {
+        let diagnostic_admission = diagnostic::start(Stage::CodecAdmission);
         let admission = self.metrics.admission.start();
         let permit = self
             .workers
@@ -148,9 +154,10 @@ impl BlockCodec {
             .await
             .map_err(Error::internal)?;
         admission.finish(0);
+        diagnostic_admission.finish(0);
         let metrics = self.metrics.clone();
 
-        tokio::task::spawn_blocking(move || {
+        diagnostic::blocking(move || {
             let _permit = permit;
             let _read_permit = read_permit;
             let sample = metrics.decode.start();
@@ -187,7 +194,9 @@ fn valid_size(size: u64) -> Result<usize> {
 
 fn encode(vault: &Vault, scope: &str, bytes: &[u8]) -> Result<(Vec<u8>, u8)> {
     valid_size(bytes.len() as u64)?;
+    let sample = diagnostic::start(Stage::Compress);
     let compressed = zstd::bulk::compress(bytes, 3)?;
+    sample.finish(bytes.len());
     let (codec, data) = if compressed.len() < bytes.len() {
         (ZSTD, compressed.as_slice())
     } else {
@@ -198,7 +207,9 @@ fn encode(vault: &Vault, scope: &str, bytes: &[u8]) -> Result<(Vec<u8>, u8)> {
     payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     payload.extend_from_slice(data);
 
+    let sample = diagnostic::start(Stage::Encrypt);
     let encrypted = vault.encrypt_bytes(&v2_scope(scope), &payload)?;
+    sample.finish(payload.len());
     let mut encoded = Vec::with_capacity(V2.len() + encrypted.len());
     encoded.extend_from_slice(V2);
     encoded.extend_from_slice(&encrypted);
@@ -221,7 +232,9 @@ fn decode(
     }
     let ciphertext = &encoded[V2.len()..];
     let (bytes, codec) = {
+        let sample = diagnostic::start(Stage::Decrypt);
         let payload = vault.decrypt_bytes(&v2_scope(scope), ciphertext)?;
+        sample.finish(ciphertext.len());
         let header = payload
             .get(..PAYLOAD_HEADER)
             .ok_or_else(|| Error::bad("Invalid disk block header."))?;
@@ -232,7 +245,12 @@ fn decode(
         let data = &payload[PAYLOAD_HEADER..];
         let bytes = match header[0] {
             RAW if data.len() == size => data.to_vec(),
-            ZSTD => decompress(data, size)?,
+            ZSTD => {
+                let sample = diagnostic::start(Stage::Decompress);
+                let bytes = decompress(data, size)?;
+                sample.finish(bytes.len());
+                bytes
+            }
             _ => return Err(Error::bad("Invalid disk block codec or length.")),
         };
         (bytes, header[0])
@@ -551,7 +569,7 @@ mod tests {
         runtime.block_on(async {
             let (entered, ready) = tokio::sync::oneshot::channel();
             let (release, wait) = std::sync::mpsc::channel();
-            let occupied = tokio::task::spawn_blocking(move || {
+            let occupied = diagnostic::blocking(move || {
                 entered.send(()).unwrap();
                 wait.recv().unwrap();
             });

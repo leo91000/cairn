@@ -273,7 +273,7 @@ jobs:
           # Each engine's own sandbox enforces a plan turn's boundary. The releases this build
           # ships run one through Cairn's adapters against a local model that asks for writes,
           # network access, escalation and subagents; none may take effect, and the turn after
-          # the plan must write again. See docs/adr/0075-plan-turns.md#qualification.
+          # the plan must write again. See docs/adr/0076-plan-turns.md#qualification.
           sudo apt-get install -y --no-install-recommends bubblewrap socat
           # Ubuntu restricts the unprivileged user namespaces both sandboxes create.
           if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then

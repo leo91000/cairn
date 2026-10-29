@@ -1,3 +1,5 @@
+> Statut : l’étape `people` (la délégation externe) est retirée par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md), et une instance ne compte comme accordée à un agent de gestion, pour réutiliser une étape partagée, que s’il en a l’accès complet. Le MCP public peut accorder des droits, `agentIds` compris à la dernière étape, qui donne l’accès complet ; `cairn_installation` ne le peut pas.
+
 # Guided plugin setup and shared provider apps
 
 Date: 2026-10-22.

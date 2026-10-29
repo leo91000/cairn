@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) : la délégation externe disparaît au profit de règles de hook qui agissent avec l’autorité de leur créateur.
+
 # Owner-chosen agents for bot delegation
 
 Date: 2026-10-24.

@@ -126,9 +126,12 @@ candidate pending for repair and retry. The supervisor does not start a previous
 binary against the data. The replacement's stop, readiness and verification
 bounds remain within the twenty-minute lease.
 
-The next release requires the
-[complete reinstallation](PRODUCTION-CAIRN.md#réinstallation-complète). Automatic
-updates create no backups.
+Version-11 manager databases support the automatic
+[data-preserving upgrade to version 12](migrations/0012-typed-node-inventory.md).
+Retain a consistent database/WAL backup before upgrading; automatic updates create
+no backups. Preserve installation identity, node state and object storage. Other
+schema transitions require their own documented compatibility path; an unsupported
+version is not an instruction to reinstall or erase data.
 
 ```sh
 sudo systemctl status cairn-installation-update.timer

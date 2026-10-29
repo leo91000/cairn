@@ -1,4 +1,5 @@
 //! Content-addressed disk manifests. Capture callers must provide an immutable disk.
+use crate::performance::publication::{self as diagnostic, Stage};
 use crate::{
     error::{Error, Result},
     validation::text,
@@ -256,12 +257,10 @@ impl Reader {
         if let Some(journal) = &self.journal {
             let (volume, generation, hash) =
                 (journal.volume.clone(), journal.generation, hash.to_owned());
-            return tokio::task::spawn_blocking(move || {
-                volume.disk.captured_block(generation, &hash)
-            })
-            .await
-            .map_err(Error::internal)?
-            .map_err(Into::into);
+            return diagnostic::blocking(move || volume.disk.captured_block(generation, &hash))
+                .await
+                .map_err(Error::internal)?
+                .map_err(Into::into);
         }
         block_where(
             &self.directory.join("disk"),
@@ -283,7 +282,7 @@ pub async fn served_batch(
     directory: &Path,
     hashes: Vec<String>,
 ) -> Result<(u64, axum::body::Body)> {
-    served_blocks(directory, hashes, READ_BATCH).await
+    served_blocks(directory, hashes, READ_BATCH, None).await
 }
 
 /// A publication owns one journal reader, regardless of its number of blocks.
@@ -292,18 +291,36 @@ pub async fn served_publication(
     directory: &Path,
     hashes: Vec<String>,
 ) -> Result<(u64, axum::body::Body)> {
-    served_blocks(directory, hashes, MAX_PUBLICATION_BLOCKS).await
+    served_blocks(directory, hashes, MAX_PUBLICATION_BLOCKS, None).await
+}
+
+pub(crate) async fn served_publication_observed(
+    directory: &Path,
+    hashes: Vec<String>,
+    request: Option<diagnostic::Request>,
+    snapshot: &str,
+) -> Result<(u64, axum::body::Body)> {
+    let summary = diagnostic::NodeSummary::begin(request, snapshot);
+    let metrics = summary.as_ref().map(|summary| summary.metrics.clone());
+    diagnostic::scope(
+        metrics,
+        served_blocks(directory, hashes, MAX_PUBLICATION_BLOCKS, summary),
+    )
+    .await
 }
 
 async fn served_blocks(
     directory: &Path,
     hashes: Vec<String>,
     limit: usize,
+    summary: Option<diagnostic::NodeSummary>,
 ) -> Result<(u64, axum::body::Body)> {
     if hashes.is_empty() || hashes.len() > limit || hashes.iter().any(|hash| !valid_hash(hash)) {
         return Err(Error::bad("Invalid snapshot block batch."));
     }
+    let open = diagnostic::start(Stage::NodeOpen);
     let reader = Reader::open(directory).await?;
+    open.finish(0);
     validate(&reader.manifest)?;
     let sizes: std::collections::HashMap<_, _> = reader.manifest["blocks"]
         .as_array()
@@ -320,13 +337,37 @@ async fn served_blocks(
     }
     drop(sizes);
     let stream = futures_util::stream::try_unfold(
-        (reader, hashes.into_iter()),
-        |(reader, mut hashes)| async move {
-            let Some(hash) = hashes.next() else {
-                return Ok::<_, Error>(None);
-            };
-            let bytes = reader.block(&hash).await?;
-            Ok(Some((bytes, (reader, hashes))))
+        (
+            reader,
+            hashes.into_iter(),
+            summary,
+            None::<diagnostic::Sample>,
+        ),
+        |(reader, mut hashes, mut summary, waiting)| {
+            let metrics = summary.as_ref().map(|summary| summary.metrics.clone());
+            diagnostic::scope(metrics, async move {
+                if let Some(waiting) = waiting {
+                    waiting.finish(0);
+                }
+                let Some(hash) = hashes.next() else {
+                    if let Some(summary) = &mut summary {
+                        summary.complete();
+                    }
+                    return Ok::<_, Error>(None);
+                };
+                let sample = diagnostic::start(Stage::NodeProduce);
+                let bytes = reader.block(&hash).await?;
+                sample.finish(bytes.len());
+                let waiting = if hashes.len() == 0 {
+                    if let Some(summary) = &mut summary {
+                        summary.complete();
+                    }
+                    None
+                } else {
+                    Some(diagnostic::start(Stage::NodeBackpressure))
+                };
+                Ok(Some((bytes, (reader, hashes, summary, waiting))))
+            })
         },
     );
     Ok((length, axum::body::Body::from_stream(stream)))
@@ -338,6 +379,7 @@ async fn block_where(
     hash: &str,
     available: impl Fn(u64) -> bool,
 ) -> Result<Vec<u8>> {
+    let metadata = diagnostic::start(Stage::NodeMetadata);
     if !valid_hash(hash) {
         return Err(Error::bad("Invalid block digest."));
     }
@@ -351,6 +393,8 @@ async fn block_where(
         .as_u64()
         .filter(|s| *s <= BLOCK)
         .ok_or_else(|| Error::bad("Invalid block size."))?;
+    metadata.finish(0);
+    let read = diagnostic::start(Stage::NodeLocalRead);
     let mut file = tokio::fs::File::open(path).await?;
     file.seek(std::io::SeekFrom::Start(
         block["offset"]
@@ -360,6 +404,7 @@ async fn block_where(
     .await?;
     let mut bytes = vec![0; size as usize];
     file.read_exact(&mut bytes).await?;
+    read.finish(bytes.len());
     if !crate::storage::digest::matches(hash, &bytes) {
         return Err(Error::conflict("Backup data changed."));
     }
@@ -428,6 +473,8 @@ pub struct Fetch {
     stream: Option<std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>>,
     remaining: usize,
     direct_publication: bool,
+    diagnostics: bool,
+    first_body: bool,
 }
 
 impl Fetch {
@@ -445,12 +492,19 @@ impl Fetch {
             stream: None,
             remaining: 0,
             direct_publication: false,
+            diagnostics: false,
+            first_body: false,
         }
     }
 
     /// Direct controller transfers have no reverse-proxy request deadline.
     pub fn direct_publication(mut self) -> Self {
         self.direct_publication = true;
+        self
+    }
+
+    pub(crate) fn diagnostics(mut self, enabled: bool) -> Self {
+        self.diagnostics = enabled;
         self
     }
 
@@ -471,11 +525,16 @@ impl Fetch {
             let batch: Vec<_> = self.pending.iter().take(count).collect();
             let length: u64 = batch.iter().map(|(_, size)| *size).sum();
             let hashes: Vec<_> = batch.iter().map(|(hash, _)| hash).collect();
+            let mut input = json!({ "hashes": hashes });
+            if self.diagnostics {
+                input["diagnostic"] =
+                    serde_json::to_value(diagnostic::request(batch.len() == self.pending.len()))?;
+            }
             let request = self
                 .http
                 .post(format!("{}/publication", self.url))
                 .bearer_auth(&self.credential)
-                .json(&json!({ "hashes": hashes }));
+                .json(&input);
             // A stopped local journal is verified once before the response starts.
             // Its byte stream still has the ordinary per-block idle deadline.
             let startup = if self.direct_publication {
@@ -483,10 +542,12 @@ impl Fetch {
             } else {
                 PUBLICATION_STARTUP
             };
+            let headers = diagnostic::start(Stage::NodeHeaders);
             let response = tokio::time::timeout(startup, request.send())
                 .await
                 .map_err(|_| Error::unavailable("Backup block transfer interrupted."))?
                 .map_err(|_| Error::unavailable("Backup block transfer interrupted."))?;
+            headers.finish(0);
             {
                 if !response.status().is_success() {
                     return Err(Error::unavailable(format!(
@@ -501,6 +562,7 @@ impl Fetch {
                     return Err(Error::bad("Backup block batch has the wrong size."));
                 }
                 self.remaining = batch.len();
+                self.first_body = true;
                 self.stream = Some(Box::pin(tokio_util::io::StreamReader::new(
                     response.bytes_stream().map_err(std::io::Error::other),
                 )));
@@ -508,10 +570,21 @@ impl Fetch {
         }
         let bytes = if let Some(stream) = &mut self.stream {
             let mut bytes = vec![0; size as usize];
-            tokio::time::timeout(TRANSFER_IDLE, stream.read_exact(&mut bytes))
-                .await
-                .map_err(|_| Error::unavailable("Backup block batch interrupted."))?
-                .map_err(|_| Error::unavailable("Backup block batch interrupted."))?;
+            let body = diagnostic::start(Stage::NodeBody);
+            tokio::time::timeout(TRANSFER_IDLE, async {
+                if self.first_body && !bytes.is_empty() {
+                    let first = diagnostic::start(Stage::NodeFirstByte);
+                    stream.read_exact(&mut bytes[..1]).await?;
+                    first.finish(1);
+                    self.first_body = false;
+                    stream.read_exact(&mut bytes[1..]).await
+                } else {
+                    stream.read_exact(&mut bytes).await
+                }
+            })
+            .await
+            .map_err(|_| Error::unavailable("Backup block batch interrupted."))?
+            .map_err(|_| Error::unavailable("Backup block batch interrupted."))?;
             self.remaining -= 1;
             if self.remaining == 0 {
                 if tokio::time::timeout(TRANSFER_IDLE, stream.read(&mut [0]))
@@ -524,6 +597,7 @@ impl Fetch {
                 }
                 self.stream = None;
             }
+            body.finish(bytes.len());
             bytes
         } else {
             return Err(Error::internal("Missing publication stream."));
@@ -807,7 +881,7 @@ mod tests {
                 let mut transferred = 0;
                 for group in hashes.chunks(batch) {
                     let opening = std::time::Instant::now();
-                    let (length, body) = served_blocks(&captured, group.to_vec(), batch)
+                    let (length, body) = served_blocks(&captured, group.to_vec(), batch, None)
                         .await
                         .unwrap();
                     open_ms += opening.elapsed().as_secs_f64() * 1000.0;
