@@ -1746,11 +1746,11 @@ internal fun ChatPage(
                                                 (draft.isNotBlank() || attachments.isNotEmpty()) &&
                                                 (id == null || chat != null) &&
                                                 live.error == null
-                                        if (
-                                            active &&
-                                                editing == null &&
-                                                (draft.isNotBlank() || attachments.isNotEmpty())
-                                        )
+                                        // Without access a leftover draft cannot be sent, so
+                                        // stopping stays offered.
+                                        val hasDraft =
+                                            draft.isNotBlank() || attachments.isNotEmpty()
+                                        if (active && editing == null && hasDraft && !readOnly)
                                             RoundAction(
                                                 "Intervenir maintenant",
                                                 CairnIcons.Steer,
@@ -1766,8 +1766,7 @@ internal fun ChatPage(
                                             }
                                         if (
                                             (active || chat?.wakeup != null) &&
-                                                draft.isBlank() &&
-                                                attachments.isEmpty()
+                                                (!hasDraft || readOnly)
                                         )
                                             RoundAction(
                                                 "Arrêter",

@@ -312,8 +312,8 @@ impl Missions {
 
     /// Confirms the memberships unless a check within `age` already did. Observations stay
     /// under `authors`, consistent with grants and task saves; while another holds it (a
-    /// scheduling pass, a save), a member's request waits for that holder's own check
-    /// rather than for its whole work.
+    /// scheduling pass, a save), a member's request waits for that holder's own check or
+    /// for the lock, whichever comes first, rather than for the holder's whole work.
     pub(crate) async fn verify_membership(
         &self,
         s: &Service,
@@ -329,12 +329,18 @@ impl Missions {
         let authors = match self.authors.try_lock() {
             Ok(authors) => authors,
             Err(_) => {
-                if tokio::time::timeout(HOLDER_CHECK, observed).await.is_ok()
-                    && self.membership_verified_within(age)
-                {
-                    return Ok(());
+                let waited = tokio::time::timeout(HOLDER_CHECK, async {
+                    tokio::select! {
+                        () = observed.as_mut() => None,
+                        authors = self.authors.lock() => Some(authors),
+                    }
+                })
+                .await;
+                match waited {
+                    Ok(Some(authors)) => authors,
+                    Ok(None) if self.membership_verified_within(age) => return Ok(()),
+                    _ => self.authors.lock().await,
                 }
-                self.authors.lock().await
             }
         };
         // Another request may have checked while this one waited.

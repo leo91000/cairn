@@ -205,6 +205,10 @@ fn require_run(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result
         return require(uses_chat(db, identity, &chat)?, member(identity));
     }
     let run = required(db.run(id)?, "Run not found")?;
+    // An earlier run of a conversation still follows the conversation.
+    if let Some(chat) = db.get("chats", text(&run, "taskId"))? {
+        return require(uses_chat(db, identity, &chat)?, member(identity));
+    }
     require_agent(db, identity, crate::nodes::run_agent(&run))
 }
 
@@ -751,6 +755,36 @@ mod tests {
         direct(&s, start.clone()).await.unwrap();
         s.missions.expire_membership_check();
         assert_eq!(direct(&s, start).await.unwrap_err().0, 403);
+    }
+
+    #[tokio::test]
+    async fn a_request_does_not_wait_on_a_lock_holder_that_checks_no_membership() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(&root).await;
+        relay_fixture::claimed(&s).await.unwrap();
+        s.missions.expire_membership_check();
+
+        // A save or an idle scheduling pass holds the lock briefly and checks nothing.
+        let authors = s.missions.authors.lock().await;
+        let waiting = {
+            let s = s.clone();
+            tokio::spawn(async move {
+                s.missions
+                    .verify_membership(&s, std::time::Duration::from_secs(30))
+                    .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        drop(authors);
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("the request must take the lock once it is free")
+            .unwrap()
+            .unwrap();
+        assert!(
+            s.missions
+                .membership_verified_within(std::time::Duration::from_secs(30))
+        );
     }
 
     #[tokio::test]

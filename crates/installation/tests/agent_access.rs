@@ -184,21 +184,25 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
 
     let (_, chat) = owner(&s, "POST", "/api/chats", json!({ "agentId": reviewer })).await;
     let chat = chat["id"].as_str().unwrap().to_owned();
-    // A conversation's finished run, which a retry would start again.
+    // A conversation's finished runs, which a retry would start again: its current one
+    // and an earlier one, which still follows the conversation.
     let chat_run = cairn_installation::config::id();
-    let record = json!({
-        "id": chat_run,
-        "taskId": chat,
-        "createdAt": 0,
-        "status": "failed",
-        "nativeProvenanceUnknown": true,
-        "nativePrincipals": [],
-        "nativeAuthorityNodes": [],
-    });
-    s.store
-        .transaction(move |db| db.add_run_fixture(&record, None))
-        .await
-        .unwrap();
+    let earlier_run = cairn_installation::config::id();
+    for run in [&chat_run, &earlier_run] {
+        let record = json!({
+            "id": run,
+            "taskId": chat,
+            "createdAt": 0,
+            "status": "failed",
+            "nativeProvenanceUnknown": true,
+            "nativePrincipals": [],
+            "nativeAuthorityNodes": [],
+        });
+        s.store
+            .transaction(move |db| db.add_run_fixture(&record, None))
+            .await
+            .unwrap();
+    }
     let mut record = s.get("chats", &chat).await.unwrap();
     record["runId"] = chat_run.clone().into();
     s.store.put("chats", record).await.unwrap();
@@ -240,6 +244,7 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
         ("POST", format!("/api/runs/{run}/resume"), json!({})),
         ("POST", format!("/api/runs/{run}/chat"), json!({})),
         ("POST", format!("/api/runs/{chat_run}/retry"), json!({})),
+        ("POST", format!("/api/runs/{earlier_run}/retry"), json!({})),
         ("POST", format!("/api/chats/{chat}/restore"), json!({})),
         (
             "PUT",

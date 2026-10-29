@@ -1415,10 +1415,11 @@ function key(event: KeyboardEvent) {
                       :disabled="busy || readOnly || noAgent"
                     />
                   </div>
-                  <!-- As on Android: steer while typing during a reply, stop when the field is empty, otherwise send. -->
+                  <!-- As on Android: steer while typing during a reply, stop when the field is empty, otherwise send.
+                       Without access a leftover draft cannot be sent, so stopping stays offered. -->
                   <div class="flex shrink-0 items-center gap-1">
                     <button
-                      v-if="active && !editing && hasDraft"
+                      v-if="active && !editing && hasDraft && !readOnly"
                       type="button"
                       class="round-action bg-soft text-accent"
                       aria-label="Steer now"
@@ -1429,7 +1430,7 @@ function key(event: KeyboardEvent) {
                       <Icon :name="Zap" :size="16" />
                     </button>
                     <button
-                      v-if="(active || detail?.wakeup) && !editing && !hasDraft"
+                      v-if="(active || detail?.wakeup) && !editing && (!hasDraft || readOnly)"
                       type="button"
                       class="round-action border border-line text-coral"
                       :aria-label="scheduled ? 'Cancel scheduled wait' : 'Stop response'"
