@@ -555,7 +555,7 @@ test('plugin skill source candidates reset when its fields or the folder change'
     },
   }))
   const requests: Record<string, unknown>[] = []
-  await page.route(/\/skills\/global\/import$/, async (route) => {
+  await page.route(/\/skills\/import$/, async (route) => {
     requests.push(route.request().postDataJSON())
     await route.fulfill({ json: { imported: null, candidates: ['skills/first', 'skills/old-repo'] } })
   })

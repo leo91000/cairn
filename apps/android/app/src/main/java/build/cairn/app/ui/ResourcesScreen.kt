@@ -13,12 +13,14 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import build.cairn.contracts.CreateProjectInput
+import build.cairn.contracts.ImportProjectInput
 import build.cairn.contracts.ListPluginPackagesInput
 import build.cairn.contracts.ProjectInput
 import build.cairn.contracts.ProjectSettings
 import build.cairn.contracts.ReplaceProjectInput
 import build.cairn.contracts.createProject
 import build.cairn.contracts.deleteProject
+import build.cairn.contracts.importProject
 import build.cairn.contracts.listPluginPackages
 import build.cairn.contracts.replaceProject
 import kotlinx.serialization.json.*
@@ -245,7 +247,11 @@ internal fun ProjectEditor(
                         },
                         request = { method, route, payload ->
                             if (route == "/projects/import")
-                                api.send<JsonElement>(method, route, payload)
+                                wireJson.encodeToJsonElement(
+                                    api.importProject(
+                                        wireJson.decodeFromJsonElement<ImportProjectInput>(payload)
+                                    )
+                                )
                             else {
                                 val saved =
                                     if (method == "PUT")

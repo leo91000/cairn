@@ -1,0 +1,150 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "SkillDiffLine": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "default": "",
+          "pattern": "^(context|added|removed|gap)$",
+          "type": "string"
+        },
+        "text": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SkillSource": {
+      "additionalProperties": false,
+      "properties": {
+        "folder": {
+          "default": "",
+          "type": "string"
+        },
+        "importedAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "instance": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "default": "",
+          "type": "string"
+        },
+        "location": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": "object",
+          "x-cairn-json-object": true
+        },
+        "modified": {
+          "default": false,
+          "type": "boolean"
+        },
+        "pluginId": {
+          "default": "",
+          "type": "string"
+        },
+        "source": {
+          "default": "",
+          "type": "string"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "location"
+      ],
+      "type": "object"
+    },
+    "SkillSourceChange": {
+      "additionalProperties": false,
+      "properties": {
+        "binary": {
+          "default": false,
+          "type": "boolean"
+        },
+        "lines": {
+          "items": {
+            "$ref": "#/definitions/SkillDiffLine"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "path": {
+          "default": "",
+          "type": "string"
+        },
+        "status": {
+          "default": "",
+          "pattern": "^(added|removed|modified)$",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SkillSourceVersion": {
+      "additionalProperties": false,
+      "properties": {
+        "date": {
+          "default": "",
+          "type": "string"
+        },
+        "message": {
+          "default": "",
+          "type": "string"
+        },
+        "version": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "properties": {
+    "changes": {
+      "items": {
+        "$ref": "#/definitions/SkillSourceChange"
+      },
+      "type": "array"
+    },
+    "current": {
+      "type": "boolean"
+    },
+    "latest": {
+      "$ref": "#/definitions/SkillSourceVersion"
+    },
+    "source": {
+      "$ref": "#/definitions/SkillSource"
+    }
+  },
+  "required": [
+    "source",
+    "latest",
+    "current",
+    "changes"
+  ],
+  "title": "SkillSourceStatus",
+  "type": "object"
+}

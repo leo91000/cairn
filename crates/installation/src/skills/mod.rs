@@ -1,5 +1,6 @@
 pub mod bundle;
 pub mod diff;
+pub(crate) mod lifecycle;
 pub mod sources;
 mod usage;
 pub mod zip;
@@ -11,7 +12,6 @@ use crate::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bundle::{Base, Change};
-use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     os::unix::fs::PermissionsExt,
@@ -62,12 +62,7 @@ pub fn mentions(text: &str, names: &[&str]) -> Vec<String> {
     found
 }
 
-/// SKILL.md frontmatter.
-#[derive(Serialize)]
-pub(crate) struct Metadata {
-    name: String,
-    description: String,
-}
+pub(crate) use cairn_contracts::SkillMetadata as Metadata;
 
 pub(crate) fn metadata(content: &str) -> Result<Metadata> {
     if content.len() > 100000 {
@@ -104,41 +99,25 @@ pub fn parse(content: &str) -> Result<Value> {
     Ok(serde_json::to_value(metadata(content)?)?)
 }
 
-/// A skill directory as listed to the owner, including invalid ones.
-#[derive(Serialize)]
-struct Listing<'a> {
-    name: String,
-    description: String,
-    scope: &'a str,
-    path: String,
+fn read_listing(
+    listing: &mut cairn_contracts::Skill,
+    directory: &str,
+    path: &Path,
     content: String,
-    valid: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    files: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bytes: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    executables: Option<usize>,
-}
-
-impl Listing<'_> {
-    fn read(&mut self, directory: &str, path: &Path, content: String) {
-        self.path = path.to_string_lossy().into_owned();
-        match metadata(&content) {
-            Ok(parsed) => {
-                self.valid = parsed.name == directory;
-                if !self.valid {
-                    self.error = Some("Name differs from directory".into());
-                }
-                self.name = parsed.name;
-                self.description = parsed.description;
+) {
+    listing.path = path.to_string_lossy().into_owned();
+    match metadata(&content) {
+        Ok(parsed) => {
+            listing.valid = parsed.name == directory;
+            if !listing.valid {
+                listing.error = Some("Name differs from directory".into());
             }
-            Err(error) => self.error = Some(error.message),
+            listing.name = parsed.name;
+            listing.description = parsed.description;
         }
-        self.content = content;
+        Err(error) => listing.error = Some(error.message),
     }
+    listing.content = content;
 }
 
 pub fn relative(value: &str) -> Result<()> {
@@ -320,7 +299,7 @@ async fn expire(directory: &Path, age: i64) {
 }
 
 const HOUR: i64 = 3_600_000;
-const ARCHIVE_CHUNK: usize = 4 * 1024 * 1024;
+const ARCHIVE_CHUNK: usize = 512 * 1024;
 
 /// The frozen copy of a skill revision, when `revision` is a revision.
 pub fn frozen(config: &Config, revision: &str) -> Option<PathBuf> {
@@ -344,6 +323,7 @@ pub fn bundle_response(scope: &str, skill: &str, described: &bundle::Described) 
 #[derive(Clone)]
 pub struct Skills {
     pub config: Config,
+    pub(crate) mutations: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Skills {
@@ -386,10 +366,10 @@ impl Skills {
             if !entry.file_type().await?.is_dir() || directory.starts_with('.') {
                 continue;
             }
-            let mut listing = Listing {
+            let mut listing = cairn_contracts::Skill {
                 name: directory.clone(),
                 description: "Invalid skill".into(),
-                scope,
+                scope: scope.to_owned(),
                 path: root
                     .join(&directory)
                     .join("SKILL.md")
@@ -398,9 +378,11 @@ impl Skills {
                 content: String::new(),
                 valid: false,
                 error: None,
-                files: None,
-                bytes: None,
-                executables: None,
+                files: 0,
+                bytes: 0,
+                executables: 0,
+                usage_count: 0,
+                source: None,
             };
             let read = async {
                 name(&directory)?;
@@ -410,14 +392,15 @@ impl Skills {
             }
             .await;
             match read {
-                Ok((path, content)) => listing.read(&directory, &path, content),
+                Ok((path, content)) => read_listing(&mut listing, &directory, &path, content),
                 Err(error) => listing.error = Some(error.message),
             }
             match bundle::scan(&root.join(&directory)).await {
                 Ok(files) => {
-                    listing.files = Some(files.len());
-                    listing.bytes = Some(files.iter().map(|file| file.size).sum());
-                    listing.executables = Some(files.iter().filter(|file| file.executable).count());
+                    listing.files = files.len() as u32;
+                    listing.bytes = files.iter().map(|file| file.size).sum();
+                    listing.executables =
+                        files.iter().filter(|file| file.executable).count() as u32;
                 }
                 Err(error) => {
                     listing.valid = false;
@@ -763,12 +746,13 @@ impl Skills {
     }
 
     /// Creates a skill from a staged `.zip` or `.skill` archive.
-    pub async fn import_archive(
+    pub(crate) async fn import_archive(
         &self,
         scope: &str,
         upload: &str,
         requested: Option<&str>,
         project: Option<&Path>,
+        authorization: bundle::Authorization,
     ) -> Result<Value> {
         let archive = self.upload(upload).await?;
         let entries = zip::entries(&archive)?;
@@ -807,7 +791,9 @@ impl Skills {
         }
 
         let skill = imported_name(&changes)?;
-        let saved = self.apply(&skill, None, &changes, project).await?;
+        let saved = self
+            .apply_authorized(&skill, None, &changes, project, Some(authorization))
+            .await?;
         self.discard(&[upload.to_owned()]).await;
         Ok(json!({
             "imported": bundle_response(scope, &skill, &saved),

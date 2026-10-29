@@ -24,6 +24,7 @@ fn main() {
     let root = Path::new(&root);
     fs::create_dir_all(root).unwrap();
     let mut generator = SchemaSettings::draft07().for_serialize().into_generator();
+    export::<ReadSkillInput>(root, &mut generator, Contract::Deserialize);
     export::<SkillInput>(root, &mut generator, Contract::Deserialize);
     export::<ListSkillsInput>(root, &mut generator, Contract::Deserialize);
     export::<Skill>(root, &mut generator, Contract::Deserialize);
@@ -54,7 +55,134 @@ fn main() {
     export::<ListSourceProjectsInput>(root, &mut generator, Contract::Deserialize);
     export::<PluginProject>(root, &mut generator, Contract::Deserialize);
     export::<PluginProjectPage>(root, &mut generator, Contract::Deserialize);
-    fs::write(root.join("skill-clients.json"), serde_json::to_string_pretty(&serde_json::json!([{"name": "listSkills", "input": "ListSkillsInput", "output": "Skill", "method": "GET", "path": "/skills", "query": ["scope"], "array": true}, {"name": "readSkillBundle", "input": "SkillInput", "output": "SkillBundle", "method": "GET", "path": "/skills/{scope}/{name}/bundle", "query": [], "array": false}, {"name": "readSkillFile", "input": "ReadSkillFileInput", "output": "SkillFileContent", "method": "GET", "path": "/skills/{scope}/{name}/file", "query": ["path"], "array": false}, {"name": "editSkillFiles", "input": "EditSkillFilesInput", "output": "SkillBundle", "method": "POST", "path": "/skills/{scope}/{name}/bundle", "query": [], "array": false}, {"name": "saveSkill", "input": "SaveSkillInput", "output": "SkillMetadata", "method": "PUT", "path": "/skills/{scope}/{name}", "query": [], "array": false}, {"name": "importSkill", "input": "ImportSkillInput", "output": "SkillImport", "method": "POST", "path": "/skills/{scope}/import", "query": [], "array": false}, {"name": "deleteSkill", "input": "SkillInput", "output": "DeleteSkillOutput", "method": "DELETE", "path": "/skills/{scope}/{name}", "query": [], "array": false}, {"name": "exportSkillArchive", "input": "ExportSkillArchiveInput", "output": "SkillArchiveChunk", "method": "GET", "path": "/skills/{scope}/{name}/archive", "query": ["offset", "revision"], "array": false}, {"name": "getSkillSourceStatus", "input": "SkillInput", "output": "SkillSourceStatus", "method": "GET", "path": "/skills/{scope}/{name}/source", "query": [], "array": false}, {"name": "updateSkillSource", "input": "UpdateSkillSourceInput", "output": "SkillBundle", "method": "POST", "path": "/skills/{scope}/{name}/source/update", "query": [], "array": false}, {"name": "forgetSkillSource", "input": "SkillInput", "output": "ForgetSkillSourceOutput", "method": "DELETE", "path": "/skills/{scope}/{name}/source", "query": [], "array": false}, {"name": "stageSkillUpload", "input": "StageSkillUploadInput", "output": "SkillUpload", "method": "POST", "path": "/skills/stage", "query": [], "array": false}, {"name": "importProject", "input": "ImportProjectInput", "output": "Project", "method": "POST", "path": "/projects/import", "query": [], "array": false}, {"name": "listSourceProjects", "input": "ListSourceProjectsInput", "output": "PluginProjectPage", "method": "GET", "path": "/plugins/{pluginId}/projects", "query": ["source", "instance", "page", "query"], "array": false}])).unwrap() + "\n").unwrap();
+    let skill_clients = serde_json::json!([
+        {
+            "name": "listSkills",
+            "input": "ListSkillsInput",
+            "output": "Skill",
+            "method": "GET",
+            "path": "/skills",
+            "query": [
+                "scope"
+            ],
+            "optionalQuery": [
+                "scope"
+            ],
+            "array": true
+        },
+        {
+            "name": "readSkillBundle",
+            "input": "SkillInput",
+            "output": "SkillBundle",
+            "method": "GET",
+            "path": "/skills/{scope}/{name}/bundle"
+        },
+        {
+            "name": "readSkillFile",
+            "input": "ReadSkillFileInput",
+            "output": "SkillFileContent",
+            "method": "GET",
+            "path": "/skills/{scope}/{name}/file",
+            "query": [
+                "path"
+            ]
+        },
+        {
+            "name": "editSkillFiles",
+            "input": "EditSkillFilesInput",
+            "output": "SkillBundle",
+            "method": "POST",
+            "path": "/skills/{scope}/{name}/bundle"
+        },
+        {
+            "name": "saveSkill",
+            "input": "SaveSkillInput",
+            "output": "SkillMetadata",
+            "method": "PUT",
+            "path": "/skills/{scope}/{name}"
+        },
+        {
+            "name": "importSkill",
+            "input": "ImportSkillInput",
+            "output": "SkillImport",
+            "method": "POST",
+            "path": "/skills/import"
+        },
+        {
+            "name": "deleteSkill",
+            "input": "SkillInput",
+            "output": "DeleteSkillOutput",
+            "method": "DELETE",
+            "path": "/skills/{scope}/{name}"
+        },
+        {
+            "name": "exportSkillArchive",
+            "input": "ExportSkillArchiveInput",
+            "output": "SkillArchiveChunk",
+            "method": "GET",
+            "path": "/skills/{scope}/{name}/archive",
+            "query": [
+                "offset",
+                "revision"
+            ],
+            "optionalQuery": [
+                "revision"
+            ]
+        },
+        {
+            "name": "getSkillSourceStatus",
+            "input": "SkillInput",
+            "output": "SkillSourceStatus",
+            "method": "GET",
+            "path": "/skills/{scope}/{name}/source"
+        },
+        {
+            "name": "updateSkillSource",
+            "input": "UpdateSkillSourceInput",
+            "output": "SkillBundle",
+            "method": "POST",
+            "path": "/skills/{scope}/{name}/source/update"
+        },
+        {
+            "name": "forgetSkillSource",
+            "input": "SkillInput",
+            "output": "ForgetSkillSourceOutput",
+            "method": "DELETE",
+            "path": "/skills/{scope}/{name}/source"
+        },
+        {
+            "name": "stageSkillUpload",
+            "input": "StageSkillUploadInput",
+            "output": "SkillUpload",
+            "method": "POST",
+            "path": "/skills/stage"
+        },
+        {
+            "name": "importProject",
+            "input": "ImportProjectInput",
+            "output": "Project",
+            "method": "POST",
+            "path": "/projects/import"
+        },
+        {
+            "name": "listSourceProjects",
+            "input": "ListSourceProjectsInput",
+            "output": "PluginProjectPage",
+            "method": "GET",
+            "path": "/plugins/{pluginId}/projects",
+            "query": [
+                "source",
+                "instance",
+                "page",
+                "query"
+            ]
+        }
+    ]);
+    fs::write(
+        root.join("skill-clients.json"),
+        serde_json::to_string_pretty(&skill_clients).unwrap() + "\n",
+    )
+    .unwrap();
     export::<CodingAgentAccount>(root, &mut generator, Contract::Deserialize);
     export::<CodingAgentAccounts>(root, &mut generator, Contract::Deserialize);
     export::<AccountUsage>(root, &mut generator, Contract::Deserialize);

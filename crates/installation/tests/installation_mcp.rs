@@ -1269,6 +1269,19 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "get_storage_settings",
         "save_storage_settings",
         "check_storage",
+        "import_project",
+        "list_source_projects",
+        "list_skills",
+        "read_skill",
+        "save_skill",
+        "edit_skill_files",
+        "stage_skill_upload",
+        "import_skill",
+        "delete_skill",
+        "export_skill_archive",
+        "get_skill_source_status",
+        "update_skill_source",
+        "forget_skill_source",
     ]);
     assert_eq!(installed_names, public_names);
     assert!(tools.iter().all(|tool| tool.get("_meta").is_none()));
@@ -1872,8 +1885,8 @@ async fn installation_access_can_save_global_and_project_skills() {
         let mut args = json!({ "name": "independent-review", "content": content });
         let mut list = json!({});
         if let Some(project_id) = scope {
-            args["projectId"] = project_id.clone();
-            list["projectId"] = project_id;
+            args["scope"] = project_id.clone();
+            list["scope"] = project_id;
         }
         let saved = call(&s, &configuration, "save_skill", args).await;
         result(&saved);
@@ -5475,4 +5488,274 @@ async fn installation_settings_audit_and_storage_match_on_every_surface() {
             .unwrap()
             .contains("manage")
     );
+}
+
+#[tokio::test]
+async fn skill_lifecycle_matches_http_public_and_installation_without_granting_access() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use cairn_installation::skills::zip;
+
+    for internal in [false, true] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        let manager = s.agent_fixture(json!({"name": "Resource manager", "access": {"installation": true, "projects": [], "skills": []}}), None).await.unwrap();
+        let (_, configuration) = active_run(&s, &manager).await;
+        let invoke = |name: &'static str, input: Value| {
+            let s = s.clone();
+            let configuration = configuration.clone();
+            async move {
+                if internal {
+                    call(&s, &configuration, name, input).await
+                } else {
+                    public_call(&s, &["read", "manage"], name, input).await
+                }
+            }
+        };
+        let manifest = b"---\nname: review\ndescription: Review changes\n---\nReview.";
+        let archive = zip::write(&[zip::File {
+            path: "review/SKILL.md",
+            bytes: manifest,
+            executable: false,
+        }])
+        .unwrap();
+        let staged = invoke(
+            "stage_skill_upload",
+            json!({"content": STANDARD.encode(&archive)}),
+        )
+        .await;
+        let upload = result(&staged)["id"].clone();
+        let imported = invoke(
+            "import_skill",
+            json!({"source": "archive", "scope": "global", "upload": upload}),
+        )
+        .await;
+        let bundle = result(&imported)["imported"].clone();
+        assert_eq!(bundle["name"], "review");
+        let http =
+            common::owner_api_route(&s, "GET", "/api/skills/global/review/bundle", Value::Null)
+                .await
+                .unwrap();
+        assert_eq!(http, bundle);
+        let chunk = invoke(
+            "export_skill_archive",
+            json!({"scope": "global", "name": "review", "offset": 0}),
+        )
+        .await;
+        let chunk = result(&chunk);
+        assert_eq!(STANDARD.decode(text(chunk, "content")).unwrap(), archive);
+        let stale = invoke("edit_skill_files", json!({"scope": "global", "name": "review", "base": "stale", "changes": [{"op":"delete", "path":"SKILL.md"}]})).await;
+        assert_eq!(stale["result"]["isError"], true);
+        let missing = invoke(
+            "get_skill_source_status",
+            json!({"scope": "global", "name": "review"}),
+        )
+        .await;
+        assert_eq!(missing["result"]["isError"], true);
+        let forgotten = invoke(
+            "forget_skill_source",
+            json!({"scope": "global", "name": "review"}),
+        )
+        .await;
+        assert_eq!(result(&forgotten)["detached"], true);
+        let task = s.task_fixture(json!({"name":"Uses review", "prompt":"Review", "agentId": MAIN_AGENT_ID, "skills":["global/review"], "worktree":false}), None).await.unwrap();
+        let refused = invoke("delete_skill", json!({"scope":"global", "name":"review"})).await;
+        assert_eq!(refused["result"]["isError"], true);
+        common::owner_api_route(
+            &s,
+            "DELETE",
+            &format!("/api/tasks/{}", text(&task, "id")),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        let deleted = invoke("delete_skill", json!({"scope":"global", "name":"review"})).await;
+        assert_eq!(result(&deleted)["deleted"], true);
+        let current = s.store.agent(text(&manager, "id")).await.unwrap().unwrap();
+        assert_eq!(
+            current.settings.access,
+            serde_json::from_value::<cairn_contracts::Agent>(manager)
+                .unwrap()
+                .settings
+                .access
+        );
+        let denied = public_call(
+            &s,
+            &["read"],
+            "stage_skill_upload",
+            json!({"content":STANDARD.encode(&archive)}),
+        )
+        .await;
+        assert_eq!(denied["result"]["isError"], true);
+        let malformed = invoke("stage_skill_upload", json!({"content": "not-base64"})).await;
+        assert_eq!(malformed["result"]["isError"], true);
+    }
+}
+
+#[tokio::test]
+async fn resource_sources_require_the_calling_agents_existing_instance_grant() {
+    use common::github::{self, Github};
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let github = Github::start(root.path()).await;
+    github.attach(&s);
+    let main = enabled_main(&s).await;
+    let instance = github::instance(&s, "Private account", "synthetic-resource-secret", &[]).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    for (name, input) in [
+        (
+            "list_source_projects",
+            json!({"pluginId":"github", "source":"repositories", "instance":instance}),
+        ),
+        (
+            "import_project",
+            json!({"pluginId":"github", "source":"repositories", "instance":instance, "id":"fixture/repo"}),
+        ),
+        (
+            "import_skill",
+            json!({"source":"plugin", "scope":"global", "pluginId":"github", "skillSource":"repository", "instance":instance, "location":{"repository":"fixture/skills"}}),
+        ),
+    ] {
+        let response = call(&s, &configuration, name, input).await;
+        assert_eq!(response["result"]["isError"], true, "{name}: {response}");
+        assert!(!response.to_string().contains("synthetic-resource-secret"));
+    }
+    assert!(
+        github.api_calls().is_empty(),
+        "Unapproved sources must not call the provider."
+    );
+    assert!(s.store.projects().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_tools_share_status_updates_and_fence_instance_revocation_during_download() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use common::github::{self, Github};
+    for internal in [false, true] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        let github = Github::start(root.path()).await;
+        github.attach(&s);
+        enabled_main(&s).await;
+        let instance = github::instance(
+            &s,
+            "Source account",
+            "synthetic-source-credential",
+            &[MAIN_AGENT_ID],
+        )
+        .await;
+        let main = s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
+        let (_, configuration) = active_run(&s, &main).await;
+        let invoke = |name: &'static str, input: Value| {
+            let s = s.clone();
+            let configuration = configuration.clone();
+            async move {
+                if internal {
+                    call(&s, &configuration, name, input).await
+                } else {
+                    public_call(&s, &["read", "manage"], name, input).await
+                }
+            }
+        };
+        let first = "1".repeat(40);
+        let second = "2".repeat(40);
+        let manifest = "---\nname: review\ndescription: Review source\n---\nReview.";
+        for (version, tree, blob, content) in [
+            (&first, "3".repeat(40), "a".repeat(40), manifest.to_owned()),
+            (
+                &second,
+                "4".repeat(40),
+                "b".repeat(40),
+                format!("{manifest}\nUpdated."),
+            ),
+        ] {
+            github.respond(&format!("repos/fixture/skills/commits/{version}"), &json!({"sha":version,"commit":{"tree":{"sha":tree},"message":"Release","committer":{"date":"2026-10-01"}}}));
+            github.respond(&format!("repos/fixture/skills/git/trees/{tree}?recursive=1"), &json!({"tree":[{"path":"SKILL.md","type":"blob","mode":"100644","sha":blob,"size":content.len()}],"truncated":false}));
+            github.respond(
+                &format!("repos/fixture/skills/git/blobs/{blob}"),
+                &json!({"content":STANDARD.encode(content),"encoding":"base64"}),
+            );
+        }
+        github.respond("repos/fixture/skills/commits/main", &json!({"sha":first,"commit":{"tree":{"sha":"3".repeat(40)},"message":"Release","committer":{"date":"2026-10-01"}}}));
+        let imported = invoke("import_skill", json!({"source":"plugin","scope":"global","pluginId":"github","skillSource":"repository","instance":instance,"location":{"repository":"fixture/skills","ref":"main"}})).await;
+        let base = result(&imported)["imported"]["revision"].clone();
+        assert!(!imported.to_string().contains("synthetic-source-credential"));
+        github.respond("repos/fixture/skills/commits/main", &json!({"sha":second,"commit":{"tree":{"sha":"4".repeat(40)},"message":"Release","committer":{"date":"2026-10-01"}}}));
+        let status = invoke(
+            "get_skill_source_status",
+            json!({"scope":"global","name":"review"}),
+        )
+        .await;
+        assert_eq!(result(&status)["current"], false);
+        assert_eq!(result(&status)["latest"]["version"], second);
+        assert_eq!(result(&status)["changes"][0]["status"], "modified");
+        let started = root.path().join("source-started");
+        let released = root.path().join("source-released");
+        github.state(&json!({"gate":{"path":format!("repos/fixture/skills/git/blobs/{}", "b".repeat(40)),"started":started,"released":released}}));
+        let pending = invoke(
+            "update_skill_source",
+            json!({"scope":"global","name":"review","base":base,"version":second}),
+        );
+        let pending = tokio::spawn(pending);
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while !started.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let id = instance.clone();
+        s.store
+            .transaction(move |db| {
+                let mut connection = db.plugin_instance(&id)?.unwrap();
+                connection.enabled = false;
+                connection.revision = uuid::Uuid::new_v4().to_string();
+                db.save_plugin_instance(&connection)
+            })
+            .await
+            .unwrap();
+        std::fs::write(&released, "release").unwrap();
+        let response = pending.await.unwrap();
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        let current =
+            common::owner_api_route(&s, "GET", "/api/skills/global/review/bundle", Value::Null)
+                .await
+                .unwrap();
+        assert_eq!(current["revision"], base);
+        assert_eq!(current["source"]["version"], first);
+        let id = instance.clone();
+        s.store
+            .transaction(move |db| {
+                let mut connection = db.plugin_instance(&id)?.unwrap();
+                connection.enabled = true;
+                connection.revision = uuid::Uuid::new_v4().to_string();
+                db.save_plugin_instance(&connection)
+            })
+            .await
+            .unwrap();
+        let updated = invoke(
+            "update_skill_source",
+            json!({"scope":"global","name":"review","base":base,"version":second}),
+        )
+        .await;
+        assert_eq!(result(&updated)["source"]["version"], second);
+        let detached = invoke(
+            "forget_skill_source",
+            json!({"scope":"global","name":"review"}),
+        )
+        .await;
+        assert_eq!(result(&detached)["detached"], true);
+        assert_eq!(
+            s.store
+                .agent(MAIN_AGENT_ID)
+                .await
+                .unwrap()
+                .unwrap()
+                .settings
+                .plugins,
+            serde_json::from_value::<cairn_contracts::Agent>(main)
+                .unwrap()
+                .settings
+                .plugins
+        );
+    }
 }

@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import type { SkillBundle, SkillSource, SkillSourceStatus } from '../../../../packages/contracts/contracts'
 import { computed, ref } from 'vue'
+import { forgetSkillSource } from '../../../../packages/contracts/generated/forgetSkillSource'
+import { getSkillSourceStatus } from '../../../../packages/contracts/generated/getSkillSourceStatus'
+import { updateSkillSource } from '../../../../packages/contracts/generated/updateSkillSource'
 import { api, ApiError, date } from '../api'
 import {
   ArrowUpRight,
@@ -39,7 +42,6 @@ const busy = ref<'' | 'check' | 'update' | 'detach'>('')
 const error = ref('')
 const confirmUpdate = ref(false)
 const confirmDetach = ref(false)
-const base = computed(() => `/skills/${encodeURIComponent(props.scope)}/${encodeURIComponent(props.name)}/source`)
 const risky = computed(() => props.source.modified || props.unsaved > 0)
 
 async function run(kind: 'check' | 'update' | 'detach', action: () => Promise<void>) {
@@ -64,7 +66,7 @@ async function run(kind: 'check' | 'update' | 'detach', action: () => Promise<vo
 
 function check() {
   return run('check', async () => {
-    status.value = await api<SkillSourceStatus>(base.value)
+    status.value = await getSkillSourceStatus(api, { scope: props.scope, name: props.name })
   })
 }
 
@@ -75,9 +77,11 @@ function update() {
   }
 
   return run('update', async () => {
-    const bundle = await api<SkillBundle>(`${base.value}/update`, {
-      method: 'POST',
-      body: JSON.stringify({ version: status.value!.latest.version, base: props.revision }),
+    const bundle = await updateSkillSource(api, {
+      scope: props.scope,
+      name: props.name,
+      version: status.value!.latest.version,
+      base: props.revision,
     })
     status.value = undefined
     confirmUpdate.value = false
@@ -92,7 +96,7 @@ function detach() {
   }
 
   return run('detach', async () => {
-    await api(base.value, { method: 'DELETE' })
+    await forgetSkillSource(api, { scope: props.scope, name: props.name })
     confirmDetach.value = false
     emit('detached')
   })

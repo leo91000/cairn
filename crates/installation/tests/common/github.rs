@@ -69,6 +69,14 @@ impl Github {
         std::fs::write(self.root.join("github-state.json"), value.to_string()).unwrap();
     }
 
+    pub fn blob_size(&self, id: &str) -> usize {
+        let name = format!("repos_fixture_skills_git_blobs_{id}");
+        let response: Value =
+            serde_json::from_slice(&std::fs::read(self.root.join("github").join(name)).unwrap())
+                .unwrap();
+        STANDARD.decode(text(&response, "content")).unwrap().len()
+    }
+
     /// Answers `endpoint` (as `repos/x/y?recursive=1`) with `value`.
     pub fn respond(&self, endpoint: &str, value: &Value) {
         let name = endpoint.replace(['/', '?', '=', '%'], "_");

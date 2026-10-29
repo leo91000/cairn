@@ -700,6 +700,26 @@ pub async fn plugin_questions(
     .await
 }
 
+pub async fn owner_api_route(
+    s: &Arc<Service>,
+    method: &str,
+    path: &str,
+    body: Value,
+) -> cairn_installation::error::Result<Value> {
+    let input = cairn_installation::http::Input {
+        method: method.into(),
+        path: path.into(),
+        body,
+        query: std::collections::HashMap::new(),
+        headers: axum::http::HeaderMap::new(),
+        identity: Some(cairn_installation::auth::InstallationIdentity::trusted(
+            cairn_installation::auth::InstallationRole::Owner,
+            "fixture-owner",
+        )),
+    };
+    cairn_installation::api::dispatch(s, &input).await
+}
+
 pub async fn owner_plugin_route(
     s: &Arc<Service>,
     method: &str,

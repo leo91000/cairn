@@ -462,28 +462,9 @@ fun PluginCatalog.skillSources(): List<SkillSourceChoice> =
         }
         .filter { it.instances.isNotEmpty() }
 
-/** One project a plugin's project source offers for import. */
-@Serializable
-data class PluginProject(
-    val id: String = "",
-    val name: String = "",
-    val description: String = "",
-    val defaultBranch: String = "",
-    /** The plugin's short labels, e.g. "Private", "Fork", "Rust". */
-    val badges: List<String> = emptyList(),
-    val updatedAt: String? = null,
-    val url: String? = null,
-    /** Already registered: shown, not selectable. */
-    val imported: Boolean = false,
-    /** The name a project imported from this item takes. */
-    val projectName: String? = null,
-)
+typealias PluginProject = build.cairn.contracts.PluginProject
 
-@Serializable
-data class PluginProjectPage(
-    val items: List<PluginProject> = emptyList(),
-    val nextPage: Int? = null,
-)
+typealias PluginProjectPage = build.cairn.contracts.PluginProjectPage
 
 /**
  * A loaded project matches when every word typed appears in its name, identifier, description or
@@ -499,7 +480,3 @@ private fun searchable(value: String) =
     java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFD)
         .replace(Regex("\\p{M}+"), "")
         .lowercase()
-
-/** `GET /plugins/{id}/projects` for one page of a source, through one instance. */
-fun pluginProjectsPath(pluginId: String, source: String, instance: String, page: Int): String =
-    "/plugins/${segment(pluginId)}/projects?source=${segment(source)}&instance=${segment(instance)}&page=$page"

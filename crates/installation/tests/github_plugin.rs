@@ -13,7 +13,7 @@ mod common;
 use cairn_installation::{
     config::MAIN_AGENT_ID,
     execution,
-    plugins::{connections, device_flow, projects, registry, run_credentials},
+    plugins::{connections, device_flow, registry, run_credentials},
     project_workspaces, run_output,
     service::Service,
     validation::text,
@@ -40,6 +40,7 @@ async fn fixture() -> Fixture {
     .await
     .unwrap();
     github.attach(&s);
+    common::relay_fixture::claimed(&s).await.unwrap();
     Fixture { root, s, github }
 }
 
@@ -454,11 +455,13 @@ async fn repositories_are_listed_and_imported_with_the_instance() {
         query: serde_urlencoded::from_str(query).unwrap(),
         headers: axum::http::HeaderMap::default(),
         body: Value::Null,
-        identity: None,
+        identity: Some(cairn_installation::auth::InstallationIdentity::trusted(
+            cairn_installation::auth::InstallationRole::Owner,
+            "fixture-owner",
+        )),
     };
-    let page = projects::list(
+    let page = cairn_installation::api::dispatch(
         &f.s,
-        "github",
         &input(&format!("source=repositories&instance={instance}")),
     )
     .await
@@ -473,7 +476,9 @@ async fn repositories_are_listed_and_imported_with_the_instance() {
     assert!(page["nextPage"].is_null());
 
     let request = json!({ "pluginId": "github", "source": "repositories", "instance": instance, "id": "fixture/repo" });
-    let project = projects::import(&f.s, &request).await.unwrap();
+    let project = common::owner_api_route(&f.s, "POST", "/api/projects/import", request.clone())
+        .await
+        .unwrap();
     assert_eq!(project["name"], "repo");
     assert_eq!(project["baseBranch"], "trunk");
     assert_eq!(project["source"]["pluginId"], "github");
@@ -485,12 +490,13 @@ async fn repositories_are_listed_and_imported_with_the_instance() {
     );
     // Imports are idempotent and the listing marks the repository.
     assert_eq!(
-        projects::import(&f.s, &request).await.unwrap()["id"],
+        common::owner_api_route(&f.s, "POST", "/api/projects/import", request.clone())
+            .await
+            .unwrap()["id"],
         project["id"]
     );
-    let page = projects::list(
+    let page = cairn_installation::api::dispatch(
         &f.s,
-        "github",
         &input(&format!("source=repositories&instance={instance}")),
     )
     .await
@@ -500,7 +506,10 @@ async fn repositories_are_listed_and_imported_with_the_instance() {
     unknown["source"] = "elsewhere".into();
     unknown["id"] = "fixture/other".into();
     assert_eq!(
-        projects::import(&f.s, &unknown).await.unwrap_err().status,
+        common::owner_api_route(&f.s, "POST", "/api/projects/import", unknown)
+            .await
+            .unwrap_err()
+            .status,
         404
     );
 }

@@ -17,6 +17,7 @@ import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { createProject } from '../../../../packages/contracts/generated/createProject'
 import { deleteAgent } from '../../../../packages/contracts/generated/deleteAgent'
 import { deleteProject } from '../../../../packages/contracts/generated/deleteProject'
+import { importProject } from '../../../../packages/contracts/generated/importProject'
 import { listPluginPackages } from '../../../../packages/contracts/generated/listPluginPackages'
 import { replaceProject } from '../../../../packages/contracts/generated/replaceProject'
 import { accessSummary } from '../agent-access'
@@ -171,7 +172,7 @@ function edit(item?: Project) {
 
 async function projectRequest<T>(path: string, options: RequestInit): Promise<T> {
   if (path === '/projects/import')
-    return api<T>(path, options)
+    return await importProject(api, JSON.parse(options.body as string)) as T
   const payload = JSON.parse(options.body as string)
   const saved = options.method === 'PUT'
     ? await replaceProject(api, { projectId: editing.value!, revision: revision.value, settings: form.value })

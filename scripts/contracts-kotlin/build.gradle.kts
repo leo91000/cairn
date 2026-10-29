@@ -24,6 +24,8 @@ sourceSets.test {
 
 tasks.test {
     inputs.file(rootProject.file("../../tests/fixtures/questions-waits-contracts.json"))
+
+    inputs.file(rootProject.file("../../tests/fixtures/skill-contracts.json"))
     inputs.file(rootProject.file("../../tests/fixtures/model-contracts.json"))
     val codingAgentAccounts =
         rootProject.file("../../tests/fixtures/coding-agent-account-contracts.json")

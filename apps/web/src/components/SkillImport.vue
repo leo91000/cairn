@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import type { SkillBundle, SkillImport } from '../../../../packages/contracts/contracts'
+import type { SkillBundle } from '../../../../packages/contracts/contracts'
+import type { ImportSkillInput } from '../../../../packages/contracts/generated/typescript/ImportSkillInput'
 import type { Catalog } from '../plugins'
 import {
   computed,
@@ -7,6 +8,7 @@ import {
   ref,
   watch,
 } from 'vue'
+import { importSkill } from '../../../../packages/contracts/generated/importSkill'
 import { listPluginPackages } from '../../../../packages/contracts/generated/listPluginPackages'
 import { api, ApiError, state } from '../api'
 import {
@@ -136,7 +138,7 @@ async function submit() {
   const requestedFolder = candidate.value || (chosen ? folder.value.trim().replace(/^\/+|\/+$/g, '') : '')
   busy.value = chosen ? `Fetching from ${chosen.pluginName}…` : 'Uploading archive…'
   try {
-    let body: Record<string, unknown>
+    let body: ImportSkillInput
     if (!chosen) {
       // Uploads are consumed only by a successful import, so a candidate pick reuses this one.
       if (!upload.value || upload.value.file !== submittedArchive) {
@@ -145,13 +147,17 @@ async function submit() {
         upload.value = { id: staged.id, file: submittedArchive! }
       }
 
-      body = { source: 'archive', upload: upload.value.id }
-      if (requestedFolder)
-        body.path = requestedFolder
+      body = {
+        source: 'archive',
+        scope: destination,
+        upload: upload.value.id,
+        ...(requestedFolder ? { path: requestedFolder } : {}),
+      }
     }
     else {
       body = {
         source: 'plugin',
+        scope: destination,
         pluginId: chosen.pluginId,
         skillSource: chosen.source,
         ...(instance.value ? { instance: instance.value } : {}),
@@ -161,7 +167,7 @@ async function submit() {
     }
 
     busy.value = chosen ? `Fetching from ${chosen.pluginName}…` : 'Importing…'
-    const result = await api<SkillImport>(`/skills/${encodeURIComponent(destination)}/import`, { method: 'POST', body: JSON.stringify(body) })
+    const result = await importSkill(api, body)
     if (result.imported) {
       emit('imported', result.imported)
       return

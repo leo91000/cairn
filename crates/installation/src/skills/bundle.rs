@@ -145,6 +145,7 @@ async fn read_all_locked(directory: &Path) -> Result<(String, Vec<(Entry, Vec<u8
 }
 
 /// A skill's files with their revision.
+#[derive(Clone)]
 pub struct Described {
     pub revision: String,
     pub files: Vec<Value>,
@@ -498,7 +499,7 @@ pub async fn save(
 
 pub(crate) type Authorization = (
     crate::store::Store,
-    Box<dyn FnOnce(&crate::store::Db<'_>) -> Result<()> + Send>,
+    Box<dyn FnOnce(&crate::store::Db<'_>, &Described) -> Result<()> + Send>,
 );
 
 pub(crate) async fn save_authorized(
@@ -550,10 +551,11 @@ pub(crate) async fn save_authorized(
         validate(&staging, skill, before).await?;
         let described = describe_locked(&staging).await?;
         let prepared = staging.clone();
+        let publication = described.clone();
         if let Some((store, authorize)) = authorization {
             store
                 .transaction(move |db| {
-                    authorize(db)?;
+                    authorize(db, &publication)?;
                     swap(&prepared, &directory, exists)
                 })
                 .await?;
