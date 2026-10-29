@@ -9,8 +9,8 @@ d’[ADR-0046](0046-plugin-transports-and-forms-in-luau.md),
 d’[ADR-0051](0051-agent-centric-permissions.md),
 d’[ADR-0057](0057-guided-plugin-setup.md), d’[ADR-0059](0059-delegated-tasks.md) et
 d’[ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) ; remplace en partie les
-droits par instance d’[ADR-0045](0045-declarative-plugin-contributions.md),
-d’[ADR-0051](0051-agent-centric-permissions.md) et
+droits par instance d’[ADR-0045](0045-declarative-plugin-contributions.md) et
+d’[ADR-0051](0051-agent-centric-permissions.md), l’édition des droits
 d’[ADR-0056](0056-plugin-oauth-file-transfers-and-gmail.md), la couverture des tâches
 déléguées d’[ADR-0059](0059-delegated-tasks.md), la règle d’une instance par package
 et celle de l’agent ouvert à tout le monde
@@ -223,7 +223,7 @@ indépendamment des autres :
 | Désactivée | son créateur, ou une duplication (le duplicata démarre ainsi) ; arrête les déclenchements en cours | son créateur |
 | Pause d’urgence | le propriétaire ; arrête aussi les déclenchements en cours | le propriétaire |
 | Budget épuisé | un plafond horaire dépassé ; le créateur est prévenu | son créateur ou le propriétaire |
-| Droits perdus | le créateur perd l’accès à l’agent d’exécution, ou cet agent le hook de plugin écouté | le retour du droit, de lui-même, ou le créateur qui choisit un autre agent d’exécution |
+| Droits perdus | le créateur perd l’accès à l’agent d’exécution ou à un agent que la règle démarre, ou l’agent d’exécution perd le hook de plugin écouté | le retour du droit, de lui-même, ou le créateur qui choisit un autre agent d’exécution |
 | Adhésion terminée | le créateur est retiré, part ou est supprimé ; le réinviter n’y change rien | jamais : il reste à dupliquer |
 
 Un agent qui a l’accès à l’installation n’écrit des règles que dans une conversation
@@ -240,17 +240,19 @@ des instructions ou des skills qu’un agent a écrites, à quelque moment que c
 (les instructions d’un plugin comptent comme écrites par le propriétaire qui l’a
 accordé). Il écrit au nom de cette personne : il crée des règles à son nom, et ne
 modifie, désactive, réactive ou supprime que les règles de ce compte. Tant qu’une
-règle de cette personne est en pause d’urgence, il n’écrit aucune de ses règles : ni
-création, ni duplication, ni modification, ni réactivation, ni suppression ; il ne
-lève jamais cette pause, ne duplique la règle en pause de personne, et ne relance pas
-une règle au budget épuisé. Il n’accorde de droits à aucun agent ni à aucun compte, et
-ne touche pas à la règle d’un autre compte. Enfin, dans toute conversation, il ne
+règle de cette personne est en pause d’urgence ou au budget épuisé, il n’écrit aucune
+de ses règles : ni création, ni duplication, ni modification, ni réactivation, ni
+suppression ; il ne lève jamais ces empêchements et ne duplique la règle en pause ou
+au budget épuisé de personne. Il n’accorde de droits à aucun agent ni à aucun compte,
+et ne touche pas à la règle d’un autre compte. Enfin, dans toute conversation, il ne
 réduit pas un droit sur un hook ou un outil qu’utilise, sur son agent d’exécution, la
 règle d’un autre compte que cette personne (le propriétaire, ou un membre dont
 l’adhésion dure), ressources comprises et quel que soit l’état de la règle ; hors
 d’une conversation qui remplit ces conditions, cela vaut pour les règles de tous les
-comptes. Une règle créée par le MCP public a pour créateur le propriétaire qui a
-autorisé ce client.
+comptes. Une conversation, des instructions ou des skills dont Cairn n’a pas
+enregistré qui les a écrits, comme tout ce qui précède cette décision, ne permettent
+jamais d’écrire des règles. Une règle créée par le MCP public a pour créateur le
+propriétaire qui a autorisé ce client.
 
 Une règle n’atteint un agent dont la politique autorise l’exécution native, ou une
 conversation qui s’exécute en natif, que si son créateur détenait l’autorité native
@@ -262,7 +264,7 @@ une conversation qu’une règle démarre ou oriente la porte pour tout ce qu’
 ensuite (tâches déléguées, missions, migrations, tours repris) : l’autorité native
 retenue est l’intersection de cette autorité conservée et de l’autorité actuelle du
 créateur, et sans elle ce travail échoue
-([ADR-0050](0050-trusted-native-execution.md)). à chaque action qui résout, au moment
+([ADR-0050](0050-trusted-native-execution.md)). À chaque action qui résout, au moment
 du déclenchement, un agent ou une conversation natifs, Cairn vérifie à la fois cette
 autorité conservée et l’autorité native actuelle du créateur ; sans elles, l’action
 échoue. Le travail natif qu’une règle démarre garde les limites de node et le
@@ -305,7 +307,9 @@ une instance deviennent un accès complet à cette instance, qui comprend désor
 hooks : par choix du propriétaire, les membres peuvent donc écouter dès la mise en
 place les instances que leurs agents utilisent, jusqu’à ce qu’il réduise ces droits.
 L’instance qui fournit aujourd’hui les identifiants de run d’un agent devient
-l’instance choisie pour eux.
+l’instance choisie pour eux. Cairn enregistre désormais qui écrit chaque entrée d’une
+conversation, ses instructions et ses skills ; ce qui existait avant n’a pas cette
+trace.
 
 ## Options écartées
 
@@ -340,9 +344,10 @@ comme le faisait l’assistant des bots
 ([ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md)).
 
 Avant qu’un droit élargisse un agent (droits de plugin, accès à l’installation), la
-revue du propriétaire, sur le web, Android et le MCP public, liste les règles de tous
-les comptes qui démarrent ou orientent cet agent ; ce que l’agent peut alors faire
-pour des inconnus est ainsi visible au moment de l’accorder.
+revue du propriétaire, sur le web, Android et le MCP public, liste les comptes qui ont
+accès à cet agent et les règles de tous les comptes qui le démarrent ou l’orientent ;
+ce que l’agent peut alors faire pour des inconnus est ainsi visible au moment de
+l’accorder.
 
 Les risques d’un droit trop large relèvent du propriétaire ; Cairn doit en revanche
 rendre ces droits lisibles et n’en accorder aucun par défaut. Les capacités d’un
