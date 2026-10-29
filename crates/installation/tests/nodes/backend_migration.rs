@@ -314,7 +314,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         assert_eq!(saved_chat["paused"], false);
         assert_eq!(saved_chat["sessionRestartRequested"], true);
         let key = chat.clone();
-        let messages = owner
+        let mut messages = owner
             .service
             .store
             .read(move |db| db.messages(&key))
@@ -322,7 +322,21 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
             .unwrap();
         let mut cancelled = sending.clone();
         cancelled["status"] = "cancelled".into();
-        assert_eq!(messages, vec![message.clone(), cancelled, queued.clone()]);
+        let expected = [message.clone(), cancelled, queued.clone()]
+            .into_iter()
+            .map(|value| {
+                let message: cairn_installation::chats::Message =
+                    serde_json::from_value(value).unwrap();
+                serde_json::to_value(message).unwrap()
+            })
+            .collect::<Vec<_>>();
+        // The typed store supplies defaults and regenerates revisions on writes,
+        // including cancellation. Compare the complete content independently of revisions.
+        for message in &mut messages {
+            assert!(message["revision"].as_str().is_some_and(|r| !r.is_empty()));
+            message["revision"] = "".into();
+        }
+        assert_eq!(messages, expected);
         assert!(
             disk_grants::authorize(&owner.service, credential)
                 .await
