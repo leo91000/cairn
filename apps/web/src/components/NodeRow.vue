@@ -5,6 +5,7 @@ import {
   formatMiB,
   nodeAdministrator,
   nodeHealth,
+  runnerStale,
   usedPercent,
 } from '../../../../packages/contracts/nodes'
 import { ChevronRight } from '../icons'
@@ -18,7 +19,7 @@ import NodeMeter from './NodeMeter.vue'
 const props = defineProps<{ node: ExecutionNode, selected?: boolean, clock?: number | null }>()
 defineEmits<{ open: [] }>()
 const health = computed(() => nodeHealth(props.node, Date.now(), props.clock ?? null))
-const live = computed(() => !['offline', 'revoked'].includes(health.value.state))
+const live = computed(() => !['offline', 'revoked'].includes(health.value.state) && !runnerStale(props.node, props.clock ?? null))
 const slots = computed(() => props.node.slots ?? 0)
 const free = computed(() => props.node.availableSlots ?? 0)
 const runtime = computed(() => props.node.capabilities.backend === 'native' ? nodeAdministrator(props.node) ? 'Native · admin' : 'Native' : 'VM')

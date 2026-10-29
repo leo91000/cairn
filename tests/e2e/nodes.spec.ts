@@ -147,6 +147,8 @@ test('shows disk accounting and keeps the storage draft revision through invento
   await panel.getByRole('button', { name: 'Free old disks', exact: true }).click()
   const cleaning = page.getByRole('dialog', { name: 'Free old disks on Disk capacity fixture' })
   await expect(cleaning.getByRole('button', { name: 'Delete 3 GiB', exact: true })).toBeVisible()
+  // A newly opened dialog does not inherit the failed release.
+  await expect(cleaning.getByRole('alert')).toHaveCount(0)
   await cleaning.getByRole('button', { name: 'Close dialog', exact: true }).click()
   await expect(cleaning).toHaveCount(0)
   await expect(panel).toBeVisible()

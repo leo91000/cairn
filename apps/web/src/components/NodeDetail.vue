@@ -75,7 +75,7 @@ const sections: { value: Section, label: string }[] = [
   { value: 'settings', label: 'Settings' },
 ]
 const health = computed(() => nodeHealth(props.node, Date.now(), props.clock ?? null))
-const diagnostics = computed(() => nodeDiagnostics(props.node))
+const diagnostics = computed(() => nodeDiagnostics(props.node, Date.now(), props.clock ?? null))
 const native = computed(() => props.node.capabilities.backend === 'native')
 const slots = computed(() => props.node.slots ?? 0)
 const free = computed(() => props.node.availableSlots ?? 0)

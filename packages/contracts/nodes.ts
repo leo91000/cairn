@@ -100,11 +100,37 @@ const HEARTBEAT_TIMEOUT_MS = 60_000
  * The server's clock as seen in an inventory: the latest contact of a machine the server reports online.
  * Device clocks can drift from the server's, so staleness is judged against this rather than `Date.now()`.
  */
-export function fleetClock(nodes: ExecutionNode[]): number | null {
+export function fleetClock(nodes: ExecutionNode[], runner: RunnerObservation | null = null, now = Date.now()): number | null {
   const seen = nodes
     .filter(node => !node.local && !node.revoked && node.status === 'online' && node.lastSeen != null)
     .map(node => node.lastSeen!)
+  // The built-in runner's contact plus the device time elapsed since it was first seen: no clock offset involved.
+  if (runner)
+    seen.push(runner.lastSeen + Math.max(0, now - runner.observedAt))
   return seen.length ? Math.max(...seen) : null
+}
+
+/** The built-in runner's last contact, and when this device first saw that value. */
+export interface RunnerObservation {
+  lastSeen: number
+  observedAt: number
+}
+
+/** Keeps the first time each runner contact was seen across inventory refreshes. */
+export function observeRunner(nodes: ExecutionNode[], previous: RunnerObservation | null, now = Date.now()): RunnerObservation | null {
+  const runner = nodes.find(node => node.local && !node.revoked)
+  if (runner?.lastSeen == null)
+    return null
+  return previous?.lastSeen === runner.lastSeen ? previous : { lastSeen: runner.lastSeen, observedAt: now }
+}
+
+/**
+ * The built-in runner always reports "local". Listing refreshes its contact only when it answers with
+ * usable health, so a contact older than the server clock by the heartbeat timeout means it stopped
+ * answering, runs a mismatched version or reports no capabilities. Without a reference, it is not judged.
+ */
+export function runnerStale(node: ExecutionNode, clock: number | null) {
+  return node.local && !node.revoked && clock != null && node.lastSeen != null && clock - node.lastSeen >= HEARTBEAT_TIMEOUT_MS
 }
 
 /**
@@ -119,15 +145,8 @@ export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number 
   const reference = clock ?? now
   if (!node.local && node.status === 'offline')
     return { state: 'offline', label: 'Offline', detail: node.lastSeen != null ? `Last contact ${relativeAge(node.lastSeen, Math.max(reference, node.lastSeen))}` : 'Never connected' }
-  // The built-in runner always reports "local". Listing refreshes it when it answers as expected, so a
-  // contact older than the fleet's by the heartbeat timeout means it stopped answering, or answers with a
-  // mismatched version (which also turns readiness off). Without a reference, it is not judged.
-  if (node.local && clock != null && node.lastSeen != null && clock - node.lastSeen >= HEARTBEAT_TIMEOUT_MS) {
-    const since = relativeAge(node.lastSeen, clock)
-    return node.executionReady
-      ? { state: 'offline', label: 'Offline', detail: `Unreachable · last contact ${since}` }
-      : { state: 'attention', label: 'Needs attention', detail: `Not ready since its last contact ${since}` }
-  }
+  if (runnerStale(node, clock))
+    return { state: 'attention', label: 'Needs attention', detail: `Last usable report ${relativeAge(node.lastSeen!, clock!)}` }
 
   const native = node.capabilities.backend === 'native'
   if (!native && !node.capabilities.kvm)
@@ -182,12 +201,15 @@ export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number 
 }
 
 /** Why a node cannot take new work right now; empty when it can. */
-export function nodeDiagnostics(node: ExecutionNode, now = Date.now()) {
+export function nodeDiagnostics(node: ExecutionNode, now = Date.now(), clock: number | null = null) {
   if (node.revoked)
     return []
   const reasons: string[] = []
+  const reference = clock ?? now
+  if (runnerStale(node, clock))
+    reasons.push(`The built-in runner has sent no usable report since ${relativeAge(node.lastSeen!, clock!)}: check that it is running, at the same version as the server.`)
   if (!node.local && node.status === 'offline')
-    reasons.push(node.lastSeen != null ? `No contact since ${relativeAge(node.lastSeen, now)}: check that the machine is on, online and that the ${node.capabilities.backend === 'native' ? 'cairn-native-node' : 'cairn-node'} service is running.` : 'The machine has never connected: run the installation command on it.')
+    reasons.push(node.lastSeen != null ? `No contact since ${relativeAge(node.lastSeen, Math.max(reference, node.lastSeen))}: check that the machine is on, online and that the ${node.capabilities.backend === 'native' ? 'cairn-native-node' : 'cairn-node'} service is running.` : 'The machine has never connected: run the installation command on it.')
   if (node.capabilities.backend !== 'native' && !node.capabilities.kvm)
     reasons.push('KVM is unavailable: enable virtualization in the BIOS and load the kvm module.')
   if (node.capabilities.backend === 'native' && !node.capabilities.ublk)

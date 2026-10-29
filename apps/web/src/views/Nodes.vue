@@ -1,12 +1,18 @@
 <script setup lang="ts">
 import type { NodeConfiguration } from '../../../../packages/contracts/generated/typescript/NodeConfiguration'
-import type { ExecutionNode, NodeEnrollment, NodeSyncSettings } from '../../../../packages/contracts/nodes'
+import type {
+  ExecutionNode,
+  NodeEnrollment,
+  NodeSyncSettings,
+  RunnerObservation,
+} from '../../../../packages/contracts/nodes'
 import {
   computed,
   nextTick,
   onBeforeUnmount,
   onMounted,
   ref,
+  watch,
 } from 'vue'
 import { createNodeEnrollment } from '../../../../packages/contracts/generated/createNodeEnrollment'
 import { revokeNode } from '../../../../packages/contracts/generated/revokeNode'
@@ -15,6 +21,8 @@ import {
   fleetClock,
   formatMiB,
   nodeHealth,
+  observeRunner,
+  runnerStale,
 } from '../../../../packages/contracts/nodes'
 import { nodeBackend } from '../agent-access'
 import {
@@ -89,40 +97,62 @@ const machinesHeading = ref<HTMLElement>()
 const loaded = ref(false)
 // A failed inventory refresh concerns the page, not the machine whose panel is open; the next success clears it.
 const refreshError = ref('')
+// Trusted people load separately; their failure concerns native configuration, not the inventory.
+const callersError = ref('')
 // Action dialogs show their own errors; adding a machine also shows refresh failures, as it waits on refreshes.
 const shownError = computed(() => error.value || refreshError.value)
 const errorNodeId = ref<string | null>(null)
 // Behind dialogs and panels, the page names the machine an action error concerns.
 const pageError = computed(() => {
   const machine = errorNodeId.value && nodes.value.find(node => node.id === errorNodeId.value)
-  return refreshError.value || (error.value && machine ? `${machine.name}: ${error.value}` : error.value)
+  const action = error.value && machine ? `${machine.name}: ${error.value}` : error.value
+  return [action, refreshError.value, callersError.value].filter(Boolean).join(' · ')
 })
 const opened = computed(() => nodes.value.find(node => node.id === openedId.value) ?? null)
 const active = computed(() => nodes.value.filter(node => !node.revoked))
 const revoked = computed(() => nodes.value.filter(node => node.revoked))
 const visible = computed(() => showRevoked.value ? nodes.value : active.value)
-const clock = computed(() => fleetClock(nodes.value))
+// When the built-in runner's contact last changed, as seen by this device: it times a lone runner.
+const runner = ref<RunnerObservation | null>(null)
+const clock = computed(() => fleetClock(nodes.value, runner.value))
 const healths = computed(() => active.value.map(node => nodeHealth(node, Date.now(), clock.value)))
 // Connected machines answer heartbeats; the built-in runner too, unless its contact went stale.
-const live = computed(() => active.value.filter((node, index) => (node.local || node.status === 'online') && healths.value[index].state !== 'offline'))
+const live = computed(() => active.value.filter((node, index) => (node.local || node.status === 'online') && healths.value[index].state !== 'offline' && !runnerStale(node, clock.value)))
 const totalSlots = computed(() => live.value.reduce((total, node) => total + (node.slots ?? 0), 0))
 const usedSlots = computed(() => live.value.reduce((total, node) => total + (node.occupiedSlots ?? 0), 0))
 const attention = computed(() => healths.value.filter(health => ['offline', 'attention', 'setup'].includes(health.state)).length)
 let timer: ReturnType<typeof setInterval> | undefined
+
+// A dialog opens on a clean slate: errors from earlier actions are not its own.
+watch(() => [adding.value, editing.value?.id, grantingId.value, cleaning.value?.id, revoking.value?.id, retiring.value?.previous.id, recovery.value !== null], (current, previous) => {
+  if (current.some((value, index) => value && !previous?.[index])) {
+    error.value = ''
+    errorNodeId.value = null
+  }
+})
 // The newly enrolled native node whose "Who can use it?" step follows its configuration.
 let grantAfterConfigure: string | null = null
 
 async function load() {
   try {
     nodes.value = await api<ExecutionNode[]>('/nodes')
+    runner.value = observeRunner(nodes.value, runner.value)
     loaded.value = true
-    if (nodes.value.some(node => node.capabilities.backend === 'native'))
-      nativeCallers.value = await api('/nodes/native-callers')
     refreshError.value = ''
   }
   catch (e) {
     refreshError.value = (e as Error).message
     return
+  }
+
+  if (nodes.value.some(node => node.capabilities.backend === 'native')) {
+    try {
+      nativeCallers.value = await api('/nodes/native-callers')
+      callersError.value = ''
+    }
+    catch (e) {
+      callersError.value = `Trusted people could not be loaded: ${(e as Error).message}`
+    }
   }
 
   if (!enrollment.value)

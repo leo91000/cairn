@@ -116,28 +116,22 @@ class NodesTest {
             "Espace disque partagé insuffisant",
             nodeHealth(ready.copy(pressure = "disk")).detail,
         )
-        // The built-in runner is judged against the server clock seen in the fleet.
+        // The built-in runner is judged against server time, never against the device clock offset.
         val runner = ready.copy(local = true, status = "local", lastSeen = 0)
         val remote = ready.copy(id = "0d7c9a6e-3b8f-5b1e-9f3a-2c4d5e6f7a8b", lastSeen = 120_000)
         assertEquals(120_000L, fleetClock(listOf(runner, remote)))
         assertNull(fleetClock(listOf(runner)))
         assertEquals(
             NodeHealth(
-                NodeHealthState.OFFLINE,
-                "Hors ligne",
-                "Injoignable · dernier contact il y a 2 min",
+                NodeHealthState.ATTENTION,
+                "À vérifier",
+                "Dernier rapport exploitable il y a 2 min",
             ),
             nodeHealth(runner, 0, 120_000),
         )
+        assertTrue(runnerStale(runner, 120_000))
+        assertTrue(nodeDiagnostics(runner, 0, 120_000).first().contains("depuis 2 min"))
         assertEquals(NodeHealthState.READY, nodeHealth(runner, 0, 30_000).state)
-        assertEquals(
-            NodeHealth(
-                NodeHealthState.ATTENTION,
-                "À vérifier",
-                "Pas prêt depuis son dernier contact il y a 2 min",
-            ),
-            nodeHealth(runner.copy(executionReady = false), 0, 120_000),
-        )
         assertEquals(
             "Dernier contact il y a 2 min",
             nodeHealth(ready.copy(status = "offline", lastSeen = 0), 3_600_000, 120_000).detail,
@@ -148,6 +142,20 @@ class NodesTest {
             nodeHealth(runner.copy(lastSeen = 120_000), 900_000, 125_000).state,
         )
         assertEquals(NodeHealthState.READY, nodeHealth(runner, 900_000).state)
+        // A lone runner is timed by the device time elapsed since its contact last changed.
+        val alone = listOf(runner.copy(lastSeen = 1_000))
+        val seen = observeRunner(alone, null, 3_600_000)!!
+        assertEquals(RunnerObservation(1_000, 3_600_000), seen)
+        assertEquals(seen, observeRunner(alone, seen, 3_700_000))
+        assertEquals(
+            RunnerObservation(11_000, 3_610_000),
+            observeRunner(listOf(runner.copy(lastSeen = 11_000)), seen, 3_610_000),
+        )
+        assertEquals(62_000L, fleetClock(alone, seen, 3_661_000))
+        assertEquals(
+            NodeHealthState.ATTENTION,
+            nodeHealth(alone[0], 3_661_000, fleetClock(alone, seen, 3_661_000)).state,
+        )
         val native =
             ready.copy(
                 capabilities =

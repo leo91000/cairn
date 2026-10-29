@@ -3,7 +3,10 @@ import { describe, expect, it } from 'vitest'
 import {
   fleetClock,
   nodeAdministrator,
+  nodeDiagnostics,
   nodeHealth,
+  observeRunner,
+  runnerStale,
   usedPercent,
 } from '../../../packages/contracts/nodes'
 
@@ -119,22 +122,37 @@ describe('node health', () => {
     expect(nodeHealth(partial)).toMatchObject({ state: 'full', detail: 'All 4 slots in use' })
   })
 
-  it('judges the built-in runner against the server clock seen in the fleet, not the device clock', () => {
+  it('judges the built-in runner against server time, never against the device clock offset', () => {
     const runner = node({ local: true, status: 'local', lastSeen: 0 })
     const remote = node({ id: 'remote', status: 'online', lastSeen: 120_000 })
     expect(fleetClock([runner, remote, node({ id: 'gone', status: 'offline', lastSeen: 900_000 })])).toBe(120_000)
     expect(fleetClock([runner])).toBeNull()
-    expect(nodeHealth(runner, 0, 120_000)).toEqual({ state: 'offline', label: 'Offline', detail: 'Unreachable · last contact 2 min ago' })
+    expect(nodeHealth(runner, 0, 120_000)).toEqual({ state: 'attention', label: 'Needs attention', detail: 'Last usable report 2 min ago' })
+    expect(runnerStale(runner, 120_000)).toBe(true)
+    expect(nodeDiagnostics(runner, 0, 120_000)[0]).toContain('no usable report since 2 min ago')
     expect(nodeHealth(runner, 0, 30_000).state).toBe('ready')
-    // A runner that answers with a mismatched version is not refreshed either, but turns readiness off.
-    expect(nodeHealth({ ...runner, executionReady: false }, 0, 120_000)).toEqual({ state: 'attention', label: 'Needs attention', detail: 'Not ready since its last contact 2 min ago' })
     // Offline ages follow the server clock too.
     expect(nodeHealth(node({ status: 'offline', lastSeen: 0 }), 3_600_000, 120_000).detail).toBe('Last contact 2 min ago')
     // A device clock far ahead of the server does not make a refreshed runner look stale.
     expect(nodeHealth(node({ local: true, status: 'local', lastSeen: 120_000 }), 900_000, 125_000).state).toBe('ready')
-    // Without a machine the server reports online, there is no reference: the runner is not judged.
+    // Without any reference, the runner is not judged.
     expect(nodeHealth(runner, 900_000).state).toBe('ready')
     expect(nodeHealth(node({ local: true, status: 'local', lastSeen: null }), 0, 120_000).state).toBe('ready')
+  })
+
+  it('times a lone built-in runner by the device time elapsed since its contact last changed', () => {
+    // The device clock is an hour ahead of the server: only elapsed time matters.
+    const fresh = [node({ local: true, status: 'local', lastSeen: 1_000 })]
+    const seen = observeRunner(fresh, null, 3_600_000)!
+    expect(seen).toEqual({ lastSeen: 1_000, observedAt: 3_600_000 })
+    expect(nodeHealth(fresh[0], 3_600_000, fleetClock(fresh, seen, 3_600_000)).state).toBe('ready')
+    // Refreshed contacts restart the count; an unchanged one ages with the device's elapsed time.
+    const refreshed = [node({ local: true, status: 'local', lastSeen: 11_000 })]
+    expect(observeRunner(refreshed, seen, 3_610_000)).toEqual({ lastSeen: 11_000, observedAt: 3_610_000 })
+    expect(observeRunner(fresh, seen, 3_700_000)).toBe(seen)
+    expect(fleetClock(fresh, seen, 3_661_000)).toBe(62_000)
+    expect(nodeHealth(fresh[0], 3_661_000, fleetClock(fresh, seen, 3_661_000)).state).toBe('attention')
+    expect(observeRunner([node({ local: true, status: 'local', lastSeen: null })], seen)).toBeNull()
   })
 
   it('asks for native activation before a native node takes work', () => {
