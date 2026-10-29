@@ -2,7 +2,15 @@
 package build.cairn.contracts
 
 import build.cairn.app.data.CairnApi
+import build.cairn.app.data.pluginOperation
 import build.cairn.app.data.segment
+import build.cairn.app.data.wireJson
+import kotlinx.serialization.json.decodeFromJsonElement
 
 suspend fun CairnApi.getSkillSourceStatus(input: SkillInput): SkillSourceStatus =
-    send("GET", "/skills/${segment(input.scope)}/${segment(input.name)}/source")
+    wireJson.decodeFromJsonElement(
+        pluginOperation(
+            "/skills/${segment(input.scope)}/${segment(input.name)}/source",
+            method = "GET",
+        )
+    )

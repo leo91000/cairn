@@ -44,6 +44,7 @@ import {
   ShieldCheck,
   Trash2,
 } from '../icons'
+import { pluginRequest } from '../plugin-operations'
 import { pluginSources } from '../plugin-sources'
 import { instanceNoun } from '../plugins'
 import { useResourceSave } from '../resourceSave'
@@ -176,7 +177,7 @@ async function projectRequest<T>(path: string, options: RequestInit): Promise<T>
     // Imports recover by their source identity; the generic form's creation ID
     // belongs only to locally registered projects.
     delete payload.creationId
-    return await importProject(api, payload) as T
+    return await importProject(pluginRequest, payload) as T
   }
 
   const saved = options.method === 'PUT'

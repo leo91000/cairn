@@ -138,12 +138,14 @@ impl Authority {
         self.check_local(s).await
     }
 
-    pub(crate) fn publication(&self, s: &Service) -> super::bundle::Authorization {
+    pub(crate) fn publication<'a>(&self, s: &'a Service) -> super::bundle::Authorization<'a> {
         let authority = self.clone();
-        (
-            s.store.clone(),
-            Box::new(move |db, _| authority.authorize(db)),
-        )
+        let external = self.clone();
+        super::bundle::Authorization {
+            store: s.store.clone(),
+            recheck: Box::pin(async move { external.recheck(s).await }),
+            authorize: Box::new(move |db, _| authority.authorize(db)),
+        }
     }
 }
 

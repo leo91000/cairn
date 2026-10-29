@@ -855,3 +855,14 @@ change, historical runtime reader, data reset or migration is required. Existing
 single-file UI-only transports are removed in favor of `edit_skill_files`/bundle.
 Raw upload is a declared bounded transport of `stage_skill_upload`; archive chunks
 are 512 KiB so public and built-in tools can export the same complete ZIP.
+
+B3 remote preparation (project source pages/import, skill import/source status/update)
+uses the existing plugin operation manager: return an operation id immediately,
+then read `get_plugin_operation` (or cancel it) with the same audience checks.
+Both generated app clients await the canonical typed result. Preparations retain
+the existing four slots, nine-minute deadline and cancellation fence; the code
+worker keeps its 30-second limit. Failed operations preserve their HTTP status
+for revision-conflict handling. The operation catalogue/results are in memory,
+with no SQL or persistent-format change. Bundle publication refreshes external
+owner/public proofs after staging and lock waits, then checks local execution,
+project and source revisions in the writer transaction.

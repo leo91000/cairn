@@ -2,7 +2,12 @@
 package build.cairn.contracts
 
 import build.cairn.app.data.CairnApi
+import build.cairn.app.data.pluginOperation
+import build.cairn.app.data.wireJson
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 
 suspend fun CairnApi.importSkill(input: ImportSkillInput): SkillImport =
-    send("POST", "/skills/import", contractJson.encodeToJsonElement(input))
+    wireJson.decodeFromJsonElement(
+        pluginOperation("/skills/import", contractJson.encodeToJsonElement(input), method = "POST")
+    )

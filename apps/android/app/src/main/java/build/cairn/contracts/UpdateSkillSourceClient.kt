@@ -2,12 +2,17 @@
 package build.cairn.contracts
 
 import build.cairn.app.data.CairnApi
+import build.cairn.app.data.pluginOperation
 import build.cairn.app.data.segment
+import build.cairn.app.data.wireJson
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 
 suspend fun CairnApi.updateSkillSource(input: UpdateSkillSourceInput): SkillBundle =
-    send(
-        "POST",
-        "/skills/${segment(input.scope)}/${segment(input.name)}/source/update",
-        contractJson.encodeToJsonElement(input),
+    wireJson.decodeFromJsonElement(
+        pluginOperation(
+            "/skills/${segment(input.scope)}/${segment(input.name)}/source/update",
+            contractJson.encodeToJsonElement(input),
+            method = "POST",
+        )
     )

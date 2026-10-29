@@ -45,6 +45,7 @@
     "path": "/skills/{scope}/{name}"
   },
   {
+    "deferred": true,
     "input": "ImportSkillInput",
     "method": "POST",
     "name": "importSkill",
@@ -73,6 +74,7 @@
     ]
   },
   {
+    "deferred": true,
     "input": "SkillInput",
     "method": "GET",
     "name": "getSkillSourceStatus",
@@ -80,6 +82,7 @@
     "path": "/skills/{scope}/{name}/source"
   },
   {
+    "deferred": true,
     "input": "UpdateSkillSourceInput",
     "method": "POST",
     "name": "updateSkillSource",
@@ -101,6 +104,7 @@
     "path": "/skills/stage"
   },
   {
+    "deferred": true,
     "input": "ImportProjectInput",
     "method": "POST",
     "name": "importProject",
@@ -108,6 +112,7 @@
     "path": "/projects/import"
   },
   {
+    "deferred": true,
     "input": "ListSourceProjectsInput",
     "method": "GET",
     "name": "listSourceProjects",

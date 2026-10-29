@@ -2,7 +2,16 @@
 package build.cairn.contracts
 
 import build.cairn.app.data.CairnApi
+import build.cairn.app.data.pluginOperation
+import build.cairn.app.data.wireJson
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 
 suspend fun CairnApi.importProject(input: ImportProjectInput): Project =
-    send("POST", "/projects/import", contractJson.encodeToJsonElement(input))
+    wireJson.decodeFromJsonElement(
+        pluginOperation(
+            "/projects/import",
+            contractJson.encodeToJsonElement(input),
+            method = "POST",
+        )
+    )

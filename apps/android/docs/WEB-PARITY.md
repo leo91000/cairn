@@ -460,3 +460,9 @@ the 100 returned entries with their details, as before. Public MCP and
 that authorized a public grant, executions without an account delegation are refused
 and see no personal state, and storage credentials can only be saved by the human
 owner in the apps.
+
+B3 preparations (project source pages/import, skill import/source status/update)
+use the same bounded manager operations on web, Android and both tools. The apps
+keep their existing busy states while generated calls poll the result; failures
+retain their HTTP status, including revision conflicts. Tools receive an operation
+id and use `get_plugin_operation`/`cancel_plugin_operation`. No layout change.

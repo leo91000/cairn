@@ -466,6 +466,7 @@ async fn repositories_are_listed_and_imported_with_the_instance() {
     )
     .await
     .unwrap();
+    let page = common::resource_result(&f.s, page).await.unwrap();
     let items = page["items"].as_array().unwrap();
     assert_eq!(items.len(), 2);
     assert_eq!(items[0]["id"], "fixture/repo");
@@ -501,6 +502,7 @@ async fn repositories_are_listed_and_imported_with_the_instance() {
     )
     .await
     .unwrap();
+    let page = common::resource_result(&f.s, page).await.unwrap();
     assert_eq!(page["items"][0]["imported"], true);
     let mut unknown = request.clone();
     unknown["source"] = "elsewhere".into();

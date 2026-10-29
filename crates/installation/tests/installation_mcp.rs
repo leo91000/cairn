@@ -150,7 +150,7 @@ async fn call(s: &Arc<Service>, configuration: &Value, name: &str, args: Value) 
     let (status, result) =
         request(s, token, "tools/call", common::mcp_arguments(name, &args)).await;
     assert_eq!(status, StatusCode::OK, "{result}");
-    result
+    finish_resource_call(s, "/mcp-installation", token, name, result).await
 }
 
 fn result(response: &Value) -> &Value {
@@ -2321,7 +2321,8 @@ async fn public_call(s: &Arc<Service>, scopes: &[&str], name: &str, args: Value)
         .unwrap();
     let response = common::send(&app, request).await;
     assert_eq!(response.status(), StatusCode::OK);
-    common::read_json(response).await
+    let response = common::read_json(response).await;
+    finish_resource_call(s, "/mcp", &token, name, response).await
 }
 
 #[tokio::test]
@@ -5758,4 +5759,144 @@ async fn source_tools_share_status_updates_and_fence_instance_revocation_during_
                 .plugins
         );
     }
+}
+
+async fn finish_resource_call(
+    s: &Arc<Service>,
+    endpoint: &str,
+    token: &str,
+    name: &str,
+    mut response: Value,
+) -> Value {
+    if !matches!(
+        name,
+        "import_project"
+            | "list_source_projects"
+            | "import_skill"
+            | "get_skill_source_status"
+            | "update_skill_source"
+    ) || response["result"]["isError"] == true
+    {
+        return response;
+    }
+    let id = result(&response)["operation"]
+        .as_str()
+        .expect("Resource preparation id")
+        .to_owned();
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        loop {
+            let (_, polled) = node_management_call(
+                &app,
+                endpoint,
+                token,
+                "get_plugin_operation",
+                json!({"operationId": id}),
+            )
+            .await;
+            if polled["result"]["isError"] == true {
+                return polled;
+            }
+            let state = result(&polled);
+            match text(state, "state") {
+                "completed" => {
+                    let value = common::resource_output(&state["result"]);
+                    response["result"]["structuredContent"]["result"] = value.clone();
+                    response["result"]["content"][0]["text"] = value.to_string().into();
+                    return response;
+                }
+                "failed" | "cancelled" => {
+                    response["result"]["isError"] = true.into();
+                    response["result"]["content"][0]["text"] = state["error"].clone();
+                    return response;
+                }
+                _ => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+            }
+        }
+    })
+    .await
+    .expect("Resource tool preparation did not finish")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_resource_imports_complete_through_both_tools_without_extending_code_deadlines() {
+    async fn scenario(internal: bool) {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use common::github::{self, Github};
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        let github = Github::start(root.path()).await;
+        github.attach(&s);
+        enabled_main(&s).await;
+        let instance =
+            github::instance(&s, "Slow source", "synthetic-slow-source", &[MAIN_AGENT_ID]).await;
+        let main = s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
+        let (_, configuration) = active_run(&s, &main).await;
+        let public = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+        let token = if internal {
+            configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+                .as_str()
+                .unwrap()
+        } else {
+            &public
+        };
+        let endpoint = if internal {
+            "/mcp-installation"
+        } else {
+            "/mcp"
+        };
+        let version = "1".repeat(40);
+        let tree = "2".repeat(40);
+        github.respond("repos/fixture/skills/commits/main", &json!({"sha":version,"commit":{"tree":{"sha":tree},"message":"Release","committer":{"date":"2026-10-01"}}}));
+        let mut files = Vec::new();
+        for index in 0..7 {
+            let blob = format!("{:040x}", index + 100);
+            let path = if index == 0 {
+                "SKILL.md".to_owned()
+            } else {
+                format!("data/{index}.txt")
+            };
+            let content = if index == 0 {
+                "---\nname: review\ndescription: A slow source\n---\nReview."
+            } else {
+                "reference"
+            };
+            files.push(
+                json!({"path":path,"type":"blob","mode":"100644","sha":blob,"size":content.len()}),
+            );
+            github.respond(
+                &format!("repos/fixture/skills/git/blobs/{blob}"),
+                &json!({"content":STANDARD.encode(content),"encoding":"base64"}),
+            );
+        }
+        github.respond(
+            &format!("repos/fixture/skills/git/trees/{tree}?recursive=1"),
+            &json!({"tree":files,"truncated":false}),
+        );
+        // Seven individually valid 17 s downloads exceed 30 s with six workers.
+        github.state(&json!({"blobDelay":17000}));
+        let app = common::relay_fixture::router(s.clone()).await.unwrap();
+        let (_, started) = tokio::time::timeout(std::time::Duration::from_secs(10), node_management_call(&app, endpoint, token, "import_skill", json!({"source":"plugin","scope":"global","pluginId":"github","skillSource":"repository","instance":instance,"location":{"repository":"fixture/skills","ref":"main"}}))).await.unwrap();
+        let id = result(&started)["operation"].as_str().unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+        let (_, pending) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "get_plugin_operation",
+            json!({"operationId":id}),
+        )
+        .await;
+        assert_eq!(result(&pending)["state"], "running", "{pending}");
+        let imported = finish_resource_call(&s, endpoint, token, "import_skill", started).await;
+        assert_eq!(
+            result(&imported)["imported"]["files"]
+                .as_array()
+                .unwrap()
+                .len(),
+            7
+        );
+        assert!(!imported.to_string().contains("synthetic-slow-source"));
+    }
+    tokio::join!(scenario(false), scenario(true));
 }

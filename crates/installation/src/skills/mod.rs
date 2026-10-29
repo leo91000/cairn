@@ -428,7 +428,7 @@ impl Skills {
         skill: &str,
         content: &str,
         project: Option<&Path>,
-        authorization: Option<bundle::Authorization>,
+        authorization: Option<bundle::Authorization<'_>>,
     ) -> Result<Value> {
         name(skill)?;
         let parsed = metadata(content)?;
@@ -577,7 +577,7 @@ impl Skills {
         base: Option<&str>,
         changes: &[Change],
         project: Option<&Path>,
-        authorization: Option<bundle::Authorization>,
+        authorization: Option<bundle::Authorization<'_>>,
     ) -> Result<bundle::Described> {
         name(skill)?;
         let root = self.root(project).await?;
@@ -694,7 +694,7 @@ impl Skills {
         upload: &str,
         requested: Option<&str>,
         project: Option<&Path>,
-        authorization: bundle::Authorization,
+        authorization: bundle::Authorization<'_>,
     ) -> Result<Value> {
         let archive = self.upload(upload).await?;
         let entries = zip::entries(&archive)?;

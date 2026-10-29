@@ -10,7 +10,6 @@ import {
   watch,
 } from 'vue'
 import { listSourceProjects } from '../../../../packages/contracts/generated/listSourceProjects'
-import { api } from '../api'
 import {
   Check,
   ExternalLink,
@@ -21,6 +20,7 @@ import {
   SearchX,
   X,
 } from '../icons'
+import { pluginRequest } from '../plugin-operations'
 import { projectMatches, updatedLabel } from '../plugin-sources'
 import { iconButton } from '../ui'
 import Icon from './Icon.vue'
@@ -63,7 +63,7 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const page = await listSourceProjects(api, {
+    const page = await listSourceProjects(pluginRequest, {
       pluginId: props.source.pluginId,
       source: props.source.source,
       instance: props.instance,

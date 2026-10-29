@@ -245,7 +245,18 @@ impl Api {
             .unwrap();
         let response = common::send(&self.router, request).await;
         let status = response.status();
-        (status, common::read_json(response).await)
+        let value = common::read_json(response).await;
+        if status == StatusCode::OK {
+            match common::resource_result(&self.service, value).await {
+                Ok(value) => (status, value),
+                Err(error) => (
+                    StatusCode::from_u16(error.status).unwrap(),
+                    json!({ "error": error.message }),
+                ),
+            }
+        } else {
+            (status, value)
+        }
     }
 
     async fn ok(&self, method: &str, uri: &str, body: Option<Value>) -> Value {
@@ -282,18 +293,7 @@ async fn source_route(
     path: &str,
     body: Value,
 ) -> cairn_installation::error::Result<Value> {
-    let input = cairn_installation::http::Input {
-        method: "POST".into(),
-        path: path.into(),
-        body,
-        query: std::collections::HashMap::new(),
-        headers: axum::http::HeaderMap::new(),
-        identity: Some(cairn_installation::auth::InstallationIdentity::trusted(
-            cairn_installation::auth::InstallationRole::Owner,
-            "fixture-owner",
-        )),
-    };
-    cairn_installation::api::dispatch(s, &input).await
+    common::owner_api_route(s, "POST", path, body).await
 }
 
 async fn update_source(

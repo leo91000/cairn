@@ -21,12 +21,12 @@ pub(crate) const RESOURCE_OPERATIONS: &[ResourceOperation] = &[
     ResourceOperation {
         name: "import_project",
         scope: "manage",
-        description: "Import a project through an already authorized plugin instance. Does not grant project or plugin access to the caller.",
+        description: "Import a project through an already authorized plugin instance. Does not grant project or plugin access to the caller. Returns an operation id; poll get_plugin_operation.",
     },
     ResourceOperation {
         name: "list_source_projects",
         scope: "manage",
-        description: "List a bounded page of projects from an already authorized plugin instance.",
+        description: "List a bounded page of projects from an already authorized plugin instance. Returns an operation id; poll get_plugin_operation.",
     },
     ResourceOperation {
         name: "list_skills",
@@ -56,7 +56,7 @@ pub(crate) const RESOURCE_OPERATIONS: &[ResourceOperation] = &[
     ResourceOperation {
         name: "import_skill",
         scope: "manage",
-        description: "Import a skill from a staged archive or an already authorized plugin instance. Multiple folders return bounded candidates without writing.",
+        description: "Import a skill from a staged archive or an already authorized plugin instance. Multiple folders return bounded candidates without writing. Returns an operation id; poll get_plugin_operation.",
     },
     ResourceOperation {
         name: "delete_skill",
@@ -71,12 +71,12 @@ pub(crate) const RESOURCE_OPERATIONS: &[ResourceOperation] = &[
     ResourceOperation {
         name: "get_skill_source_status",
         scope: "manage",
-        description: "Compare an imported skill's source with its latest version through an already authorized plugin instance.",
+        description: "Compare an imported skill's source with its latest version through an already authorized plugin instance. Returns an operation id; poll get_plugin_operation.",
     },
     ResourceOperation {
         name: "update_skill_source",
         scope: "manage",
-        description: "Replace an imported skill from the chosen source version against its current base revision.",
+        description: "Replace an imported skill from the chosen source version against its current base revision. Returns an operation id; poll get_plugin_operation.",
     },
     ResourceOperation {
         name: "forget_skill_source",
@@ -95,6 +95,17 @@ fn output<T: DeserializeOwned + Serialize>(value: Value) -> Result<Value> {
 }
 
 impl ResourceOperation {
+    fn deferred(&self) -> bool {
+        matches!(
+            self.name,
+            "import_project"
+                | "list_source_projects"
+                | "import_skill"
+                | "get_skill_source_status"
+                | "update_skill_source"
+        )
+    }
+
     pub(crate) fn descriptor(&self) -> Value {
         let input = match self.name {
             "import_project" => schema_for::<ImportProjectInput>(Contract::Deserialize),
@@ -109,19 +120,19 @@ impl ResourceOperation {
             "update_skill_source" => schema_for::<UpdateSkillSourceInput>(Contract::Deserialize),
             _ => schema_for::<SkillInput>(Contract::Deserialize),
         };
-        let result = match self.name {
-            "import_project" => schema_for::<Project>(Contract::Serialize),
-            "list_source_projects" => schema_for::<PluginProjectPage>(Contract::Serialize),
-            "list_skills" => schema_for::<Vec<Skill>>(Contract::Serialize),
-            "read_skill" => schema_for::<ReadSkillOutput>(Contract::Serialize),
-            "save_skill" => schema_for::<SkillMetadata>(Contract::Serialize),
-            "stage_skill_upload" => schema_for::<SkillUpload>(Contract::Serialize),
-            "import_skill" => schema_for::<SkillImport>(Contract::Serialize),
-            "export_skill_archive" => schema_for::<SkillArchiveChunk>(Contract::Serialize),
-            "get_skill_source_status" => schema_for::<SkillSourceStatus>(Contract::Serialize),
-            "delete_skill" => schema_for::<DeleteSkillOutput>(Contract::Serialize),
-            "forget_skill_source" => schema_for::<ForgetSkillSourceOutput>(Contract::Serialize),
-            _ => schema_for::<SkillBundle>(Contract::Serialize),
+        let result = if self.deferred() {
+            schema_for::<PluginOperationStarted>(Contract::Serialize)
+        } else {
+            match self.name {
+                "list_skills" => schema_for::<Vec<Skill>>(Contract::Serialize),
+                "read_skill" => schema_for::<ReadSkillOutput>(Contract::Serialize),
+                "save_skill" => schema_for::<SkillMetadata>(Contract::Serialize),
+                "stage_skill_upload" => schema_for::<SkillUpload>(Contract::Serialize),
+                "export_skill_archive" => schema_for::<SkillArchiveChunk>(Contract::Serialize),
+                "delete_skill" => schema_for::<DeleteSkillOutput>(Contract::Serialize),
+                "forget_skill_source" => schema_for::<ForgetSkillSourceOutput>(Contract::Serialize),
+                _ => schema_for::<SkillBundle>(Contract::Serialize),
+            }
         };
         json!({
             "name": self.name,
@@ -154,7 +165,52 @@ impl ResourceOperation {
         input: Value,
         context: ResumeContext,
     ) -> Result<Value> {
-        let mut authority = Authority::new(s, context, self.scope).await?;
+        use crate::plugins::operations::Audience;
+        let audience = match &context {
+            ResumeContext::Human(_) => Audience::Owner,
+            ResumeContext::Public(..) => Audience::Public,
+            ResumeContext::Installation(bearer) => Audience::from_bearer(Some(bearer), false),
+        };
+        let authority = Authority::new(s, context, self.scope).await?;
+        if self.deferred() {
+            let service = s.clone();
+            let name = self.name;
+            return s.plugins.operations.start(s.clone(), audience, async move {
+                let result = Box::pin(
+                    resource_operation(name)
+                        .unwrap()
+                        .execute(&service, input, authority),
+                )
+                .await?;
+                Ok(match name {
+                    "import_project" => PluginOperationResult::Project {
+                        project: Box::new(serde_json::from_value(result)?),
+                    },
+                    "list_source_projects" => PluginOperationResult::SourceProjects {
+                        page: Box::new(serde_json::from_value(result)?),
+                    },
+                    "import_skill" => PluginOperationResult::SkillImport {
+                        imported: Box::new(serde_json::from_value(result)?),
+                    },
+                    "get_skill_source_status" => PluginOperationResult::SkillSource {
+                        status: Box::new(serde_json::from_value(result)?),
+                    },
+                    "update_skill_source" => PluginOperationResult::SkillBundle {
+                        bundle: Box::new(serde_json::from_value(result)?),
+                    },
+                    _ => unreachable!(),
+                })
+            });
+        }
+        self.execute(s, input, authority).await
+    }
+
+    async fn execute(
+        &self,
+        s: &Arc<Service>,
+        input: Value,
+        mut authority: Authority,
+    ) -> Result<Value> {
         let result = match self.name {
             "import_project" => {
                 let input: ImportProjectInput = decode(input)?;

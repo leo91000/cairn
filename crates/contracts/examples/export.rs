@@ -103,6 +103,7 @@ fn main() {
         },
         {
             "name": "importSkill",
+            "deferred": true,
             "input": "ImportSkillInput",
             "output": "SkillImport",
             "method": "POST",
@@ -131,6 +132,7 @@ fn main() {
         },
         {
             "name": "getSkillSourceStatus",
+            "deferred": true,
             "input": "SkillInput",
             "output": "SkillSourceStatus",
             "method": "GET",
@@ -138,6 +140,7 @@ fn main() {
         },
         {
             "name": "updateSkillSource",
+            "deferred": true,
             "input": "UpdateSkillSourceInput",
             "output": "SkillBundle",
             "method": "POST",
@@ -159,6 +162,7 @@ fn main() {
         },
         {
             "name": "importProject",
+            "deferred": true,
             "input": "ImportProjectInput",
             "output": "Project",
             "method": "POST",
@@ -166,6 +170,7 @@ fn main() {
         },
         {
             "name": "listSourceProjects",
+            "deferred": true,
             "input": "ListSourceProjectsInput",
             "output": "PluginProjectPage",
             "method": "GET",

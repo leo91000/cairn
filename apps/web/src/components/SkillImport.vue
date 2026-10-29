@@ -23,6 +23,7 @@ import {
   Upload,
 } from '../icons'
 import { pluginFormValues, pluginSettings } from '../plugin-form-values'
+import { pluginRequest } from '../plugin-operations'
 import { pluginSources } from '../plugin-sources'
 import { instanceNoun } from '../plugins'
 import { defaultSkillLimits, formatBytes } from '../skill-bundle'
@@ -167,7 +168,7 @@ async function submit() {
     }
 
     busy.value = chosen ? `Fetching from ${chosen.pluginName}…` : 'Importing…'
-    const result = await importSkill(api, body)
+    const result = await importSkill(pluginRequest, body)
     if (result.imported) {
       emit('imported', result.imported)
       return

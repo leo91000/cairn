@@ -1096,6 +1096,91 @@
           "additionalProperties": false,
           "properties": {
             "kind": {
+              "const": "project",
+              "type": "string"
+            },
+            "project": {
+              "$ref": "#/definitions/Project"
+            }
+          },
+          "required": [
+            "kind",
+            "project"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "sourceProjects",
+              "type": "string"
+            },
+            "page": {
+              "$ref": "#/definitions/PluginProjectPage"
+            }
+          },
+          "required": [
+            "kind",
+            "page"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "imported": {
+              "$ref": "#/definitions/SkillImport"
+            },
+            "kind": {
+              "const": "skillImport",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "imported"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "skillSource",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/definitions/SkillSourceStatus"
+            }
+          },
+          "required": [
+            "kind",
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "bundle": {
+              "$ref": "#/definitions/SkillBundle"
+            },
+            "kind": {
+              "const": "skillBundle",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "bundle"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
               "const": "package",
               "type": "string"
             },
@@ -1234,6 +1319,90 @@
       "required": [
         "daemonArgs",
         "socketEnv"
+      ],
+      "type": "object"
+    },
+    "PluginProject": {
+      "additionalProperties": false,
+      "properties": {
+        "badges": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "defaultBranch": {
+          "default": "",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "imported": {
+          "default": false,
+          "type": "boolean"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "projectName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "description",
+        "defaultBranch",
+        "badges",
+        "imported"
+      ],
+      "type": "object"
+    },
+    "PluginProjectPage": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/definitions/PluginProject"
+          },
+          "type": "array"
+        },
+        "nextPage": {
+          "format": "uint32",
+          "maximum": 10000,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "nextPage"
       ],
       "type": "object"
     },
@@ -1605,6 +1774,98 @@
       ],
       "type": "object"
     },
+    "Project": {
+      "properties": {
+        "baseBranch": {
+          "default": "main",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_/.-]*$",
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProjectSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceMode": {
+          "default": "remote",
+          "pattern": "^(remote|local)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "path",
+        "description",
+        "sourceMode",
+        "baseBranch",
+        "origin",
+        "source",
+        "revision",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "ProjectSource": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginId",
+        "source",
+        "instance",
+        "id"
+      ],
+      "type": "object"
+    },
     "SetupPreset": {
       "additionalProperties": false,
       "description": "A named combination of the step's boolean settings, e.g. \"Read only\".",
@@ -1735,12 +1996,339 @@
         "title"
       ],
       "type": "object"
+    },
+    "SkillBundle": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "files": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/SkillFile"
+          },
+          "type": "array"
+        },
+        "limits": {
+          "$ref": "#/definitions/SkillLimits"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "revision": {
+          "default": "",
+          "type": "string"
+        },
+        "scope": {
+          "default": "global",
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SkillSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "scope",
+        "name",
+        "revision",
+        "files",
+        "limits",
+        "source"
+      ],
+      "type": "object"
+    },
+    "SkillDiffLine": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "default": "",
+          "pattern": "^(context|added|removed|gap)$",
+          "type": "string"
+        },
+        "text": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "text"
+      ],
+      "type": "object"
+    },
+    "SkillFile": {
+      "additionalProperties": false,
+      "properties": {
+        "executable": {
+          "default": false,
+          "type": "boolean"
+        },
+        "path": {
+          "default": "",
+          "type": "string"
+        },
+        "size": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "text": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "size",
+        "executable",
+        "text"
+      ],
+      "type": "object"
+    },
+    "SkillImport": {
+      "additionalProperties": false,
+      "properties": {
+        "candidates": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "imported": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SkillBundle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "imported",
+        "candidates"
+      ],
+      "type": "object"
+    },
+    "SkillLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "bundleBytes": {
+          "default": 16777216,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fileBytes": {
+          "default": 4194304,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files": {
+          "default": 500,
+          "format": "uint32",
+          "maximum": 2147483647,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "uploadBytes": {
+          "default": 5242880,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "fileBytes",
+        "bundleBytes",
+        "files",
+        "uploadBytes"
+      ],
+      "type": "object"
+    },
+    "SkillSource": {
+      "additionalProperties": false,
+      "properties": {
+        "folder": {
+          "default": "",
+          "type": "string"
+        },
+        "importedAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "instance": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "default": "",
+          "type": "string"
+        },
+        "location": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": "object",
+          "x-cairn-json-object": true
+        },
+        "modified": {
+          "default": false,
+          "type": "boolean"
+        },
+        "pluginId": {
+          "default": "",
+          "type": "string"
+        },
+        "source": {
+          "default": "",
+          "type": "string"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginId",
+        "source",
+        "label",
+        "location",
+        "folder",
+        "version",
+        "importedAt",
+        "modified"
+      ],
+      "type": "object"
+    },
+    "SkillSourceChange": {
+      "additionalProperties": false,
+      "properties": {
+        "binary": {
+          "default": false,
+          "type": "boolean"
+        },
+        "lines": {
+          "items": {
+            "$ref": "#/definitions/SkillDiffLine"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "path": {
+          "default": "",
+          "type": "string"
+        },
+        "status": {
+          "default": "",
+          "pattern": "^(added|removed|modified)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "status",
+        "binary"
+      ],
+      "type": "object"
+    },
+    "SkillSourceStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "changes": {
+          "items": {
+            "$ref": "#/definitions/SkillSourceChange"
+          },
+          "type": "array"
+        },
+        "current": {
+          "type": "boolean"
+        },
+        "latest": {
+          "$ref": "#/definitions/SkillSourceVersion"
+        },
+        "source": {
+          "$ref": "#/definitions/SkillSource"
+        }
+      },
+      "required": [
+        "source",
+        "latest",
+        "current",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "SkillSourceVersion": {
+      "additionalProperties": false,
+      "properties": {
+        "date": {
+          "default": "",
+          "type": "string"
+        },
+        "message": {
+          "default": "",
+          "type": "string"
+        },
+        "version": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "message",
+        "date"
+      ],
+      "type": "object"
     }
   },
   "properties": {
     "error": {
       "type": [
         "string",
+        "null"
+      ]
+    },
+    "errorStatus": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": [
+        "integer",
         "null"
       ]
     },

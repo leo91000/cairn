@@ -15,6 +15,7 @@ import {
   TriangleAlert,
   Unlink,
 } from '../icons'
+import { pluginRequest } from '../plugin-operations'
 import { plural, shortVersion } from '../skill-bundle'
 import Icon from './Icon.vue'
 import SkillDiff from './SkillDiff.vue'
@@ -66,7 +67,7 @@ async function run(kind: 'check' | 'update' | 'detach', action: () => Promise<vo
 
 function check() {
   return run('check', async () => {
-    status.value = await getSkillSourceStatus(api, { scope: props.scope, name: props.name })
+    status.value = await getSkillSourceStatus(pluginRequest, { scope: props.scope, name: props.name })
   })
 }
 
@@ -77,7 +78,7 @@ function update() {
   }
 
   return run('update', async () => {
-    const bundle = await updateSkillSource(api, {
+    const bundle = await updateSkillSource(pluginRequest, {
       scope: props.scope,
       name: props.name,
       version: status.value!.latest.version,

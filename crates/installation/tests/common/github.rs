@@ -146,6 +146,11 @@ async fn answer(root: &Path, calls: &Mutex<Vec<Value>>, request: Request<Body>) 
         "userAgent": headers.get("user-agent").and_then(|value| value.to_str().ok()),
     }));
     let state = state(root);
+    if full.contains("/git/blobs/")
+        && let Some(delay) = state["blobDelay"].as_u64()
+    {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
 
     if let Some(gate) = state.get("gate")
         && gate["path"] == full.as_str()

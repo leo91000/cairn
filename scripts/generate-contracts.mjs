@@ -90,7 +90,7 @@ ${tsQuerySetup}  return request<${tsOutput}>(\`${tsPath}\`, { method: '${client.
       : `?${queryFields.map(field => `${field}=\${segment(input.${field}.toString())}`).join('&')}`
     : ''
   const ktPath = client.path.replace(/\{(\w+)\}/g, (_, field) => `\${segment(input.${field})}`) + ktQuery
-  const ktCall = client.deferred ? `wireJson.decodeFromJsonElement(pluginOperation("${ktPath}", contractJson.encodeToJsonElement(input), method = "${client.method}"))` : `send("${client.method}", "${ktPath}"${hasBody ? `, contractJson.encodeToJsonElement(input${client.bodyField ? `.${client.bodyField}` : ''})` : ''})`
+  const ktCall = client.deferred ? `wireJson.decodeFromJsonElement(pluginOperation("${ktPath}"${hasBody ? `, contractJson.encodeToJsonElement(input${client.bodyField ? `.${client.bodyField}` : ''})` : ''}, method = "${client.method}"))` : `send("${client.method}", "${ktPath}"${hasBody ? `, contractJson.encodeToJsonElement(input${client.bodyField ? `.${client.bodyField}` : ''})` : ''})`
   const ktQueryItems = queryFields.map(field => optionalQuery.includes(field)
     ? `input.${field}?.let { "${field}" to it.toString() }`
     : `"${field}" to input.${field}.toString()`).join(', ')

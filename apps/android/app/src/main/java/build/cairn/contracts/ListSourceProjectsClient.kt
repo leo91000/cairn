@@ -2,10 +2,15 @@
 package build.cairn.contracts
 
 import build.cairn.app.data.CairnApi
+import build.cairn.app.data.pluginOperation
 import build.cairn.app.data.segment
+import build.cairn.app.data.wireJson
+import kotlinx.serialization.json.decodeFromJsonElement
 
 suspend fun CairnApi.listSourceProjects(input: ListSourceProjectsInput): PluginProjectPage =
-    send(
-        "GET",
-        "/plugins/${segment(input.pluginId)}/projects?source=${segment(input.source.toString())}&instance=${segment(input.instance.toString())}&page=${segment(input.page.toString())}&query=${segment(input.query.toString())}",
+    wireJson.decodeFromJsonElement(
+        pluginOperation(
+            "/plugins/${segment(input.pluginId)}/projects?source=${segment(input.source.toString())}&instance=${segment(input.instance.toString())}&page=${segment(input.page.toString())}&query=${segment(input.query.toString())}",
+            method = "GET",
+        )
     )

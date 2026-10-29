@@ -442,22 +442,15 @@ pub(crate) async fn import(
     let source_key = key(scope, &skill);
     let auth = origin.authority.clone();
     let mut publication_record = record.clone();
+    let mut publication = origin.authority.publication(s);
+    publication.authorize = Box::new(move |db, saved| {
+        auth.authorize(db)?;
+        publication_record.revision = saved.revision.clone();
+        db.set_as(&source_key, &publication_record, None)
+    });
     let saved = s
         .skills
-        .apply_authorized(
-            &skill,
-            None,
-            &changes,
-            project,
-            Some((
-                s.store.clone(),
-                Box::new(move |db, saved| {
-                    auth.authorize(db)?;
-                    publication_record.revision = saved.revision.clone();
-                    db.set_as(&source_key, &publication_record, None)
-                }),
-            )),
-        )
+        .apply_authorized(&skill, None, &changes, project, Some(publication))
         .await?;
     let mut bundle = super::bundle_response(scope, &skill, &saved);
     record.revision = saved.revision.clone();
@@ -683,14 +676,25 @@ pub(crate) async fn update(
     let auth = origin.authority.clone();
     auth.recheck(s).await?;
     let root = s.skills.root(project).await?;
-    let saved = super::bundle::save_authorized(&root, skill, super::bundle::Base::Replace(base), &changes, Some((s.store.clone(), Box::new(move |db, saved| {
+    let mut publication = origin.authority.publication(s);
+    publication.authorize = Box::new(move |db, saved| {
         auth.authorize(db)?;
         if db.kv_as::<SourceRecord>(&source_key)?.as_ref() != Some(&expected) {
-            return Err(Error::conflict("The skill source changed during this update. Reload the skill and try again."));
+            return Err(Error::conflict(
+                "The skill source changed during this update. Reload the skill and try again.",
+            ));
         }
         publication_record.revision = saved.revision.clone();
         db.set_as(&source_key, &publication_record, None)
-    })))).await?;
+    });
+    let saved = super::bundle::save_authorized(
+        &root,
+        skill,
+        super::bundle::Base::Replace(base),
+        &changes,
+        Some(publication),
+    )
+    .await?;
     let mut bundle = super::bundle_response(scope, skill, &saved);
     record.revision = saved.revision.clone();
     bundle["source"] = serde_json::to_value(public(&record, &saved.revision))?;
