@@ -303,7 +303,7 @@ async fn legacy_missing_defaults_and_revocation_are_retained() {
     assert_eq!(node.storage, cairn_contracts::NodeStoragePolicy::default());
     assert!(
         migration::upgrade(&mut db).is_err(),
-        "The inventory-only helper must not rewrite version13"
+        "The inventory-only helper must not rewrite version14"
     );
 }
 
