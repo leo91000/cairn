@@ -153,6 +153,21 @@ pub async fn remove_member(service: &Service, account: &str) {
     service.store.set(MEMBERS, members, None).await.unwrap();
 }
 
+/// Make the fixture Beacon's membership endpoint fail, or answer again.
+pub async fn authority_unavailable(service: &Service, unavailable: bool) {
+    if unavailable {
+        service
+            .store
+            .set(AUTHORITY_DOWN, json!(true), None)
+            .await
+            .unwrap();
+    } else {
+        service.store.delete(AUTHORITY_DOWN).await.unwrap();
+    }
+}
+
+const AUTHORITY_DOWN: &str = "test-relay-authority-down";
+
 /// A member who may use the agent, as if the owner gave the access from the apps.
 pub async fn allow_member(service: &Service, account: &str, agent: &str) {
     let access = format!("membership-{account}");
@@ -183,6 +198,9 @@ async fn fixture_task_authors(
         return Err(Error::unauthorized("Incorrect fixture installation token."));
     }
 
+    if service.store.kv(AUTHORITY_DOWN).await?.is_some() {
+        return Err(Error::unavailable("Synthetic membership outage."));
+    }
     let members = service.store.kv(MEMBERS).await?.unwrap_or_default();
     Ok(Json(TaskAuthorPolicy {
         owner: TaskAuthorGrant {

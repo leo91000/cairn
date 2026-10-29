@@ -215,12 +215,11 @@ pub(crate) async fn authorize_request(s: &Service, input: &crate::http::Input) -
     }
 
     // A failed check fails closed: these requests direct an agent.
-    {
-        let _authors = s.missions.authors.lock().await;
-        // Another request may have checked while this one waited.
-        if !s.missions.membership_verified_within(MEMBERSHIP_AGE) {
-            s.missions.observe(s).await?;
-        }
+    if let Err(error) = s.missions.verify_membership(s, MEMBERSHIP_AGE).await {
+        tracing::warn!(status = error.status, "Agent access could not be confirmed");
+        return Err(Error::unavailable(
+            "Your access to this agent could not be confirmed right now. Try again in a moment.",
+        ));
     }
     check().await.map(|_| ())
 }

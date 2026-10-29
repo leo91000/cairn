@@ -419,6 +419,64 @@ async fn an_entry_from_an_ended_membership_is_dropped_before_it_allows_work() {
     assert_eq!(usable(&s).await, json!([]));
 }
 
+/// A member's request straight to the installation API, without the fixture relay's
+/// own membership refresh, so only the installation decides when to confirm them.
+async fn direct(
+    s: &Arc<Service>,
+    method: &str,
+    path: &str,
+    body: Value,
+) -> Result<Value, (u16, String)> {
+    Box::pin(cairn_installation::api::dispatch(
+        s,
+        &cairn_installation::http::Input {
+            method: method.into(),
+            path: path.into(),
+            query: std::collections::HashMap::default(),
+            headers: axum::http::HeaderMap::default(),
+            body,
+            identity: Some(InstallationIdentity::trusted(
+                InstallationRole::Member,
+                MEMBER,
+            )),
+        },
+    ))
+    .await
+    .map_err(|error| (error.status, error.message))
+}
+
+#[tokio::test]
+async fn a_stale_membership_check_is_repeated_and_fails_closed_without_the_beacon() {
+    let root = tempfile::tempdir().unwrap();
+    let s = service(root.path()).await;
+    let reviewer = agent(&s, "Reviewer").await;
+    relay_fixture::allow_member(&s, MEMBER, &reviewer).await;
+    let start = json!({ "agentId": reviewer });
+
+    // While the Beacon cannot confirm the membership, the entry allows nothing.
+    relay_fixture::authority_unavailable(&s, true).await;
+    s.missions.expire_membership_check();
+    let (status, message) = direct(&s, "POST", "/api/chats", start.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(status, 503);
+    assert!(message.contains("could not be confirmed"), "{message}");
+    relay_fixture::authority_unavailable(&s, false).await;
+    direct(&s, "POST", "/api/chats", start.clone())
+        .await
+        .unwrap();
+
+    // A recent check vouches for the entry; an expired one drops an ended membership.
+    relay_fixture::remove_member(&s, MEMBER).await;
+    relay_fixture::add_member(&s, MEMBER, "membership-2").await;
+    direct(&s, "POST", "/api/chats", start.clone())
+        .await
+        .unwrap();
+    s.missions.expire_membership_check();
+    let (status, _) = direct(&s, "POST", "/api/chats", start).await.unwrap_err();
+    assert_eq!(status, 403);
+}
+
 #[tokio::test]
 async fn merging_an_agent_never_passes_its_account_access_to_the_receiving_agent() {
     let root = tempfile::tempdir().unwrap();

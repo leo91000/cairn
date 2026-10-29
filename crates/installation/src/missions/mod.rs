@@ -22,6 +22,8 @@ pub struct Missions {
     pub(crate) authors: tokio::sync::Mutex<()>,
     /// When the Beacon last confirmed the memberships, reconciled with account access.
     verified: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Applies one membership observation at a time, in the order they were fetched.
+    observing: tokio::sync::Mutex<()>,
 }
 
 pub(crate) enum Actor {
@@ -295,6 +297,11 @@ impl Missions {
             .await
     }
 
+    /// The next request a member's access entry allows confirms the memberships first.
+    pub fn expire_membership_check(&self) {
+        *self.verified.lock().unwrap() = None;
+    }
+
     pub(crate) fn membership_verified_within(&self, age: std::time::Duration) -> bool {
         self.verified
             .lock()
@@ -302,8 +309,28 @@ impl Missions {
             .is_some_and(|verified| verified.elapsed() < age)
     }
 
-    /// Callers hold `authors`.
+    /// Confirms the memberships unless a check within `age` already did, without waiting
+    /// for task admission: a member's request never queues behind a scheduling pass.
+    pub(crate) async fn verify_membership(
+        &self,
+        s: &Service,
+        age: std::time::Duration,
+    ) -> Result<()> {
+        let _observing = self.observing.lock().await;
+        // Another request may have checked while this one waited.
+        if !self.membership_verified_within(age) {
+            self.observe_locked(s).await?;
+        }
+        Ok(())
+    }
+
+    /// Callers hold `authors` when they act on the returned policy.
     pub(crate) async fn observe(&self, s: &Service) -> Result<Option<TaskAuthorPolicy>> {
+        let _observing = self.observing.lock().await;
+        self.observe_locked(s).await
+    }
+
+    async fn observe_locked(&self, s: &Service) -> Result<Option<TaskAuthorPolicy>> {
         let checked = std::time::Instant::now();
         let policy = crate::relay::task_author_policy(s).await?;
         let observed = policy.clone();
