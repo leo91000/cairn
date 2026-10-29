@@ -35,6 +35,8 @@ const props = defineProps<{
   node: ExecutionNode
   busy: boolean
   error?: string
+  // A failed inventory refresh: the panel's figures may be out of date.
+  refreshError?: string
   clock?: number | null
 }>()
 const emit = defineEmits<{
@@ -113,6 +115,9 @@ const reserve = computed(() => {
       <div v-if="error" class="px-6.5 pt-3 phone:px-5">
         <UiAlert>{{ error }}</UiAlert>
       </div>
+      <p v-if="refreshError" class="px-6.5 pt-3 text-xs text-warning phone:px-5" role="status">
+        Could not refresh this machine: {{ refreshError }}
+      </p>
       <template v-if="node.revoked">
         <section class="grid gap-3 px-6.5 py-5 phone:px-5">
           <span><NodeHealthBadge :health="health" /></span>

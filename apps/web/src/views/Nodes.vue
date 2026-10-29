@@ -89,6 +89,7 @@ const machinesHeading = ref<HTMLElement>()
 const loaded = ref(false)
 // A failed inventory refresh concerns the page, not the machine whose panel is open; the next success clears it.
 const refreshError = ref('')
+// Action dialogs show their own errors; adding a machine also shows refresh failures, as it waits on refreshes.
 const shownError = computed(() => error.value || refreshError.value)
 const errorNodeId = ref<string | null>(null)
 // Behind dialogs and panels, the page names the machine an action error concerns.
@@ -576,6 +577,7 @@ function revoke() {
       :clock="clock"
       :busy="busy"
       :error="errorNodeId === opened.id ? error : ''"
+      :refresh-error="refreshError"
       @close="openedId = null"
       @changed="load"
       @configure="edit(opened)"
@@ -643,8 +645,8 @@ function revoke() {
         </fieldset><p class="text-sm text-muted">
           Synchronization can take longer than the target interval. The publication cache stays within this budget.
         </p>
-        <UiAlert v-if="shownError">
-          {{ shownError }}
+        <UiAlert v-if="error">
+          {{ error }}
         </UiAlert>
         <UiButton type="submit" :disabled="busy">
           Save
@@ -687,8 +689,8 @@ function revoke() {
         <p class="text-xs text-muted">
           You can change this later on each agent’s page.
         </p>
-        <UiAlert v-if="shownError">
-          {{ shownError }}
+        <UiAlert v-if="error">
+          {{ error }}
         </UiAlert>
         <div class="flex justify-end gap-2.5">
           <UiButton :disabled="busy" @click="closeGrants">
@@ -712,8 +714,8 @@ function revoke() {
         <p class="text-sm text-muted">
           The machine must be online. Disks of conversations that are running or moving are kept.
         </p>
-        <UiAlert v-if="shownError">
-          {{ shownError }}
+        <UiAlert v-if="error">
+          {{ error }}
         </UiAlert><div>
           <UiButton variant="danger" :disabled="busy" @click="freeStaleDisks">
             Delete {{ formatMiB(cleaning.staleDisks?.diskMiB || 0) }}
@@ -728,8 +730,8 @@ function revoke() {
       @close="closeEditor"
     >
       <form class="node-form" @submit.prevent="save">
-        <UiAlert v-if="shownError">
-          {{ shownError }}
+        <UiAlert v-if="error">
+          {{ error }}
         </UiAlert>
         <label>Name<input
           v-model="editing.name"
@@ -840,8 +842,8 @@ function revoke() {
         <p v-if="revoking.capabilities.backend === 'native'" class="text-sm text-muted">
           If a conversation disk is still mounted, the command lists it and stops before deleting anything: start cairn-native-node so its recovery releases owned disks, then run the command again.
         </p>
-        <UiAlert v-if="shownError">
-          {{ shownError }}
+        <UiAlert v-if="error">
+          {{ error }}
         </UiAlert>
         <div>
           <UiButton variant="danger" :disabled="busy" @click="revoke">
@@ -876,8 +878,8 @@ function revoke() {
         <p v-if="nodeBackend(retiring.previous) === 'native'" class="text-sm text-muted">
           If a conversation disk is still mounted, the command lists it and stops before deleting anything: start cairn-native-node so its recovery releases owned disks, then run the command again.
         </p>
-        <UiAlert v-if="shownError">
-          {{ shownError }}
+        <UiAlert v-if="error">
+          {{ error }}
         </UiAlert>
         <div class="flex flex-wrap justify-end gap-2.5">
           <UiButton :disabled="busy" @click="retiring = null">

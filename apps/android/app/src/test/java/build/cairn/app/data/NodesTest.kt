@@ -130,6 +130,18 @@ class NodesTest {
             nodeHealth(runner, 0, 120_000),
         )
         assertEquals(NodeHealthState.READY, nodeHealth(runner, 0, 30_000).state)
+        assertEquals(
+            NodeHealth(
+                NodeHealthState.ATTENTION,
+                "À vérifier",
+                "Pas prêt depuis son dernier contact il y a 2 min",
+            ),
+            nodeHealth(runner.copy(executionReady = false), 0, 120_000),
+        )
+        assertEquals(
+            "Dernier contact il y a 2 min",
+            nodeHealth(ready.copy(status = "offline", lastSeen = 0), 3_600_000, 120_000).detail,
+        )
         // A device clock far ahead of the server does not make a refreshed runner look stale.
         assertEquals(
             NodeHealthState.READY,

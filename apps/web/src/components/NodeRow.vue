@@ -23,6 +23,17 @@ const slots = computed(() => props.node.slots ?? 0)
 const free = computed(() => props.node.availableSlots ?? 0)
 const runtime = computed(() => props.node.capabilities.backend === 'native' ? nodeAdministrator(props.node) ? 'Native · admin' : 'Native' : 'VM')
 const agents = computed(() => props.node.agents ?? [])
+// The button's name replaces its content for screen readers: it carries what the row shows.
+const label = computed(() => {
+  const node = props.node
+  const parts = [`${node.name}${node.local ? ' (built-in runner)' : ''}`, `${health.value.label}: ${health.value.detail}`, runtime.value]
+  if (live.value && slots.value)
+    parts.push(`${free.value} of ${slots.value} slots free`)
+  if (live.value && node.usage)
+    parts.push(`${formatMiB(node.usage.memoryMiB)} of ${formatMiB(node.limits.memoryMiB)} RAM`, `${formatMiB(node.usage.diskMiB)} of ${formatMiB(node.limits.diskMiB)} disk`)
+  parts.push(`${agents.value.length} ${agents.value.length === 1 ? 'agent' : 'agents'}`)
+  return parts.join(', ')
+})
 </script>
 
 <template>
@@ -30,13 +41,13 @@ const agents = computed(() => props.node.agents ?? [])
     type="button"
     class="node-row group grid w-full grid-cols-[minmax(0,1fr)_7rem_5.5rem_8.5rem_4.5rem_1rem] items-center gap-4 border-t border-line px-4.5 py-3.5 text-left transition-colors hover:bg-hover/40 focus-visible:-outline-offset-2 focus-visible:outline-2 focus-visible:outline-accent tablet:grid-cols-[minmax(0,1fr)_7rem_5.5rem_1rem] phone:grid-cols-[minmax(0,1fr)_auto]! phone:gap-3 phone:px-4"
     :class="{ 'bg-soft/40': selected }"
-    :aria-label="`${node.name}${node.local ? ' (built-in runner)' : ''}, ${health.label}: ${health.detail}`"
+    :aria-label="label"
     :data-node-id="node.id"
     @click="$emit('open')"
   >
     <span class="min-w-0">
-      <span class="flex min-w-0 items-center gap-2">
-        <span class="truncate text-[14px] font-semibold">{{ node.name }}</span>
+      <span class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+        <span class="max-w-full truncate text-[14px] font-semibold" :title="node.name">{{ node.name }}</span>
         <NodeHealthBadge :health="health" />
       </span>
       <span class="block truncate text-xs" :class="['offline', 'attention'].includes(health.state) ? 'text-coral' : 'text-muted'">{{ node.local ? `Built-in runner · ${health.detail}` : health.detail }}</span>

@@ -126,6 +126,10 @@ describe('node health', () => {
     expect(fleetClock([runner])).toBeNull()
     expect(nodeHealth(runner, 0, 120_000)).toEqual({ state: 'offline', label: 'Offline', detail: 'Unreachable · last contact 2 min ago' })
     expect(nodeHealth(runner, 0, 30_000).state).toBe('ready')
+    // A runner that answers with a mismatched version is not refreshed either, but turns readiness off.
+    expect(nodeHealth({ ...runner, executionReady: false }, 0, 120_000)).toEqual({ state: 'attention', label: 'Needs attention', detail: 'Not ready since its last contact 2 min ago' })
+    // Offline ages follow the server clock too.
+    expect(nodeHealth(node({ status: 'offline', lastSeen: 0 }), 3_600_000, 120_000).detail).toBe('Last contact 2 min ago')
     // A device clock far ahead of the server does not make a refreshed runner look stale.
     expect(nodeHealth(node({ local: true, status: 'local', lastSeen: 120_000 }), 900_000, 125_000).state).toBe('ready')
     // Without a machine the server reports online, there is no reference: the runner is not judged.

@@ -192,26 +192,39 @@ fun nodeHealth(
     clock: Long? = null,
 ): NodeHealth {
     if (node.revoked) return NodeHealth(NodeHealthState.REVOKED, "Révoquée", "N’a plus accès")
+    // Ages use the server clock when the fleet shows it, so device clock drift does not shift them.
+    val reference = clock ?: now
     if (!node.local && node.status == "offline")
         return NodeHealth(
             NodeHealthState.OFFLINE,
             "Hors ligne",
-            node.lastSeen?.let { "Dernier contact ${relativeAge(it, now)}" } ?: "Jamais connectée",
+            node.lastSeen?.let { "Dernier contact ${relativeAge(it, maxOf(reference, it))}" }
+                ?: "Jamais connectée",
         )
-    // The built-in runner always reports "local". Listing refreshes it when reachable, so a contact
-    // older than the fleet's by the heartbeat timeout means it stopped answering. Without a
-    // reference, it is not judged.
+    // The built-in runner always reports "local". Listing refreshes it when it answers as expected,
+    // so a contact older than the fleet's by the heartbeat timeout means it stopped answering, or
+    // answers with a mismatched version (which also turns readiness off). Without a reference, it
+    // is not judged.
     if (
         node.local &&
             clock != null &&
             node.lastSeen != null &&
             clock - node.lastSeen >= HEARTBEAT_TIMEOUT_MS
-    )
-        return NodeHealth(
-            NodeHealthState.OFFLINE,
-            "Hors ligne",
-            "Injoignable · dernier contact ${relativeAge(node.lastSeen, clock)}",
-        )
+    ) {
+        val since = relativeAge(node.lastSeen, clock)
+        return if (node.executionReady)
+            NodeHealth(
+                NodeHealthState.OFFLINE,
+                "Hors ligne",
+                "Injoignable · dernier contact $since",
+            )
+        else
+            NodeHealth(
+                NodeHealthState.ATTENTION,
+                "À vérifier",
+                "Pas prêt depuis son dernier contact $since",
+            )
+    }
     val native = node.capabilities.backend == NATIVE_BACKEND
     if (!native && !node.capabilities.kvm)
         return NodeHealth(NodeHealthState.ATTENTION, "À vérifier", "KVM indisponible")

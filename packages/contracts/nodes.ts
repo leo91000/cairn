@@ -115,12 +115,19 @@ export function fleetClock(nodes: ExecutionNode[]): number | null {
 export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number | null = null): NodeHealth {
   if (node.revoked)
     return { state: 'revoked', label: 'Revoked', detail: 'No longer has access' }
+  // Ages use the server clock when the fleet shows it, so device clock drift does not shift them.
+  const reference = clock ?? now
   if (!node.local && node.status === 'offline')
-    return { state: 'offline', label: 'Offline', detail: node.lastSeen != null ? `Last contact ${relativeAge(node.lastSeen, now)}` : 'Never connected' }
-  // The built-in runner always reports "local". Listing refreshes it when reachable, so a contact older
-  // than the fleet's by the heartbeat timeout means it stopped answering. Without a reference, it is not judged.
-  if (node.local && clock != null && node.lastSeen != null && clock - node.lastSeen >= HEARTBEAT_TIMEOUT_MS)
-    return { state: 'offline', label: 'Offline', detail: `Unreachable · last contact ${relativeAge(node.lastSeen, clock)}` }
+    return { state: 'offline', label: 'Offline', detail: node.lastSeen != null ? `Last contact ${relativeAge(node.lastSeen, Math.max(reference, node.lastSeen))}` : 'Never connected' }
+  // The built-in runner always reports "local". Listing refreshes it when it answers as expected, so a
+  // contact older than the fleet's by the heartbeat timeout means it stopped answering, or answers with a
+  // mismatched version (which also turns readiness off). Without a reference, it is not judged.
+  if (node.local && clock != null && node.lastSeen != null && clock - node.lastSeen >= HEARTBEAT_TIMEOUT_MS) {
+    const since = relativeAge(node.lastSeen, clock)
+    return node.executionReady
+      ? { state: 'offline', label: 'Offline', detail: `Unreachable · last contact ${since}` }
+      : { state: 'attention', label: 'Needs attention', detail: `Not ready since its last contact ${since}` }
+  }
 
   const native = node.capabilities.backend === 'native'
   if (!native && !node.capabilities.kvm)
