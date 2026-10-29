@@ -9,12 +9,17 @@ import { expect, test } from '@playwright/test'
 import { beaconRelayFixture, executeBeaconSql } from './beacon-relay-fixture'
 import { relayProtocolVersion } from './relay-protocol'
 
-test('installation subdomains preserve browser drafts and canonical account access', async ({ page: initialPage, browser, browserName }) => {
+test('installation subdomains preserve browser drafts and canonical account access', async ({ page: initialPage, browser, browserName }, testInfo) => {
   let page = initialPage
   let proxyContext: Awaited<ReturnType<typeof browser.newContext>> | undefined
   test.setTimeout(120000)
   page.setDefaultTimeout(10000)
-  const fixture = await beaconRelayFixture(4489)
+  // Different browser projects can run this journey at the same time.
+  const portBase = Number(process.env.CAIRN_BROWSER_PORT_BASE ?? 4322)
+  const beaconPort = portBase + 200 + testInfo.parallelIndex
+  if (!Number.isInteger(portBase) || portBase < 1024 || beaconPort > 65535)
+    throw new Error('CAIRN_BROWSER_PORT_BASE must select valid unprivileged fixture ports.')
+  const fixture = await beaconRelayFixture(beaconPort)
   const database = new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!)
   const schema = `subdomains_${crypto.randomUUID().replaceAll('-', '')}`
   executeBeaconSql(database, `CREATE SCHEMA ${schema}`)
@@ -45,7 +50,7 @@ test('installation subdomains preserve browser drafts and canonical account acce
 
     const upstream = httpRequest({
       hostname: '127.0.0.1',
-      port: 4489,
+      port: beaconPort,
       method: request.method,
       path: request.url,
       headers: { ...request.headers, host: forwardHost(request.headers.host || '') },
@@ -65,7 +70,7 @@ test('installation subdomains preserve browser drafts and canonical account acce
   proxy.on('upgrade', (request, socket, head) => {
     upgraded.add(socket)
     socket.on('close', () => upgraded.delete(socket))
-    const upstream = connect(4489, '127.0.0.1', () => {
+    const upstream = connect(beaconPort, '127.0.0.1', () => {
       const headers = Object.entries({ ...request.headers, host: forwardHost(request.headers.host || '') })
         .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : value}`)
         .join('\r\n')
