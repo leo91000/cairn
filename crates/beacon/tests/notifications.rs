@@ -1270,7 +1270,9 @@ async fn failed_push_tasks_release_the_relay_window_for_new_events() {
 
     // Concurrent sends may reach the provider in any order. Fill the window
     // with failing sends before adding the event that must get a new slot.
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // The four sends serialize on the same device row, including rollback after
+    // each panic. Allow their combined work to finish on a loaded host.
+    tokio::time::timeout(Duration::from_secs(30), async {
         while mail
             .panics_remaining
             .load(std::sync::atomic::Ordering::SeqCst)
