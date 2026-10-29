@@ -11,6 +11,5 @@ data class SetAgentAvatarInput(
 ) {
     init {
         java.util.UUID.fromString(agentId)
-        require(data.codePointCount(0, data.length) <= 6990508)
     }
 }

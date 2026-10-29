@@ -9,8 +9,5 @@ data class SchedulePreviewInput(
     val cron: String,
     val timezone: String,
 ) {
-    init {
-        require(cron.codePointCount(0, cron.length) in 1..100)
-        require(timezone.codePointCount(0, timezone.length) in 1..100)
-    }
+    init {}
 }

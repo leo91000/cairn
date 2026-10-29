@@ -20,10 +20,7 @@ data class Project(
     init {
         require(Regex("^[a-zA-Z0-9][a-zA-Z0-9_/.-]*\$").containsMatchIn(baseBranch))
         require(createdAt in 0L..9007199254740991L)
-        require(description.codePointCount(0, description.length) <= 500)
         java.util.UUID.fromString(id)
-        require(name.codePointCount(0, name.length) in 1..100)
-        require(path.codePointCount(0, path.length) in 1..2000)
         require(Regex("^(remote|local)\$").containsMatchIn(sourceMode))
     }
 }
