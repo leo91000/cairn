@@ -96,7 +96,8 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
             task["archived"] = true.into();
             task["enabled"] = false.into();
             db.save_mission(&serde_json::from_value(task.clone())?)?;
-            chat["deletedAt"] = 1.into();
+            chat["lifecycle"] = "trash".into();
+            chat["trashedAt"] = 1.into();
             db.save_conversation_boundary(&chat)?;
             db.put_message(&json!({ "id": id(), "chatId": chat["id"], "createdAt": 1, "text": "Keep this message" }))?;
             db.event(run["id"].as_str().unwrap(), &EventKind::Status, "Keep this history", None)?;
@@ -128,7 +129,8 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
         .await
         .unwrap();
     assert_eq!(transferred_chat["agentId"], MAIN_AGENT_ID);
-    assert_eq!(transferred_chat["deletedAt"], 1);
+    assert_eq!(transferred_chat["lifecycle"], "trash");
+    assert_eq!(transferred_chat["trashedAt"], 1);
     let transferred = s.store.run(run["id"].as_str().unwrap()).await.unwrap();
     original_snapshot["agent"]["id"] = MAIN_AGENT_ID.into();
     original_snapshot["task"]["agentId"] = MAIN_AGENT_ID.into();

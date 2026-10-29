@@ -370,10 +370,12 @@ mod tests {
 
     #[tokio::test]
     async fn forgetting_a_conversation_removes_its_run_records() {
+        use crate::run_fixture::DbRunFixture;
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();
         store
             .transaction(|db| {
+                db.add_run_fixture(&json!({ "id": "run", "taskId": "chat", "status": "succeeded", "createdAt": 0 }), None)?;
                 db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run" }))?;
                 for key in ["turn-speed:run", "chat-error:chat"] {
                     db.set(key, &json!({ "messageId": "message" }), None)?;
