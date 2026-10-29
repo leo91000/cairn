@@ -22,7 +22,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
 };
-use tower_http::compression::CompressionLayer;
+use tower_http::compression::{CompressionLayer, CompressionLevel};
 
 #[derive(Clone)]
 pub struct App {
@@ -125,7 +125,7 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
         .route("/mcp-gateway/{id}", any(crate::mcp_server::handle))
         .route("/api/{*path}", any(api))
         .fallback(|| async { Error::unauthorized("Access this installation through the Beacon.") })
-        .layer(CompressionLayer::new())
+        .layer(CompressionLayer::new().quality(CompressionLevel::Fastest))
         .merge(internal)
         .layer(middleware::from_fn_with_state(app.clone(), security))
         .with_state(app))

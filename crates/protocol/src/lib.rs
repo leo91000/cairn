@@ -238,6 +238,7 @@ pub fn request_header(name: &str) -> bool {
         name,
         "content-type"
             | "accept"
+            | "accept-encoding"
             | "range"
             | "if-none-match"
             | "if-modified-since"
@@ -251,6 +252,8 @@ pub fn response_header(name: &str) -> bool {
     matches!(
         name,
         "content-type"
+            | "content-encoding"
+            | "vary"
             | "content-length"
             | "content-disposition"
             | "etag"
