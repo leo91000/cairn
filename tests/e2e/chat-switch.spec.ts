@@ -165,7 +165,7 @@ test('the Fil keeps receiving conversations after a missing deep link fails', as
   await authenticateWorkspace(page)
   await failed
 
-  const chat = await workspace.api('/api/chats', 'POST', { title: 'Still available in the Fil' })
+  const chat = await workspace.api('/api/chats', 'POST', {})
   try {
     await expect(page.getByRole('complementary', { name: 'Fil' }).locator(`[data-fil-key="chat:${chat.id}"]`)).toBeVisible()
   }

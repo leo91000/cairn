@@ -20,9 +20,7 @@ impl Service {
                 // rowid bounds the work without scanning or sorting the whole history.
                 // Queued/cancelled messages never count as an invocation.
                 let mut statement = db.0.prepare_cached(
-                    "SELECT json_extract(data,'$.text') FROM
-                     (SELECT data FROM chat_messages ORDER BY rowid DESC LIMIT 1000)
-                     WHERE json_extract(data,'$.status')='delivered'",
+                    "SELECT text FROM (SELECT text,status FROM chat_messages ORDER BY rowid DESC LIMIT 1000) WHERE status='delivered'",
                 )?;
                 let messages = statement.query_map([], |row| row.get::<_, String>(0))?;
                 let names: Vec<&str> = names.iter().map(String::as_str).collect();

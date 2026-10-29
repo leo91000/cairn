@@ -409,7 +409,7 @@ fn dependency(db: &Db<'_>, condition: &Value) -> Result<Option<String>> {
     match text(condition, "type") {
         "run_finished" => Ok(Some(text(condition, "runId").to_owned())),
         "task_finished" => Ok(db
-            .get("chats", text(condition, "chatId"))?
+            .conversation_boundary(text(condition, "chatId"))?
             .and_then(|chat| chat["runId"].as_str().map(str::to_owned))),
         _ => Ok(None),
     }
@@ -807,7 +807,7 @@ pub async fn tick_groups(s: &Service, active: &HashSet<String>) -> Result<()> {
         s.store
             .read(|db| {
                 let mut owners = db
-                    .list("chats")?
+                    .conversations_boundary()?
                     .into_iter()
                     .map(|record| Owner { chat: true, record })
                     .collect::<Vec<_>>();
@@ -946,7 +946,7 @@ impl Owner {
 
     pub(crate) fn reload(&self, db: &Db<'_>) -> Result<Option<Self>> {
         let record = if self.chat {
-            db.get("chats", text(&self.record, "id"))?
+            db.conversation_boundary(text(&self.record, "id"))?
         } else {
             db.run(text(&self.record, "id"))?
         };
@@ -975,7 +975,7 @@ impl Owner {
 
     pub(crate) fn save(&self, db: &Db<'_>) -> Result<()> {
         if self.chat {
-            db.put("chats", &self.record)?;
+            db.save_conversation_boundary(&self.record)?;
             Ok(())
         } else {
             db.update_run_boundary(

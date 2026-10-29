@@ -119,9 +119,17 @@ impl App {
         let run = self
             .finished_run(text(&chat, "id"), "chat", RunStatus::Succeeded)
             .await;
-        let mut stored = self.service.get("chats", text(&chat, "id")).await.unwrap();
+        let mut stored = self
+            .service
+            .conversation_boundary(text(&chat, "id"))
+            .await
+            .unwrap();
         stored["runId"] = run.into();
-        self.service.store.put("chats", stored).await.unwrap();
+        self.service
+            .store
+            .save_conversation_boundary(stored)
+            .await
+            .unwrap();
         chat
     }
 }
@@ -166,9 +174,13 @@ async fn finished_conversations_stay_unread_for_each_account_until_opened() {
     let run = app
         .finished_run(chat_id, "chat", RunStatus::Succeeded)
         .await;
-    let mut stored = app.service.get("chats", chat_id).await.unwrap();
+    let mut stored = app.service.conversation_boundary(chat_id).await.unwrap();
     stored["runId"] = run.into();
-    app.service.store.put("chats", stored).await.unwrap();
+    app.service
+        .store
+        .save_conversation_boundary(stored)
+        .await
+        .unwrap();
     let owner = app.get(&app.owner, "/api/chats").await;
     assert_eq!(find(&owner, "id", chat_id)["unread"], true);
 }
@@ -208,9 +220,17 @@ async fn failed_and_stopped_work_is_never_unread() {
         .await;
     for status in [RunStatus::Failed, RunStatus::Cancelled] {
         let run = app.finished_run(text(&chat, "id"), "chat", status).await;
-        let mut stored = app.service.get("chats", text(&chat, "id")).await.unwrap();
+        let mut stored = app
+            .service
+            .conversation_boundary(text(&chat, "id"))
+            .await
+            .unwrap();
         stored["runId"] = run.into();
-        app.service.store.put("chats", stored).await.unwrap();
+        app.service
+            .store
+            .save_conversation_boundary(stored)
+            .await
+            .unwrap();
         let listed = app.get(&app.owner, "/api/chats").await;
         assert_eq!(find(&listed, "id", text(&chat, "id"))["unread"], false);
     }
@@ -286,9 +306,13 @@ async fn reading_an_observed_completion_does_not_consume_newer_work() {
     let run = app
         .finished_run(chat_id, "chat", RunStatus::Succeeded)
         .await;
-    let mut stored = app.service.get("chats", chat_id).await.unwrap();
+    let mut stored = app.service.conversation_boundary(chat_id).await.unwrap();
     stored["runId"] = run.into();
-    app.service.store.put("chats", stored).await.unwrap();
+    app.service
+        .store
+        .save_conversation_boundary(stored)
+        .await
+        .unwrap();
 
     let read = |at| {
         json!({

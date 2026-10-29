@@ -136,7 +136,7 @@ JSON Schema's UUID format; clients never grant authority through validation.
 
 ### Development reset
 
-The fresh installation schema is now version 10. Earlier development databases
+The fresh installation schema is now version 13. Earlier development databases
 are rejected, without being rewritten. Stop the development processes, remove the
 **disposable development data directory** (SQLite, vault and related local state)
 and start with a newly empty data directory. Recreate projects/agents and rerun
@@ -689,3 +689,65 @@ credentials never appear in that progress view. No agent confirmation token is
 implemented or inferred from a manage scope. The full owner view stays UI-only.
 The model corpus qualifies routes, billing, efforts, speeds, stale/absent catalogs
 and closed provider inputs in Rust, TypeScript/JSON Schema and Kotlin.
+
+## Conversations and messages (A7)
+
+Rust owns the conversation/message views, lifecycle/mode/status enums, creation,
+message and directing commands, retained execution input and quota-switch options.
+Both apps remove their manual chat/message/context models and consume the existing
+TS/Kotlin generation. Their composers, native controls and timeline presentation
+retain their existing behavior. Questionnaire and wait models remain explicit A8
+boundaries; execution-node/backend migration and native provenance retain their
+owning domain adapters until A10/A11/A18. These adapters read the typed SQL writer,
+never `records`, and do not accept another persisted format.
+
+SQLite v15 upgrades version 14 atomically at startup; see
+[the preserving migration](migrations/0015-typed-conversations.md). Fresh installs use `conversations`, `chat_messages`, `message_attachments`,
+`conversation_engine_switches` and the singleton `conversation_retention` policy.
+Conversation and message revisions rotate with writes. Slugs are unique and never
+change on rename. The unique partial run index replaces `chat_for_run`'s collection
+scan. Current agent/project references have FKs with `ON DELETE SET NULL`; their
+remembered assignment identifiers remain provenance so deleting a profile/project
+retains the conversation's existing unavailable-resource behavior. Run deletion
+clears the current run reference. Only owned message/attachment/switch rows cascade
+with conversation deletion; a requester never owns the delegated conversation's
+lifetime. Native approval snapshots and requester identity are serialized from
+named structs in separate columns, with no open business document.
+
+Messages store text, engine/model/reasoning/speed, mode, delivery state, question
+identity and timestamps in columns. Ordered attachment snapshots preserve every
+immutable upload field, including digest/date and optional image dimensions. Reads
+hydrate the relation once per conversation inside one SQLite snapshot; a point read
+uses message identity instead of loading the whole conversation. A failed relation
+write rolls back the header and attachments even when its caller catches the error,
+and does not notify subscribers. A8's answer map stays at its local typed delivery
+boundary and is removed from public reads; private replies retain their placeholder.
+
+The existing registry supplies the same creation, send/edit/withdraw, rename,
+pause/stop/resume, compaction, fresh-session, conversion and deletion/restoration
+commands to HTTP, public MCP and `cairn_installation`. Installation/native grants
+remain checked when effects commit, after asynchronous preparation and fencing.
+Resuming the follow-up queue retains the UI's recovery of an eligible stopped turn
+and clearing of the conversation error. Message identities survive direct/relay
+retries without duplication. Renaming requires the current conversation revision.
+Inactive environments retire through typed cleaning/expired states while retaining
+conversation history, uploads, artifacts and public links. Explicit deletion retains
+its full erasure contract. The next message starts a fresh environment, preserving
+backend confirmations, placement pins and permissions from #481.
+Quota-switch requests retain separate current and idempotency lifetimes in SQL;
+restart and cancellation use the same fencing and retained turn.
+
+Human reads retain full UI frames and pending input. Tool projections use the same
+redacted detail reader with bounded message pages: `kind: complete` contains
+`message`; `kind: truncated` contains `preview` and `totalBytes`. Complete sanitized
+content remains available in digest-pinned UTF-8 chunks through `read_chat_content`.
+The difference is transport projection, not a second reader, policy or writer.
+Questionnaire tools remain at A8, and file/artifact tools remain at A16.
+
+`conversation-contracts.json` qualifies command defaults, UUIDs, message selection,
+attachments, lifecycle, wire integer bounds and execution input across Rust,
+JSON Schema/TS and Kotlin. `project_measurement::conversation_measurement` extends
+the A1/A2 harness against the frozen records/message mapping at `663259d9`, with
+alternating repetitions, cold/warm reads, list and transactional writes, CPU and
+DB/WAL/page reporting. PR descriptions own results and host conditions; raw results
+are never committed and local SQLite timings are not production network latency.

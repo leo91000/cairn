@@ -10,6 +10,7 @@ data class OrderAccountsInput(
     val provider: String,
 ) {
     init {
+        require(ids.size <= 10)
         require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
     }
 }

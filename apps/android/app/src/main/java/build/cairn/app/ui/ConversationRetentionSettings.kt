@@ -6,23 +6,20 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.text.input.KeyboardType
 import build.cairn.app.data.CairnViewModel
+import build.cairn.contracts.ConversationRetention
+import build.cairn.contracts.GetConversationRetentionInput
+import build.cairn.contracts.getConversationRetention
+import build.cairn.contracts.setConversationRetention
 import kotlinx.coroutines.launch
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
-
-@Serializable private data class ConversationRetention(val inactivityDays: Int)
 
 @Composable
 internal fun ConversationRetentionSettings(vm: CairnViewModel) {
     ConversationRetentionSettings(
-        load = { vm.api.get<ConversationRetention>("/settings/conversations").inactivityDays },
+        load = {
+            vm.api.getConversationRetention(GetConversationRetentionInput()).inactivityDays
+        },
         save = { days ->
-            vm.api.send<ConversationRetention>(
-                "PUT",
-                "/settings/conversations",
-                buildJsonObject { put("inactivityDays", days) },
-            )
+            vm.api.setConversationRetention(ConversationRetention(inactivityDays = days))
         },
     )
 }
