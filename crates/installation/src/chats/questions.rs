@@ -123,7 +123,7 @@ fn valid_question_id(id: &str) -> bool {
 
 #[derive(Deserialize)]
 struct AnswerInput {
-    id: uuid::Uuid,
+    id: String,
     answers: BTreeMap<String, FieldAnswer>,
 }
 
@@ -456,7 +456,7 @@ fn answer(
     chat(db, chat_id)?;
     let question = required(find_question(db, chat_id, id)?, "Question not found")?;
     let answers = serde_json::to_value(&input.answers)?;
-    let message_id = input.id.to_string();
+    let message_id = input.id.clone();
     let previous = find_message(db, chat_id, &message_id)?;
     let already_sent = question.message_id.as_deref() == Some(message_id.as_str())
         && previous.is_some_and(|message| {

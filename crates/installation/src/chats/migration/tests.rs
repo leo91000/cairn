@@ -249,6 +249,90 @@ async fn upgraded_uppercase_message_ids_keep_retries_edits_and_deletion() {
 }
 
 #[tokio::test]
+async fn upgraded_uppercase_questionnaire_answers_remain_idempotent() {
+    use crate::{config::Config, service::Service};
+
+    const MESSAGE: &str = "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDE3";
+    for (question_status, message_status) in [("answering", "queued"), ("answered", "delivered")] {
+        let root = tempfile::tempdir().unwrap();
+        let db = database(root.path()).await;
+        let question_id = "a".repeat(64);
+        let answers = json!({"choice": {"selected": [], "comment": "Retained private answer"}});
+        db.execute(
+            "INSERT INTO records VALUES(?,'chats',?,1)",
+            params![
+                CHAT,
+                json!({"id": CHAT, "slug": "retained-answer", "paused": true}).to_string()
+            ],
+        )
+        .unwrap();
+        let question = json!({
+            "id": question_id,
+            "chatId": CHAT,
+            "runId": "retained-question-run",
+            "blocking": false,
+            "status": question_status,
+            "messageId": MESSAGE,
+            "fields": [{"id": "choice", "title": "Private question", "secret": true}],
+        });
+        db.execute(
+            "INSERT INTO kv VALUES(?,?,NULL)",
+            params![
+                format!("chat-question:{CHAT}:{question_id}"),
+                question.to_string()
+            ],
+        )
+        .unwrap();
+        let message = json!({
+            "id": MESSAGE,
+            "chatId": CHAT,
+            "text": "Retained private answer",
+            "createdAt": 99,
+            "mode": "steer",
+            "status": message_status,
+            "questionId": question_id,
+            "answers": answers,
+        });
+        db.execute(
+            "INSERT INTO chat_messages VALUES(?,?,?,99)",
+            params![MESSAGE, CHAT, message.to_string()],
+        )
+        .unwrap();
+        drop(db);
+
+        let config: Config = serde_json::from_value(json!({
+            "dataDir": root.path(),
+            "home": root.path().join("home"),
+            "workspaceRoots": [root.path()],
+            "publicUrl": "http://localhost:4310",
+            "host": "127.0.0.1",
+            "port": 0,
+            "codexBin": "unused-fixture",
+            "concurrency": 1,
+            "logger": false,
+            "workerEnabled": false,
+            "runnerUrl": "",
+        }))
+        .unwrap();
+        let service = Service::new(config).await.unwrap();
+        let retried = service
+            .question_answer(
+                CHAT,
+                &question_id,
+                json!({"id": MESSAGE, "answers": answers}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retried["messageId"], MESSAGE);
+        assert_eq!(retried["status"], question_status);
+        let messages = service.store.read(|db| db.messages(CHAT)).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["id"], MESSAGE);
+        assert_eq!(messages[0]["answers"], answers);
+    }
+}
+
+#[tokio::test]
 async fn late_invalid_message_rolls_back_schema_and_all_original_data() {
     let root = tempfile::tempdir().unwrap();
     let db = database(root.path()).await;
