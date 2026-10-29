@@ -1116,7 +1116,7 @@ private fun parseState(source: String): GraphDiagram {
     var notes = 0
     val descriptions = LinkedHashMap<String, List<String>>()
 
-    fun scopeKey() = stack.lastOrNull() ?: "root"
+    fun scopeKey() = if (stack.isEmpty()) "document" else "state:${stack.last()}"
     fun endpoint(raw: String, from: Boolean): String {
         val name = jsTrim(raw)
         if (name == "[*]") {

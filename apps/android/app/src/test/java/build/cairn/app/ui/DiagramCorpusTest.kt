@@ -310,6 +310,20 @@ class DiagramCorpusTest {
     }
 
     @Test
+    fun `separates document endpoints from a composite named root`() {
+        val graph =
+            parseDiagram(
+                "stateDiagram-v2\n[*] --> root\nstate root {\n[*] --> Ready\nReady --> [*]\n}\nroot --> [*]"
+            )
+                as GraphDiagram
+        val endpoints =
+            graph.nodes.filter { it.shape == NodeShape.START || it.shape == NodeShape.END }
+        assertEquals(4, endpoints.size)
+        assertEquals(2, endpoints.count { it.parent == null })
+        assertEquals(2, endpoints.count { it.parent == "root" })
+    }
+
+    @Test
     fun `orders whole subgraphs beyond 400 member constraints`() {
         val source =
             cases("parse")

@@ -125,6 +125,17 @@ describe('diagram layout', () => {
     expect(texts.flatMap(item => item.lines)).toContain('Total: 1,000,000,000,000,000,000')
   })
 
+  it('separates document endpoints from a composite named root', () => {
+    const graph = parseDiagram('stateDiagram-v2\n[*] --> root\nstate root {\n[*] --> Ready\nReady --> [*]\n}\nroot --> [*]')
+    expect(graph.kind).toBe('graph')
+    if (graph.kind !== 'graph')
+      return
+    const endpoints = graph.nodes.filter(node => node.shape === 'start' || node.shape === 'end')
+    expect(endpoints).toHaveLength(4)
+    expect(endpoints.filter(node => node.parent === undefined)).toHaveLength(2)
+    expect(endpoints.filter(node => node.parent === 'root')).toHaveLength(2)
+  })
+
   it('draws every flowchart node, link and label', () => {
     const scene = layoutDiagram(parseDiagram('flowchart LR\n  A[One] -->|go| B{Two?}\n  B --> C((Three))'), measure)
     const texts = scene.items.flatMap(item => item.kind === 'text' ? item.lines : [])

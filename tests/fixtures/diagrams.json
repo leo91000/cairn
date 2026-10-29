@@ -473,7 +473,7 @@
         "direction": "TB",
         "nodes": [
           {
-            "id": "[*]start:root",
+            "id": "[*]start:document",
             "label": "",
             "shape": "start"
           },
@@ -493,7 +493,7 @@
             "shape": "round"
           },
           {
-            "id": "[*]start:Running",
+            "id": "[*]start:state:Running",
             "label": "",
             "shape": "start",
             "parent": "Running"
@@ -511,7 +511,7 @@
             "parent": "Running"
           },
           {
-            "id": "[*]end:Running",
+            "id": "[*]end:state:Running",
             "label": "",
             "shape": "end",
             "parent": "Running"
@@ -522,7 +522,7 @@
             "shape": "choice"
           },
           {
-            "id": "[*]end:root",
+            "id": "[*]end:document",
             "label": "",
             "shape": "end"
           },
@@ -538,7 +538,7 @@
         ],
         "edges": [
           {
-            "from": "[*]start:root",
+            "from": "[*]start:document",
             "to": "Idle",
             "label": "",
             "line": "solid",
@@ -583,7 +583,7 @@
             "length": 1
           },
           {
-            "from": "[*]start:Running",
+            "from": "[*]start:state:Running",
             "to": "Fetching",
             "label": "",
             "line": "solid",
@@ -602,7 +602,7 @@
           },
           {
             "from": "Working",
-            "to": "[*]end:Running",
+            "to": "[*]end:state:Running",
             "label": "",
             "line": "solid",
             "start": "none",
@@ -620,7 +620,7 @@
           },
           {
             "from": "check",
-            "to": "[*]end:root",
+            "to": "[*]end:document",
             "label": "ok",
             "line": "solid",
             "start": "none",
@@ -1351,7 +1351,7 @@
         "direction": "LR",
         "nodes": [
           {
-            "id": "[*]start:root",
+            "id": "[*]start:document",
             "label": "",
             "shape": "start"
           },
@@ -1376,7 +1376,7 @@
             "shape": "fork"
           },
           {
-            "id": "[*]end:root",
+            "id": "[*]end:document",
             "label": "",
             "shape": "end"
           },
@@ -1397,7 +1397,7 @@
         ],
         "edges": [
           {
-            "from": "[*]start:root",
+            "from": "[*]start:document",
             "to": "fork_state",
             "label": "",
             "line": "solid",
@@ -1443,7 +1443,7 @@
           },
           {
             "from": "join_state",
-            "to": "[*]end:root",
+            "to": "[*]end:document",
             "label": "",
             "line": "solid",
             "start": "none",
@@ -2693,7 +2693,7 @@
         "direction": "TB",
         "nodes": [
           {
-            "id": "[*]start:NamedComposite",
+            "id": "[*]start:state:NamedComposite",
             "label": "",
             "shape": "start",
             "parent": "NamedComposite"
@@ -2707,7 +2707,7 @@
         ],
         "edges": [
           {
-            "from": "[*]start:NamedComposite",
+            "from": "[*]start:state:NamedComposite",
             "to": "namedSimple",
             "label": "",
             "line": "solid",
@@ -2737,7 +2737,7 @@
         "direction": "TB",
         "nodes": [
           {
-            "id": "[*]start:NamedComposite",
+            "id": "[*]start:state:NamedComposite",
             "label": "",
             "shape": "start",
             "parent": "NamedComposite"
@@ -2751,7 +2751,7 @@
         ],
         "edges": [
           {
-            "from": "[*]start:NamedComposite",
+            "from": "[*]start:state:NamedComposite",
             "to": "namedSimple",
             "label": "",
             "line": "solid",
@@ -4699,6 +4699,93 @@
         "width": 80,
         "height": 185,
         "items": 8
+      }
+    },
+    {
+      "name": "state-composite-named-root",
+      "source": "stateDiagram-v2\n[*] --> root\nstate root {\n[*] --> Ready\nReady --> [*]\n}\nroot --> [*]",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "[*]start:document",
+            "label": "",
+            "shape": "start"
+          },
+          {
+            "id": "[*]start:state:root",
+            "label": "",
+            "shape": "start",
+            "parent": "root"
+          },
+          {
+            "id": "Ready",
+            "label": "Ready",
+            "shape": "round",
+            "parent": "root"
+          },
+          {
+            "id": "[*]end:state:root",
+            "label": "",
+            "shape": "end",
+            "parent": "root"
+          },
+          {
+            "id": "[*]end:document",
+            "label": "",
+            "shape": "end"
+          }
+        ],
+        "edges": [
+          {
+            "from": "[*]start:document",
+            "to": "root",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "[*]start:state:root",
+            "to": "Ready",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "Ready",
+            "to": "[*]end:state:root",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "root",
+            "to": "[*]end:document",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "root",
+            "label": "root"
+          }
+        ]
+      },
+      "layout": {
+        "width": 170,
+        "height": 399,
+        "items": 19
       }
     }
   ],

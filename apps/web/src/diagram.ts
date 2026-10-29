@@ -1042,7 +1042,7 @@ function parseState(source: string): GraphDiagram {
   let notes = 0
   const descriptions = new Map<string, string[]>()
 
-  const scopeKey = () => stack.at(-1) ?? 'root'
+  const scopeKey = () => stack.length ? `state:${stack.at(-1)}` : 'document'
   const endpoint = (raw: string, side: 'from' | 'to') => {
     const name = raw.trim()
     if (name === '[*]') {
