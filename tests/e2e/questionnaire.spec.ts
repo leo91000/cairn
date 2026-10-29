@@ -98,3 +98,53 @@ test('submitted answers have a readable conversation summary', async ({ page }) 
   await expect(bubble).not.toContainText('questionId')
   await expect(bubble).not.toContainText('selected')
 })
+
+test('raw options without a mode use single selection for both cards and submission', async ({ page }) => {
+  let answer: any
+  await page.route('**/api/chats/chat/questions/question/answer', async (route) => {
+    answer = route.request().postDataJSON()
+    await route.fulfill({ json: { status: 'answering' } })
+  })
+  await page.goto(`${address}scripts/fixtures/questionnaire.html`)
+  await page.waitForFunction(() => window.questionnaireRaw)
+  await page.evaluate(() => window.questionnaireRaw([{
+    id: 'filters',
+    title: 'Which editor?',
+    options: [
+      { id: 'structured', label: 'Structured editor', description: 'Groups and filters' },
+      { id: 'expressions', label: 'Editor with expressions', description: 'Expressions too' },
+      { id: 'simple', label: 'Simple filters', description: 'Conditions only' },
+    ],
+  }]))
+  await page.getByRole('button', { name: 'Answer', exact: true }).click()
+  await page.getByText('Structured editor', { exact: true }).click()
+  await expect(page.getByRole('radio', { name: 'Structured editor Groups and filters', exact: true })).toBeChecked()
+  await page.getByText('Simple filters', { exact: true }).click()
+  await expect(page.getByRole('radio', { name: 'Structured editor Groups and filters', exact: true })).not.toBeChecked()
+  await expect(page.getByRole('radio', { name: 'Simple filters Conditions only', exact: true })).toBeChecked()
+  await expect(page.getByText('Choose one option, or answer using text only')).toBeVisible()
+  await page.getByRole('button', { name: 'Send answer', exact: true }).click()
+  expect(answer.answers.filters).toEqual({ selected: ['simple'], comment: '' })
+})
+
+for (const invalid of ['missing IDs', 'duplicate IDs']) {
+  test(`unsupported questions with ${invalid} cannot produce an ambiguous answer`, async ({ page }) => {
+    await page.goto(`${address}scripts/fixtures/questionnaire.html`)
+    await page.waitForFunction(() => window.questionnaireRaw)
+    await page.evaluate(invalid => window.questionnaireRaw([{
+      id: 'filters',
+      title: 'Which editor?',
+      options: [
+        { ...(invalid === 'duplicate IDs' ? { id: 'same' } : {}), label: 'Structured editor' },
+        { ...(invalid === 'duplicate IDs' ? { id: 'same' } : {}), label: 'Simple filters' },
+      ],
+    }]), invalid)
+    await page.getByRole('button', { name: 'Answer', exact: true }).click()
+    await expect(page.getByRole('alert')).toContainText('Update the Cairn installation')
+    await expect(page.getByRole('radio')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Send answer', exact: true })).toBeDisabled()
+    await page.route('**/api/chats/chat/questions/question/cancel', route => route.fulfill({ json: { status: 'cancelled' } }))
+    await page.getByRole('button', { name: 'No longer needed', exact: true }).click()
+    await expect(page.getByRole('dialog')).not.toBeVisible()
+  })
+}
