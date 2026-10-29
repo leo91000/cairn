@@ -290,7 +290,7 @@ abstract class NodePlacementCases {
         }
         compose.onNodeWithText("Slots d’exécution").assertIsEnabled().performTextReplacement("6")
         // A focused field keeps reopening the keyboard on devices, and its panel can take the
-        // toggle's tap: release focus first, then toggle through the control's own action.
+        // toggle's tap: release focus first.
         compose.runOnIdle {
             focus?.clearFocus()
             keyboard?.hide()
@@ -303,7 +303,7 @@ abstract class NodePlacementCases {
         compose.onNodeWithText("Mettez à jour le runtime", substring = true).assertExists()
         compose.onNodeWithText("Personnes de confiance").performScrollTo().assertExists()
         val nativeToggle = compose.onNodeWithText("Activer l’exécution native").performScrollTo()
-        nativeToggle.performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.OnClick)
+        nativeToggle.performClick()
         try {
             nativeToggle.assertIsOn()
         } catch (failure: AssertionError) {

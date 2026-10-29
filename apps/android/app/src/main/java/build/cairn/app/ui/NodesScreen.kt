@@ -81,8 +81,16 @@ fun NodesScreen(
         nodes = listed
         runner = observeRunner(nodes, runner)
         unready = observeUnready(nodes, unready, clock = fleetClock(nodes, runner), runner = runner)
+        // Trusted people load separately: their failure is reported without blocking enrollment
+        // detection, as on the web.
         if (nodes.any { it.capabilities.backend == "native" })
-            nativeCallers = vm.api.get("/nodes/native-callers")
+            try {
+                nativeCallers = vm.api.get("/nodes/native-callers")
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                vm.report(e)
+            }
         val invitation = enrollment ?: return
         nodes
             .firstOrNull {

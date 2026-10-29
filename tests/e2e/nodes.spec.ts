@@ -1182,8 +1182,8 @@ test('a silent built-in runner needs attention, and rows open and return focus f
   await expect(row).toBeFocused()
 })
 
-test('listings slower than the refresh interval still show the machines', async ({ page, workspace: _workspace }) => {
-  test.setTimeout(60000)
+test('slow listings still show the machines, and an older answer never replaces a newer one', async ({ page, workspace: _workspace }) => {
+  test.setTimeout(90000)
   await useRelayForHttpMocks(page)
   const machine = {
     id: randomUUID(),
@@ -1223,11 +1223,21 @@ test('listings slower than the refresh interval still show the machines', async 
     lastSeen: Date.now(),
   }
   // Each answer arrives after the next poll has started.
+  let listings = 0
   await page.route('**/api/nodes', async (route) => {
-    await new Promise(resolve => setTimeout(resolve, 11000))
-    await route.fulfill({ json: [machine] }).catch(() => {})
+    const listing = ++listings
+    // The third answer lands after the fourth: it must not win. Later listings stay pending, so a
+    // wrongly applied older answer would remain visible.
+    const delay = listing === 3 ? 15000 : listing === 4 ? 0 : listing >= 5 ? 60000 : 11000
+    await new Promise(resolve => setTimeout(resolve, delay))
+    await route.fulfill({ json: [{ ...machine, name: listing === 3 ? 'Old answer' : 'Slow host' }] }).catch(() => {})
   })
   await page.goto(workspacePath('/nodes'))
   await authenticateWorkspace(page)
   await expect(nodeRow(page, 'Slow host')).toBeVisible({ timeout: 30000 })
+  await expect.poll(() => listings, { timeout: 30000 }).toBeGreaterThanOrEqual(4)
+  // Long enough for the delayed third answer to land.
+  await page.waitForTimeout(16000)
+  await expect(nodeRow(page, 'Old answer')).toHaveCount(0)
+  await expect(nodeRow(page, 'Slow host')).toBeVisible()
 })

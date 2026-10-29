@@ -436,8 +436,8 @@ data class FleetSummary(
 
 /**
  * The fleet at a glance. Connected machines answer heartbeats, the built-in runner too unless it
- * went silent; their slots are counted as placement sees them. Offline machines, those needing
- * attention and those waiting for setup need the owner.
+ * went silent; their slots are counted within each runtime pool, whether or not the machine takes
+ * work now. Offline machines, those needing attention and those waiting for setup need the owner.
  */
 fun fleetSummary(
     nodes: List<ExecutionNode>,

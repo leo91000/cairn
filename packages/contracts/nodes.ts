@@ -290,7 +290,7 @@ export interface FleetSummary {
 
 /**
  * The fleet at a glance. Connected machines answer heartbeats, the built-in runner too unless it went
- * silent; their slots are counted as placement sees them. Offline machines, those needing attention and
+ * silent; their slots are counted within each runtime pool, whether or not the machine takes work now. Offline machines, those needing attention and
  * those waiting for setup need the owner.
  */
 export function fleetSummary(nodes: ExecutionNode[], now = Date.now(), clock: number | null = null, runner: RunnerObservation | null = null, unready: UnreadyObservations | null = null): FleetSummary {
