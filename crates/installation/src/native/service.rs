@@ -1597,11 +1597,17 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         ("POST", ["storage-policy"]) => {
             let configuration: crate::storage::policy::Configuration =
                 serde_json::from_value(input(request, 16384).await?)?;
-            let _disk = disk::lock(&controller.state).await?;
-            controller
+            if !controller
                 .storage_policy
-                .apply(&controller.state, configuration)
-                .await?;
+                .apply_relief(&controller.state, &configuration)
+                .await?
+            {
+                let _disk = disk::lock(&controller.state).await?;
+                controller
+                    .storage_policy
+                    .apply(&controller.state, configuration)
+                    .await?;
+            }
             json!({ "ready": true })
         }
         ("POST", ["runs", id, "lease"]) => {
@@ -2340,6 +2346,189 @@ mod tests {
         drop(owner);
         assert!(waiting);
         assert!(readable);
+    }
+
+    #[tokio::test]
+    async fn mixed_storage_policy_changes_still_wait_for_the_disk_gate() {
+        use crate::storage::policy::{Configuration, Policy};
+
+        let (_fixture, controller) = fixture().await;
+        let first = Configuration {
+            generation: 1,
+            policy: Policy::default(),
+        };
+        controller
+            .storage_policy
+            .apply(&controller.state, first.clone())
+            .await
+            .unwrap();
+        let owner = disk::lock(&controller.state).await.unwrap();
+        let mixed = Configuration {
+            generation: 2,
+            policy: Policy {
+                reserve_mi_b: 64,
+                memory_cache_mi_b: 128,
+                ..first.policy.clone()
+            },
+        };
+        let updating = controller.clone();
+        let pending = tokio::spawn(async move {
+            route(updating, request("/storage-policy", &json!(mixed))).await
+        });
+        let waiting = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if crate::file_lock::exclusive(
+                    &controller.state.join("storage-foreground.lock"),
+                    "priority probe",
+                )
+                .is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .is_ok();
+        let current = controller.storage_policy.current().await;
+        // A queued general update must not retain Control's mutex and prevent
+        // a later committed reserve reduction from reaching blocked writers.
+        let relief = Configuration {
+            generation: 3,
+            policy: Policy {
+                reserve_mi_b: 64,
+                ..first.policy.clone()
+            },
+        };
+        let applied = tokio::time::timeout(
+            Duration::from_secs(2),
+            route(
+                controller.clone(),
+                request("/storage-policy", &json!(relief)),
+            ),
+        )
+        .await;
+        drop(owner);
+        let result = tokio::time::timeout(Duration::from_secs(2), pending).await;
+        assert!(waiting);
+        assert_eq!(current, Some(first));
+        applied.unwrap().unwrap();
+        result.unwrap().unwrap().unwrap();
+        assert_eq!(controller.storage_policy.current().await, Some(relief));
+    }
+
+    #[test]
+    fn storage_policy_relief_reaches_a_writer_while_the_disk_gate_is_held() {
+        // Other storage tests deliberately hold process-global write admission.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "native::service::tests::storage_policy_relief_child",
+                "--ignored",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated process-global write admission and pressure relief child"]
+    async fn storage_policy_relief_child() {
+        use crate::storage::{
+            Disk,
+            policy::{Configuration, Policy},
+        };
+
+        let (_fixture, controller) = fixture().await;
+        let directory = controller
+            .state
+            .join("environments")
+            .join(crate::config::id());
+        let policy = Policy {
+            reserve_mi_b: 64,
+            reserve_percent: 1,
+            ..Policy::default()
+        };
+        drop(
+            storage::runtime::create_prepared(
+                &directory.join("lazy"),
+                &json!({
+                    "version": 1,
+                    "size": 4096,
+                    "blockSize": 4194304,
+                    "blocks": [{ "offset": 0, "size": 4096, "hash": null }]
+                }),
+                &json!({ "unassigned": true, "policy": policy }),
+            )
+            .await
+            .unwrap(),
+        );
+        let volume = storage::runtime::load(&directory).await.unwrap();
+        let blocked = Configuration {
+            generation: 1,
+            policy: Policy {
+                reserve_mi_b: 16 * 1024 * 1024,
+                ..policy.clone()
+            },
+        };
+        route(
+            controller.clone(),
+            request("/storage-policy", &json!(blocked)),
+        )
+        .await
+        .unwrap();
+
+        // Filesystem close holds this gate while syncfs waits for outstanding
+        // block writes. Keep its ownership until the route has relieved I/O.
+        let owner = disk::lock(&controller.state).await.unwrap();
+        let writing = volume.clone();
+        let mut writer = tokio::task::spawn_blocking(move || writing.write_at(0, b"preserved"));
+        let pressure = tokio::time::timeout(Duration::from_secs(5), async {
+            while volume.status().unwrap()["performance"]["writeAdmission"]["inFlight"] != 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        let blocked = !writer.is_finished();
+
+        let relief = Configuration {
+            generation: 2,
+            policy,
+        };
+        let updating = controller.clone();
+        let value = json!(relief);
+        let mut applying =
+            tokio::spawn(async move { route(updating, request("/storage-policy", &value)).await });
+        let applied = tokio::time::timeout(Duration::from_secs(2), &mut applying).await;
+        // A broken route must fail without retaining a blocked writer/thread.
+        if applied.is_err() {
+            applying.abort();
+            let _ = applying.await;
+            controller
+                .storage_policy
+                .apply(&controller.state, relief.clone())
+                .await
+                .unwrap();
+        }
+        let written = tokio::time::timeout(Duration::from_secs(5), &mut writer).await;
+        assert!(
+            crate::file_lock::exclusive(&controller.state.join("storage.lock"), "other owner")
+                .is_err()
+        );
+        drop(owner);
+        pressure.unwrap();
+        assert!(blocked, "the reserve must still protect the journal");
+        applied.unwrap().unwrap().unwrap();
+        written.unwrap().unwrap().unwrap();
+        assert_eq!(controller.storage_policy.current().await, Some(relief));
+        let mut bytes = [0; 9];
+        volume.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"preserved");
     }
 
     pub(super) async fn fixture() -> (tempfile::TempDir, Controller) {
