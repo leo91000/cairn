@@ -310,6 +310,7 @@ pub struct RelayedInstallation {
     pub cookie: String,
     pub session: Value,
     pub base: String,
+    pub beacon_origin: String,
     pub stop: tokio_util::sync::CancellationToken,
     pub connector: JoinHandle<cairn_installation::error::Result<()>>,
     pub direct: cairn_installation::direct::DirectConnections,
@@ -420,9 +421,9 @@ impl RelayedInstallation {
         let identity_dir = installation.config.data_dir.join("installation-relay");
         // Machine clients do not share the HTTP fixture client's DNS override.
         // The claimed origin is also retained by the real relay connector.
-        let beacon = app.url.replace("localhost", "127.0.0.1");
+        let beacon_origin = app.url.replace("localhost", "127.0.0.1");
         cairn_installation::relay::claim(
-            &beacon,
+            &beacon_origin,
             &identity_dir,
             claim["code"].as_str().unwrap(),
             "Real installation",
@@ -457,6 +458,7 @@ impl RelayedInstallation {
             cookie,
             session,
             base,
+            beacon_origin,
             stop,
             connector,
             direct,
