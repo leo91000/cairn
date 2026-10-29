@@ -20,6 +20,11 @@ class ConversationsTest {
         }
         corpus.getValue("messages").jsonArray.forEach {
             val message = json.decodeFromJsonElement<ChatMessageInput>(it)
+            val encoded = json.encodeToJsonElement(message).jsonObject
+            assertEquals(it.jsonObject.getValue("id"), encoded.getValue("id"))
+            if (it.jsonObject.containsKey("attachmentIds")) {
+                assertEquals(it.jsonObject["attachmentIds"], encoded["attachmentIds"])
+            }
             assertEquals(
                 message,
                 json.decodeFromJsonElement<ChatMessageInput>(json.encodeToJsonElement(message)),

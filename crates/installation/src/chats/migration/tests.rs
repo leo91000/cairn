@@ -183,6 +183,72 @@ async fn startup_preserves_conversations_messages_order_secrets_and_settings() {
 }
 
 #[tokio::test]
+async fn upgraded_uppercase_message_ids_keep_retries_edits_and_deletion() {
+    use cairn_contracts::{ChatMessageReference, EditChatMessageInput, SendChatMessageInput};
+
+    const MESSAGE: &str = "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDE1";
+    let root = tempfile::tempdir().unwrap();
+    let db = database(root.path()).await;
+    let chat = json!({"id": CHAT, "slug": "retained-uppercase", "paused": true});
+    db.execute(
+        "INSERT INTO records VALUES(?,'chats',?,1)",
+        params![CHAT, chat.to_string()],
+    )
+    .unwrap();
+    let message = json!({
+        "id": MESSAGE, "chatId": CHAT, "text": "Retained message", "createdAt": 99,
+        "mode": "queue", "status": "queued", "provider": "codex",
+    });
+    db.execute(
+        "INSERT INTO chat_messages VALUES(?,?,?,99)",
+        params![MESSAGE, CHAT, message.to_string()],
+    )
+    .unwrap();
+    drop(db);
+
+    let store = Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            let retry: SendChatMessageInput = serde_json::from_value(json!({
+                "chatId": CHAT,
+                "message": {"id": MESSAGE, "text": "Retained message", "provider": "codex"},
+            }))?;
+            let sent = crate::chats::send(
+                db,
+                &retry.chat_id.to_string(),
+                crate::chats::parse_message(serde_json::to_value(retry.message)?)?,
+                None,
+                &crate::native::policy::Origin::default(),
+            )?;
+            assert_eq!(sent["id"], MESSAGE);
+            assert_eq!(db.conversation_messages(CHAT)?.len(), 1);
+
+            let edit: EditChatMessageInput = serde_json::from_value(json!({
+                "chatId": CHAT, "messageId": MESSAGE,
+                "message": {"text": "Edited after upgrade", "provider": "codex"},
+            }))?;
+            let mut values = serde_json::to_value(edit.message)?;
+            values["id"] = edit.message_id.clone().into();
+            let edited = crate::chats::edit(
+                db,
+                &edit.chat_id.to_string(),
+                &edit.message_id,
+                Some(crate::chats::parse_edit(values)?),
+            )?;
+            assert_eq!(edited["id"], MESSAGE);
+            assert_eq!(edited["text"], "Edited after upgrade");
+
+            let remove: ChatMessageReference =
+                serde_json::from_value(json!({"chatId": CHAT, "messageId": MESSAGE}))?;
+            crate::chats::edit(db, &remove.chat_id.to_string(), &remove.message_id, None)?;
+            assert!(db.conversation_messages(CHAT)?.is_empty());
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn late_invalid_message_rolls_back_schema_and_all_original_data() {
     let root = tempfile::tempdir().unwrap();
     let db = database(root.path()).await;

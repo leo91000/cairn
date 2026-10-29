@@ -355,9 +355,12 @@ class SignalJourneyTest {
                 CairnTheme("light") { CairnApp(vm = vm) }
             }
             try {
+                compose.waitUntil(30000) {
+                    vm.state.value.installation != null && !vm.state.value.busy
+                }
                 body(vm)
             } finally {
-                vm.api.closeStreams()
+                runCatching { vm.api }.getOrNull()?.closeStreams()
             }
         }
     }
