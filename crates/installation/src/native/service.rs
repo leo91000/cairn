@@ -2920,7 +2920,21 @@ mod tests {
         assert_eq!(error.message, "Native disk preparation stopped.");
         watching.await.unwrap();
         let path = controller.file(&id, "stop-reason.json");
-        let saved: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        // Fencing only waits a bounded time for diagnostics. Its blocking
+        // writer retains ownership and may commit after both callers return.
+        let saved = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match tokio::fs::read(&path).await {
+                    Ok(bytes) => break serde_json::from_slice::<Value>(&bytes).unwrap(),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("Could not read native stop reason: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("Native stop diagnostics must finish committing after fencing");
         assert_eq!(saved["reason"], "lease_expired");
         controller.record_stop(&id, "cancelled", Value::Null).await;
         assert_eq!(
