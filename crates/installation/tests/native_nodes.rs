@@ -532,7 +532,11 @@ async fn converting_a_mission_retains_native_authority_and_rejects_unauthorized_
     let (status, chat) = f.call(&f.trusted, "POST", &path, json!({})).await;
     assert_eq!(status, StatusCode::OK, "{chat}");
     assert!(chat.get("nativePrincipals").is_none());
-    let chat = f.service.conversation_boundary(text(&chat, "id")).await.unwrap();
+    let chat = f
+        .service
+        .conversation_boundary(text(&chat, "id"))
+        .await
+        .unwrap();
     assert_eq!(chat["nativePrincipals"], json!([TRUSTED]));
     assert_eq!(chat["nativeAuthorityNodes"], json!([f.node["id"]]));
     assert_eq!(chat["nativeProvenanceUnknown"], false);
@@ -609,7 +613,11 @@ async fn public_mcp_preserves_the_trusted_native_caller_and_automatic_priority()
         assert_ne!(response["result"]["isError"], true, "{backend}: {response}");
         let public_chat = &response["result"]["structuredContent"]["result"];
         assert!(public_chat.get("nativePrincipals").is_none());
-        let stored = f.service.conversation_boundary(text(public_chat, "id")).await.unwrap();
+        let stored = f
+            .service
+            .conversation_boundary(text(public_chat, "id"))
+            .await
+            .unwrap();
         let chat = &stored;
         assert_eq!(
             chat["nativePrincipals"],
@@ -667,7 +675,11 @@ async fn public_mcp_rechecks_the_native_caller_when_directing_existing_work() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{chat}");
-    let before = f.service.conversation_boundary(text(&chat, "id")).await.unwrap();
+    let before = f
+        .service
+        .conversation_boundary(text(&chat, "id"))
+        .await
+        .unwrap();
     let args = json!({
         "chatId": chat["id"],
         "message": { "id": id(), "text": "Continue the authorized work" },
@@ -2785,7 +2797,11 @@ async fn a_vm_coordinator_can_delegate_only_its_traced_native_authority() {
     assert_ne!(response["result"]["isError"], true, "{response}");
     let public_child = &response["result"]["structuredContent"]["result"];
     assert!(public_child.get("nativeParentRunId").is_none());
-    let child = f.service.conversation_boundary(text(public_child, "id")).await.unwrap();
+    let child = f
+        .service
+        .conversation_boundary(text(public_child, "id"))
+        .await
+        .unwrap();
     assert_eq!(child["nativeParentRunId"], parent["id"], "{response}");
     assert_eq!(child["nativeAuthorityNodes"], json!([f.node["id"]]));
     let mut run = f.run();
