@@ -171,8 +171,26 @@ data class NodeHealth(val state: NodeHealthState, val label: String, val detail:
  */
 private const val HEARTBEAT_TIMEOUT_MS = 60_000L
 
-/** Whether a node can take work, as one state and a short sentence; the first blocker wins. */
-fun nodeHealth(node: ExecutionNode, now: Long = System.currentTimeMillis()): NodeHealth {
+/**
+ * The server's clock as seen in an inventory: the latest contact of a machine the server reports
+ * online. Device clocks can drift from the server's, so staleness is judged against this.
+ */
+fun fleetClock(nodes: List<ExecutionNode>): Long? =
+    nodes
+        .filter { !it.local && !it.revoked && it.status == "online" }
+        .mapNotNull { it.lastSeen }
+        .maxOrNull()
+
+/**
+ * Whether a node can take work, as one state and a short sentence; the first blocker wins. Online
+ * follows the server's 60-second heartbeat timeout; placement wants a heartbeat within 30 seconds,
+ * so a machine that just stopped answering can read ready for up to half a minute.
+ */
+fun nodeHealth(
+    node: ExecutionNode,
+    now: Long = System.currentTimeMillis(),
+    clock: Long? = null,
+): NodeHealth {
     if (node.revoked) return NodeHealth(NodeHealthState.REVOKED, "Révoquée", "N’a plus accès")
     if (!node.local && node.status == "offline")
         return NodeHealth(
@@ -180,12 +198,19 @@ fun nodeHealth(node: ExecutionNode, now: Long = System.currentTimeMillis()): Nod
             "Hors ligne",
             node.lastSeen?.let { "Dernier contact ${relativeAge(it, now)}" } ?: "Jamais connectée",
         )
-    // The built-in runner always reports "local"; a stale contact means it stopped answering.
-    if (node.local && node.lastSeen != null && now - node.lastSeen >= HEARTBEAT_TIMEOUT_MS)
+    // The built-in runner always reports "local". Listing refreshes it when reachable, so a contact
+    // older than the fleet's by the heartbeat timeout means it stopped answering. Without a
+    // reference, it is not judged.
+    if (
+        node.local &&
+            clock != null &&
+            node.lastSeen != null &&
+            clock - node.lastSeen >= HEARTBEAT_TIMEOUT_MS
+    )
         return NodeHealth(
             NodeHealthState.OFFLINE,
             "Hors ligne",
-            "Runner du master injoignable · dernier contact ${relativeAge(node.lastSeen, now)}",
+            "Injoignable · dernier contact ${relativeAge(node.lastSeen, clock)}",
         )
     val native = node.capabilities.backend == NATIVE_BACKEND
     if (!native && !node.capabilities.kvm)
@@ -214,7 +239,11 @@ fun nodeHealth(node: ExecutionNode, now: Long = System.currentTimeMillis()): Nod
             "Changement de privilèges en cours",
         )
     if (node.maintenance != null && node.maintenanceError != null)
-        return NodeHealth(NodeHealthState.ATTENTION, "À vérifier", "La mise à jour a échoué")
+        return NodeHealth(
+            NodeHealthState.ATTENTION,
+            "À vérifier",
+            "La préparation de la mise à jour a échoué",
+        )
     if (node.maintenance != null)
         return NodeHealth(
             NodeHealthState.UPDATING,
@@ -222,7 +251,8 @@ fun nodeHealth(node: ExecutionNode, now: Long = System.currentTimeMillis()): Nod
             "Les nouveaux travaux attendent la mise à jour",
         )
     // Without a reported error, readiness is usually on its way, as after a budget change until
-    // the next heartbeat: it waits rather than alarms. The diagnostics list the possible causes.
+    // the next heartbeat: it waits rather than alarms. The inventory cannot tell a lasting cause
+    // (image, pool, data root) from that wait; the diagnostics list the possible causes.
     if (!node.executionReady)
         return when {
             node.budgetError != null ->
@@ -235,7 +265,7 @@ fun nodeHealth(node: ExecutionNode, now: Long = System.currentTimeMillis()): Nod
                 NodeHealth(
                     NodeHealthState.ATTENTION,
                     "À vérifier",
-                    "Le runtime a signalé une erreur",
+                    "La mise à jour a échoué",
                 )
             else ->
                 NodeHealth(

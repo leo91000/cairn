@@ -14,9 +14,10 @@ import NodeHealthBadge from './NodeHealthBadge.vue'
 import NodeMeter from './NodeMeter.vue'
 
 // One machine in the fleet: whether it takes work, its free slots, memory and disk in use, and who may run there.
-const props = defineProps<{ node: ExecutionNode, selected?: boolean }>()
+// `clock` is the server time seen in the inventory (`fleetClock`).
+const props = defineProps<{ node: ExecutionNode, selected?: boolean, clock?: number | null }>()
 defineEmits<{ open: [] }>()
-const health = computed(() => nodeHealth(props.node))
+const health = computed(() => nodeHealth(props.node, Date.now(), props.clock ?? null))
 const live = computed(() => !['offline', 'revoked'].includes(health.value.state))
 const slots = computed(() => props.node.slots ?? 0)
 const free = computed(() => props.node.availableSlots ?? 0)

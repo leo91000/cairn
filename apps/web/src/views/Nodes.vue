@@ -12,6 +12,7 @@ import { createNodeEnrollment } from '../../../../packages/contracts/generated/c
 import { revokeNode } from '../../../../packages/contracts/generated/revokeNode'
 import {
   diskCapacity,
+  fleetClock,
   formatMiB,
   nodeHealth,
 } from '../../../../packages/contracts/nodes'
@@ -90,11 +91,17 @@ const loaded = ref(false)
 const refreshError = ref('')
 const shownError = computed(() => error.value || refreshError.value)
 const errorNodeId = ref<string | null>(null)
+// Behind dialogs and panels, the page names the machine an action error concerns.
+const pageError = computed(() => {
+  const machine = errorNodeId.value && nodes.value.find(node => node.id === errorNodeId.value)
+  return refreshError.value || (error.value && machine ? `${machine.name}: ${error.value}` : error.value)
+})
 const opened = computed(() => nodes.value.find(node => node.id === openedId.value) ?? null)
 const active = computed(() => nodes.value.filter(node => !node.revoked))
 const revoked = computed(() => nodes.value.filter(node => node.revoked))
 const visible = computed(() => showRevoked.value ? nodes.value : active.value)
-const healths = computed(() => active.value.map(node => nodeHealth(node)))
+const clock = computed(() => fleetClock(nodes.value))
+const healths = computed(() => active.value.map(node => nodeHealth(node, Date.now(), clock.value)))
 // Connected machines answer heartbeats; the built-in runner too, unless its contact went stale.
 const live = computed(() => active.value.filter((node, index) => (node.local || node.status === 'online') && healths.value[index].state !== 'offline'))
 const totalSlots = computed(() => live.value.reduce((total, node) => total + (node.slots ?? 0), 0))
@@ -439,8 +446,8 @@ function revoke() {
         </div>
       </dl>
     </section>
-    <UiAlert v-if="shownError && !adding" class="mb-4">
-      {{ shownError }}
+    <UiAlert v-if="pageError && !adding" class="mb-4">
+      {{ pageError }}
     </UiAlert>
     <Modal
       v-if="adding"
@@ -538,7 +545,12 @@ function revoke() {
       </div>
       <ul aria-label="Machines" class="[&>li:first-child>button]:border-t-0">
         <li v-for="node in visible" :key="node.id">
-          <NodeRow :node="node" :selected="node.id === openedId" @open="openNode(node)" />
+          <NodeRow
+            :node="node"
+            :clock="clock"
+            :selected="node.id === openedId"
+            @open="openNode(node)"
+          />
         </li>
       </ul>
       <p v-if="!loaded && !shownError" class="px-4.5 py-6 text-sm text-muted" role="status">
@@ -561,6 +573,7 @@ function revoke() {
       v-if="opened"
       :key="opened.id"
       :node="opened"
+      :clock="clock"
       :busy="busy"
       :error="errorNodeId === opened.id ? error : ''"
       @close="openedId = null"

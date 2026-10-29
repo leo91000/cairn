@@ -79,8 +79,8 @@ class NodesTest {
             nodeHealth(ready.copy(executionReady = false)),
         )
         assertEquals(
-            NodeHealthState.ATTENTION,
-            nodeHealth(ready.copy(executionReady = false, updateError = "image")).state,
+            NodeHealth(NodeHealthState.ATTENTION, "À vérifier", "La mise à jour a échoué"),
+            nodeHealth(ready.copy(executionReady = false, updateError = "image")),
         )
         assertEquals(
             "Aucun agent ne peut encore utiliser cette machine",
@@ -116,22 +116,26 @@ class NodesTest {
             "Espace disque partagé insuffisant",
             nodeHealth(ready.copy(pressure = "disk")).detail,
         )
-        assertEquals(
-            NodeHealthState.READY,
-            nodeHealth(ready.copy(local = true, status = "local", lastSeen = null)).state,
-        )
-        assertEquals(
-            NodeHealthState.READY,
-            nodeHealth(ready.copy(local = true, status = "local", lastSeen = 0), 30_000).state,
-        )
+        // The built-in runner is judged against the server clock seen in the fleet.
+        val runner = ready.copy(local = true, status = "local", lastSeen = 0)
+        val remote = ready.copy(id = "0d7c9a6e-3b8f-5b1e-9f3a-2c4d5e6f7a8b", lastSeen = 120_000)
+        assertEquals(120_000L, fleetClock(listOf(runner, remote)))
+        assertNull(fleetClock(listOf(runner)))
         assertEquals(
             NodeHealth(
                 NodeHealthState.OFFLINE,
                 "Hors ligne",
-                "Runner du master injoignable · dernier contact il y a 2 min",
+                "Injoignable · dernier contact il y a 2 min",
             ),
-            nodeHealth(ready.copy(local = true, status = "local", lastSeen = 0), 120_000),
+            nodeHealth(runner, 0, 120_000),
         )
+        assertEquals(NodeHealthState.READY, nodeHealth(runner, 0, 30_000).state)
+        // A device clock far ahead of the server does not make a refreshed runner look stale.
+        assertEquals(
+            NodeHealthState.READY,
+            nodeHealth(runner.copy(lastSeen = 120_000), 900_000, 125_000).state,
+        )
+        assertEquals(NodeHealthState.READY, nodeHealth(runner, 900_000).state)
         val native =
             ready.copy(
                 capabilities =
@@ -176,7 +180,11 @@ class NodesTest {
             nodeHealth(enabled.copy(nativeModeStatus = "failed", executionReady = false)).detail,
         )
         assertEquals(
-            NodeHealth(NodeHealthState.ATTENTION, "À vérifier", "La mise à jour a échoué"),
+            NodeHealth(
+                NodeHealthState.ATTENTION,
+                "À vérifier",
+                "La préparation de la mise à jour a échoué",
+            ),
             nodeHealth(ready.copy(maintenance = "draining", maintenanceError = "disque plein")),
         )
         assertEquals(

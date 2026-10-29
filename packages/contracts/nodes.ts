@@ -96,15 +96,31 @@ export interface NodeHealth {
 /** The server's heartbeat timeout; listing nodes refreshes the built-in runner within it when reachable. */
 const HEARTBEAT_TIMEOUT_MS = 60_000
 
-/** Whether a node can take work, as one state and a short sentence; the first blocker wins. */
-export function nodeHealth(node: ExecutionNode, now = Date.now()): NodeHealth {
+/**
+ * The server's clock as seen in an inventory: the latest contact of a machine the server reports online.
+ * Device clocks can drift from the server's, so staleness is judged against this rather than `Date.now()`.
+ */
+export function fleetClock(nodes: ExecutionNode[]): number | null {
+  const seen = nodes
+    .filter(node => !node.local && !node.revoked && node.status === 'online' && node.lastSeen != null)
+    .map(node => node.lastSeen!)
+  return seen.length ? Math.max(...seen) : null
+}
+
+/**
+ * Whether a node can take work, as one state and a short sentence; the first blocker wins.
+ * Online follows the server's 60-second heartbeat timeout; placement wants a heartbeat within 30 seconds,
+ * so a machine that just stopped answering can read Ready for up to half a minute.
+ */
+export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number | null = null): NodeHealth {
   if (node.revoked)
     return { state: 'revoked', label: 'Revoked', detail: 'No longer has access' }
   if (!node.local && node.status === 'offline')
     return { state: 'offline', label: 'Offline', detail: node.lastSeen != null ? `Last contact ${relativeAge(node.lastSeen, now)}` : 'Never connected' }
-  // The built-in runner always reports "local"; a stale contact means it stopped answering.
-  if (node.local && node.lastSeen != null && now - node.lastSeen >= HEARTBEAT_TIMEOUT_MS)
-    return { state: 'offline', label: 'Offline', detail: `Built-in runner unreachable · last contact ${relativeAge(node.lastSeen, now)}` }
+  // The built-in runner always reports "local". Listing refreshes it when reachable, so a contact older
+  // than the fleet's by the heartbeat timeout means it stopped answering. Without a reference, it is not judged.
+  if (node.local && clock != null && node.lastSeen != null && clock - node.lastSeen >= HEARTBEAT_TIMEOUT_MS)
+    return { state: 'offline', label: 'Offline', detail: `Unreachable · last contact ${relativeAge(node.lastSeen, clock)}` }
 
   const native = node.capabilities.backend === 'native'
   if (!native && !node.capabilities.kvm)
@@ -122,17 +138,18 @@ export function nodeHealth(node: ExecutionNode, now = Date.now()): NodeHealth {
     return { state: 'updating', label: 'Updating', detail: 'Privilege change in progress' }
   // Optional fields are tested for presence, as in the Kotlin contract.
   if (node.maintenance != null && node.maintenanceError != null)
-    return { state: 'attention', label: 'Needs attention', detail: 'The update failed' }
+    return { state: 'attention', label: 'Needs attention', detail: 'Update preparation failed' }
   if (node.maintenance != null)
     return { state: 'updating', label: 'Updating', detail: 'New work waits for the update' }
   // Without a reported error, readiness is usually on its way, as after a budget change until the
-  // next heartbeat: it waits rather than alarms. The diagnostics list the possible causes.
+  // next heartbeat: it waits rather than alarms. The inventory cannot tell a lasting cause (image,
+  // pool, data root) from that wait; the diagnostics list the possible causes in the panel.
   // A missing flag reads as not ready, like the generated Kotlin contract.
   if (!node.executionReady) {
     if (node.budgetError != null)
       return { state: 'attention', label: 'Needs attention', detail: 'The shared budget could not be applied' }
     if (node.updateError != null)
-      return { state: 'attention', label: 'Needs attention', detail: 'The runtime reported an error' }
+      return { state: 'attention', label: 'Needs attention', detail: 'The update failed' }
     return { state: 'updating', label: 'Not ready', detail: 'The runtime is not ready yet' }
   }
 

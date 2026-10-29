@@ -105,13 +105,15 @@ fun NodesScreen(
             "Gérez vos machines et leur capacité. L’accès des agents se règle sur leur fiche.",
         )
         val active = nodes.filter { !it.revoked }
+        val clock = fleetClock(nodes)
         // Connected machines answer heartbeats; the built-in runner too, unless its contact went
         // stale.
         val live = active.filter {
-            (it.local || it.status == "online") && nodeHealth(it).state != NodeHealthState.OFFLINE
+            (it.local || it.status == "online") &&
+                nodeHealth(it, clock = clock).state != NodeHealthState.OFFLINE
         }
         val attention = active.count {
-            nodeHealth(it).state in
+            nodeHealth(it, clock = clock).state in
                 listOf(NodeHealthState.OFFLINE, NodeHealthState.ATTENTION, NodeHealthState.SETUP)
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -135,7 +137,7 @@ fun NodesScreen(
             .filter { showRevoked || !it.revoked }
             .forEach { node ->
                 Panel {
-                    val health = nodeHealth(node)
+                    val health = nodeHealth(node, clock = clock)
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),

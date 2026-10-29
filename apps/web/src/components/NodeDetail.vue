@@ -30,7 +30,13 @@ import UiSegments from './UiSegments.vue'
 
 // Everything about one machine, in four sections: how it is doing, who may use it, its disks, and its settings.
 // Editors and confirmations stay in their own dialogs, opened above this panel by the page.
-const props = defineProps<{ node: ExecutionNode, busy: boolean, error?: string }>()
+// `clock` is the server time seen in the inventory (`fleetClock`).
+const props = defineProps<{
+  node: ExecutionNode
+  busy: boolean
+  error?: string
+  clock?: number | null
+}>()
 const emit = defineEmits<{
   close: []
   changed: []
@@ -55,7 +61,7 @@ async function reviewRequest() {
 }
 
 // A control that did its job disappears (old disks freed, reservation released): keep focus in the panel.
-watch([() => props.node.staleDisks?.count, () => props.node.exclusiveReservation?.id], async () => {
+watch([() => props.node.staleDisks?.count, () => props.node.exclusiveReservation?.id, () => props.node.exclusiveReservation?.state], async () => {
   await nextTick()
   if (!content.value?.contains(document.activeElement) && (document.activeElement === document.body || !document.activeElement?.isConnected))
     content.value?.focus()
@@ -66,7 +72,7 @@ const sections: { value: Section, label: string }[] = [
   { value: 'storage', label: 'Storage' },
   { value: 'settings', label: 'Settings' },
 ]
-const health = computed(() => nodeHealth(props.node))
+const health = computed(() => nodeHealth(props.node, Date.now(), props.clock ?? null))
 const diagnostics = computed(() => nodeDiagnostics(props.node))
 const native = computed(() => props.node.capabilities.backend === 'native')
 const slots = computed(() => props.node.slots ?? 0)
@@ -252,18 +258,20 @@ const reserve = computed(() => {
                 Platform
               </dt>
               <dd>{{ node.capabilities.os }} {{ node.capabilities.arch }} · {{ native ? `ublk ${node.capabilities.ublk ? 'available' : 'unavailable'}` : `KVM ${node.capabilities.kvm ? 'available' : 'unavailable'}` }}</dd>
-              <template v-if="node.tags.length || node.systemTags?.length">
+              <template v-if="node.tags.length">
                 <dt class="text-muted">
                   Tags
                 </dt>
                 <dd class="flex flex-wrap gap-1.5">
                   <span v-for="tag in node.tags" :key="`tag-${tag}`" class="rounded-full bg-hover px-2 py-0.5 font-semibold">{{ tag }}</span>
-                  <span
-                    v-for="tag in node.systemTags"
-                    :key="`system-${tag}`"
-                    class="rounded-full border border-line px-2 py-0.5 text-muted"
-                    :title="`Detected tag ${tag}`"
-                  >{{ tag }}</span>
+                </dd>
+              </template>
+              <template v-if="node.systemTags?.length">
+                <dt class="text-muted">
+                  Detected tags
+                </dt>
+                <dd class="flex flex-wrap gap-1.5">
+                  <span v-for="tag in node.systemTags" :key="`system-${tag}`" class="rounded-full border border-line px-2 py-0.5 text-muted">{{ tag }}</span>
                 </dd>
               </template>
               <template v-if="node.lastSeen">

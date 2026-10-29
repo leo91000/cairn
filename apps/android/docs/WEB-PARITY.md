@@ -21,14 +21,17 @@ attention) and give each node one health state with a short reason: ready, full,
 busy, reserved, paused, updating, setup needed, needs attention, offline or
 revoked. Failed updates or privilege changes and an agent's pending privilege
 request count as needing attention; a runtime not yet ready without a reported
-error, as after a budget change, is getting ready. The first blocker wins, in the
-same order on both platforms (`nodeHealth` in `packages/contracts/nodes.ts` and
-`data/Nodes.kt`); the full diagnostics list is unchanged. Platform difference: web
-lists machines as compact rows and opens a side panel (Overview, Access, Storage,
-Settings) whose existing editors and confirmations are unchanged; Android keeps
-its Material cards and adds the health pill and reason under each name. Health is
-derived from the existing `list_nodes` inventory, already returned by public MCP
-and `cairn_installation`; no capability, grant or command changes.
+error, as after a budget change, is getting ready. The built-in runner reads
+offline when its contact lags the machines the server reports online by the
+heartbeat timeout, so device clock drift cannot mark it stale. The first blocker
+wins, in the same order on both platforms (`nodeHealth` in
+`packages/contracts/nodes.ts` and `data/Nodes.kt`); the full diagnostics list is
+unchanged. Platform difference: web lists machines as compact rows and opens a
+side panel (Overview, Access, Storage, Settings) whose existing editors and
+confirmations are unchanged; Android keeps its Material cards and adds the health
+pill and reason under each name. Health is derived from the existing `list_nodes`
+inventory, already returned by public MCP and `cairn_installation`; no capability,
+grant or command changes.
 
 ## Node priority drag and drop
 

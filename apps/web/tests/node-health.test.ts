@@ -1,6 +1,11 @@
 import type { ExecutionNode } from '../../../packages/contracts/nodes'
 import { describe, expect, it } from 'vitest'
-import { nodeAdministrator, nodeHealth, usedPercent } from '../../../packages/contracts/nodes'
+import {
+  fleetClock,
+  nodeAdministrator,
+  nodeHealth,
+  usedPercent,
+} from '../../../packages/contracts/nodes'
 
 function node(overrides: Partial<ExecutionNode> = {}): ExecutionNode {
   return {
@@ -66,7 +71,7 @@ describe('node health', () => {
     expect(nodeHealth(node({ status: 'offline', lastSeen: null })).detail).toBe('Never connected')
     expect(nodeHealth(node({ capabilities: { ...node().capabilities, kvm: false }, agents: [] }))).toMatchObject({ state: 'attention', detail: 'KVM is unavailable' })
     expect(nodeHealth(node({ executionReady: false, budgetError: 'cgroup' }))).toMatchObject({ state: 'attention', detail: 'The shared budget could not be applied' })
-    expect(nodeHealth(node({ executionReady: false, updateError: 'image mismatch' }))).toMatchObject({ state: 'attention', detail: 'The runtime reported an error' })
+    expect(nodeHealth(node({ executionReady: false, updateError: 'image mismatch' }))).toMatchObject({ state: 'attention', detail: 'The update failed' })
     // A saved budget turns readiness off until the next heartbeat applies it: not a fault.
     expect(nodeHealth(node({ executionReady: false }))).toEqual({ state: 'updating', label: 'Not ready', detail: 'The runtime is not ready yet' })
     const unreported = node()
@@ -105,7 +110,7 @@ describe('node health', () => {
       nativeModeObserved: { mode: 'administrator', status: 'failed' } as ExecutionNode['nativeModeObserved'],
       executionReady: false,
     }).state).toBe('updating')
-    expect(nodeHealth(node({ maintenance: 'draining', maintenanceError: 'disk full' }))).toMatchObject({ state: 'attention', detail: 'The update failed' })
+    expect(nodeHealth(node({ maintenance: 'draining', maintenanceError: 'disk full' }))).toMatchObject({ state: 'attention', detail: 'Update preparation failed' })
   })
 
   it('reads a missing free-slot count as none, like the generated Kotlin contract', () => {
@@ -114,11 +119,18 @@ describe('node health', () => {
     expect(nodeHealth(partial)).toMatchObject({ state: 'full', detail: 'All 4 slots in use' })
   })
 
-  it('keeps the built-in runner online without a heartbeat status, until its contact goes stale', () => {
-    expect(nodeHealth(node({ local: true, status: 'local', lastSeen: null })).state).toBe('ready')
-    expect(nodeHealth(node({ local: true, status: 'local', lastSeen: 0 }), 30_000).state).toBe('ready')
-    expect(nodeHealth(node({ local: true, status: 'local', lastSeen: 0 }), 120_000)).toEqual({ state: 'offline', label: 'Offline', detail: 'Built-in runner unreachable · last contact 2 min ago' })
-    expect(nodeHealth(node({ local: true, status: 'local', lastSeen: null }), 120_000).state).toBe('ready')
+  it('judges the built-in runner against the server clock seen in the fleet, not the device clock', () => {
+    const runner = node({ local: true, status: 'local', lastSeen: 0 })
+    const remote = node({ id: 'remote', status: 'online', lastSeen: 120_000 })
+    expect(fleetClock([runner, remote, node({ id: 'gone', status: 'offline', lastSeen: 900_000 })])).toBe(120_000)
+    expect(fleetClock([runner])).toBeNull()
+    expect(nodeHealth(runner, 0, 120_000)).toEqual({ state: 'offline', label: 'Offline', detail: 'Unreachable · last contact 2 min ago' })
+    expect(nodeHealth(runner, 0, 30_000).state).toBe('ready')
+    // A device clock far ahead of the server does not make a refreshed runner look stale.
+    expect(nodeHealth(node({ local: true, status: 'local', lastSeen: 120_000 }), 900_000, 125_000).state).toBe('ready')
+    // Without a machine the server reports online, there is no reference: the runner is not judged.
+    expect(nodeHealth(runner, 900_000).state).toBe('ready')
+    expect(nodeHealth(node({ local: true, status: 'local', lastSeen: null }), 0, 120_000).state).toBe('ready')
   })
 
   it('asks for native activation before a native node takes work', () => {
