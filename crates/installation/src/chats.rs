@@ -30,6 +30,7 @@ use std::collections::HashSet;
 pub use storage::{Conversation, Message};
 
 pub mod engine_switch;
+pub(crate) mod migration;
 pub(crate) mod storage;
 
 pub use cairn_contracts::{MessageMode, MessageStatus};
@@ -78,8 +79,8 @@ struct UserMessageEvent<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     question_id: Option<&'a str>,
     text: &'a str,
-    attachments: &'a Value,
-    created_at: &'a Value,
+    attachments: &'a [cairn_contracts::ChatAttachment],
+    created_at: i64,
 }
 
 fn chat(db: &Db<'_>, id: &str) -> Result<Value> {
@@ -138,94 +139,148 @@ fn same_content(a: &Message, b: &Message) -> bool {
         && a.attachments == b.attachments
 }
 
-fn record_name(db: &Db<'_>, chat: &Value, kind: &str, key: &str, deleted: &str) -> Result<Value> {
-    let id_key = if kind == "agents" {
-        "agentId"
-    } else {
-        "projectId"
-    };
-    Ok(match db.agent_snapshot(text(chat, id_key))? {
-        Some(record) => record["name"].clone(),
-        // Keep the name remembered on the chat after its agent or project is removed.
-        None => chat[key]
-            .as_str()
-            .map_or_else(|| deleted.into(), Value::from),
-    })
+// Other domains still accept a JSON projection; current conversation decisions
+// and views use the named state and public contract directly.
+pub(crate) fn view(db: &Db<'_>, chat: Value) -> Result<Value> {
+    Ok(serde_json::to_value(conversation_view(
+        db,
+        serde_json::from_value(chat)?,
+    )?)?)
 }
 
-pub(crate) fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
-    chat["codingAgentSwitch"] = coding_agent::progress(db, text(&chat, "id"))?;
-    chat["error"] = if is_active(&chat) {
-        db.kv(&format!("chat-error:{}", text(&chat, "id")))?
-            .unwrap_or(Value::Null)
-    } else {
-        Value::Null
-    };
-    chat["lifecycle"] = crate::conversation_lifecycle::state(&chat).into();
-    chat["pendingQuestions"] = questions(db, text(&chat, "id"))?
+fn conversation_view(db: &Db<'_>, chat: Conversation) -> Result<cairn_contracts::Chat> {
+    use cairn_contracts::{Chat, ChatRequester, ConversationLifecycle, ConversationStatus};
+    let active = chat.lifecycle == ConversationLifecycle::Active;
+    let run = db.run(chat.run_id.as_deref().unwrap_or(""))?;
+    let pending_questions = questions(db, &chat.id)?
         .iter()
         .filter(|question| question.status == QuestionStatus::Pending)
-        .count()
-        .into();
-    chat["agentName"] = record_name(db, &chat, "agents", "agentName", "Deleted agent")?;
-    chat["projectName"] = if chat["projectId"].is_null() {
-        Value::Null
-    } else {
-        db.project(text(&chat, "projectId"))?.map_or_else(
-            || {
-                chat["projectName"]
-                    .as_str()
-                    .map_or_else(|| "Deleted project".into(), Value::from)
-            },
-            |project| Value::from(project.settings.name),
-        )
-    };
-    let run = db.run(text(&chat, "runId"))?;
-    chat["canRequestNewSession"] =
-        crate::conversation_lifecycle::can_request_new_session(&chat, run.as_ref()).into();
-    let queued_delegation = run.is_none()
-        && chat["requestedBy"].is_object()
-        && continuation::has_pending_input(db, &chat)?;
-    chat["status"] = if queued_delegation {
-        "queued".into()
+        .count() as u32;
+    let agent_name = db.agent(&chat.agent_id)?.map_or_else(
+        || {
+            chat.agent_name
+                .clone()
+                .unwrap_or_else(|| "Deleted agent".into())
+        },
+        |agent| agent.settings.name,
+    );
+    let project_name = chat
+        .project_id
+        .as_ref()
+        .map(|id| {
+            Ok::<_, Error>(db.project(id)?.map_or_else(
+                || {
+                    chat.project_name
+                        .clone()
+                        .unwrap_or_else(|| "Deleted project".into())
+                },
+                |project| project.settings.name,
+            ))
+        })
+        .transpose()?;
+    let pending_delegation = run.is_none()
+        && chat.requested_by.is_some()
+        && db.conversation_messages(&chat.id)?.iter().any(|message| {
+            matches!(
+                message.status,
+                MessageStatus::Queued | MessageStatus::Sending
+            )
+        });
+    let status = if pending_delegation {
+        ConversationStatus::Queued
     } else {
         run.as_ref()
-            .map_or_else(|| "idle".into(), |run| run["status"].clone())
+            .map(|run| serde_json::from_value(run["status"].clone()))
+            .transpose()?
+            .unwrap_or(ConversationStatus::Idle)
     };
-    chat["suspendedByExclusive"] = run
+    let requester = chat
+        .requested_by
         .as_ref()
-        .map_or(Value::Null, |run| run["suspendedByExclusive"].clone());
-    for field in ["accountWaitReason", "accountRequired"] {
-        chat[field] = run.as_ref().map_or(Value::Null, |run| run[field].clone());
-    }
-    // The coding agent of the latest turn, which a message may switch from the agent's own.
-    chat["provider"] = run
+        .map(|requester| {
+            Ok::<_, Error>(
+                db.conversation(&requester.chat_id)?
+                    .filter(|requester| requester.lifecycle == ConversationLifecycle::Active)
+                    .map(|requester| ChatRequester {
+                        chat_id: requester.id,
+                        title: requester.title,
+                    }),
+            )
+        })
+        .transpose()?
+        .flatten();
+    let compaction = Some(compaction_state(db, &chat, run.as_ref())?);
+    let coding_agent_switch = coding_agent::progress(db, &chat.id)?;
+    let error = if active {
+        db.kv(&format!("chat-error:{}", chat.id))?
+            .map(serde_json::from_value)
+            .transpose()?
+    } else {
+        None
+    };
+    // Run-owned fields remain at A5/A10's explicit projection boundary.
+    let run_field = |field: &str| run.as_ref().map_or(Value::Null, |run| run[field].clone());
+    let provider = run
         .as_ref()
         .and_then(|run| Provider::of_run(run).ok())
-        .map_or(Value::Null, |provider| provider.as_str().into());
-    // How full the native session's context was at its latest report; absent when unknown.
-    chat["contextUsage"] = run
-        .as_ref()
-        .map_or(Value::Null, |run| run["contextUsage"].clone());
-    chat["compaction"] = compaction_state(db, &chat, run.as_ref())?;
-    // When the agent's latest turn ended, for what the Fil shows as unread.
-    chat["finishedAt"] = run.map_or(Value::Null, |run| run["finishedAt"].clone());
-    // The delegating conversation, while it can still be opened.
-    chat["requester"] = match chat["requestedBy"]["chatId"].as_str() {
-        Some(id) => db.conversation_boundary(id)?.filter(is_active).map_or(
-            Value::Null,
-            |requester| json!({ "chatId": requester["id"], "title": requester["title"] }),
+        .map(|provider| serde_json::from_value(Value::from(provider.as_str())))
+        .transpose()?;
+    Ok(Chat {
+        can_request_new_session: crate::conversation_lifecycle::can_request_new_session(
+            &chat,
+            run.as_ref(),
         ),
-        None => Value::Null,
-    };
-    Ok(serde_json::to_value(serde_json::from_value::<
-        cairn_contracts::Chat,
-    >(chat)?)?)
+        finished_at: serde_json::from_value(run_field("finishedAt"))?,
+        context_usage: serde_json::from_value(run_field("contextUsage"))?,
+        account_wait_reason: serde_json::from_value(run_field("accountWaitReason"))?,
+        account_required: serde_json::from_value(run_field("accountRequired"))?,
+        suspended_by_exclusive: serde_json::from_value(run_field("suspendedByExclusive"))?,
+        id: chat.id,
+        slug: chat.slug,
+        revision: chat.revision,
+        title: chat.title,
+        agent_id: chat.agent_id,
+        project_id: chat.project_id,
+        run_id: chat.run_id,
+        paused: chat.paused,
+        lifecycle: chat.lifecycle,
+        created_at: chat.created_at,
+        updated_at: chat.updated_at,
+        last_activity_at: chat.last_activity_at,
+        trashed_at: chat.trashed_at,
+        purge_at: chat.purge_at,
+        restored_at: chat.restored_at,
+        session_restart_requested: chat.session_restart_requested,
+        unread: false,
+        lifecycle_error: chat.lifecycle_error,
+        environment_state: chat.environment_state,
+        environment_expired_at: chat.environment_expired_at,
+        environment_error: chat.environment_error,
+        requested_by: chat.requested_by,
+        wakeup: chat.wakeup,
+        requester,
+        provider,
+        compaction,
+        coding_agent_switch,
+        error,
+        pending_questions,
+        agent_name,
+        project_name,
+        status,
+        preview: None,
+        questions: Vec::new(),
+        messages: Vec::new(),
+        run: None,
+    })
 }
 
 /// Whether the conversation's coding agent can compact its context, whether it is
 /// compacting now, and why a compaction cannot start when it cannot.
-fn compaction_state(db: &Db<'_>, chat: &Value, run: Option<&Value>) -> Result<Value> {
+fn compaction_state(
+    db: &Db<'_>,
+    chat: &Conversation,
+    run: Option<&Value>,
+) -> Result<cairn_contracts::ChatCompaction> {
     let provider = run.and_then(|run| Provider::of_run(run).ok());
     let supported = provider.is_some_and(Provider::compacts_context);
     let running = run.is_some_and(|run| run_is_active(run) && is_compaction(run));
@@ -234,20 +289,24 @@ fn compaction_state(db: &Db<'_>, chat: &Value, run: Option<&Value>) -> Result<Va
     } else {
         compaction_blocker(db, chat, run)?
     };
-    Ok(json!({
-        "supported": supported,
-        "running": running,
-        "available": blocker.is_none(),
-        "reason": blocker,
-    }))
+    Ok(cairn_contracts::ChatCompaction {
+        supported,
+        running,
+        available: blocker.is_none(),
+        reason: blocker,
+    })
 }
 
 /// Why the conversation cannot compact its native context now, if it cannot.
-fn compaction_blocker(db: &Db<'_>, chat: &Value, run: Option<&Value>) -> Result<Option<String>> {
-    if !is_active(chat) {
+fn compaction_blocker(
+    db: &Db<'_>,
+    chat: &Conversation,
+    run: Option<&Value>,
+) -> Result<Option<String>> {
+    if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active {
         return Ok(Some("This conversation has been deleted.".into()));
     }
-    if chat["environmentState"].is_string() {
+    if chat.environment_state.is_some() {
         return Ok(Some(
             "The working environment expired. Send a new message to start a fresh session.".into(),
         ));
@@ -283,7 +342,7 @@ fn compaction_blocker(db: &Db<'_>, chat: &Value, run: Option<&Value>) -> Result<
             "This workspace has been cleaned up. Start a new chat.".into(),
         ));
     }
-    let fresh_session = chat["sessionRestartRequested"] == true
+    let fresh_session = chat.session_restart_requested
         || RunCheckpoint::load_in(db, text(run, "id"))?
             .is_some_and(|checkpoint| checkpoint.fresh_session == Some(true));
     if !run["sessionId"].is_string() || fresh_session {
@@ -291,7 +350,7 @@ fn compaction_blocker(db: &Db<'_>, chat: &Value, run: Option<&Value>) -> Result<
             "This conversation has no saved native session to compact.".into(),
         ));
     }
-    if chat["wakeup"].is_object() {
+    if chat.wakeup.as_ref().is_some_and(Value::is_object) {
         return Ok(Some(
             "Compact after the scheduled continuation resumes.".into(),
         ));
@@ -299,7 +358,7 @@ fn compaction_blocker(db: &Db<'_>, chat: &Value, run: Option<&Value>) -> Result<
     let undelivered: bool = db.0.query_row(
         "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE chat_id=?
          AND status IN ('queued','sending'))",
-        [text(chat, "id")],
+        [&chat.id],
         |row| row.get(0),
     )?;
     if undelivered {
@@ -324,7 +383,7 @@ fn compact(db: &Db<'_>, chat_id: &str, origin: &crate::native::policy::Origin) -
         // A retried request after a lost response keeps the compaction already started.
         return view(db, serde_json::to_value(chat)?);
     }
-    if let Some(reason) = compaction_blocker(db, &serde_json::to_value(&chat)?, run.as_ref())? {
+    if let Some(reason) = compaction_blocker(db, &chat, run.as_ref())? {
         return Err(Error::conflict(reason));
     }
     let run = run.unwrap();
@@ -354,17 +413,17 @@ fn compact(db: &Db<'_>, chat_id: &str, origin: &crate::native::policy::Origin) -
 
 /// Active conversations. Deleted ones are skipped before their view is built.
 pub(crate) fn list(db: &Db<'_>) -> Result<Vec<Value>> {
-    db.conversations_boundary()?
+    db.conversations()?
         .into_iter()
-        .filter(is_active)
-        .map(|chat| view(db, serde_json::to_value(chat)?))
+        .filter(|chat| chat.lifecycle == cairn_contracts::ConversationLifecycle::Active)
+        .map(|chat| Ok(serde_json::to_value(conversation_view(db, chat)?)?))
         .collect()
 }
 
 pub(crate) fn list_all(db: &Db<'_>) -> Result<Vec<Value>> {
-    db.conversations_boundary()?
+    db.conversations()?
         .into_iter()
-        .map(|chat| view(db, serde_json::to_value(chat)?))
+        .map(|chat| Ok(serde_json::to_value(conversation_view(db, chat)?)?))
         .collect()
 }
 
@@ -759,8 +818,8 @@ fn acknowledge(db: &Db<'_>, run_id: &str, message_id: &str) -> Result<()> {
         message_id,
         question_id: message.question_id.as_deref(),
         text,
-        attachments: &serde_json::to_value(&message.attachments)?,
-        created_at: &serde_json::to_value(message.created_at)?,
+        attachments: &message.attachments,
+        created_at: message.created_at,
     })?;
     db.event(run_id, &EventKind::ChatUser, text, Some(&payload))?;
     touch(&mut chat);

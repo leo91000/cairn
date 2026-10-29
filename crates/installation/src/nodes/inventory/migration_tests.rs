@@ -16,6 +16,7 @@ async fn version11(root: &std::path::Path) -> Connection {
         .unwrap();
     drop(store);
     let db = Connection::open(root.join("manager.db")).unwrap();
+    crate::chats::migration::tests::version12(&db);
     db.execute_batch("DROP TABLE direct_journal_acknowledgements; DROP TABLE direct_object_quarantines; DROP TABLE direct_storage_grants; DROP TABLE direct_read_authorizations;
 DROP TABLE node_reviewed_agents; DROP TABLE node_trusted_accounts; DROP TABLE node_tags; DROP TABLE nodes;
 DROP TABLE records;

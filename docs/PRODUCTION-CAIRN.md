@@ -58,7 +58,9 @@ work and update separately through their existing host supervisor.
 Installation database version 11 upgrades automatically to version 12 at manager
 startup through the [typed inventory migration](migrations/0012-typed-node-inventory.md).
 Direct-storage releases then continue to version 13 through a separate
-[coordination metadata migration](migrations/0013-direct-node-storage.md).
+[coordination metadata migration](migrations/0013-direct-node-storage.md),
+then version 13 upgrades to 14 through the
+[typed conversation migration](migrations/0014-typed-conversations.md).
 Stop the old manager and retain a consistent database/WAL backup first. Keep the
 installation identity, configuration, data roots, node state and object storage.
 The migration preserves node identities, credentials, configuration and references;

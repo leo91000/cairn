@@ -74,7 +74,8 @@ class ContextCompactionJourneyTest {
                             cachedTokens = 120_000,
                             estimated = false,
                         ),
-                    compaction = ChatCompaction(supported = true, available = true, running = false),
+                    compaction =
+                        ChatCompaction(supported = true, available = true, running = false),
                 )
             val events =
                 listOf(
@@ -210,7 +211,11 @@ class ContextCompactionJourneyTest {
                                     wireJson.encodeToString(
                                         chat.copy(
                                             compaction =
-                                                ChatCompaction(supported = true, available = false, running = true)
+                                                ChatCompaction(
+                                                    supported = true,
+                                                    available = false,
+                                                    running = true,
+                                                )
                                         )
                                     )
                                 else ->

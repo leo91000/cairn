@@ -1,0 +1,38 @@
+# Installation database 12 → 13
+
+`Store::open` upgrades version 12 before starting database actors or serving
+requests. Version 11 first follows the existing inventory migration to version 12.
+Stop the old manager and retain a consistent database/WAL backup before upgrading;
+never run both versions against the same database.
+
+One immediate SQLite transaction moves chat records into `conversations`, message
+headers into typed `chat_messages`, ordered upload snapshots into
+`message_attachments`, engine-switch progress and idempotency receipts into
+`conversation_engine_switches`, and the inactivity policy into
+`conversation_retention`. The obsolete chat records, message documents and converted
+KV keys disappear only in that same transaction. Unrelated records, KV values and
+expiration timestamps, runs, events, checkpoints, credentials and counters remain
+unchanged. There is no runtime fallback or second writer.
+
+Conversation identities, immutable readable slugs, existing revisions and record
+ordering timestamps are retained. Historical agent/project assignment IDs remain
+even if their resource was removed; live references use nullable foreign keys.
+Current run references are checked. Message IDs, delivery states, text, selections,
+private answer maps, equal-timestamp row order and attachment order are retained.
+Messages without a revision receive one. Engine-switch receipts keep their exact
+expiration; a current switch retains its separate expiry, pending state, model,
+error and retry timestamp. Missing inactivity policy still means seven days.
+
+Malformed data, unsupported states, identity mismatches and failed constraints or
+foreign keys roll back the entire version-12 upgrade, including schema changes.
+The version remains 12 and the old data is available for repair and retry. Upgrade
+decoding diagnostics contain no message contents, answers or native provenance.
+Reopening version 13 performs no further migration. There is no downgrade path
+from a successfully committed version 13; failure rollback leaves version 12 intact.
+
+Tests reconstruct the affected version-12 DDL from pre-conversion main `4af96bbe`,
+seed persisted conversations, retained/deleted resource references, private answers,
+ordered attachments and credentials, then open through the production startup
+path. They verify preservation, repeat opens and complete schema rollback after a
+late malformed message or broken run reference. Engine-switch tests exercise
+multiple receipts and a pending current switch with independent lifetimes.
