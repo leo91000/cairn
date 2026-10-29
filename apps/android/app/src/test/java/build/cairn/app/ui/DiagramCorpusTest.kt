@@ -8,6 +8,16 @@ import org.junit.Test
 /** Mermaid parsing and layout, on the corpus the web's diagram tests check too. */
 class DiagramCorpusTest {
     @Test
+    fun `preserves semicolon separated sequence steps`() {
+        val compact = "sequenceDiagram; A->>B: first;B->>A: response #59;"
+        val expanded = "sequenceDiagram\nA->>B: first\nB->>A: response #59;"
+        assertEquals(
+            canonical(diagramJson(parseDiagram(expanded))),
+            canonical(diagramJson(parseDiagram(compact))),
+        )
+    }
+
+    @Test
     fun `keeps multiline flag labels beyond the notch`() {
         for (direction in listOf("TD", "BT", "LR", "RL")) {
             for (lines in listOf(1, 5, 11)) {

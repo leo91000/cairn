@@ -9,7 +9,8 @@ diagrams: flowcharts (directions, node shapes, subgraphs, link styles, heads and
 `classDef`/`class`/`style`/`linkStyle`, http(s) `click` links, front-matter titles), state
 diagrams (start/end, composite states, choice, fork/join, notes), sequence diagrams
 (actors, every arrow kind, activations, notes, `loop`/`alt`/`opt`/`par`/`critical`/`break`/`rect`,
-`autonumber`, including start/increment values to hundredths) and pie charts. Large pie totals
+`autonumber`, including start/increment values to hundredths, and semicolon-separated steps
+including after the header) and pie charts. Encoded semicolons stay in sequence labels. Large pie totals
 move to a full-value legend row, with a sum symbol in the center so digits do not cross the ring. Zero-value categories stay in the legend without an arc. Neither app loads Mermaid or a WebView: `diagram.ts` /
 `Diagram.kt` parse the same model and `diagram-layout.ts` / `DiagramLayout.kt` compute the
 same scene, drawn as SVG on web and on a Compose canvas on Android with one light/dark
@@ -17,7 +18,7 @@ palette. A fence stays code until its closing fence arrives, so streaming never 
 unsupported types (gantt, class…) keep the code block, and invalid sources show their code
 with a short note. State notes stay physically left/right of their target in every direction;
 multiple notes stack with reserved space. Notes on composite states or self-transition states
-keep readable source. Self-transitions on composite states or subgraphs, and concurrent state
+keep readable source. Links between a group and its own descendants, self-transitions on composite states or subgraphs, and concurrent state
 regions (`--`), and sequence participant creation/destruction or `box` groups also keep source with an explanation. Subgraphs with a differing local direction keep source unless
 an external member link invokes Mermaid's documented parent-direction inheritance
 ([syntax](https://mermaid.js.org/syntax/flowchart.html#direction-in-subgraphs)). Each drawing has a source toggle, copy and a full-screen viewer with

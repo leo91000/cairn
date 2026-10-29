@@ -9202,6 +9202,104 @@
         "height": 266,
         "items": 2
       }
+    },
+    {
+      "name": "sequence-header-message",
+      "source": "sequenceDiagram; A->>B: first\nB->>A: response",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "message",
+            "from": "A",
+            "to": "B",
+            "label": "first",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          },
+          {
+            "type": "message",
+            "from": "B",
+            "to": "A",
+            "label": "response",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          }
+        ]
+      },
+      "layout": {
+        "width": 260,
+        "height": 226,
+        "items": 16
+      }
+    },
+    {
+      "name": "sequence-semicolon-steps",
+      "source": "sequenceDiagram;participant A as Alice;participant B as Bob;autonumber;A->>B: First #59; &#59; &amp;;B-->>A: Response",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "Alice",
+            "actor": false
+          },
+          {
+            "id": "B",
+            "label": "Bob",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "message",
+            "from": "A",
+            "to": "B",
+            "label": "First ; ; &",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 1
+          },
+          {
+            "type": "message",
+            "from": "B",
+            "to": "A",
+            "label": "Response",
+            "line": "dotted",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 2
+          }
+        ]
+      },
+      "layout": {
+        "width": 263,
+        "height": 242,
+        "items": 20
+      }
     }
   ],
   "errors": [
@@ -9348,6 +9446,22 @@
     {
       "name": "sequence-colored-participant-group",
       "source": "sequenceDiagram\nbox rgba(100,100,100,0.1) Internal APIs\nparticipant A\nparticipant B\nend\nA->>B: work"
+    },
+    {
+      "name": "group-to-member",
+      "source": "flowchart TD\nsubgraph S\nA\nend\nS-->|start|A"
+    },
+    {
+      "name": "member-to-group",
+      "source": "flowchart TD\nsubgraph S\nA\nend\nA-->|return|S"
+    },
+    {
+      "name": "group-to-nested-group",
+      "source": "flowchart LR\nsubgraph S\nsubgraph T\nA\nend\nend\nS-->T"
+    },
+    {
+      "name": "state-to-own-member",
+      "source": "stateDiagram-v2\nstate S {\nA\n}\nS-->A: enter"
     }
   ],
   "unsupported": [

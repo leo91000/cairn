@@ -60,6 +60,22 @@ describe('diagrams (shared Android corpus)', () => {
 })
 
 describe('diagram layout', () => {
+  it.each([
+    ['sequenceDiagram; A->>B: first\nB->>A: response', 'sequenceDiagram\nA->>B: first\nB->>A: response'],
+    ['sequenceDiagram;participant A as Alice;participant B as Bob;autonumber;A->>B: First #59; &#59; &amp;;B-->>A: Response', 'sequenceDiagram\nparticipant A as Alice\nparticipant B as Bob\nautonumber\nA->>B: First #59; &#59; &amp;\nB-->>A: Response'],
+  ])('preserves semicolon-separated sequence steps %#', (compact, expanded) => {
+    expect(parseDiagram(compact)).toEqual(parseDiagram(expanded))
+  })
+
+  it.each([
+    'flowchart TD\nsubgraph S\nA\nend\nS-->|start|A',
+    'flowchart TD\nsubgraph S\nA\nend\nA-->|return|S',
+    'flowchart LR\nsubgraph S\nsubgraph T\nA\nend\nend\nS-->T',
+    'stateDiagram-v2\nstate S {\nA\n}\nS-->A: enter',
+  ])('keeps unsupported group-to-descendant links as readable source %#', (source) => {
+    expect(() => parseDiagram(source)).toThrow(DiagramError)
+  })
+
   it.each(['TD', 'BT', 'LR', 'RL'].flatMap(direction => [1, 5, 11].map(lines => ({ direction, lines }))))('keeps $lines-line flag labels beyond the notch in $direction', ({ direction, lines }) => {
     const scene = layoutDiagram(parseDiagram(`flowchart ${direction}\nA>"${Array.from({ length: lines }).fill('Hello').join('<br>')}"]`), measure)
     const outline = scene.items.find((item): item is PathItem => item.kind === 'path' && !!item.shadow)!

@@ -175,6 +175,21 @@ test('unsupported and invalid Mermaid sources stay readable as code', async ({ p
   await expect(failed.getByRole('button', { name: 'Open diagram' })).toHaveCount(0)
 })
 
+test('semicolon-separated sequence steps preserve every message and encoded entity', async ({ page }) => {
+  await page.evaluate(text => window.chatRendering.markdown(text), '```mermaid\nsequenceDiagram;A->>B: first #59; &#59; &amp;; B->>A: response\n```')
+  const svg = page.locator('#app figure.diagram svg')
+  await expect(svg).toContainText('first ; ; &')
+  await expect(svg).toContainText('response')
+})
+
+test('group-to-descendant links retain readable source instead of disappearing', async ({ page }) => {
+  const source = 'flowchart TD\nsubgraph S\nA\nend\nS-->|start|A'
+  await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)
+  const failed = page.locator('#app figure.diagram-failed')
+  await expect(failed.locator('.diagram-error')).toContainText('Links between a group and its own descendants')
+  await expect(failed.locator('.diagram-source')).toHaveText(source)
+})
+
 test('identical closed and streaming fences keep their own completion state', async ({ page }) => {
   const source = 'flowchart TD\nA-->B'
   const closed = `\`\`\`mermaid\n${source}\n\`\`\``

@@ -523,17 +523,19 @@ private class GraphBuilder {
             if (style != null) edge.style = style
         }
 
+        fun inGroup(key: String, group: String): Boolean {
+            if (key == group) return true
+            var parent = this.nodes[key]?.parent ?: clusters[key]?.parent
+            while (parent != null) {
+                if (parent == group) return true
+                parent = clusters[parent]?.parent
+            }
+            return false
+        }
+
         for ((id, requested) in clusterDirections) {
             if (requested == dir) continue
-            fun inside(key: String): Boolean {
-                if (key == id) return true
-                var parent = this.nodes[key]?.parent ?: clusters[key]?.parent
-                while (parent != null) {
-                    if (parent == id) return true
-                    parent = clusters[parent]?.parent
-                }
-                return false
-            }
+            fun inside(key: String) = inGroup(key, id)
             // Mermaid inherits the parent direction when a member node has an external link.
             val externalMemberLink =
                 this.edges.any { edge ->
@@ -554,6 +556,14 @@ private class GraphBuilder {
             throw DiagramError(
                 "Self-transitions on composite states or subgraphs are not supported."
             )
+
+        if (
+            this.edges.any { edge ->
+                (clusters.containsKey(edge.from) && inGroup(edge.to, edge.from)) ||
+                    (clusters.containsKey(edge.to) && inGroup(edge.from, edge.to))
+            }
+        )
+            throw DiagramError("Links between a group and its own descendants are not supported.")
 
         val known = nodes.map { it.id }.toSet() + clusters.keys
         val edges = edges.filter { known.contains(it.from) && known.contains(it.to) }
@@ -1363,8 +1373,30 @@ private fun sequenceNumber(value: String): Long {
     return if (value.startsWith('-')) -cents else cents
 }
 
+private val SEQUENCE_SEPARATORS = Regex("(?:&?#|&)\\w+;|;")
+
+/** Sequence semicolons separate steps; entity terminators stay in their labels. */
+private fun sequenceStatements(lines: List<String>): List<String> {
+    val result = mutableListOf<String>()
+    for (line in lines) {
+        var start = 0
+        for (match in SEQUENCE_SEPARATORS.findAll(line)) {
+            if (match.value != ";") continue
+            val part = jsTrim(line.substring(start, match.range.first))
+            if (part.isNotEmpty()) result.add(part)
+            start = match.range.last + 1
+        }
+        val last = jsTrim(line.substring(start))
+        if (last.isNotEmpty()) result.add(last)
+    }
+    return result
+}
+
 private fun parseSequence(source: String): SequenceDiagram {
     val statements = statements(source)
+    val inline = jsTrim(statements.header.orEmpty().drop("sequenceDiagram".length))
+    if (inline.isNotEmpty() && !inline.startsWith(';'))
+        throw DiagramError("The sequence header must end before its first step.")
     var title = statements.title
     val participants = LinkedHashMap<String, Participant>()
     val items = mutableListOf<SequenceItem>()
@@ -1392,8 +1424,7 @@ private fun parseSequence(source: String): SequenceDiagram {
         items.add(item)
     }
 
-    for (raw in statements.lines) {
-        val line = raw.removeSuffix(";")
+    for (line in sequenceStatements(listOf(inline) + statements.lines)) {
         val (keyword, rest) = head(line)
         val lower = keyword.lowercase()
         if (lower == "title" || lower.startsWith("title:")) {

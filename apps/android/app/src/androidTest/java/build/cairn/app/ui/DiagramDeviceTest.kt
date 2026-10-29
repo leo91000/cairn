@@ -336,6 +336,7 @@ class DiagramDeviceTest {
                     "stateDiagram-v2\n[*]-->Ready\nnote left of Ready : Input\nnote right of Ready : Output",
                     "stateDiagram-v2\nclassDef critical fill:red\nA-->B:::critical : proceed",
                     "sequenceDiagram\nA->>B: Hello",
+                    "sequenceDiagram;A->>B: first #59;;B->>A: response",
                     "sequenceDiagram\nparticipant A\n" + "activate A\n".repeat(20),
                     "sequenceDiagram\nautonumber 1234567890123\nA->>A: work",
                     "sequenceDiagram\nparticipant A\nparticipant B\n" +
@@ -372,6 +373,7 @@ class DiagramDeviceTest {
                 "flowchart TD\nsubgraph S\nsubgraph S\nA\nend\nend",
                 "stateDiagram-v2\nstate Active {\nIdle-->Running\n}\nActive --> Active : retry",
                 "flowchart TD\nsubgraph Active\nIdle-->Running\nend\nActive-->|retry|Active",
+                "flowchart TD\nsubgraph S\nA\nend\nS-->|start|A",
                 "stateDiagram-v2\nstate Active {\n[*]-->A\nA-->[*]\n--\n[*]-->B\nB-->[*]\n}",
                 "sequenceDiagram\nparticipant A\ncreate participant B\nA->>B: work",
                 "sequenceDiagram\nparticipant A\ncreate actor B\nA->>B: work",

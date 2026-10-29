@@ -437,21 +437,23 @@ class GraphBuilder {
         edge.style = style
     })
 
+    const inGroup = (key: string, group: string) => {
+      if (key === group)
+        return true
+      let parent = this.nodes.get(key)?.parent ?? this.clusters.get(key)?.parent
+      while (parent) {
+        if (parent === group)
+          return true
+        parent = this.clusters.get(parent)?.parent
+      }
+
+      return false
+    }
+
     for (const [id, requested] of this.clusterDirections) {
       if (requested === dir)
         continue
-      const inside = (key: string) => {
-        if (key === id)
-          return true
-        let parent = this.nodes.get(key)?.parent ?? this.clusters.get(key)?.parent
-        while (parent) {
-          if (parent === id)
-            return true
-          parent = this.clusters.get(parent)?.parent
-        }
-
-        return false
-      }
+      const inside = (key: string) => inGroup(key, id)
 
       // Mermaid inherits the parent direction when a member node has an external link.
       const externalMemberLink = this.edges.some(edge =>
@@ -463,6 +465,12 @@ class GraphBuilder {
 
     if (this.edges.some(edge => edge.from === edge.to && this.clusters.has(edge.from)))
       throw new DiagramError('Self-transitions on composite states or subgraphs are not supported.')
+
+    if (this.edges.some(edge =>
+      (this.clusters.has(edge.from) && inGroup(edge.to, edge.from))
+      || (this.clusters.has(edge.to) && inGroup(edge.from, edge.to)))) {
+      throw new DiagramError('Links between a group and its own descendants are not supported.')
+    }
 
     const known = new Set([...nodes.map(node => node.id), ...this.clusters.keys()])
     const edges = this.edges.filter(edge => known.has(edge.from) && known.has(edge.to))
@@ -1235,8 +1243,33 @@ function sequenceNumber(value: string) {
   return cents
 }
 
+/** Sequence semicolons separate steps; entity terminators stay in their labels. */
+function sequenceStatements(lines: string[]) {
+  const result: string[] = []
+  for (const line of lines) {
+    let start = 0
+    for (const match of line.matchAll(/(?:&?#|&)\w+;|;/g)) {
+      if (match[0] !== ';')
+        continue
+      const part = line.slice(start, match.index).trim()
+      if (part)
+        result.push(part)
+      start = match.index + 1
+    }
+
+    const last = line.slice(start).trim()
+    if (last)
+      result.push(last)
+  }
+
+  return result
+}
+
 function parseSequence(source: string): SequenceDiagram {
-  const { title: frontTitle, lines } = statements(source)
+  const { title: frontTitle, header, lines } = statements(source)
+  const inline = header!.slice('sequenceDiagram'.length).trim()
+  if (inline && !inline.startsWith(';'))
+    throw new DiagramError('The sequence header must end before its first step.')
   let title = frontTitle
   const participants = new Map<string, Participant>()
   const items: SequenceItem[] = []
@@ -1264,8 +1297,7 @@ function parseSequence(source: string): SequenceDiagram {
     items.push(item)
   }
 
-  for (const raw of lines) {
-    const line = raw.replace(/;$/, '')
+  for (const line of sequenceStatements([inline, ...lines])) {
     const [keyword, rest] = head(line)
     const lower = keyword.toLowerCase()
     if (lower === 'title' || lower.startsWith('title:')) {
