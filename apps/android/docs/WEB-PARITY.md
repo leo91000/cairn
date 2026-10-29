@@ -29,13 +29,15 @@ runner already stale when the page opens is found within a minute, and device
 clock offset never matters. The first blocker wins, in the same order on both
 platforms (`nodeHealth` in `packages/contracts/nodes.ts` and `data/Nodes.kt`); the
 diagnostics list keeps its reasons, gains the stale-runner one and dates offline
-machines with the same server-time reference. Free slots follow the runtime pool,
-as placement does. Platform difference: web lists machines as compact rows and
-opens a side panel (Overview, Access, Storage, Settings) whose existing editors
-and confirmations are unchanged; Android keeps its Material cards and adds the
-health pill and reason under each name. Health is derived from the existing
-`list_nodes` inventory, already returned by public MCP and `cairn_installation`;
-no capability, grant or command changes.
+machines with the same server-time reference when one exists (an online machine,
+or a runner contact that changed while watched), and with the device clock
+otherwise. Free slots and slot totals follow the runtime pool, as placement does.
+Platform difference: web lists machines as compact rows and opens a side panel
+(Overview, Access, Storage, Settings) whose existing editors and confirmations are
+unchanged; Android keeps its Material cards and adds the health pill and reason
+under each name. Health is derived from the existing `list_nodes` inventory,
+already returned by public MCP and `cairn_installation`; no capability, grant or
+command changes.
 
 ## Node priority drag and drop
 

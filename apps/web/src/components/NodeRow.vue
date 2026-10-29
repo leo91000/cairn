@@ -7,6 +7,7 @@ import {
   nodeAdministrator,
   nodeHealth,
   runnerStale,
+  slotCapacity,
   usedPercent,
 } from '../../../../packages/contracts/nodes'
 import { ChevronRight } from '../icons'
@@ -26,7 +27,7 @@ const props = defineProps<{
 defineEmits<{ open: [] }>()
 const health = computed(() => nodeHealth(props.node, Date.now(), props.clock ?? null, props.runner ?? null))
 const live = computed(() => !['offline', 'revoked'].includes(health.value.state) && !runnerStale(props.node, props.clock ?? null, props.runner ?? null))
-const slots = computed(() => props.node.slots ?? 0)
+const slots = computed(() => slotCapacity(props.node))
 const free = computed(() => freeSlots(props.node))
 const runtime = computed(() => props.node.capabilities.backend === 'native' ? nodeAdministrator(props.node) ? 'Native · admin' : 'Native' : 'VM')
 const agents = computed(() => props.node.agents ?? [])
@@ -34,7 +35,8 @@ const agents = computed(() => props.node.agents ?? [])
 const label = computed(() => {
   const node = props.node
   const parts = [`${node.name}${node.local ? ' (built-in runner)' : ''}`, `${health.value.label}: ${health.value.detail}`, runtime.value]
-  if (live.value && slots.value)
+  // The health detail already counts slots when the machine takes work.
+  if (live.value && slots.value && !['ready', 'full'].includes(health.value.state))
     parts.push(`${free.value} of ${slots.value} slots free`)
   if (live.value && node.usage)
     parts.push(`${formatMiB(node.usage.memoryMiB)} of ${formatMiB(node.limits.memoryMiB)} RAM`, `${formatMiB(node.usage.diskMiB)} of ${formatMiB(node.limits.diskMiB)} disk`)

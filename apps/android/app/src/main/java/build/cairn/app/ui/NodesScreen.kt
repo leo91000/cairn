@@ -124,7 +124,7 @@ fun NodesScreen(
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 "${live.size}/${active.size} connectée${if (live.size > 1) "s" else ""} · " +
-                    "${live.sumOf { it.occupiedSlots }}/${live.sumOf { it.slots ?: 0 }} slots utilisés" +
+                    "${live.sumOf { it.occupiedSlots }}/${live.sumOf { slotCapacity(it) }} slots utilisés" +
                     if (attention > 0) " · $attention à vérifier" else "",
                 Modifier.weight(1f),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -206,7 +206,7 @@ fun NodesScreen(
                         )
                     }
                     Text(
-                        "${freeSlots(node)} slots libres sur ${node.slots} · ${node.occupiedSlots} occupés"
+                        "${freeSlots(node)} slots libres sur ${slotCapacity(node)} · ${node.occupiedSlots} occupés"
                     )
                     node.diskAccounting?.let { disk ->
                         Text("Capacité disque", style = MaterialTheme.typography.titleSmall)

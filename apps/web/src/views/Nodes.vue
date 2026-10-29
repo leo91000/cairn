@@ -23,6 +23,7 @@ import {
   nodeHealth,
   observeRunner,
   runnerStale,
+  slotCapacity,
 } from '../../../../packages/contracts/nodes'
 import { nodeBackend } from '../agent-access'
 import {
@@ -118,7 +119,7 @@ const clock = computed(() => fleetClock(nodes.value, runner.value))
 const healths = computed(() => active.value.map(node => nodeHealth(node, Date.now(), clock.value, runner.value)))
 // Connected machines answer heartbeats; the built-in runner too, unless its contact went stale.
 const live = computed(() => active.value.filter((node, index) => (node.local || node.status === 'online') && healths.value[index].state !== 'offline' && !runnerStale(node, clock.value, runner.value)))
-const totalSlots = computed(() => live.value.reduce((total, node) => total + (node.slots ?? 0), 0))
+const totalSlots = computed(() => live.value.reduce((total, node) => total + slotCapacity(node), 0))
 const usedSlots = computed(() => live.value.reduce((total, node) => total + (node.occupiedSlots ?? 0), 0))
 const attention = computed(() => healths.value.filter(health => ['offline', 'attention', 'setup'].includes(health.state)).length)
 let timer: ReturnType<typeof setInterval> | undefined

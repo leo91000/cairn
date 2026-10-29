@@ -33,9 +33,13 @@ export function nodeAdministrator(node: ExecutionNode) {
 
 /** Free slots as placement counts them: the runtime's pool can be smaller than the configured slots. */
 export function freeSlots(node: ExecutionNode) {
+  return Math.max(0, Math.min(node.availableSlots ?? 0, slotCapacity(node) - (node.occupiedSlots ?? 0)))
+}
+
+/** Slots placement can use: the configured ones, within the runtime's pool once it reports one. */
+export function slotCapacity(node: ExecutionNode) {
   const slots = node.slots ?? 0
-  const capacity = Math.min(slots, node.runtimeSlots ?? slots)
-  return Math.max(0, Math.min(node.availableSlots ?? 0, capacity - (node.occupiedSlots ?? 0)))
+  return Math.min(slots, node.runtimeSlots ?? slots)
 }
 
 /** Percentage of a limit in use, between 0 and 100. */
@@ -232,7 +236,7 @@ export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number 
   if (node.pressure != null)
     return { state: 'busy', label: 'Busy', detail: node.pressure === 'memory' ? 'Shared RAM is under pressure' : 'Shared disk space is low' }
 
-  const slots = node.slots ?? 0
+  const slots = slotCapacity(node)
   const running = node.occupiedSlots ?? 0
   const free = freeSlots(node)
   if (slots > 0 && free <= 0)
@@ -248,7 +252,7 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now(), clock: nu
   const reference = clock ?? now
   if (runnerStale(node, clock, runner)) {
     const silence = runnerSilence(node, clock)
-    reasons.push(`The built-in runner has sent no usable report ${silence ? `since ${silence}` : 'for over a minute'}: check that it is running, at the same version as the server.`)
+    reasons.push(`The built-in runner's last usable report was ${silence ?? 'over a minute ago'}: check that it is running, at the same version as the server.`)
   }
 
   if (!node.local && node.status === 'offline')

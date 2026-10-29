@@ -13,6 +13,7 @@ import {
   nativeModeLabel,
   nodeDiagnostics,
   nodeHealth,
+  slotCapacity,
   usedPercent,
 } from '../../../../packages/contracts/nodes'
 import { nodeBackend } from '../agent-access'
@@ -79,7 +80,8 @@ const sections: { value: Section, label: string }[] = [
 const health = computed(() => nodeHealth(props.node, Date.now(), props.clock ?? null, props.runner ?? null))
 const diagnostics = computed(() => nodeDiagnostics(props.node, Date.now(), props.clock ?? null, props.runner ?? null))
 const native = computed(() => props.node.capabilities.backend === 'native')
-const slots = computed(() => props.node.slots ?? 0)
+// Placement's capacity; Settings shows the configured count.
+const slots = computed(() => slotCapacity(props.node))
 const free = computed(() => freeSlots(props.node))
 const runtime = computed(() => `${props.node.local ? 'Built-in runner · ' : ''}${native.value ? 'Native process · shares the host GPU' : 'Firecracker VM'}`)
 const banner = computed(() => ({
@@ -474,7 +476,7 @@ const reserve = computed(() => {
                 Execution slots
               </dt>
               <dd class="text-right tabular-nums">
-                {{ slots }}
+                {{ node.slots ?? 0 }}
               </dd>
               <dt class="text-muted">
                 Shared CPU budget

@@ -177,6 +177,12 @@ class NodesTest {
                 ready.copy(slots = 4, runtimeSlots = 2, occupiedSlots = 1, availableSlots = 3)
             ),
         )
+        assertEquals(
+            NodeHealth(NodeHealthState.FULL, "Pleine", "Les 2 slots sont occupés"),
+            nodeHealth(
+                ready.copy(slots = 4, runtimeSlots = 2, occupiedSlots = 2, availableSlots = 2)
+            ),
+        )
         // A runner already stale when the screen opened does not shorten other ages.
         val stale = observeRunner(listOf(runner), null, 7_200_000)
         assertEquals(

@@ -190,10 +190,13 @@ fun fleetClock(nodes: List<ExecutionNode>, runner: RunnerObservation? = null): L
 /**
  * Free slots as placement counts them: the runtime's pool can be smaller than the configured slots.
  */
-fun freeSlots(node: ExecutionNode): Long {
+fun freeSlots(node: ExecutionNode): Long =
+    maxOf(0, minOf(node.availableSlots, slotCapacity(node) - node.occupiedSlots))
+
+/** Slots placement can use: the configured ones, within the runtime's pool once it reports one. */
+fun slotCapacity(node: ExecutionNode): Long {
     val slots = node.slots ?: 0
-    val capacity = minOf(slots, node.runtimeSlots ?: slots)
-    return maxOf(0, minOf(node.availableSlots, capacity - node.occupiedSlots))
+    return minOf(slots, node.runtimeSlots ?: slots)
 }
 
 /** The built-in runner's last contact, and when this device first saw that value. */
@@ -367,7 +370,7 @@ fun nodeHealth(
             else "Espace disque partagé insuffisant",
         )
     }
-    val slots = node.slots ?: 0
+    val slots = slotCapacity(node)
     val free = freeSlots(node)
     if (slots > 0 && free <= 0)
         return NodeHealth(NodeHealthState.FULL, "Pleine", "Les $slots slots sont occupés")

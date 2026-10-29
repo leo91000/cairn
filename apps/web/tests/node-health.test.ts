@@ -130,7 +130,7 @@ describe('node health', () => {
     expect(fleetClock([runner])).toBeNull()
     expect(nodeHealth(runner, 0, 120_000)).toEqual({ state: 'attention', label: 'Needs attention', detail: 'Last usable report 2 min ago' })
     expect(runnerStale(runner, 120_000)).toBe(true)
-    expect(nodeDiagnostics(runner, 0, 120_000)[0]).toContain('no usable report since 2 min ago')
+    expect(nodeDiagnostics(runner, 0, 120_000)[0]).toContain('last usable report was 2 min ago')
     expect(nodeHealth(runner, 0, 30_000).state).toBe('ready')
     // Offline ages follow the server clock too.
     expect(nodeHealth(node({ status: 'offline', lastSeen: 0 }), 3_600_000, 120_000).detail).toBe('Last contact 2 min ago')
@@ -165,7 +165,7 @@ describe('node health', () => {
     expect(nodeHealth(fresh[0], 3_659_000, null, later).state).toBe('ready')
     const silent = observeRunner(fresh, later, 3_660_000)!
     expect(nodeHealth(fresh[0], 3_660_000, null, silent)).toEqual({ state: 'attention', label: 'Needs attention', detail: 'No usable report for over a minute' })
-    expect(nodeDiagnostics(fresh[0], 3_660_000, null, silent)[0]).toContain('no usable report for over a minute')
+    expect(nodeDiagnostics(fresh[0], 3_660_000, null, silent)[0]).toContain('last usable report was over a minute ago')
     // Failed listings leave the observation as it was: the page's connectivity is not blamed on the runner.
     expect(nodeHealth(fresh[0], 9_999_999, null, later).state).toBe('ready')
     expect(observeRunner([node({ local: true, status: 'local', lastSeen: null })], seen)).toBeNull()
@@ -221,7 +221,7 @@ describe('node health', () => {
       runtimeSlots: 2,
       occupiedSlots: 2,
       availableSlots: 2,
-    }))).toMatchObject({ state: 'full' })
+    }))).toEqual({ state: 'full', label: 'Full', detail: 'All 2 slots in use' })
   })
 
   it('bounds usage to the limit', () => {
