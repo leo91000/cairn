@@ -300,6 +300,21 @@ describe('diagram layout', () => {
     expect(graph.kind === 'graph' && graph.edges.map(edge => [edge.from, edge.to])).toEqual([['A', 'B'], ['B', 'C']])
   })
 
+  it.each(['LR', 'RL'].flatMap(direction => [false, true].map(empty => ({ direction, empty }))))('keeps horizontal cluster titles inside their boxes in $direction (empty=$empty)', ({ direction, empty }) => {
+    const labels = ['Long descriptive group title', 'Another group']
+    const source = `flowchart ${direction}\nsubgraph S[${labels[0]}]\n${empty ? '' : 'A[Go]\n'}end\nsubgraph T[${labels[1]}]\n${empty ? '' : 'B[Done]\n'}end\nS --> T`
+    const scene = layoutDiagram(parseDiagram(source), measure)
+    const boxes = scene.items.filter((item): item is PathItem => item.kind === 'path' && !!item.stroke && !!item.fill && 'tone' in item.fill && item.fill.tone === 'cluster')
+    expect(boxes).toHaveLength(2)
+    for (const [index, label] of labels.entries()) {
+      const text = scene.items.find(item => item.kind === 'text' && item.lines[0] === label)!
+      if (text.kind !== 'text')
+        throw new Error('Expected a cluster title')
+      const right = Math.max(...points(boxes[index]!).map(([x]) => x))
+      expect(text.x + measure.width(label, text.size)).toBeLessThanOrEqual(right)
+    }
+  })
+
   it('orders whole subgraphs beyond 400 member constraints', () => {
     const source = corpus.parse.find(item => item.name === 'full-cluster-constraints')!.source
     const scene = layoutDiagram(parseDiagram(source), measure)

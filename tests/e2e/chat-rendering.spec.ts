@@ -457,6 +457,24 @@ test('sequence message labels clear wide badges and nested activations', async (
   }
 })
 
+test('horizontal cluster titles fit their boxes without hiding neighboring titles', async ({ page }) => {
+  for (const direction of ['LR', 'RL']) {
+    for (const empty of [false, true]) {
+      const source = `flowchart ${direction}\nsubgraph S[Long descriptive group title]\n${empty ? '' : 'A[Go]\n'}end\nsubgraph T[Another group]\n${empty ? '' : 'B[Done]\n'}end\nS --> T`
+      await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)
+      const contained = await page.locator('#app figure.diagram svg').evaluate((svg) => {
+        const boxes = [...svg.querySelectorAll('path')].filter(path => path.style.fill === 'var(--dg-cluster)' && path.style.stroke !== 'none')
+        return ['Long descriptive group title', 'Another group'].every((label, index) => {
+          const text = [...svg.querySelectorAll('text')].find(item => item.textContent === label)!.getBBox()
+          const box = boxes[index]!.getBBox()
+          return text.x >= box.x && text.x + text.width <= box.x + box.width
+        })
+      })
+      expect(contained).toBe(true)
+    }
+  }
+})
+
 test('graph links and loops meet every supported shape outline in all directions', async ({ page }) => {
   const shapes = ['rect', 'rounded', 'stadium', 'subroutine', 'cylinder', 'circle', 'double-circle', 'diamond', 'hexagon', 'lean-r', 'lean-l', 'trap-b', 'trap-t', 'flag', 'doc', 'start', 'stop', 'fork', 'choice']
   for (const direction of ['TB', 'BT', 'LR', 'RL']) {

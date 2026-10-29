@@ -1486,6 +1486,18 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         }
     }
 
+    // Horizontal titles need space along the rank axis, including in empty/nested clusters.
+    if (horizontal) {
+        for (node in nodes.values) {
+            if (node.kind == LKind.LEFT || node.kind == LKind.RIGHT) continue
+            for (id in chainOf(node.cluster)) {
+                if (spans.getValue(id)[0] == node.rank)
+                    node.rankPadding =
+                        max(node.rankPadding, (titles.getValue(id).width - node.h) / 2)
+            }
+        }
+    }
+
     // Vertical positions: rank gaps grow where clusters open or close.
     val rankHeight = layers.map { layer ->
         layer.fold(0.0) { tallest, node -> max(tallest, node.h + node.rankPadding * 2) }

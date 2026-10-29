@@ -585,7 +585,7 @@ interface LNode {
   y: number
   /** Extra room on the right for self loops. */
   extra: number
-  /** Extra space along the rank axis for tall/wide loop labels, without moving shape ports. */
+  /** Extra rank-axis space for loop labels and horizontal cluster titles, without moving ports. */
   rankPadding?: number
   node?: GraphNode
   box?: NodeBox
@@ -1391,6 +1391,18 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     if (shift > 0.5) {
       for (const node of inside)
         node.x += shift
+    }
+  }
+
+  // Horizontal titles need space along the rank axis, including in empty/nested clusters.
+  if (horizontal) {
+    for (const node of nodes.values()) {
+      if (node.kind === 'left' || node.kind === 'right')
+        continue
+      for (const id of chainOf(node.cluster)) {
+        if (spans.get(id)![0] === node.rank)
+          node.rankPadding = Math.max(node.rankPadding ?? 0, (titles.get(id)!.width - node.h) / 2)
+      }
     }
   }
 

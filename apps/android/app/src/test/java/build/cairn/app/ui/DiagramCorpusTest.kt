@@ -438,6 +438,35 @@ class DiagramCorpusTest {
     }
 
     @Test
+    fun `keeps horizontal cluster titles inside their boxes`() {
+        val labels = listOf("Long descriptive group title", "Another group")
+        for (direction in listOf("LR", "RL")) for (empty in listOf(false, true)) {
+            val source =
+                "flowchart $direction\nsubgraph S[${labels[0]}]\n" +
+                    (if (empty) "" else "A[Go]\n") +
+                    "end\nsubgraph T[${labels[1]}]\n" +
+                    (if (empty) "" else "B[Done]\n") +
+                    "end\nS --> T"
+            val scene = layoutDiagram(parseDiagram(source), measure)
+            val boxes =
+                scene.items.filterIsInstance<PathItem>().filter {
+                    it.fill == DiagramPaint.Tone("cluster") && it.stroke != null
+                }
+            assertEquals(2, boxes.size)
+            for ((index, label) in labels.withIndex()) {
+                val text =
+                    scene.items.filterIsInstance<TextItem>().first {
+                        it.lines.firstOrNull() == label
+                    }
+                assertTrue(
+                    text.x + measure.width(label, text.size, text.weight) <=
+                        points(boxes[index]).maxOf { it.first }
+                )
+            }
+        }
+    }
+
+    @Test
     fun `orders whole subgraphs beyond 400 member constraints`() {
         val source =
             cases("parse")

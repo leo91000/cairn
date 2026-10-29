@@ -244,6 +244,7 @@ class DiagramDeviceTest {
             for (source in
                 listOf(
                     "flowchart LR\nA-->B",
+                    "flowchart LR\nsubgraph S[Long descriptive group title]\nA[Go]\nend\nsubgraph T[Another group]\nB[Done]\nend\nS-->T",
                     "flowchart TD\nA{Ready?}-->|retry|A",
                     "stateDiagram-v2\n[*]-->Ready\nnote left of Ready : Input\nnote right of Ready : Output",
                     "sequenceDiagram\nA->>B: Hello",
