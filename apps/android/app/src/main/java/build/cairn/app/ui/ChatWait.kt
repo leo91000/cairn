@@ -27,10 +27,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import build.cairn.app.data.Chat
-import build.cairn.app.data.ChatWakeup
-import build.cairn.app.data.RunEvent
-import build.cairn.app.data.wireJson
+import build.cairn.app.data.*
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.*
 
@@ -197,12 +194,12 @@ private fun groupResults(observation: JsonObject?): JsonArray? =
 internal fun waitMembers(wakeup: ChatWakeup?, observation: JsonObject? = null): List<WaitMember> {
     val final = groupResults(observation)
     val conditions: List<JsonElement> =
-        wakeup?.condition?.takeIf { waitGroupMode(it) != null }?.get("conditions").asArray()
+        wakeup?.conditionJson?.takeIf { waitGroupMode(it) != null }?.get("conditions").asArray()
             ?: final?.map { it.asObject()?.get("condition") ?: JsonNull }
             ?: return emptyList()
     return conditions.mapIndexed { index, element ->
         val condition = element.asObject()
-        val progress = wakeup?.members?.getOrNull(index).asObject()
+        val progress = wakeup?.membersJson?.getOrNull(index).asObject()
         val result =
             (if (final != null) final.getOrNull(index).asObject()?.get("result")
                 else progress?.get("observation"))
@@ -289,7 +286,7 @@ private fun groupTarget(mode: String, wakeup: ChatWakeup): WaitTarget {
 }
 
 internal fun waitTarget(wakeup: ChatWakeup, now: Long = System.currentTimeMillis()): WaitTarget {
-    val condition = wakeup.condition
+    val condition = wakeup.conditionJson
     val mode = waitGroupMode(condition)
     return when {
         mode != null -> groupTarget(mode, wakeup)
@@ -309,7 +306,7 @@ internal fun waitTarget(wakeup: ChatWakeup, now: Long = System.currentTimeMillis
             )
         // A plugin condition reads as its plugin words it.
         condition != null -> {
-            val display = wakeup.display
+            val display = wakeup.displayJson
             WaitTarget(
                 WaitKind.CONDITION,
                 display?.get("title").text().ifBlank { "Attente d’une condition" },
@@ -587,7 +584,7 @@ internal fun waitProgress(wait: ActivityWait, live: LiveWait?): WaitProgress {
     // Plugin condition polling records the result on the pending wakeup too, which matters when
     // its event is unloaded. Another run's result is only computed when the conversation resumes.
     val observation =
-        if (wait.observed) wait.observation else if (current) live?.wakeup?.observation else null
+        if (wait.observed) wait.observation else if (current) live?.wakeup?.observationJson else null
     val finished = wait.finished || observation != null
     val replaced = wait.ended == "replaced"
     // Live state, when known, is authoritative: stopping a wait leaves no event in the history.
@@ -647,7 +644,7 @@ internal fun WaitCard(wait: ActivityWait) {
     val latest = if (current) live?.wakeup else wakeup
     // A grouped wait lists its conditions: the final results once it ended, else Cairn's progress.
     val groupMode =
-        waitGroupMode(latest?.condition ?: wakeup?.condition)
+        waitGroupMode(latest?.conditionJson ?: wakeup?.conditionJson)
             ?: observation
                 ?.takeIf { it.string("type") == "group" }
                 ?.string("mode")
@@ -805,7 +802,7 @@ internal fun WaitCard(wait: ActivityWait) {
                             !retrying &&
                             wakeup?.condition != null &&
                             // A group times each of its conditions in its own list.
-                            wakeup.condition.string("type") !in setOf("run_finished", "group")
+                            wakeup.conditionJson.string("type") !in setOf("run_finished", "group")
                     val next = latest?.nextCheckAt
                     val checked =
                         if (!polled) ""

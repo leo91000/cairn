@@ -490,7 +490,7 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
                 }
                 message => message,
             };
-            let waiting = current.trigger != "chat" && record.boundary["wakeup"].is_object();
+            let waiting = current.trigger != "chat" && record.wakeup.is_some();
             if waiting && current.session_id.is_none() {
                 db.change_run(id,crate::runs::RunChanges {
                     status: Some(RunStatus::Failed),

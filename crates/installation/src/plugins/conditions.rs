@@ -331,124 +331,92 @@ type Slot = Option<usize>;
 // Share each wait snapshot: cloning its full member list per watcher is quadratic.
 type Watch = (Arc<crate::waits::Owner>, Arc<Value>, Slot);
 
-fn condition_of(wakeup: &Value, slot: Slot) -> &Value {
-    match slot {
-        Some(index) => &wakeup["condition"]["conditions"][index],
-        None => &wakeup["condition"],
+fn condition_of(
+    wakeup: &cairn_contracts::ChatWakeup,
+    slot: Slot,
+) -> Option<&cairn_contracts::WaitCondition> {
+    match (slot, wakeup.condition.as_ref()?) {
+        (Some(index), cairn_contracts::WaitCondition::Group { conditions, .. }) => {
+            conditions.get(index)
+        }
+        (None, condition) => Some(condition),
+        _ => None,
     }
 }
 
-/// Where a condition's progress is recorded: on the wakeup, or beside its grouped condition.
-fn progress_of(wakeup: &mut Value, slot: Slot) -> &mut Value {
+fn progress_of(
+    wakeup: &mut cairn_contracts::ChatWakeup,
+    slot: Slot,
+) -> Option<&mut cairn_contracts::WaitMemberProgress> {
     match slot {
-        Some(index) => &mut wakeup["members"][index],
-        None => wakeup,
+        Some(index) => wakeup.members.as_mut()?.get_mut(index),
+        None => Some(&mut wakeup.progress),
     }
 }
 
-/// The plugin conditions of a wait to observe now.
 fn watched(owner: &crate::waits::Owner, run: &Value, time: i64) -> Vec<Slot> {
-    let wakeup = &owner.record["wakeup"];
-    let pending = owner.resumable(run)
-        && !wakeup["observation"].is_object()
-        && wakeup["wakeAt"]
-            .as_i64()
-            .is_some_and(|deadline| deadline > time);
-    if !pending {
+    let Some(wakeup) = owner
+        .wakeup
+        .as_ref()
+        .filter(|w| owner.resumable(run) && w.progress.observation.is_none() && w.wake_at > time)
+    else {
         return Vec::new();
-    }
-    let slots = if crate::waits::is_group(&wakeup["condition"]) {
-        (0..crate::waits::members(&wakeup["condition"]).len())
-            .map(Some)
-            .collect()
-    } else {
-        vec![None]
+    };
+    let slots = match &wakeup.condition {
+        Some(cairn_contracts::WaitCondition::Group { conditions, .. }) => {
+            (0..conditions.len()).map(Some).collect::<Vec<_>>()
+        }
+        _ => vec![None],
     };
     slots
         .into_iter()
         .filter(|slot| {
             let progress = match slot {
-                Some(index) => &wakeup["members"][index],
-                None => wakeup,
+                Some(index) => wakeup.members.as_ref().and_then(|m| m.get(*index)),
+                None => Some(&wakeup.progress),
             };
-            is_condition(condition_of(wakeup, *slot))
-                && !progress["observation"].is_object()
-                && progress["nextCheckAt"]
-                    .as_i64()
-                    .is_none_or(|next| next <= time)
+            matches!(
+                condition_of(wakeup, *slot),
+                Some(cairn_contracts::WaitCondition::Plugin { .. })
+            ) && progress.is_some_and(|p| {
+                p.observation.is_none() && p.next_check_at.is_none_or(|at| at <= time)
+            })
         })
         .collect()
 }
 
-/// One batch is capped and deduplicated; slow services never hold the admission tick.
 pub async fn poll_once(s: &Service) -> Result<()> {
-    let groups = s
-        .store
-        .read(|db| {
-            let mut groups: BTreeMap<String, Vec<Watch>> = BTreeMap::new();
-            let mut owners = db
-                .conversations_boundary()?
-                .into_iter()
-                .map(|record| crate::waits::Owner { chat: true, record })
-                .collect::<Vec<_>>();
-            owners.extend(
-                db.active()?
-                    .into_iter()
-                    .filter(|run| run["status"] == "waiting")
-                    .map(|record| crate::waits::Owner {
-                        chat: false,
-                        record,
-                    }),
-            );
-            for owner in owners {
-                let Some(run) = db.run(owner.run_id())? else {
-                    continue;
-                };
-                let owner = Arc::new(owner);
-                let run = Arc::new(run);
-                for slot in watched(&owner, &run, now()) {
-                    let condition = condition_of(&owner.record["wakeup"], slot);
-                    let project_id = &condition["projectId"];
-                    let granted_origin = crate::project_workspaces::catalog(&run)
-                        .into_iter()
-                        .find(|project| &project["id"] == project_id)
-                        .map(|project| project["origin"].clone());
-                    let key = json!({
-                        "agentId": run["snapshot"]["agent"]["id"],
-                        "access": policy(&run["snapshot"]["agent"]),
-                        "condition": condition,
-                        "projectOrigin": granted_origin,
-                    })
-                    .to_string();
-                    groups
-                        .entry(key)
-                        .or_default()
-                        .push((owner.clone(), run.clone(), slot));
-                }
+    let groups=s.store.read(|db| {
+        let mut groups=BTreeMap::<String,Vec<Watch>>::new();
+        let mut owners=Vec::new();
+        for record in db.conversations_boundary()? {owners.push(crate::waits::Owner::new(db,true,record)?);}
+        for record in db.active()?.into_iter().filter(|r|r["status"]=="waiting") {owners.push(crate::waits::Owner::new(db,false,record)?);}
+        for owner in owners {
+            let Some(run)=db.run(owner.run_id())? else {continue;};
+            let owner=Arc::new(owner);
+            let run=Arc::new(run);
+            for slot in watched(&owner,&run,now()) {
+                let condition=condition_of(owner.wakeup.as_ref().unwrap(),slot).unwrap();
+                let wire=crate::waits::condition_wire(condition);
+                let project_id=&wire["projectId"];
+                let granted_origin=crate::project_workspaces::catalog(&run).into_iter().find(|p|&p["id"]==project_id).map(|p|p["origin"].clone());
+                let key=json!({"agentId":run["snapshot"]["agent"]["id"],"access":policy(&run["snapshot"]["agent"]),"condition":condition,"projectOrigin":granted_origin}).to_string();
+                groups.entry(key).or_default().push((owner.clone(),run.clone(),slot));
             }
-            let mut groups: Vec<_> = groups.into_values().collect();
-            groups.sort_by_key(|group| {
-                group
-                    .iter()
-                    .filter_map(|(owner, _, slot)| {
-                        let wakeup = &owner.record["wakeup"];
-                        match slot {
-                            Some(index) => wakeup["members"][index]["nextCheckAt"].as_i64(),
-                            None => wakeup["nextCheckAt"].as_i64(),
-                        }
-                    })
-                    .min()
-                    .unwrap_or(0)
-            });
-            groups.truncate(BATCH_SIZE);
-            Ok(groups)
-        })
-        .await?;
+        }
+        let mut groups=groups.into_values().collect::<Vec<_>>();
+        groups.sort_by_key(|group|group.iter().filter_map(|(owner,_,slot)| {
+            let w=owner.wakeup.as_ref()?;
+            match slot {Some(index)=>w.members.as_ref()?.get(*index)?.next_check_at,None=>w.progress.next_check_at}
+        }).min().unwrap_or(0));
+        groups.truncate(BATCH_SIZE);
+        Ok(groups)
+    }).await?;
     let results = stream::iter(groups)
         .map(|group| async move {
             let (first, run, slot) = &group[0];
-            let condition = condition_of(&first.record["wakeup"], *slot);
-            let observed = observe(s, run, condition).await;
+            let condition = condition_of(first.wakeup.as_ref().unwrap(), *slot).unwrap();
+            let observed = observe(s, run, &crate::waits::condition_wire(condition)).await;
             s.store
                 .transaction(move |db| record(db, group, &observed))
                 .await
@@ -463,14 +431,20 @@ pub async fn poll_once(s: &Service) -> Result<()> {
     Ok(())
 }
 
-/// Whether the condition observed is still the one waited for, in the same state. Other
-/// conditions of its group may have progressed meanwhile.
-fn unchanged(current: &Value, expected: &Value, slot: Slot) -> bool {
+fn unchanged(
+    current: Option<&cairn_contracts::ChatWakeup>,
+    expected: Option<&cairn_contracts::ChatWakeup>,
+    slot: Slot,
+) -> bool {
+    let (Some(current), Some(expected)) = (current, expected) else {
+        return false;
+    };
     match slot {
         Some(index) => {
-            current["id"] == expected["id"]
-                && current["condition"] == expected["condition"]
-                && current["members"][index] == expected["members"][index]
+            current.id == expected.id
+                && current.condition == expected.condition
+                && current.members.as_ref().and_then(|m| m.get(index))
+                    == expected.members.as_ref().and_then(|m| m.get(index))
         }
         None => current == expected,
     }
@@ -484,52 +458,55 @@ fn record(db: &Db<'_>, group: Vec<Watch>, observed: &Result<Observed>) -> Result
         let Some(run) = db.run(owner.run_id())? else {
             continue;
         };
-        // A merge can transfer a sleeping run while its plugin check is in flight.
-        // Retry under the current profile rather than recording a stale denial.
         if run["id"] != observed_run["id"]
             || run["snapshot"]["agent"] != observed_run["snapshot"]["agent"]
-            || !unchanged(&owner.record["wakeup"], &expected.record["wakeup"], slot)
+            || !unchanged(owner.wakeup.as_ref(), expected.wakeup.as_ref(), slot)
             || !watched(&owner, &run, now()).contains(&slot)
         {
             continue;
         }
-        let condition = condition_of(&owner.record["wakeup"], slot).clone();
-        let authorized = crate::waits::access(db, &run, &condition);
+        let condition = condition_of(owner.wakeup.as_ref().unwrap(), slot)
+            .unwrap()
+            .clone();
+        let authorized = crate::waits::access(db, &run, &crate::waits::condition_wire(&condition));
         let result = match (&authorized, observed) {
-            (Err(error), _) => Some(json!({ "state": "unavailable", "message": error.message })),
+            (Err(error), _) => Some(json!({"state":"unavailable","message":error.message})),
             (Ok(()), Ok(value)) => value.result.clone(),
             (Ok(()), Err(error)) if matches!(error.status, 403 | 404 | 409) => {
-                Some(json!({ "state": "unavailable", "message": error.message }))
+                Some(json!({"state":"unavailable","message":error.message}))
             }
             _ => None,
         };
-        let progress = progress_of(&mut owner.record["wakeup"], slot);
+        let result = result
+            .as_ref()
+            .map(crate::waits::observed_from_wire)
+            .transpose()?;
+        let progress = progress_of(owner.wakeup.as_mut().unwrap(), slot).unwrap();
         let mut delay = POLL_MS;
         if let Some(result) = &result {
-            progress["observation"] = result.clone();
+            progress.observation = Some(result.clone());
         } else if observed.is_err() {
-            progress["lastError"] =
-                "The service is temporarily unavailable; retrying until the wait deadline.".into();
-        } else if let Some(progress) = progress.as_object_mut() {
-            // A successful check means the service answers again.
-            progress.remove("lastError");
+            progress.last_error = Some(
+                "The service is temporarily unavailable; retrying until the wait deadline.".into(),
+            );
+        } else {
+            progress.last_error = None;
         }
         if let Ok(observed) = observed {
             if let Some(display) = &observed.display {
-                progress["display"] = display.clone();
+                progress.display = Some(serde_json::from_value(display.clone())?);
             }
             delay = observed.check_after.unwrap_or(POLL_MS);
         }
-        progress["nextCheckAt"] = (now() + delay).into();
+        progress.next_check_at = Some(now() + delay);
         if slot.is_some() {
-            // The group resumes once this result completes it.
             crate::waits::record_members(db, &mut owner, &run)?;
         } else if let Some(result) = result {
             db.event(
                 text(&run, "id"),
                 &EventKind::from_adapter(owner.event("wait_ready")),
                 "Wait condition resolved",
-                Some(&result),
+                Some(&serde_json::to_value(result)?),
             )?;
         }
         owner.record["updatedAt"] = now().into();

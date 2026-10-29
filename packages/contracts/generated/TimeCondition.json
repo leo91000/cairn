@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "oneOf": [
+    {
+      "properties": {
+        "seconds": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "type": {
+          "const": "delay",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "seconds"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "date": {
+          "type": "string"
+        },
+        "type": {
+          "const": "at",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "date"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "TimeCondition"
+}

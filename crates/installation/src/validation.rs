@@ -3,8 +3,7 @@ use serde_json::Value;
 use std::{collections::HashMap, sync::LazyLock};
 
 static SCHEMAS: LazyLock<Value> = LazyLock::new(|| {
-    let mut schemas: Value =
-        serde_json::from_str(include_str!("../schemas/inputs.json")).expect("checked schemas");
+    let mut schemas = serde_json::json!({});
     let catalog: Value = serde_json::from_str(include_str!("../schemas/mcp-operations.json"))
         .expect("checked MCP schemas");
     for tool in catalog.as_array().unwrap() {
@@ -84,56 +83,15 @@ fn defaults(value: &mut Value, schema: &Value) {
     }
 }
 
-pub fn input_schema(kind: &str) -> Value {
-    SCHEMAS[kind].clone()
-}
-
 pub fn parse(kind: &str, mut value: Value) -> Result<Value> {
     let schema = SCHEMAS
         .get(kind)
         .ok_or_else(|| Error::internal("Unknown input schema"))?;
     defaults(&mut value, schema);
-    trim_text(kind, &mut value);
     if let Err(error) = VALIDATORS[kind].validate(&value) {
         return Err(Error::bad(format!("{}: {}", error.instance_path(), error)));
     }
-    if kind == "questions" {
-        unique_question_ids(&value)?;
-    }
     Ok(value)
-}
-
-fn trim_text(kind: &str, value: &mut Value) {
-    let trims: &[&str] = match kind {
-        "agent" => &["name"],
-        _ => &[],
-    };
-    for key in trims {
-        if let Some(text) = value[*key].as_str() {
-            value[*key] = text.trim().into();
-        }
-    }
-    if kind != "answer" {
-        return;
-    }
-    let Some(answers) = value["answers"].as_object_mut() else {
-        return;
-    };
-    for answer in answers.values_mut() {
-        if let Some(comment) = answer["comment"].as_str() {
-            answer["comment"] = comment.trim().into();
-        }
-    }
-}
-
-fn unique_question_ids(fields: &Value) -> Result<()> {
-    let mut ids = std::collections::HashSet::new();
-    for field in fields.as_array().into_iter().flatten() {
-        if !ids.insert(text(field, "id")) {
-            return Err(Error::bad("Question identifiers must be unique"));
-        }
-    }
-    Ok(())
 }
 
 /// Parses a validated input into its typed shape (see [`parse`]).

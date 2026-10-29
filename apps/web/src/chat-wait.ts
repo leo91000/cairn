@@ -131,7 +131,7 @@ export function waitMembers(wakeup: Pick<ChatWakeup, 'condition' | 'members'> | 
 
     // A plugin condition reads as its plugin words it, or by its type.
     const display = progress?.display
-    const title = display?.short || display?.title || capitalized(words(String(condition?.type ?? 'condition')))
+    const title = display?.short || display?.title || capitalized(words(String(condition?.type === 'plugin' ? condition.conditionType : condition?.type ?? 'condition')))
     return {
       kind: 'condition',
       title,

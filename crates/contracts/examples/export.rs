@@ -74,6 +74,37 @@ fn main() {
     )
     .unwrap();
 
+    export::<DelegateTaskInput>(root, &mut generator, Contract::Deserialize);
+    export::<TaskStatusInput>(root, &mut generator, Contract::Deserialize);
+    export::<DelegatedTask>(root, &mut generator, Contract::Deserialize);
+    export::<TaskStatusOutput>(root, &mut generator, Contract::Deserialize);
+
+    export::<WithdrawQuestionInput>(root, &mut generator, Contract::Deserialize);
+    export::<AskQuestionsOutput>(root, &mut generator, Contract::Deserialize);
+    export::<PendingQuestion>(root, &mut generator, Contract::Deserialize);
+    export::<PendingQuestionsOutput>(root, &mut generator, Contract::Deserialize);
+
+    export::<ChatQuestion>(root, &mut generator, Contract::Deserialize);
+    export::<QuestionField>(root, &mut generator, Contract::Deserialize);
+    export::<QuestionOption>(root, &mut generator, Contract::Deserialize);
+    export::<QuestionAnswer>(root, &mut generator, Contract::Deserialize);
+    export::<QuestionAnswerInput>(root, &mut generator, Contract::Deserialize);
+    export::<AskQuestionsInput>(root, &mut generator, Contract::Deserialize);
+    export::<ChatQuestionInput>(root, &mut generator, Contract::Deserialize);
+    export::<AnswerChatQuestionInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListChatQuestionsOutput>(root, &mut generator, Contract::Deserialize);
+    export::<ChatWakeup>(root, &mut generator, Contract::Deserialize);
+    export::<WaitExternalCondition>(root, &mut generator, Contract::Deserialize);
+    export::<WaitResult>(root, &mut generator, Contract::Deserialize);
+    export::<WaitCondition>(root, &mut generator, Contract::Deserialize);
+    export::<TimeCondition>(root, &mut generator, Contract::Deserialize);
+    export::<WaitObservation>(root, &mut generator, Contract::Deserialize);
+    export::<WaitObservationMember>(root, &mut generator, Contract::Deserialize);
+    export::<WaitDisplay>(root, &mut generator, Contract::Deserialize);
+    export::<WaitResultDisplay>(root, &mut generator, Contract::Deserialize);
+    export::<WaitMemberProgress>(root, &mut generator, Contract::Deserialize);
+    export::<PluginWaitData>(root, &mut generator, Contract::Deserialize);
+
     export::<ConversationRetention>(root, &mut generator, Contract::Deserialize);
     export::<GetConversationRetentionInput>(root, &mut generator, Contract::Deserialize);
     export::<ChatExecution>(root, &mut generator, Contract::Deserialize);
@@ -131,6 +162,9 @@ fn main() {
     export::<NodeInput>(root, &mut generator, Contract::Deserialize);
     let chat_clients = serde_json::json!(
         [
+        {"name":"answerChatQuestion","input":"AnswerChatQuestionInput","output":"ChatQuestion","method":"POST","path":"/chats/{chatId}/questions/{questionId}/answer","bodyField":"answer"},
+        {"name":"cancelChatQuestion","input":"ChatQuestionInput","output":"ChatQuestion","method":"POST","path":"/chats/{chatId}/questions/{questionId}/cancel"},
+
             {
                 "name": "getConversationRetention",
                 "input": "GetConversationRetentionInput",

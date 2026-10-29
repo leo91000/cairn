@@ -3,7 +3,6 @@ import type { RunEvent } from '../../packages/contracts/contracts'
 import { createApp, h, shallowRef } from 'vue'
 import ActivityFeed from '../../apps/web/src/components/ActivityFeed.vue'
 import ChatQuestions from '../../apps/web/src/components/ChatQuestions.vue'
-import { questionFields } from '../../packages/contracts/chats'
 import '../../apps/web/src/styles/index.css'
 
 const questions = shallowRef<ChatQuestion[]>([])
@@ -39,7 +38,7 @@ window.questionnaire = (fields: unknown) => {
     blocking: false,
     status: 'pending',
     createdAt: 1,
-    fields: questionFields.parse(fields),
+    fields: fields as ChatQuestion['fields'],
   }]
 }
 

@@ -199,7 +199,7 @@ pub fn validate_question_fields(fields: &[QuestionField]) -> Result<(), String> 
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChatQuestionInput {
     pub chat_id: ConversationId,
-    #[schemars(pattern("^[a-f0-9]{64}$"))]
+    #[schemars(length(min = 1, max = 200))]
     pub question_id: String,
 }
 
@@ -209,4 +209,40 @@ pub struct AnswerChatQuestionInput {
     pub chat_id: ConversationId,
     pub question_id: String,
     pub answer: QuestionAnswerInput,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ListChatQuestionsOutput {
+    pub questions: Vec<ChatQuestion>,
+    pub next_offset: Option<u32>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WithdrawQuestionInput {
+    #[schemars(pattern("^[a-f0-9]{64}$"))]
+    pub question_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AskQuestionsOutput {
+    pub question_id: String,
+    #[schemars(with = "String", pattern("^(pending|answering|answered|cancelled)$"))]
+    pub status: QuestionStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingQuestion {
+    pub question_id: String,
+    pub fields: Vec<QuestionField>,
+    pub blocking: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+pub struct PendingQuestionsOutput {
+    pub questions: Vec<PendingQuestion>,
 }

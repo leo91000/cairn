@@ -5,6 +5,7 @@ use crate::worker::checkpoint::RunCheckpoint;
 use cairn_contracts::EventKind;
 
 mod handoff;
+pub(crate) mod question_migration;
 pub(crate) mod question_storage;
 pub(crate) mod questions;
 
@@ -365,7 +366,7 @@ fn compaction_blocker(
             "This conversation has no saved native session to compact.".into(),
         ));
     }
-    if chat.wakeup.as_ref().is_some_and(Value::is_object) {
+    if chat.wakeup.is_some() {
         return Ok(Some(
             "Compact after the scheduled continuation resumes.".into(),
         ));
@@ -1132,7 +1133,7 @@ fn launch_turn(
     let unchanged = if waking {
         let current = db.run(chat.run_id.as_deref().unwrap_or(""))?;
         continuation::ready(db, &serde_json::to_value(&chat)?, current.as_ref(), now())?
-            && chat.wakeup.as_ref() == message.get("wakeup")
+            && serde_json::to_value(&chat.wakeup)? == message["wakeup"]
             && current.as_ref().map(|run| &run["id"]) == run.as_ref().map(|run| &run["id"])
             && (!message["wakeup"]["condition"].is_object()
                 || current.as_ref().is_some_and(|run| {

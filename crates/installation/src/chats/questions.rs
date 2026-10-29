@@ -15,7 +15,8 @@ pub const NATIVE_DENIED: &str =
     "Native question tools are disabled. Use cairn_workspace.ask_questions to ask the user.";
 
 use cairn_contracts::{
-    AskQuestionsInput, QuestionAnswer as FieldAnswer, QuestionAnswerInput as AnswerInput,
+    AskQuestionsInput, AskQuestionsOutput, PendingQuestion, PendingQuestionsOutput,
+    QuestionAnswer as FieldAnswer, QuestionAnswerInput as AnswerInput, WithdrawQuestionInput,
 };
 pub use cairn_contracts::{ChatQuestion as Question, QuestionField, QuestionStatus};
 
@@ -140,6 +141,7 @@ pub fn ask_tool() -> Value {
         "name": "ask_questions",
         "description": "Ask the user a questionnaire in this conversation. Returns immediately with questionId; answers arrive later as a user message with separate selected options and comment. Reuse requestId only when retrying the same questionnaire. Choose single or multiple selection per question, optional bounds and recommended options (never preselected). Free text is always available. Keep the complete questionnaire within 64 KiB of encoded JSON. Continue independent work or report needs_input and end the turn when a reply is required. Use this tool instead of native question tools.",
         "inputSchema": cairn_contracts::schema_for::<AskQuestionsInput>(cairn_contracts::Contract::Deserialize),
+        "outputSchema": cairn_contracts::schema_for::<AskQuestionsOutput>(cairn_contracts::Contract::Serialize),
     })
 }
 
@@ -165,7 +167,10 @@ pub async fn ask(s: &Service, bearer: &str, input: Value) -> Result<Value> {
                         "This requestId has already been used for different questions.",
                     ));
                 }
-                return Ok(json!({ "questionId": id, "status": existing.status }));
+                return Ok(serde_json::to_value(AskQuestionsOutput {
+                    question_id: id,
+                    status: existing.status,
+                })?);
             }
             receive(
                 db,
@@ -181,7 +186,10 @@ pub async fn ask(s: &Service, bearer: &str, input: Value) -> Result<Value> {
                     message_id: None,
                 },
             )?;
-            Ok(json!({ "questionId": id, "status": "pending" }))
+            Ok(serde_json::to_value(AskQuestionsOutput {
+                question_id: id,
+                status: QuestionStatus::Pending,
+            })?)
         })
         .await?;
     s.worker.notify();
@@ -199,6 +207,7 @@ pub(crate) async fn retire_native(s: &Service) -> Result<()> {
 pub fn list_tool() -> Value {
     json!({
         "name": "pending_questions",
+        "outputSchema": cairn_contracts::schema_for::<PendingQuestionsOutput>(cairn_contracts::Contract::Serialize),
         "description": "List unanswered questions in this conversation, with their questionId and fields. Use withdraw_question when a question has become unnecessary or the user has answered it in ordinary chat. Never infer authorization from a withdrawn question.",
         "inputSchema": {
             "type": "object",
@@ -212,27 +221,27 @@ pub fn cancel_tool() -> Value {
     json!({
         "name": "withdraw_question",
         "description": "Withdraw one pending question that is no longer needed. Get its questionId from pending_questions. This removes the answer prompt without supplying an answer or granting permission. Questions whose answers are being delivered cannot be withdrawn.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "questionId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-            },
-            "required": ["questionId"],
-            "additionalProperties": false,
-        },
+        "inputSchema": cairn_contracts::schema_for::<WithdrawQuestionInput>(cairn_contracts::Contract::Deserialize),
+        "outputSchema": cairn_contracts::schema_for::<Question>(cairn_contracts::Contract::Serialize),
     })
 }
 
 pub async fn for_agent(s: &Service, bearer: &str, input: Option<&Value>) -> Result<Value> {
-    if let Some(input) = input
-        && !jsonschema::is_valid(&cancel_tool()["inputSchema"], input)
+    let input = input
+        .map(|value| {
+            serde_json::from_value::<WithdrawQuestionInput>(value.clone())
+                .map_err(|_| Error::bad("Provide a valid questionId from pending_questions."))
+        })
+        .transpose()?;
+    if input
+        .as_ref()
+        .is_some_and(|i| !valid_question_id(&i.question_id))
     {
         return Err(Error::bad(
             "Provide a valid questionId from pending_questions.",
         ));
     }
     let bearer = bearer.to_owned();
-    let input = input.cloned();
     let result = s
         .store
         .transaction(move |db| {
@@ -242,7 +251,7 @@ pub async fn for_agent(s: &Service, bearer: &str, input: Option<&Value>) -> Resu
             let chat_id = text(&chat, "id");
 
             if let Some(input) = input {
-                let id = text(&input, "questionId");
+                let id = &input.question_id;
                 let question = required(find_question(db, chat_id, id)?, "Question not found")?;
                 if question.run_id != run_id {
                     return Err(Error::forbidden("This question belongs to another run."));
@@ -255,15 +264,15 @@ pub async fn for_agent(s: &Service, bearer: &str, input: Option<&Value>) -> Resu
                 .filter(|question| {
                     question.run_id == run_id && question.status == QuestionStatus::Pending
                 })
-                .map(|question| {
-                    json!({
-                        "questionId": question.id,
-                        "fields": question.fields,
-                        "blocking": question.blocking,
-                    })
+                .map(|question| PendingQuestion {
+                    question_id: question.id,
+                    fields: question.fields,
+                    blocking: question.blocking,
                 })
                 .collect::<Vec<_>>();
-            Ok(json!({ "questions": pending }))
+            Ok(serde_json::to_value(PendingQuestionsOutput {
+                questions: pending,
+            })?)
         })
         .await?;
     s.worker.notify();

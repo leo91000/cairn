@@ -393,6 +393,105 @@
       ],
       "type": "object"
     },
+    "ChatWakeup": {
+      "properties": {
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WaitCondition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "display": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WaitDisplay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "members": {
+          "items": {
+            "$ref": "#/definitions/WaitMemberProgress"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "messageId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nextCheckAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "observation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WaitObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "seconds": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "timeCondition": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TimeCondition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "wakeAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "messageId",
+        "reason",
+        "seconds",
+        "createdAt",
+        "wakeAt"
+      ],
+      "type": "object"
+    },
     "CompactionReply": {
       "properties": {
         "finishedAt": {
@@ -536,6 +635,11 @@
         "diskMiB"
       ],
       "type": "object"
+    },
+    "PluginWaitData": {
+      "additionalProperties": true,
+      "type": "object",
+      "x-cairn-json-object": true
     },
     "Project": {
       "properties": {
@@ -1054,6 +1158,532 @@
         "at"
       ],
       "type": "object"
+    },
+    "TimeCondition": {
+      "oneOf": [
+        {
+          "properties": {
+            "seconds": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": {
+              "const": "delay",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "seconds"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "date": {
+              "type": "string"
+            },
+            "type": {
+              "const": "at",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "date"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WaitCondition": {
+      "oneOf": [
+        {
+          "properties": {
+            "runId": {
+              "type": "string"
+            },
+            "type": {
+              "const": "run_finished",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "runId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "chatId": {
+              "type": "string"
+            },
+            "type": {
+              "const": "task_finished",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "chatId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "conditionType": {
+              "type": "string"
+            },
+            "input": {
+              "$ref": "#/definitions/PluginWaitData"
+            },
+            "pluginId": {
+              "type": "string"
+            },
+            "projectId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "plugin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "pluginId",
+            "conditionType",
+            "input"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "conditions": {
+              "items": {
+                "$ref": "#/definitions/WaitExternalCondition"
+              },
+              "type": "array"
+            },
+            "mode": {
+              "type": "string"
+            },
+            "type": {
+              "const": "group",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "mode",
+            "conditions"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WaitDisplay": {
+      "properties": {
+        "details": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "short": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "short",
+        "details"
+      ],
+      "type": "object"
+    },
+    "WaitExternalCondition": {
+      "oneOf": [
+        {
+          "properties": {
+            "runId": {
+              "type": "string"
+            },
+            "type": {
+              "const": "run_finished",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "runId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "chatId": {
+              "type": "string"
+            },
+            "type": {
+              "const": "task_finished",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "chatId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "conditionType": {
+              "type": "string"
+            },
+            "input": {
+              "$ref": "#/definitions/PluginWaitData"
+            },
+            "pluginId": {
+              "type": "string"
+            },
+            "projectId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "plugin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "pluginId",
+            "conditionType",
+            "input"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WaitMemberProgress": {
+      "properties": {
+        "display": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WaitDisplay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nextCheckAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "observation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WaitObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "WaitObservation": {
+      "properties": {
+        "chatId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WaitExternalCondition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "display": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WaitResultDisplay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finishedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "members": {
+          "items": {
+            "$ref": "#/definitions/WaitObservationMember"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcomeStatus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "paused": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "pluginResult": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginWaitData"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "waitingOn": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wakeAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
+    "WaitObservationMember": {
+      "properties": {
+        "condition": {
+          "$ref": "#/definitions/WaitCondition"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WaitResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "condition",
+        "result"
+      ],
+      "type": "object"
+    },
+    "WaitResult": {
+      "properties": {
+        "chatId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WaitExternalCondition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "display": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WaitResultDisplay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finishedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcomeStatus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "paused": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "pluginResult": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginWaitData"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "waitingOn": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wakeAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
+    "WaitResultDisplay": {
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "tone": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tone",
+        "title",
+        "detail"
+      ],
+      "type": "object"
     }
   },
   "description": "The full wire view shares its lifecycle fields with SQL. Payloads owned by\nunconverted domains use explicit client type references at this boundary;\nthey do not define or decide run admission/transitions (A6-A13/A18).",
@@ -1397,13 +2027,15 @@
       "x-kotlin-type": "RunUsage"
     },
     "wakeup": {
-      "additionalProperties": true,
-      "default": null,
-      "type": [
-        "object",
-        "null"
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ChatWakeup"
+        },
+        {
+          "type": "null"
+        }
       ],
-      "x-kotlin-type": "ChatWakeup"
+      "default": null
     },
     "workspace": {
       "default": null,

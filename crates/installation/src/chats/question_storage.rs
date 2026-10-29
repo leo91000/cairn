@@ -154,6 +154,7 @@ impl Db<'_> {
             return Ok(());
         }
         self.0.execute_batch("SAVEPOINT question_write")?;
+        let before = self.0.total_changes();
         let result = self.write_question(question);
         match result {
             Ok(()) => self.0.execute_batch("RELEASE question_write")?,
@@ -172,6 +173,7 @@ impl Db<'_> {
             .execute(params![q.id,q.chat_id,q.run_id,q.blocking,q.source,q.status.as_str(),q.created_at,q.message_id])?;
         if let Some(existing) = existing {
             if existing.fields != q.fields
+                || existing.run_id != q.run_id
                 || existing.source != q.source
                 || existing.created_at != q.created_at
             {
@@ -204,6 +206,99 @@ impl Db<'_> {
                         option.description,
                         option.recommended
                     ])?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Db<'_> {
+    pub(super) fn message_answers(
+        &self,
+        chat: &str,
+        message: Option<&str>,
+    ) -> Result<(
+        HashMap<String, std::collections::BTreeMap<String, cairn_contracts::QuestionAnswer>>,
+        HashMap<String, String>,
+    )> {
+        let filter = if message.is_some() {
+            "m.chat_id=?1 AND m.id=?2"
+        } else {
+            "m.chat_id=?1 AND ?2 IS NULL"
+        };
+        let deliveries=self.0.prepare_cached(&format!("SELECT d.message_id,d.text FROM question_answer_deliveries d JOIN chat_messages m ON m.id=d.message_id WHERE {filter}"))?
+            .query_map(params![chat,message],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<HashMap<_,_>>>()?;
+        let mut answers = deliveries
+            .keys()
+            .map(|id| {
+                (
+                    id.clone(),
+                    std::collections::BTreeMap::<String, cairn_contracts::QuestionAnswer>::new(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut statement=self.0.prepare_cached(&format!("SELECT a.message_id,a.field_id,a.comment FROM question_answers a JOIN chat_messages m ON m.id=a.message_id WHERE {filter}"))?;
+        for value in statement.query_map(params![chat, message], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })? {
+            let (message, field, comment) = value?;
+            answers.entry(message).or_default().insert(
+                field,
+                cairn_contracts::QuestionAnswer {
+                    selected: Vec::new(),
+                    comment,
+                },
+            );
+        }
+        let mut statement=self.0.prepare_cached(&format!("SELECT c.message_id,c.field_id,c.option_id FROM question_answer_choices c JOIN chat_messages m ON m.id=c.message_id WHERE {filter} ORDER BY c.message_id,c.field_id,c.position"))?;
+        for value in statement.query_map(params![chat, message], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })? {
+            let (message, field, option) = value?;
+            if let Some(answer) = answers.get_mut(&message).and_then(|a| a.get_mut(&field)) {
+                answer.selected.push(option);
+            }
+        }
+        Ok((answers, deliveries))
+    }
+
+    pub(super) fn save_message_answers(
+        &self,
+        message: &str,
+        answers: Option<&std::collections::BTreeMap<String, cairn_contracts::QuestionAnswer>>,
+        text: &str,
+    ) -> Result<()> {
+        self.0
+            .execute("DELETE FROM question_answers WHERE message_id=?", [message])?;
+        self.0.execute(
+            "DELETE FROM question_answer_deliveries WHERE message_id=?",
+            [message],
+        )?;
+        let Some(answers) = answers else {
+            return Ok(());
+        };
+        self.0.execute(
+            "INSERT INTO question_answer_deliveries VALUES(?,?)",
+            params![message, text],
+        )?;
+        for (field, answer) in answers {
+            self.0.execute(
+                "INSERT INTO question_answers VALUES(?,?,?)",
+                params![message, field, answer.comment],
+            )?;
+            for (position, option) in answer.selected.iter().enumerate() {
+                self.0.execute(
+                    "INSERT INTO question_answer_choices VALUES(?,?,?,?)",
+                    params![message, field, position as i64, option],
+                )?;
             }
         }
         Ok(())

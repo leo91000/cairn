@@ -46,6 +46,11 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.SecureFlagPolicy
 import build.cairn.app.data.*
+import build.cairn.contracts.AnswerChatQuestionInput
+import build.cairn.contracts.QuestionAnswerInput
+import build.cairn.contracts.ChatQuestionInput
+import build.cairn.contracts.answerChatQuestion
+import build.cairn.contracts.cancelChatQuestion
 import build.cairn.contracts.ChatInput
 import build.cairn.contracts.ChatMessageInput
 import build.cairn.contracts.ChatMessageReference
@@ -2015,10 +2020,7 @@ internal fun QuestionDialog(
                         TextButton(
                             onClick = {
                                 vm.perform {
-                                    api.request(
-                                        "POST",
-                                        "/chats/${segment(question.chatId)}/questions/${segment(question.id)}/cancel",
-                                    )
+                                    api.cancelChatQuestion(ChatQuestionInput(chatId=question.chatId,questionId=question.id))
                                     answers = emptyMap()
                                     selected = emptyMap()
                                     close()
@@ -2059,14 +2061,10 @@ internal fun QuestionDialog(
                                     submissionKey = values.toString()
                                     submission = UUID.randomUUID().toString()
                                 }
-                                api.request(
-                                    "POST",
-                                    "/chats/${segment(question.chatId)}/questions/${segment(question.id)}/answer",
-                                    buildJsonObject {
-                                        put("id", submission)
-                                        put("answers", values)
-                                    },
-                                )
+                                api.answerChatQuestion(AnswerChatQuestionInput(
+                                    chatId=question.chatId,questionId=question.id,
+                                    answer=QuestionAnswerInput(id=submission, answers=wireJson.decodeFromJsonElement(values)),
+                                ))
                                 answers = emptyMap()
                                 selected = emptyMap()
                                 close()

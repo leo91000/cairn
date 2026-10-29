@@ -911,7 +911,7 @@ internal fun timelineEntries(
                             }
                     updateWait(index) {
                         it.copy(
-                            observation = wakeup?.observation ?: it.observation,
+                            observation = wakeup?.observationJson ?: it.observation,
                             observed = true,
                             resumedAt = event.createdAt,
                         )
@@ -1179,7 +1179,7 @@ internal fun timelineEntries(
         if (knownWait != null && pendingWakeup.observation != null) {
             updateWait(knownWait) {
                 if (it.observed) it
-                else it.copy(observation = pendingWakeup.observation, observed = true)
+                else it.copy(observation = pendingWakeup.observationJson, observed = true)
             }
         }
         if (pendingWakeup != null && knownWait == null) {
@@ -1191,7 +1191,7 @@ internal fun timelineEntries(
                     wait =
                         ActivityWait(
                             pendingWakeup,
-                            pendingWakeup.observation,
+                            pendingWakeup.observationJson,
                             observed = pendingWakeup.observation != null,
                         ),
                 )

@@ -136,6 +136,30 @@ fn detail(db: &Db<'_>, args: &Value) -> Result<Value> {
     })?)
 }
 
+fn question_page(values: &[Value], args: &Value) -> Result<Value> {
+    let offset = args["offset"].as_u64().unwrap() as usize;
+    let limit = args["limit"].as_u64().unwrap() as usize;
+    let mut questions = Vec::new();
+    let mut bytes = 0;
+    for value in values.iter().skip(offset).take(limit) {
+        let question: cairn_contracts::ChatQuestion = serde_json::from_value(value.clone())?;
+        let size = serde_json::to_vec(&question)?.len();
+        if !questions.is_empty() && bytes + size > PAGE_BYTES {
+            break;
+        }
+        questions.push(question);
+        bytes += size;
+    }
+    let next = offset + questions.len();
+    Ok(serde_json::to_value(
+        cairn_contracts::ListChatQuestionsOutput {
+            questions,
+            next_offset: (next < values.len()).then_some(next as u32),
+            has_more: next < values.len(),
+        },
+    )?)
+}
+
 fn record_preview(record: Value, fields: &[&str]) -> Result<(Value, usize)> {
     let bytes = serde_json::to_vec(&record)?.len();
     if bytes <= PAGE_BYTES {
@@ -284,7 +308,7 @@ pub(crate) async fn invoke(
                     "read_chat_content" => content(db, &args)?,
                     _ => {
                         let detail = chats::detail(db, text(&args, "chatId"))?;
-                        page(detail["questions"].as_array().unwrap(), &args, "questions")?
+                        question_page(detail["questions"].as_array().unwrap(), &args)?
                     }
                 };
                 transaction.commit()?;
@@ -358,12 +382,16 @@ pub(crate) async fn invoke(
             .resume_authorized(s, &run_id, commit_authority)
             .await;
     }
-    if name == "withdraw_chat_question" {
+    if name == "cancel_chat_question" {
+        let native = crate::native::policy::chat_authorization(text(&args, "chatId"));
         return s
             .question_cancel_authorized(
                 text(&args, "chatId"),
                 text(&args, "questionId"),
-                commit_authority,
+                move |db| {
+                    commit_authority(db)?;
+                    native(db)
+                },
             )
             .await;
     }

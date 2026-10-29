@@ -1,4 +1,5 @@
 -- Produced by Store at d5e592ac9750042703b9ffdb711bd7ba9b9eff6a. All data is synthetic.
+PRAGMA foreign_keys=OFF;
 BEGIN TRANSACTION;
 CREATE TABLE account_exhaustion(
  account_id TEXT PRIMARY KEY NOT NULL REFERENCES coding_agent_accounts(id) ON DELETE CASCADE,
@@ -732,3 +733,4 @@ DELETE FROM "sqlite_sequence";
 INSERT INTO "sqlite_sequence" VALUES('audit',777);
 COMMIT;
 PRAGMA user_version=15;
+PRAGMA foreign_keys=ON;
