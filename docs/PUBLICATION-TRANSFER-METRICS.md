@@ -36,6 +36,18 @@ serial read/hash/codec/PUT loop remains serial, so no producer upload-capacity w
 or final parallel drain is needed. Failures before transfer still emit the correlated
 operation phase; transfer errors and dropped futures retain their partial summary.
 
+Direct v3 transfers propagate the same optional metadata in authenticated upload
+plans. Node aggregates cover local production, hash/codec, upload admission,
+checksum and provider HTTP work; replay reads include GET and decode stages.
+The manager's `nodeHeaders` includes the entire node batch upload, because the
+node drains its PUTs before returning a receipt. Receipt JSON parsing is residual,
+not plaintext `nodeBody` traffic. Direct node codec jobs do not use the manager's
+codec admission semaphore. Their `putSlot` / `getSlot` stages report the separate
+node budgets. Direct cold reads retain context through the host-executor hop.
+Node `putSlot` starts after local production and admits encoding plus PUT work;
+`nodeProduce` includes cold-base recovery and cache wait, with its own bounded
+cancellation. Waiting for a base does not consume the node's PUT budget.
+
 ## Units and interpretation
 
 All `*Us` fields are **wall-clock microseconds**, including synchronous codec jobs.
@@ -96,7 +108,7 @@ authority for acceptance.
 | `getCoalesced` | Inclusive consumer GET/coalescing/cleanup wait; successful encoded bytes per consumer. Includes nested physical stages for the initiator. |
 | `uploadBackpressure` | Producer blocked joining a PUT at the existing in-flight limit; bytes zero. |
 | `uploadDrain` | Final join of all started PUTs, including on error, before lock release; bytes zero. |
-| `nodeOpen` | Reader open/load, lease and journal/runtime coordination before headers; bytes zero. |
+| `nodeOpen` | Reader open/load, lease and journal/runtime coordination before headers; bytes zero. Direct publication opens one response-owned reader across its bounded PUT batches; it is not a journal replay per batch. |
 | `nodeMetadata`, `nodeJournalLookup` | Captured manifest lookup/SQLite/JSON and journal index selection, including their existing locks; bytes zero. These expose producer coordination separately from payload reads/hashing. |
 | `nodeLocalRead` | Local snapshot block open/seek/read, or one journal record header/payload read pair, including buffer allocation; successful physical bytes read. Journal headers count here; hashes can count the same payload again. Cold journal recovery also reads headers within `nodeOpen`. |
 | `nodeProduce` | Inclusive reconstruction/read per block, with journal/base/cache work and integrity checks; plaintext bytes. |

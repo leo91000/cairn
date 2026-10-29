@@ -942,6 +942,16 @@ abstract class NodePlacementCases {
             }
             compose.onNodeWithText("Travail local · sauvegardé après l’arrêt").assertDoesNotExist()
             compose.onNodeWithText("Synchronisé il y a 2 min").assertExists()
+            compose.runOnIdle {
+                run.value =
+                    run.value.copy(
+                        storage =
+                            RunStorage(mode = "on-demand", dirtyBytes = 4096, backupDegraded = true)
+                    )
+            }
+            compose
+                .onNodeWithText("Synchronisation en retard · travail conservé sur cette node")
+                .assertExists()
             compose.waitUntil(20000) {
                 compose.onAllNodesWithText("Node : Bureau GPU").fetchSemanticsNodes().isNotEmpty()
             }

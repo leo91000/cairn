@@ -308,7 +308,7 @@ impl LazyDisk {
         let waiting = crate::performance::publication::start(
             crate::performance::publication::Stage::NodeCacheWait,
         );
-        let _fetching = fetching.lock().map_err(failure)?;
+        let _fetching = super::read_scope::lock(&fetching)?;
         waiting.finish(0);
         if let Some(bytes) = self.cached_block(hash, foreground)? {
             if bytes.len() != length {
