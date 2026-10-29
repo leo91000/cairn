@@ -210,14 +210,27 @@ impl RTCPeerConnection {
         // the negotiated stream count to bound them.
         let dtls_role = self.dtls_transport().role();
         let max_channels = self.sctp_transport().max_channels();
-        DataChannelHandler::new(
+        // Keep closes pending while the read batch still holds old-channel
+        // data. The DataChannel handler retires a matching close before a
+        // replacement OPEN, or after the batch when events are polled.
+        let pending_events =
+            std::mem::take(&mut self.pipeline_context.sctp_handler_context.event_outs);
+        self.pipeline_context
+            .datachannel_handler_context
+            .pending_sctp_events
+            .extend(pending_events);
+        let mut handler = DataChannelHandler::new(
             &mut self.pipeline_context.datachannel_handler_context,
             &mut self.data_channels,
             &mut self.pipeline_context.stats,
             self.setting_engine.data_channel.dcep_handshake_timeout,
             dtls_role,
             max_channels,
-        )
+        );
+        if let Err(error) = handler.process_sctp_events(|_| false) {
+            warn!("{}.handle_event got error: {}", handler.name(), error);
+        }
+        handler
     }
 
     pub(crate) fn get_srtp_handler(&mut self) -> SrtpHandler<'_> {
@@ -430,7 +443,18 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
             }
         }
 
-        self.pipeline_context.event_outs.pop_front()
+        // The async wrapper polls events before messages. A close must not
+        // overtake data already queued for that channel; opens and events for
+        // other channels can still progress while that data is backpressured.
+        let ready = self.pipeline_context.event_outs.iter().position(|event| {
+            let RTCPeerConnectionEvent::OnDataChannel(crate::peer_connection::event::RTCDataChannelEvent::OnClose(id)) = event else {
+                return true;
+            };
+            !self.pipeline_context.data_read_outs.iter().any(|message| {
+                matches!(&message.message, RTCMessage::DataChannelMessage(channel, _) if channel == id)
+            })
+        });
+        ready.and_then(|index| self.pipeline_context.event_outs.remove(index))
     }
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {

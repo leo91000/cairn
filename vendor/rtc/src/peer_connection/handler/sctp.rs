@@ -129,6 +129,52 @@ impl<'a> SctpHandler<'a> {
         }
     }
 
+    fn forward_association_event(
+        events: &mut VecDeque<TaggedRTCEventInternal>,
+        pending: &mut HashSet<(AssociationHandle, StreamId)>,
+        ch: AssociationHandle,
+        event: Event,
+        now: Instant,
+    ) {
+        let forwarded = match event {
+            Event::HandshakeFailed { reason } => {
+                debug!(
+                    "association_handle {} handshake failed due to {}",
+                    ch.0, reason
+                );
+                None
+            }
+            Event::Connected => {
+                debug!("association_handle {} is connected", ch.0);
+                Some(RTCEventInternal::SCTPHandshakeComplete(ch.0))
+            }
+            Event::AssociationLost { reason, id } => {
+                debug!("association_handle {} is closed due to {}", ch.0, reason);
+                pending.remove(&(ch, id));
+                Some(RTCEventInternal::SCTPStreamClosed(ch.0, id))
+            }
+            Event::Stream(StreamEvent::Readable { id }) => {
+                // Timeout processing has no inbound packet to drain against.
+                // The normal level-triggered read path resumes this stream.
+                pending.insert((ch, id));
+                None
+            }
+            Event::Stream(StreamEvent::BufferedAmountLow { id }) => {
+                Some(RTCEventInternal::SCTPBufferedAmountLow(ch.0, id))
+            }
+            Event::Stream(StreamEvent::BufferedAmountHigh { id }) => {
+                Some(RTCEventInternal::SCTPBufferedAmountHigh(ch.0, id))
+            }
+            Event::Stream(StreamEvent::BufferedAmountReleased { id, n_bytes }) => {
+                Some(RTCEventInternal::SCTPBufferReleased(ch.0, id, n_bytes))
+            }
+            _ => None,
+        };
+        if let Some(event) = forwarded {
+            events.push_back(TaggedRTCEventInternal { now, event });
+        }
+    }
+
     /// How many more messages may be pulled out of SCTP before the pipeline is over its bound.
     fn read_budget(&self) -> usize {
         SCTP_PIPELINE_READ_BACKLOG_LIMIT
@@ -164,6 +210,12 @@ impl<'a> SctpHandler<'a> {
 
         let mut stream = conn.stream(id)?;
         loop {
+            // Reading the final buffered message can complete a deferred
+            // reset. That is EOF, not an error that discards this batch.
+            if !stream.is_readable() {
+                ctx_pending.remove(&(ch, id));
+                return Ok(());
+            }
             if *budget == 0 {
                 // Leave the rest in the reassembly queue: that is what shrinks `a_rwnd`.
                 ctx_pending.insert((ch, id));
@@ -369,30 +421,7 @@ impl<'a>
 
                     while let Some(event) = conn.poll() {
                         match event {
-                            Event::HandshakeFailed { reason } => {
-                                debug!(
-                                    "association_handle {} handshake failed due to {}",
-                                    ch.0, reason
-                                );
-                                //TODO: put it into event_outs?
-                            }
-                            Event::Connected => {
-                                debug!("association_handle {} is connected", ch.0);
-                                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                                    now,
-                                    event: RTCEventInternal::SCTPHandshakeComplete(ch.0),
-                                });
-                            }
-                            Event::AssociationLost { reason, id } => {
-                                debug!("association_handle {} is closed due to {}", ch.0, reason);
-                                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                                    now,
-                                    event: RTCEventInternal::SCTPStreamClosed(ch.0, id),
-                                });
-                            }
                             Event::Stream(StreamEvent::Readable { id }) => {
-                                // Bounded: what is not read stays in the reassembly queue,
-                                // which is what lowers `a_rwnd` and throttles the peer.
                                 Self::drain_stream(
                                     &mut self.ctx.pending_readable,
                                     conn,
@@ -403,36 +432,13 @@ impl<'a>
                                     &mut messages,
                                 )?;
                             }
-                            Event::Stream(StreamEvent::BufferedAmountLow { id }) => {
-                                debug!(
-                                    "association_handle {} stream id {} is buffered amount low",
-                                    ch.0, id
-                                );
-                                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                                    now,
-                                    event: RTCEventInternal::SCTPBufferedAmountLow(ch.0, id),
-                                });
-                            }
-                            Event::Stream(StreamEvent::BufferedAmountHigh { id }) => {
-                                debug!(
-                                    "association_handle {} stream id {} is buffered amount high",
-                                    ch.0, id
-                                );
-                                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                                    now,
-                                    event: RTCEventInternal::SCTPBufferedAmountHigh(ch.0, id),
-                                });
-                            }
-                            Event::Stream(StreamEvent::BufferedAmountReleased { id, n_bytes }) => {
-                                // Forward the exact released byte count so the data
-                                // channel handler can decrement its synchronous
-                                // send back-pressure counter (see DataChannelHandler).
-                                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                                    now,
-                                    event: RTCEventInternal::SCTPBufferReleased(ch.0, id, n_bytes),
-                                });
-                            }
-                            _ => {}
+                            event => Self::forward_association_event(
+                                &mut self.ctx.event_outs,
+                                &mut self.ctx.pending_readable,
+                                *ch,
+                                event,
+                                now,
+                            ),
                         }
                     }
 
@@ -704,6 +710,19 @@ impl<'a>
     }
 
     fn poll_event(&mut self) -> Option<Self::Eout> {
+        // Application reads can complete a deferred reset without a packet or
+        // timer tick. Forward those queued lifecycle events on the normal poll.
+        for (ch, connection) in &mut self.ctx.sctp_transport.sctp_associations {
+            while let Some(event) = connection.poll() {
+                Self::forward_association_event(
+                    &mut self.ctx.event_outs,
+                    &mut self.ctx.pending_readable,
+                    *ch,
+                    event,
+                    self.ctx.now,
+                );
+            }
+        }
         self.ctx.event_outs.pop_front()
     }
 
@@ -726,6 +745,15 @@ impl<'a>
         let mut endpoint_events: Vec<(AssociationHandle, EndpointEvent)> = vec![];
         for (ch, conn) in sctp_associations.iter_mut() {
             conn.handle_timeout(now);
+            while let Some(event) = conn.poll() {
+                Self::forward_association_event(
+                    &mut self.ctx.event_outs,
+                    &mut self.ctx.pending_readable,
+                    *ch,
+                    event,
+                    now,
+                );
+            }
 
             while let Some(event) = conn.poll_endpoint_event() {
                 endpoint_events.push((*ch, event));
@@ -823,7 +851,7 @@ mod tests {
     use crate::peer_connection::handler::datachannel::{
         DataChannelHandler, DataChannelHandlerContext,
     };
-    use crate::peer_connection::message::internal::DataChannelEvent;
+    use crate::peer_connection::message::internal::{ApplicationMessage, DataChannelEvent};
     use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
     use crate::peer_connection::transport::{RTCTransportId, TransportKind};
     use crate::statistics::accumulator::RTCStatsAccumulator;
@@ -1926,5 +1954,253 @@ mod tests {
             dgrams.len(),
             flushed.len()
         );
+    }
+
+    #[test]
+    fn exhausted_reset_notifies_the_control_channel_without_inbound_packets() {
+        let now = Instant::now();
+        let e = establish();
+        let mut connection = e.client_conn;
+        for id in [1, 3] {
+            connection
+                .open_stream(id, PayloadProtocolIdentifier::Binary)
+                .expect("open stream");
+        }
+        connection
+            .stream(3)
+            .expect("data stream")
+            .close(now)
+            .expect("request reset");
+        assert!(!drain_transmits(&mut connection, now).is_empty());
+        let mut ctx = client_ctx(now, e.client_ep, e.client_ch, connection);
+
+        // No more SCTP datagram arrives, although the enclosing ICE/DTLS
+        // transports can remain up. Exhaust the real reset timers virtually.
+        for _ in 0..=sctp::TimerConfig::default().max_reconfig_retrans {
+            let deadline = ctx
+                .sctp_transport
+                .sctp_associations
+                .get(&e.client_ch)
+                .unwrap()
+                .poll_timeout()
+                .expect("reset deadline");
+            let mut handler = SctpHandler::new(&mut ctx, 0);
+            handler.handle_timeout(deadline).expect("timeout");
+            while handler.poll_write().is_some() {}
+        }
+        assert!(
+            ctx.sctp_transport
+                .sctp_associations
+                .get_mut(&e.client_ch)
+                .unwrap()
+                .open_stream(5, PayloadProtocolIdentifier::Binary)
+                .is_err(),
+            "precondition: the patched SCTP association has exhausted its reset budget"
+        );
+        assert!(
+            ctx.event_outs
+                .iter()
+                .any(|event| matches!(event.event, RTCEventInternal::SCTPStreamClosed(_, 1))),
+            "timeout must notify the still-open control channel without another packet"
+        );
+    }
+
+    #[test]
+    fn a_parked_response_survives_peer_reset_before_application_drain() {
+        let now = Instant::now();
+        let mut e = establish();
+        let data = server_datagrams_carrying(&mut e, 1, 1, now);
+        e.server_conn
+            .stream(1)
+            .expect("server stream")
+            .close(now)
+            .expect("peer reset");
+        let reset = drain_transmits(&mut e.server_conn, now);
+        assert!(!reset.is_empty());
+        let mut ctx = client_ctx(now, e.client_ep, e.client_ch, e.client_conn);
+        {
+            let mut handler = SctpHandler::new(&mut ctx, SCTP_PIPELINE_READ_BACKLOG_LIMIT);
+            for datagram in data.into_iter().chain(reset) {
+                handler
+                    .handle_read(raw_read(now, datagram))
+                    .expect("read DATA and reset");
+            }
+        }
+        assert!(ctx.read_outs.is_empty());
+        assert!(!ctx.pending_readable.is_empty());
+
+        let response = SctpHandler::new(&mut ctx, 0)
+            .poll_read()
+            .expect("the final buffered response must survive deferred reset completion");
+        assert!(
+            matches!(response.message, RTCMessageInternal::Dtls(DTLSMessage::Sctp(DataChannelMessage { payload, .. })) if payload.as_ref() == [0; 64])
+        );
+        assert!(ctx.pending_readable.is_empty());
+    }
+
+    #[test]
+    fn replacement_open_after_pending_close_uses_a_new_channel_handle() {
+        let now = Instant::now();
+        let mut peer = crate::peer_connection::RTCPeerConnectionBuilder::new()
+            .build(now)
+            .expect("peer");
+        let old = peer
+            .create_data_channel(
+                "old",
+                Some(crate::data_channel::RTCDataChannelInit {
+                    negotiated: Some(1),
+                    ..Default::default()
+                }),
+            )
+            .expect("old channel")
+            .id();
+        peer.data_channel(old).unwrap().close().unwrap();
+        // SCTP can deliver the final reset ACK and replacement DCEP DATA in
+        // one input batch. Internal close must precede that replacement read.
+        peer.pipeline_context
+            .sctp_handler_context
+            .event_outs
+            .push_back(TaggedRTCEventInternal {
+                now,
+                event: RTCEventInternal::SCTPStreamClosed(0, 1),
+            });
+        let payload = Message::DataChannelOpen(DataChannelOpen {
+            channel_type: ChannelType::Reliable,
+            priority: CHANNEL_PRIORITY_NORMAL,
+            reliability_parameter: 0,
+            label: b"replacement".to_vec(),
+            protocol: Vec::new(),
+        })
+        .marshal()
+        .unwrap();
+        peer.get_datachannel_handler()
+            .handle_read(TaggedRTCMessageInternal {
+                now,
+                transport: TransportContext::default(),
+                message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(DataChannelMessage {
+                    association_handle: 0,
+                    stream_id: 1,
+                    ppi: PayloadProtocolIdentifier::Dcep,
+                    payload: payload.into(),
+                    negotiated: false,
+                })),
+            })
+            .expect("replacement DCEP");
+        assert!(
+            peer.data_channel(old).is_none(),
+            "pending close must retire the old handle before replacement DATA"
+        );
+        let replacement = peer
+            .data_channels
+            .handle_of_stream(&1)
+            .expect("replacement channel");
+        assert_ne!(replacement, old);
+    }
+
+    #[test]
+    fn final_binary_response_precedes_pending_close_and_replacement_open() {
+        let now = Instant::now();
+        let mut peer = crate::peer_connection::RTCPeerConnectionBuilder::new()
+            .build(now)
+            .unwrap();
+        let open = || {
+            Message::DataChannelOpen(DataChannelOpen {
+                channel_type: ChannelType::Reliable,
+                priority: CHANNEL_PRIORITY_NORMAL,
+                reliability_parameter: 0,
+                label: b"channel".to_vec(),
+                protocol: Vec::new(),
+            })
+            .marshal()
+            .unwrap()
+        };
+        let frame = |ppi, payload: BytesMut| TaggedRTCMessageInternal {
+            now,
+            transport: TransportContext::default(),
+            message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(DataChannelMessage {
+                association_handle: 0,
+                stream_id: 1,
+                ppi,
+                payload: payload.into(),
+                negotiated: false,
+            })),
+        };
+        peer.get_datachannel_handler()
+            .handle_read(frame(PayloadProtocolIdentifier::Dcep, open()))
+            .unwrap();
+        let old = peer.data_channels.handle_of_stream(&1).unwrap();
+        peer.pipeline_context
+            .datachannel_handler_context
+            .read_outs
+            .clear();
+        peer.pipeline_context
+            .sctp_handler_context
+            .event_outs
+            .push_back(TaggedRTCEventInternal {
+                now,
+                event: RTCEventInternal::SCTPStreamClosed(0, 1),
+            });
+        let mut handler = peer.get_datachannel_handler();
+        handler
+            .handle_read(frame(
+                PayloadProtocolIdentifier::Binary,
+                BytesMut::from(&b"final response"[..]),
+            ))
+            .expect("old response before close");
+        handler
+            .handle_read(frame(PayloadProtocolIdentifier::Dcep, open()))
+            .expect("replacement open");
+        let response = handler.poll_read().expect("final old response");
+        assert!(
+            matches!(response.message, RTCMessageInternal::Dtls(DTLSMessage::DataChannel(ApplicationMessage { data_channel_id, data_channel_event: DataChannelEvent::Message(message) })) if data_channel_id == old && message.data.as_ref() == b"final response")
+        );
+        assert!(peer.data_channel(old).is_none());
+        assert_ne!(peer.data_channels.handle_of_stream(&1).unwrap(), old);
+    }
+
+    #[test]
+    fn application_close_waits_until_its_queued_messages_are_read() {
+        use crate::peer_connection::event::RTCDataChannelEvent;
+        use crate::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+        let now = Instant::now();
+        let mut peer = crate::peer_connection::RTCPeerConnectionBuilder::new()
+            .build(now)
+            .unwrap();
+        peer.pipeline_context
+            .data_read_outs
+            .push_back(TaggedRTCMessage {
+                now,
+                message: RTCMessage::DataChannelMessage(
+                    7,
+                    crate::data_channel::message::RTCDataChannelMessage {
+                        is_string: false,
+                        data: BytesMut::from(&b"final response"[..]),
+                    },
+                ),
+            });
+        peer.pipeline_context.event_outs.push_back(
+            crate::peer_connection::event::RTCPeerConnectionEvent::OnDataChannel(
+                RTCDataChannelEvent::OnClose(7),
+            ),
+        );
+        assert!(
+            peer.poll_event().is_none(),
+            "OnClose must not overtake a queued application message"
+        );
+        assert!(matches!(
+            peer.poll_read(),
+            Some(TaggedRTCMessage {
+                message: RTCMessage::DataChannelMessage(7, _),
+                ..
+            })
+        ));
+        assert!(matches!(
+            peer.poll_event(),
+            Some(
+                crate::peer_connection::event::RTCPeerConnectionEvent::OnDataChannel(
+                    RTCDataChannelEvent::OnClose(7)
+                )
+            )
+        ));
     }
 }

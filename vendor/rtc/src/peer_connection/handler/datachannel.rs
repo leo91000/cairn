@@ -12,10 +12,13 @@ use crate::peer_connection::message::internal::{
 };
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::statistics::accumulator::RTCStatsAccumulator;
+use datachannel::message::message_type::MessageType;
 use log::{debug, warn};
+use sansio::Protocol as _;
 use sctp::PayloadProtocolIdentifier;
 use shared::TransportContext;
 use shared::error::{Error, Result};
+use shared::marshal::Unmarshal;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -23,6 +26,7 @@ pub(crate) struct DataChannelHandlerContext {
     pub(crate) read_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) write_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) event_outs: VecDeque<TaggedRTCEventInternal>,
+    pub(crate) pending_sctp_events: VecDeque<TaggedRTCEventInternal>,
 
     /// The newest instant a caller has supplied, seeded at construction.
     ///
@@ -39,6 +43,7 @@ impl DataChannelHandlerContext {
             read_outs: VecDeque::new(),
             write_outs: VecDeque::new(),
             event_outs: VecDeque::new(),
+            pending_sctp_events: VecDeque::new(),
             now,
         }
     }
@@ -83,6 +88,20 @@ impl<'a> DataChannelHandler<'a> {
             dtls_role,
             max_channels,
         }
+    }
+
+    pub(crate) fn process_sctp_events(&mut self, close_ready: impl Fn(u16) -> bool) -> Result<()> {
+        let pending = std::mem::take(&mut self.ctx.pending_sctp_events);
+        for event in pending {
+            let defer_close = matches!(&event.event,
+                RTCEventInternal::SCTPStreamClosed(_, id) if !close_ready(*id));
+            if defer_close {
+                self.ctx.pending_sctp_events.push_back(event);
+            } else {
+                self.handle_event(event)?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn name(&self) -> &'static str {
@@ -145,6 +164,15 @@ impl<'a>
         self.ctx.observe(now);
 
         if let RTCMessageInternal::Dtls(DTLSMessage::Sctp(message)) = msg.message {
+            let mut header = message.payload.as_ref();
+            let replacement_open = message.ppi == PayloadProtocolIdentifier::Dcep
+                && matches!(
+                    MessageType::unmarshal(&mut header),
+                    Ok(MessageType::DataChannelOpen)
+                );
+            // Preserve the old channel for its final messages, but retire its
+            // mapping before accepting a replacement OPEN on the same stream.
+            self.process_sctp_events(|id| replacement_open && id == message.stream_id)?;
             debug!(
                 "recv SCTP DataChannelMessage from {:?}",
                 msg.transport.peer_addr
@@ -505,6 +533,9 @@ impl<'a>
     }
 
     fn poll_event(&mut self) -> Option<Self::Eout> {
+        if let Err(error) = self.process_sctp_events(|_| true) {
+            warn!("{}.handle_event got error: {}", self.name(), error);
+        }
         self.ctx.event_outs.pop_front()
     }
 
