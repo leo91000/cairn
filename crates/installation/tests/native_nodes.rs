@@ -1174,10 +1174,6 @@ async fn native_authority_outage_preserves_automatic_vm_admission_and_vm_continu
             )
             .await
             .unwrap();
-        // Memberships were confirmed just before the Beacon became unavailable: account
-        // access to agents (ADR-0075) trusts that check for a while, so only native
-        // authority is at stake below.
-        f.service.synchronize_task_authors().await.unwrap();
         let (listener, address) = common::bind().await;
         let requests = Arc::new(AtomicUsize::new(0));
         let observed = requests.clone();
@@ -1192,6 +1188,10 @@ async fn native_authority_outage_preserves_automatic_vm_admission_and_vm_continu
             .await
             .unwrap();
         });
+        // Account access to agents (ADR-0075) fails closed without a recent membership
+        // check: the outage starts right after one, so only native authority is unavailable.
+        members_use_every_agent(&f.service).await;
+        f.service.synchronize_task_authors().await.unwrap();
         let identity_dir = f.service.config.data_dir.join("installation-relay");
         std::fs::create_dir_all(&identity_dir).unwrap();
         let identity = identity_dir.join("identity.json");
