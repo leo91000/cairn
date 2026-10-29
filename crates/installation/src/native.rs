@@ -9,6 +9,7 @@ pub(crate) mod disk;
 pub mod docker;
 mod home;
 mod identity;
+pub(crate) mod limits;
 mod mode;
 pub mod policy;
 mod protection;
