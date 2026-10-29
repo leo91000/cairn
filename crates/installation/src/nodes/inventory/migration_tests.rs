@@ -16,7 +16,8 @@ async fn version11(root: &std::path::Path) -> Connection {
         .unwrap();
     drop(store);
     let db = Connection::open(root.join("manager.db")).unwrap();
-    db.execute_batch("DROP TABLE node_reviewed_agents; DROP TABLE node_trusted_accounts; DROP TABLE node_tags; DROP TABLE nodes;
+    db.execute_batch("DROP TABLE direct_journal_acknowledgements; DROP TABLE direct_object_quarantines; DROP TABLE direct_storage_grants; DROP TABLE direct_read_authorizations;
+DROP TABLE node_reviewed_agents; DROP TABLE node_trusted_accounts; DROP TABLE node_tags; DROP TABLE nodes;
 DROP TABLE records;
 CREATE TABLE records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX records_kind ON records(kind,updated_at DESC);
@@ -143,6 +144,28 @@ async fn version11_startup_conserves_inventory_credentials_and_references() {
         .collect::<rusqlite::Result<_>>()
         .unwrap();
     let agent = Store::open(root.path()).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        13
+    );
+    for table in [
+        "direct_storage_grants",
+        "direct_read_authorizations",
+        "direct_journal_acknowledgements",
+        "direct_object_quarantines",
+    ] {
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name=?1",
+                [table],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1,
+            "{table}"
+        );
+    }
     let node = serde_json::to_value(agent.node(NODE).await.unwrap().unwrap()).unwrap();
     assert_preserved(&legacy, &node);
     assert!(!node["revision"].as_str().unwrap().is_empty());
@@ -269,13 +292,17 @@ async fn legacy_missing_defaults_and_revocation_are_retained() {
     insert(&db, NODE, &node);
     db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
     migration::upgrade(&mut db).unwrap();
+    migration::upgrade(&mut db).unwrap();
     let store = Store::open(root.path()).unwrap();
     let node = store.node(NODE).await.unwrap().unwrap();
     assert!(node.revoked);
     assert!(!node.exclusive_reservations);
     assert_eq!(node.capabilities.native_mode_protocol, 0);
     assert_eq!(node.storage, cairn_contracts::NodeStoragePolicy::default());
-    migration::upgrade(&mut db).unwrap();
+    assert!(
+        migration::upgrade(&mut db).is_err(),
+        "The inventory-only helper must not rewrite version13"
+    );
 }
 
 #[tokio::test]
@@ -287,7 +314,36 @@ async fn empty_version11_inventory_upgrades_without_creating_a_node() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        12
+        13
+    );
+}
+
+#[tokio::test]
+async fn concurrent_startups_complete_the_version11_to13_chain_without_repeating_metadata_ddl() {
+    let root = tempfile::tempdir().unwrap();
+    drop(version11(root.path()).await);
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let mut starters = Vec::new();
+    for _ in 0..2 {
+        let (path, barrier) = (root.path().to_owned(), barrier.clone());
+        starters.push(std::thread::spawn(move || {
+            barrier.wait();
+            Store::open(&path).map(drop)
+        }));
+    }
+    for starter in starters {
+        starter.join().unwrap().unwrap();
+    }
+    let db = Connection::open(root.path().join("manager.db")).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        13
+    );
+    assert_eq!(
+        db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
     );
 }
 

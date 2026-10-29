@@ -112,7 +112,7 @@ pub(crate) async fn prepare_capture(state: &Path, run: &str) -> Result<crate::fi
                 .await
                 .is_ok_and(|owner| owner == run);
         if owned {
-            tokio::fs::remove_dir_all(entry.path()).await?;
+            super::snapshots::discard(&entry.path()).await?;
         }
     }
     Ok(capture)

@@ -10,6 +10,13 @@ test('readable URLs preserve legacy deep links, UUID drafts and conversation ide
   const other = await workspace.api('/api/chats', 'POST', {})
   workspace.service.store.put('chats', { ...chat, title: 'Readable conversation' })
   workspace.service.store.put('chats', { ...other, title: 'Another conversation' })
+
+  // Titles are not identities: other journeys may leave conversations with either title.
+  for (const title of ['Readable conversation', 'Another conversation']) {
+    const duplicate = await workspace.api('/api/chats', 'POST', {})
+    workspace.service.store.put('chats', { ...duplicate, title })
+  }
+
   expect(workspace.installationSlug).toMatch(/^[a-z]+-[a-z]+-[a-f0-9]{8}$/)
   expect(chat.slug).toMatch(/^[a-z]+-[a-z]+-[a-f0-9]{8}$/)
 
@@ -25,14 +32,17 @@ test('readable URLs preserve legacy deep links, UUID drafts and conversation ide
 
   const details = page.getByRole('button', { name: 'Chat details', exact: true })
   const search = page.getByRole('button', { name: 'Search conversations', exact: true })
+  const conversations = page.getByRole('dialog', { name: /Conversations/ })
+
   await details.click()
   await search.click()
-  await page.getByRole('dialog', { name: /Conversations/ }).getByRole('link', { name: /Another conversation/ }).click()
+  await conversations.locator(`a[href="${workspacePath(`/chats/${other.slug}`)}"]`).click()
   await expect(page).toHaveURL(`${workspace.url}${workspacePath(`/chats/${other.slug}`)}`)
   await message.fill('A separate draft')
   await details.click()
   await search.click()
-  await page.getByRole('dialog', { name: /Conversations/ }).getByRole('link', { name: /Readable conversation/ }).click()
+  await conversations.locator(`a[href="${workspacePath(`/chats/${chat.slug}`)}"]`).click()
+  await expect(page).toHaveURL(`${workspace.url}${workspacePath(`/chats/${chat.slug}`)}`)
   await expect(message).toHaveValue('A draft saved from the old UUID link')
   await page.reload()
   await expect(message).toHaveValue('A draft saved from the old UUID link')

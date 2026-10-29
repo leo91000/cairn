@@ -157,5 +157,5 @@ following checks before merge:
   `NATIVE_PROBE_PATH` adds a directory to the engine's `PATH`,
   `NATIVE_PROBE_DROP_CAPS` drops inherited capabilities, and
   `NATIVE_PROBE_PRIVATE_TMP` gives Codex its own `/tmp` (with `TMPDIR` outside
-  `/tmp`); see [the plan-turn decision](adr/0076-plan-turns.md#qualification).
+  `/tmp`); see [the plan-turn decision](adr/0077-plan-turns.md#qualification).
 - All engines: keep their autoupdaters disabled at runtime.

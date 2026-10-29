@@ -366,12 +366,27 @@ async fn master_reuses_unchanged_blocks() {
     let app = Router::new().fallback(move |request: Request| {
         let (source, data) = (source.clone(), data.clone());
         async move {
+            if request.method() == "DELETE" && request.uri().path().ends_with("/direct-reader") {
+                return direct_reader_closed(request.uri().path());
+            }
+
             if request.method() == "DELETE" {
                 return Json(json!({ "ok": true })).into_response();
             }
             let manifest = data.read().await.clone();
             if request.uri().path().ends_with("/snapshot") {
                 return Json(json!({ "id": id(), "manifest": manifest })).into_response();
+            }
+
+            if request.method() == "POST" && request.uri().path().ends_with("/direct-reader") {
+                return direct_reader_response(request.uri().path());
+            }
+            if request.uri().path().ends_with("/direct-upload") {
+                let body = axum::body::to_bytes(request.into_body(), 131_072)
+                    .await
+                    .unwrap();
+                return direct_snapshot_upload(&source, data.read().await.clone(), &body, false)
+                    .await;
             }
             if request.uri().path().ends_with("/blocks")
                 || request.uri().path().ends_with("/publication")
@@ -390,9 +405,14 @@ async fn master_reuses_unchanged_blocks() {
     });
     let (runner, task) = common::serve_locally(app).await;
     let s = service(&root, format!("http://{}", common::HOST), runner).await;
+    s.store
+        .put_node_fixture(json!({ "id": LOCAL_NODE_ID, "revoked": false }))
+        .await
+        .unwrap();
     let run = id();
     let record = json!({
         "id": run,
+        "snapshot": {},
         "taskId": run,
         "createdAt": now(),
         "status": RunStatus::Running,

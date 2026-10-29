@@ -1,5 +1,14 @@
 # Android 0.6.0 / web parity
 
+## Direct storage and overdue synchronization (2026-10-28)
+
+Web and Android expose overdue synchronization while the agent continues on its
+durable local journal. Both keep upload failures, unsaved bytes/age and the existing
+integrity and disk-space warnings visible. The node storage setting now describes
+a warning threshold rather than a deadline that suspends execution. REST, public
+MCP and `cairn_installation` retain the same run storage payload, including
+`backupDegraded`; provider capabilities and transfer keys remain internal.
+
 ## Skill suggestion frequency (2026-10-27)
 
 Web and Android prefer frequently invoked skill names in `$` suggestions, within

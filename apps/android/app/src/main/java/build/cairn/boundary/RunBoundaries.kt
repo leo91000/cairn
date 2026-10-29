@@ -95,6 +95,7 @@ data class NodeBackup(
 @Serializable
 data class RunStorage(
     val mode: String = "",
+    val backupDegraded: Boolean = false,
     val localBytes: Long? = null,
     val dirtyBytes: Long? = null,
     val dirtySince: Long? = null,

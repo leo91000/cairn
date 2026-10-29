@@ -384,6 +384,21 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await header.click()
   await expect(panel).toContainText('182.5 MiB on this node')
   await expect(panel).toContainText('175.4 MiB not yet saved')
+  workspace.service.store.updateRun(detail.run.id, {
+    storage: {
+      mode: 'on-demand',
+      localBytes: 191392768,
+      dirtyBytes: 183890000,
+      dirtySince: Date.now() - 600000,
+      backupDegraded: true,
+    },
+  } as any)
+  await heartbeat()
+  await expect(header).toContainText('Sync overdue', { timeout: 15000 })
+  await expect(panel).toContainText('Work can continue while local storage is safe')
+  workspace.service.store.updateRun(detail.run.id, { storage: { backupDegraded: false } } as any)
+  await heartbeat()
+  await expect(header).toContainText('Saving…', { timeout: 15000 })
   await page.screenshot({ path: 'test-results/execution-desktop.png' })
   await page.keyboard.press('Escape')
   await page.setViewportSize({ width: 390, height: 844 })

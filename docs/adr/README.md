@@ -84,7 +84,8 @@ for current behavior.
 | 0073 | [Automatic placement with per-agent node priorities](0073-automatic-agent-placement.md) |
 | 0074 | [Un outil Cairn commun pour les questions des agents](0074-common-agent-question-tool.md) |
 | 0075 | [Hooks de plugins, règles sans code et droits restreints par ressource](0075-plugin-hooks-rules-and-scoped-grants.md) |
-| 0076 | [Les tours de plan sont bornés par Cairn, pas par le modèle](0076-plan-turns.md) |
+| 0076 | [Transferts directs de stockage confiés aux nodes](0076-direct-node-storage-transfers.md) |
+| 0077 | [Les tours de plan sont bornés par Cairn, pas par le modèle](0077-plan-turns.md) |
 
 ## Renumbered collisions
 

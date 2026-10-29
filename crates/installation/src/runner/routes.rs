@@ -81,9 +81,11 @@ pub(super) async fn handler(State(broker): State<Broker>, request: Request) -> R
         ["snapshots", snapshot, hash] => snapshot_file(&broker, request, snapshot, hash).await,
         ["disks", run, "snapshot"] => disk_snapshot(&broker, request, run).await,
         ["disks", run, "snapshot-completed"] => completed_snapshot(&broker, request, run).await,
-        ["disks", run, operation @ ("storage-status" | "published")] => {
-            disk_storage(&broker, request, run, operation).await
-        }
+        [
+            "disks",
+            run,
+            operation @ ("storage-status" | "published" | "publication-fence"),
+        ] => disk_storage(&broker, request, run, operation).await,
         ["disks", run, "restore"] => disk_restore(&broker, request, run).await,
         ["disks", run, action] => disk_action(&broker, request, run, action).await,
         _ => run_route(broker, request, &segments).await,
@@ -105,6 +107,7 @@ async fn health(broker: &Broker) -> Result<Response> {
         "backend": Backend::Firecracker,
         "runtimeId": runtime_id,
         "nodeProtocol": NODE_PROTOCOL,
+        "directStorageProtocol": 1,
         "sharedResources": broker.pool.budget().await.is_some(),
         "exclusiveReservations": true,
         "dataRoot": broker.data,
@@ -193,9 +196,25 @@ async fn snapshot_file(
 ) -> Result<Response> {
     uuid(snapshot)?;
     let directory = broker.state.join("snapshots").join(snapshot);
+    if hash == "direct-reader" {
+        if request.method() == "DELETE" {
+            crate::nodes::snapshots::close_direct_reader(&directory).await?;
+            return json_response(json!({ "closed": true }));
+        }
+        require_post(&request)?;
+        let bytes = body(request, 4096, "Invalid publication reader request.").await?;
+        return Ok(crate::nodes::snapshots::direct_reader(&directory, &bytes)
+            .await?
+            .into_response());
+    }
+    if request.method() == "POST" && hash == "direct-upload" {
+        let bytes = body(request, 131_072, "Invalid direct publication batch.").await?;
+        return json_response(
+            super::super::nodes::snapshots::upload_direct(&directory, &bytes).await?,
+        );
+    }
     if request.method() == "DELETE" && hash == "discard" {
-        tokio::fs::remove_dir_all(directory).await?;
-        crate::performance::publication::discard_snapshot(snapshot);
+        crate::nodes::snapshots::discard(&directory).await?;
         return json_response(json!({ "ok": true }));
     }
     if request.method() == "POST" && matches!(hash, "blocks" | "publication") {
@@ -294,6 +313,14 @@ async fn disk_storage(
 ) -> Result<Response> {
     uuid(run)?;
     require_post(&request)?;
+    if operation == "publication-fence" {
+        let bytes = body(request, 16384, "Invalid publication fence.").await?;
+        let fence: Value = decode(&bytes, "Invalid publication fence.")?;
+        let publication = text(&fence, "backupId");
+        uuid(publication)?;
+        crate::storage::runtime::fence_publication(&broker.state, run, publication).await?;
+        return json_response(json!({"fenced":publication}));
+    }
     let directory = crate::storage::environment::directory(&broker.state, run)?;
     if !crate::storage::runtime::exists(&directory) {
         return Err(Error::conflict("Conversation has no S3-backed journal."));
@@ -313,9 +340,14 @@ async fn disk_storage(
     let backup_id = receipt.backup_id;
     uuid(&backup_id)?;
     let disk = volume.disk.clone();
-    tokio::task::spawn_blocking(move || disk.commit_published(generation, &backup_id))
-        .await
-        .map_err(Error::internal)??;
+    let state = broker.state.clone();
+    tokio::task::spawn_blocking(move || {
+        volume
+            .source
+            .acknowledge(&state, &disk, generation, &backup_id)
+    })
+    .await
+    .map_err(Error::internal)??;
     json_response(json!({ "committed": true }))
 }
 
