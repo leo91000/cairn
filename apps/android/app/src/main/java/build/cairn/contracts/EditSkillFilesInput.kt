@@ -11,5 +11,7 @@ data class EditSkillFilesInput(
     val name: String,
     val scope: String = "global",
 ) {
-    init {}
+    init {
+        require(changes.size in 1..2000)
+    }
 }

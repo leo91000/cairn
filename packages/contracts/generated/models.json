@@ -7660,15 +7660,6 @@
             "null"
           ]
         },
-        "errorStatus": {
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
         "id": {
           "type": "string"
         },
@@ -7709,91 +7700,6 @@
     },
     "PluginOperationResult": {
       "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "project",
-              "type": "string"
-            },
-            "project": {
-              "$ref": "#/definitions/Project"
-            }
-          },
-          "required": [
-            "kind",
-            "project"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "sourceProjects",
-              "type": "string"
-            },
-            "page": {
-              "$ref": "#/definitions/PluginProjectPage"
-            }
-          },
-          "required": [
-            "kind",
-            "page"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "imported": {
-              "$ref": "#/definitions/SkillImport"
-            },
-            "kind": {
-              "const": "skillImport",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "imported"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "skillSource",
-              "type": "string"
-            },
-            "status": {
-              "$ref": "#/definitions/SkillSourceStatus"
-            }
-          },
-          "required": [
-            "kind",
-            "status"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "bundle": {
-              "$ref": "#/definitions/SkillBundle"
-            },
-            "kind": {
-              "const": "skillBundle",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "bundle"
-          ],
-          "type": "object"
-        },
         {
           "additionalProperties": false,
           "properties": {
