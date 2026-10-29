@@ -96,3 +96,8 @@ pub(crate) mod run_fixture;
 #[cfg(test)]
 #[path = "../tests/common/node_fixture.rs"]
 pub(crate) mod node_fixture;
+
+#[cfg(test)]
+#[path = "../tests/common/relay_fixture.rs"]
+#[allow(dead_code)]
+pub(crate) mod relay_fixture;

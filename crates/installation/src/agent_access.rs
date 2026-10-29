@@ -554,3 +554,124 @@ impl Service {
             .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{agent_fixture::AgentFixture, relay_fixture};
+
+    const MEMBER: &str = "member-account";
+
+    /// A member's request straight to the installation API, without the fixture relay's
+    /// own membership refresh, so only the installation decides when to confirm them.
+    async fn direct(s: &Arc<Service>, body: Value) -> std::result::Result<Value, (u16, String)> {
+        Box::pin(crate::api::dispatch(
+            s,
+            &crate::http::Input {
+                method: "POST".into(),
+                path: "/api/chats".into(),
+                query: std::collections::HashMap::default(),
+                headers: axum::http::HeaderMap::default(),
+                body,
+                identity: Some(InstallationIdentity::trusted(
+                    InstallationRole::Member,
+                    MEMBER,
+                )),
+            },
+        ))
+        .await
+        .map_err(|error| (error.status, error.message))
+    }
+
+    #[tokio::test]
+    async fn a_stale_membership_check_is_repeated_and_fails_closed_without_the_beacon() {
+        let root = tempfile::tempdir().unwrap();
+        let s = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().to_owned()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        std::fs::create_dir_all(&s.config.home).unwrap();
+        relay_fixture::claimed(&s).await.unwrap();
+        let reviewer = s
+            .agent_fixture(json!({ "name": "Reviewer" }), None)
+            .await
+            .unwrap();
+        let reviewer = text(&reviewer, "id").to_owned();
+        relay_fixture::allow_member(&s, MEMBER, &reviewer).await;
+        let start = json!({ "agentId": reviewer });
+
+        // While the Beacon cannot confirm the membership, the entry allows nothing.
+        relay_fixture::authority_unavailable(&s, true).await;
+        s.missions.expire_membership_check();
+        let (status, message) = direct(&s, start.clone()).await.unwrap_err();
+        assert_eq!(status, 503);
+        assert!(message.contains("could not be confirmed"), "{message}");
+        relay_fixture::authority_unavailable(&s, false).await;
+        direct(&s, start.clone()).await.unwrap();
+
+        // A recent check vouches for the entry; an expired one drops an ended membership.
+        relay_fixture::remove_member(&s, MEMBER).await;
+        relay_fixture::add_member(&s, MEMBER, "membership-2").await;
+        direct(&s, start.clone()).await.unwrap();
+        s.missions.expire_membership_check();
+        assert_eq!(direct(&s, start).await.unwrap_err().0, 403);
+    }
+
+    #[tokio::test]
+    async fn a_request_waits_only_for_the_lock_holders_own_membership_check() {
+        let root = tempfile::tempdir().unwrap();
+        let s = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().to_owned()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        relay_fixture::claimed(&s).await.unwrap();
+        s.missions.expire_membership_check();
+
+        // A long task admission holds the lock and confirms the memberships once.
+        let authors = s.missions.authors.lock().await;
+        let waiting = {
+            let s = s.clone();
+            tokio::spawn(async move {
+                s.missions
+                    .verify_membership(&s, std::time::Duration::from_secs(30))
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        s.missions.observe(&s).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("the request must not wait for the rest of the admission")
+            .unwrap()
+            .unwrap();
+        drop(authors);
+    }
+}
