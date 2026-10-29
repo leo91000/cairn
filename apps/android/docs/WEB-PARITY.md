@@ -1,5 +1,32 @@
 # Android 0.6.0 / web parity
 
+## Mermaid diagrams in Markdown (2026-10-29)
+
+Both apps draw closed ```` ```mermaid ```` (or `mmd`) fences in chat Markdown as native
+diagrams: flowcharts (directions, node shapes, subgraphs, link styles, heads and labels,
+`classDef`/`class`/`style`/`linkStyle`, http(s) `click` links, front-matter titles), state
+diagrams (start/end, composite states, choice, fork/join, notes), sequence diagrams
+(actors, every arrow kind, activations, notes, `loop`/`alt`/`opt`/`par`/`critical`/`break`/`rect`,
+`autonumber`) and pie charts. Neither app loads Mermaid or a WebView: `diagram.ts` /
+`Diagram.kt` parse the same model and `diagram-layout.ts` / `DiagramLayout.kt` compute the
+same scene, drawn as SVG on web and on a Compose canvas on Android with one light/dark
+palette. A fence stays code until its closing fence arrives, so streaming never flickers;
+unsupported types (gantt, class…) keep the code block, and invalid sources show their code
+with a short note. Each drawing has a source toggle, copy and a full-screen viewer with
+zoom and pan. This is presentation of existing message text, so public MCP and
+`cairn_installation` are unchanged: agents already read and write the Mermaid source.
+
+Platform differences: web labels in English, Android in French (« Logigramme »,
+« Diagramme d’états »…). The web viewer downloads SVG or PNG; Android shares a PNG. A failed
+diagram's source can be hidden on web and is always shown on Android. Android draws a fence
+inside a list item or quote at full width, and also draws a fence implicitly closed by the
+end of its list item or quote, which the web keeps as code.
+
+Validation: shared corpus `tests/fixtures/diagrams.json` (parsed models and layout
+signatures must match exactly) in `apps/web/tests/diagram.test.ts` and `DiagramCorpusTest`;
+browser journeys in `tests/e2e/chat-rendering.spec.ts` (Chromium and WebKit);
+`DiagramMarkdownTest` on Robolectric.
+
 ## Skill suggestion frequency (2026-10-27)
 
 Web and Android prefer frequently invoked skill names in `$` suggestions, within

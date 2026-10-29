@@ -20,6 +20,7 @@ import build.cairn.app.diagnostics.PerfOperation
 import build.cairn.app.diagnostics.Performance
 import io.noties.markwon.Markwon
 import io.noties.markwon.core.spans.BulletListItemSpan
+import io.noties.markwon.core.spans.CodeBlockSpan
 import io.noties.markwon.core.spans.OrderedListItemSpan
 import io.noties.markwon.ext.tables.TableRowSpan
 import io.noties.markwon.ext.tables.TableSpan
@@ -30,12 +31,24 @@ import org.commonmark.ext.gfm.tables.TableBlock
 import org.commonmark.ext.gfm.tables.TableCell
 import org.commonmark.ext.gfm.tables.TablesExtension
 import org.commonmark.node.AbstractVisitor
+import org.commonmark.node.BlockQuote
 import org.commonmark.node.CustomBlock
 import org.commonmark.node.Document
+import org.commonmark.node.FencedCodeBlock
+import org.commonmark.node.IndentedCodeBlock
+import org.commonmark.node.ListBlock
+import org.commonmark.node.ListItem
+import org.commonmark.node.Node
 import org.commonmark.renderer.html.HtmlRenderer
 
 /** A rendered group is immutable and shared with the UI until its parsed content changes. */
-internal class MarkdownBlock(val signature: String, val text: Spanned, val tableColumns: Int = 0)
+internal class MarkdownBlock(
+    val signature: String,
+    val text: Spanned,
+    val tableColumns: Int = 0,
+    /** A closed Mermaid fence, drawn natively instead of its code. */
+    val diagram: DiagramRender? = null,
+)
 
 /**
  * Parse the full document so references, unfinished fences and lists stay correct. Render small
@@ -43,11 +56,15 @@ internal class MarkdownBlock(val signature: String, val text: Spanned, val table
  * fingerprint (never displayed or loaded in a WebView). Each instance belongs to one sequential
  * background collector.
  */
-internal class MarkdownBlocks(private val markwon: Markwon) {
+internal class MarkdownBlocks(
+    private val markwon: Markwon,
+    measure: TextMeasure = TextMeasure { text, size, _ -> text.length * size * 0.56 },
+) {
     private val signatures =
         HtmlRenderer.builder()
             .extensions(listOf(TablesExtension.create(), StrikethroughExtension.create()))
             .build()
+    private val diagrams = DiagramCache(measure)
 
     private class Group(val signature: String, val blocks: List<MarkdownBlock>)
 
@@ -56,37 +73,77 @@ internal class MarkdownBlocks(private val markwon: Markwon) {
     fun render(content: String): List<MarkdownBlock> =
         Performance.measure(PerfOperation.MARKDOWN) {
             val document = markwon.parse(content)
+            // A Mermaid fence still streaming stays code until its closing fence arrives, so
+            // drawings never flicker. Its group's signature changes once the fence closes.
+            val streaming = streamingFence(document, content)
+            var streamingTop: Node? = streaming
+            while (streamingTop != null && streamingTop.parent !== document) streamingTop =
+                streamingTop.parent
             val result = mutableListOf<Group>()
             var node = document.firstChild
             while (node != null) {
                 val group = Document()
                 var count = 0
+                var open = false
                 // Fixed groups keep already displayed boundaries stable while appending.
                 while (node != null && count < 8) {
                     val next = node.next
+                    open = open || node === streamingTop
                     group.appendChild(node)
                     node = next
                     count++
                 }
-                val signature = signatures.render(group)
+                val signature = signatures.render(group) + if (open) "\u0000streaming" else ""
                 val cached = previous.getOrNull(result.size)
                 result.add(
                     if (cached?.signature == signature) cached
-                    else Group(signature, renderGroup(group, signature))
+                    else Group(signature, renderGroup(group, signature, streaming))
                 )
             }
             previous = result
             result.flatMap { it.blocks }
         }
 
-    /** Split rendered spans, so tables at any nesting depth scroll without widening prose. */
-    private fun renderGroup(group: Document, signature: String): List<MarkdownBlock> {
+    /**
+     * The document's trailing Mermaid fence while its closing fence has not arrived. Only the last
+     * block can still be streaming; earlier fences were closed by later content.
+     */
+    private fun streamingFence(document: Node, content: String): FencedCodeBlock? {
+        var node = document.lastChild
+        while (node is BlockQuote || node is ListBlock || node is ListItem) node = node.lastChild
+        val fence = node as? FencedCodeBlock ?: return null
+        if (!isDiagramLanguage(fenceLanguage(fence.info))) return null
+        // Closed by a last line of the opening fence's character, at least as long as it.
+        val trimmed = content.trimEnd()
+        val closing = trimmed.substringAfterLast('\n').trimStart(' ', '\t', '>').trim()
+        val closed =
+            trimmed.contains('\n') &&
+                closing.length >= fence.fenceLength &&
+                closing.all { it == fence.fenceChar }
+        return fence.takeUnless { closed }
+    }
+
+    /**
+     * Split rendered spans, so tables at any nesting depth scroll without widening prose and closed
+     * Mermaid fences become drawings between the text around them.
+     */
+    private fun renderGroup(
+        group: Document,
+        signature: String,
+        streaming: FencedCodeBlock?,
+    ): List<MarkdownBlock> {
         val text = markwon.render(group)
         val tables =
             text.getSpans(0, text.length, TableSpan::class.java).sortedBy { text.getSpanStart(it) }
-        if (tables.isEmpty()) return listOf(MarkdownBlock(signature, text))
+        val codes =
+            text.getSpans(0, text.length, CodeBlockSpan::class.java).sortedBy {
+                text.getSpanStart(it)
+            }
+        if (tables.isEmpty() && codes.isEmpty()) return listOf(MarkdownBlock(signature, text))
 
         val columns = mutableListOf<Int>()
+        // One entry per code block, in document order like their spans.
+        val fences = mutableListOf<DiagramRender?>()
         group.accept(
             object : AbstractVisitor() {
                 override fun visit(block: CustomBlock) {
@@ -102,15 +159,33 @@ internal class MarkdownBlocks(private val markwon: Markwon) {
                     }
                     visitChildren(block)
                 }
+
+                override fun visit(block: FencedCodeBlock) {
+                    fences.add(
+                        if (block === streaming || !isDiagramLanguage(fenceLanguage(block.info)))
+                            null
+                        else diagrams.render(block.literal.orEmpty().removeSuffix("\n"))
+                    )
+                }
+
+                override fun visit(block: IndentedCodeBlock) {
+                    fences.add(null)
+                }
             }
         )
+        val drawings =
+            if (fences.size == codes.size)
+                codes.zip(fences).mapNotNull { (span, diagram) -> diagram?.let { span to it } }
+            else emptyList()
+        if (tables.isEmpty() && drawings.isEmpty()) return listOf(MarkdownBlock(signature, text))
+
         val blocks = mutableListOf<MarkdownBlock>()
-        fun append(from: Int, to: Int, tableColumns: Int = 0) {
+        fun append(from: Int, to: Int, tableColumns: Int = 0, diagram: DiagramRender? = null) {
             var start = from
             var end = to
             while (start < end && text[start] == '\n') start++
             while (end > start && text[end - 1] == '\n') end--
-            if (start == end) return
+            if (start == end && diagram == null) return
             val part = SpannableStringBuilder(text, start, end)
             // Continued list items retain indentation without repeating a bullet or number.
             for (span in text.getSpans(start, end, LeadingMarginSpan::class.java)) {
@@ -127,15 +202,22 @@ internal class MarkdownBlocks(private val markwon: Markwon) {
                     )
                 }
             }
-            blocks.add(MarkdownBlock("$signature#${blocks.size}", part, tableColumns))
+            blocks.add(MarkdownBlock("$signature#${blocks.size}", part, tableColumns, diagram))
         }
+        class Part(val start: Int, val end: Int, val columns: Int, val diagram: DiagramRender?)
+        val parts =
+            (tables.mapIndexed { index, table ->
+                    Part(text.getSpanStart(table), text.getSpanEnd(table), columns[index], null)
+                } +
+                    drawings.map { (span, diagram) ->
+                        Part(text.getSpanStart(span), text.getSpanEnd(span), 0, diagram)
+                    })
+                .sortedBy { it.start }
         var start = 0
-        tables.forEachIndexed { index, table ->
-            val tableStart = text.getSpanStart(table)
-            val tableEnd = text.getSpanEnd(table)
-            append(start, tableStart)
-            append(tableStart, tableEnd, columns[index])
-            start = tableEnd
+        for (part in parts) {
+            append(start, part.start)
+            append(part.start, part.end, part.columns, part.diagram)
+            start = part.end
         }
         append(start, text.length)
         return blocks

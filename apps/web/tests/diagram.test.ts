@@ -50,7 +50,7 @@ describe('diagrams (shared Android corpus)', () => {
   })
 
   it.each(corpus.errors)('rejects $name', ({ source }) => {
-    expect(() => parseDiagram(source)).toThrow(DiagramError)
+    expect(() => layoutDiagram(parseDiagram(source), measure)).toThrow(DiagramError)
   })
 
   it.each(corpus.unsupported)('keeps unsupported source %#', (source) => {

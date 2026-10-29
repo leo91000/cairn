@@ -1687,6 +1687,43 @@
         "height": 246,
         "items": 18
       }
+    },
+    {
+      "name": "flowchart-entity-codes",
+      "source": "flowchart LR\n  A[\"caf&#233; #35;1 #constructor; &__proto__;\"] --> B@{ shape: constructor }",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "café #1 #constructor; &__proto__;",
+            "shape": "rect"
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 326,
+        "height": 86,
+        "items": 6
+      }
     }
   ],
   "errors": [
@@ -1709,6 +1746,14 @@
     {
       "name": "empty-pie",
       "source": "pie title Nothing"
+    },
+    {
+      "name": "empty-flowchart",
+      "source": "flowchart TD"
+    },
+    {
+      "name": "empty-sequence",
+      "source": "sequenceDiagram\n  loop x\n  end"
     }
   ],
   "unsupported": [

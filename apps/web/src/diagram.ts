@@ -239,6 +239,11 @@ const ENTITIES: Record<string, string> = {
   '#39': '\'',
 }
 
+function entity(name: string) {
+  const key = name.toLowerCase()
+  return Object.hasOwn(ENTITIES, key) ? ENTITIES[key] : undefined
+}
+
 /** Mermaid labels allow entity codes, <br> breaks, simple tags and Markdown strings. */
 export function cleanLabel(value: string) {
   let label = unquote(value)
@@ -248,14 +253,14 @@ export function cleanLabel(value: string) {
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/\\n/g, '\n')
     .replace(/<\/?[a-z][^<>]*>/gi, '')
-    .replace(/#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)))
-    .replace(/#([a-z]+);/gi, (match, name: string) => ENTITIES[name.toLowerCase()] ?? match)
+    .replace(/(?<!&)#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)))
+    .replace(/(?<!&)#([a-z]+);/gi, (match, name: string) => entity(name) ?? match)
     .replace(/&(#?\w+);/g, (match, name: string) => {
       if (/^#\d+$/.test(name))
         return String.fromCodePoint(Number(name.slice(1)))
       if (/^#x[\da-f]+$/i.test(name))
         return String.fromCodePoint(Number.parseInt(name.slice(2), 16))
-      return ENTITIES[name.toLowerCase()] ?? match
+      return entity(name) ?? match
     })
     .replace(/\bfa[bsr]?:fa-[\w-]+\s*/g, '')
     .replace(/\*\*(.+?)\*\*/g, '$1')
@@ -590,7 +595,7 @@ function readNode(scanner: Scanner): NodeRef | undefined {
     scanner.index = end + 1
     const shape = /\bshape\s*:\s*([\w-]+)/.exec(body)?.[1]?.toLowerCase()
     const label = /\blabel\s*:\s*("(?:[^"\\]|\\.)*"|'[^']*'|[^,}]+)/.exec(body)?.[1]
-    node.shape = (shape && NAMED_SHAPES[shape]) || 'rect'
+    node.shape = (shape && Object.hasOwn(NAMED_SHAPES, shape) && NAMED_SHAPES[shape]) || 'rect'
     node.label = label === undefined ? id : cleanLabel(label)
   }
   else {

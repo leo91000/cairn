@@ -103,6 +103,14 @@ async function openLink(event: MouseEvent) {
   }
 }
 
+/** A fence is closed by a line of its own character, at least as long as its opening. */
+function closedFence(raw: string) {
+  const lines = raw.trimEnd().split('\n')
+  const opening = /^ {0,3}(`{3,}|~{3,})/.exec(lines[0]!)?.[1]
+  const closing = lines.length > 1 ? lines.at(-1)!.trim() : ''
+  return !!opening && closing.length >= opening.length && closing === opening[0]!.repeat(closing.length)
+}
+
 const html = computed(() => {
   let rawHtml = false
   // Streaming fences stay code until their closing fence arrives, so drawings never flicker.
@@ -112,7 +120,7 @@ const html = computed(() => {
     walkTokens(token) {
       if (token.type === 'html')
         rawHtml = true
-      if (token.type === 'code' && isDiagramLanguage(token.lang) && /\n {0,3}(?:`{3,}|~{3,})[ \t]*$/.test(token.raw.trimEnd()))
+      if (token.type === 'code' && isDiagramLanguage(token.lang?.split(/\s/)[0]) && closedFence(token.raw))
         finished.add(token.text)
 
       // Sync parsing needs no callback results. Avoid growing the result array

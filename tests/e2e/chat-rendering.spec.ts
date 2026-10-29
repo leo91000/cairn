@@ -106,3 +106,49 @@ test('raw HTML retains parser normalization for SVG, MathML and raw text contain
     expect(await page.locator('#app .markdown style').textContent()).toContain('<a ')
   }
 })
+
+test('Mermaid fences draw once closed, keep their source view while streaming and open a zoomable viewer', async ({ page, browserName }) => {
+  const fence = '```mermaid\nflowchart LR\n  A[Start] -->|go| B{Ready?}\n  B --> C((Done))'
+  await page.evaluate(text => window.chatRendering.markdown(text), `Plan:\n\n${fence}`)
+  await expect(page.locator('#app .markdown pre code')).toContainText('flowchart LR')
+  await expect(page.locator('#app figure.diagram')).toHaveCount(0)
+
+  await page.evaluate(text => window.chatRendering.markdown(text), `Plan:\n\n${fence}\n\`\`\`\n\nAfter`)
+  const figure = page.locator('#app figure.diagram')
+  await expect(figure.locator('svg[role="img"]')).toHaveAttribute('aria-label', 'Flowchart with 3 nodes')
+  await expect(figure.locator('svg text')).toContainText(['go', 'Start', 'Ready?', 'Done'])
+  await expect(figure.locator('.diagram-source')).toBeHidden()
+
+  await figure.getByRole('button', { name: 'Show source' }).click()
+  await expect(figure.getByRole('button', { name: 'Show source' })).toHaveAttribute('aria-pressed', 'true')
+  await expect(figure.locator('.diagram-source')).toContainText('A[Start] -->|go| B{Ready?}')
+  const drawing = await figure.locator('svg').elementHandle()
+  await page.evaluate(text => window.chatRendering.markdown(text), `Plan:\n\n${fence}\n\`\`\`\n\nAfter, continued`)
+  expect(await drawing!.evaluate(element => element.isConnected)).toBe(true)
+  await expect(figure.locator('.diagram-source')).toBeVisible()
+
+  if (browserName === 'chromium') {
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
+    await figure.getByRole('button', { name: 'Copy source' }).click()
+    await expect(figure.getByRole('button', { name: 'Copy source' })).toHaveAttribute('title', 'Copied')
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toContain('flowchart LR')
+  }
+
+  await figure.getByRole('button', { name: 'Open diagram' }).click()
+  const viewer = page.getByRole('dialog', { name: 'Flowchart' })
+  await expect(viewer.locator('svg[role="img"]')).toBeVisible()
+  const fitted = await viewer.getByRole('button', { name: 'Fit to view' }).first().textContent()
+  await viewer.getByRole('button', { name: 'Zoom in' }).click()
+  await expect(viewer.getByRole('button', { name: 'Fit to view' }).first()).not.toHaveText(fitted!)
+  await page.keyboard.press('Escape')
+  await expect(viewer).toBeHidden()
+})
+
+test('unsupported and invalid Mermaid sources stay readable as code', async ({ page }) => {
+  await page.evaluate(text => window.chatRendering.markdown(text), '```mermaid\ngantt\n  title Plan\n```\n\n```mermaid\nflowchart TD\n  A[Start --> B\n```')
+  await expect(page.locator('#app .markdown > pre code')).toContainText('gantt')
+  const failed = page.locator('#app figure.diagram-failed')
+  await expect(failed.locator('.diagram-error')).toContainText('Couldn’t draw this diagram.')
+  await expect(failed.locator('.diagram-source')).toContainText('A[Start --> B')
+  await expect(failed.getByRole('button', { name: 'Open diagram' })).toHaveCount(0)
+})

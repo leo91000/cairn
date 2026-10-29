@@ -536,6 +536,8 @@ interface Box {
 }
 
 export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
+  if (!graph.nodes.length && !graph.clusters.length)
+    throw new DiagramError('This diagram has nothing to draw.')
   const horizontal = graph.direction === 'LR' || graph.direction === 'RL'
   const clusters = new Map(graph.clusters.map(cluster => [cluster.id, cluster]))
   const chains = new Map<string, string[]>()
@@ -990,7 +992,7 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
       }
 
       const size = layers[rank + 1]!.length + 1
-      const tree = Array.from({ length: size + 1 }).fill(0)
+      const tree = Array.from<number>({ length: size + 1 }).fill(0)
       for (const [index, end] of ends.entries()) {
         let below = 0
         for (let at = end + 1; at > 0; at -= at & -at)
@@ -1220,8 +1222,8 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
 
   // Vertical positions: rank gaps grow where clusters open or close.
   const rankHeight = layers.map(layer => Math.max(0, ...layer.map(node => node.h)))
-  const opening = Array.from({ length: rankCount }).fill(0)
-  const closing = Array.from({ length: rankCount }).fill(0)
+  const opening = Array.from<number>({ length: rankCount }).fill(0)
+  const closing = Array.from<number>({ length: rankCount }).fill(0)
   for (const layer of layers) {
     for (const node of layer) {
       let opens = 0
@@ -1653,6 +1655,8 @@ const SEQ_FONT = 13
 const ACTOR_GAP = 44
 
 export function layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Scene {
+  if (!diagram.participants.length)
+    throw new DiagramError('This diagram has nothing to draw.')
   const items: SceneItem[] = []
   const titleBlock = diagram.title ? textBlock(diagram.title, TITLE_FONT, 600, 480, measure) : undefined
   const top = MARGIN + (titleBlock ? titleBlock.height + 14 : 0)
