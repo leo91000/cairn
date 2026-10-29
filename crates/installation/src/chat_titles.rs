@@ -519,7 +519,6 @@ mod tests {
                     "title": "Configurer GitHub",
                     "updatedAt": 1,
                 });
-                db.save_conversation_boundary(&chat)?;
                 let run = json!({
                     "id": "run",
                     "taskId": "chat",
@@ -528,6 +527,7 @@ mod tests {
                     "createdAt": 1,
                 });
                 db.add_run_fixture(&run, None)?;
+                db.save_conversation_boundary(&chat)?;
                 db.event(
                     "run",
                     &EventKind::ChatUser,

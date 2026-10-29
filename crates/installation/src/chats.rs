@@ -1742,7 +1742,7 @@ mod tests {
         connection
             .execute_batch(
                 "ALTER TABLE chat_messages RENAME TO retained_messages;
-CREATE VIEW chat_messages AS SELECT id,chat_id,revision,purge_marker(text) AS text,
+CREATE VIEW chat_messages AS SELECT rowid AS rowid,id,chat_id,revision,purge_marker(text) AS text,
 provider,model,reasoning,speed,mode,status,created_at,question_id,answers FROM retained_messages;",
             )
             .unwrap();
@@ -2067,7 +2067,7 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,answers FROM r
                             "status": "queued",
                             "createdAt": 1,
                         });
-                        db.put_message(&message)?;
+                        let message = db.put_message(&message)?;
                         launch_turn(db, "chat", Some(run.clone()), message, run)?;
                         let queued = db.run("run")?.unwrap();
                         assert_eq!(queued["status"], "queued");
@@ -2357,6 +2357,7 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,answers FROM r
                 let new_codex = json!({ "id": "new-codex", "runId": null, "agentId": codex });
                 let new_claude = json!({ "id": "new-claude", "runId": null, "agentId": claude });
                 let switched = json!({ "id": "switched", "runId": "claude-run", "agentId": codex });
+                db.save_conversation_boundary(&switched)?;
                 let fast = |provider: &str| json!({ "id": id(), "provider": provider, "speed": "priority" });
                 let refused = |chat: &Value, message: &Value| {
                     validate_speed(db, chat, message).unwrap_err().status == 400
@@ -2396,6 +2397,7 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,answers FROM r
                 });
                 db.add_run_fixture(&running, None)?;
                 let steering = json!({ "id": "steering", "runId": "codex-run", "agentId": codex });
+                db.save_conversation_boundary(&steering)?;
                 let switching = json!({
                     "id": "switching",
                     "chatId": "steering",

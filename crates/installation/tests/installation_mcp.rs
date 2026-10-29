@@ -1173,6 +1173,28 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "read_run_history",
         "read_run_content",
     ]);
+    public_names.extend([
+        "get_conversation_retention",
+        "set_conversation_retention",
+        "get_chat_coding_agent_options",
+        "switch_chat_coding_agent",
+        "list_chats",
+        "get_chat",
+        "create_chat",
+        "convert_run_to_chat",
+        "send_chat_message",
+        "edit_chat_message",
+        "delete_chat_message",
+        "rename_chat",
+        "set_chat_paused",
+        "stop_chat",
+        "compact_chat",
+        "delete_chat",
+        "resume_chat",
+        "restart_chat_session",
+        "restore_chat",
+        "read_chat_content",
+    ]);
     public_names.insert(cairn_contracts::RESUME_RUN_ID);
     public_names.insert("manage_plugin");
     public_names.extend([
@@ -1804,6 +1826,7 @@ async fn installation_access_can_save_global_and_project_skills() {
     let content = "---\nname: independent-review\ndescription: Review until clean.\n---\n\nReview, fix, and repeat.\n";
     s.store
         .write(|db| {
+            db.save_conversation_boundary(&json!({ "id": "another-device" }))?;
             db.put_message(&json!({
                 "id": "skill-usage",
                 "chatId": "another-device",
@@ -2554,7 +2577,8 @@ async fn both_mcp_endpoints_list_current_chat_account_waits() {
             assert_eq!(listed["accountRequired"], detail["run"]["accountRequired"]);
             assert_eq!(listed["accountWaitReason"], detail["accountWaitReason"]);
             assert_eq!(listed["accountRequired"], detail["accountRequired"]);
-            assert!(listed.get("run").is_none());
+            assert!(listed["run"].is_null());
+            assert_eq!(listed["messages"], json!([]));
         }
     }
     s.store
@@ -3239,7 +3263,7 @@ async fn code_mode_discovers_schemas_and_composes_chat_and_artifact_reads() {
             await cairn.send_chat_message({chatId: chat.id, message: input});
             const detail = await cairn.get_chat({chatId: chat.id});
             const files = await cairn.list_chat_artifacts({chatId: chat.id});
-            return {id: chat.id, text: detail.messages[0].text, files: files.artifacts.length};
+            return {id: chat.id, text: detail.messages[0].message.text, files: files.artifacts.length};
         "#,
     })).await;
     assert_eq!(
