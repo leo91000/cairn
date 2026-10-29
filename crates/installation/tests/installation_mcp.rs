@@ -5847,7 +5847,16 @@ async fn slow_resource_imports_complete_through_both_tools_without_extending_cod
         };
         let version = "1".repeat(40);
         let tree = "2".repeat(40);
-        github.respond("repos/fixture/skills/commits/main", &json!({"sha":version,"commit":{"tree":{"sha":tree},"message":"Release","committer":{"date":"2026-10-01"}}}));
+        let commit = json!({
+            "sha": version,
+            "commit": {
+                "tree": { "sha": tree },
+                "message": "Release",
+                "committer": { "date": "2026-10-01" },
+            },
+        });
+        github.respond("repos/fixture/skills/commits/main", &commit);
+        github.respond(&format!("repos/fixture/skills/commits/{version}"), &commit);
         let mut files = Vec::new();
         for index in 0..7 {
             let blob = format!("{:040x}", index + 100);
