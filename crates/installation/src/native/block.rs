@@ -280,6 +280,12 @@ pub struct Mounted {
     _physical: Option<crate::file_lock::Guard>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Completion {
+    Flushed,
+    CrashPrefix,
+}
+
 pub async fn mount(
     state: &Path,
     run: &str,
@@ -519,9 +525,9 @@ impl Mounted {
     /// Keep this object owned on every error: an uncertain flush/unmount cannot
     /// release its physical lease or terminate a backend still serving a mount.
     pub async fn abort_io(&mut self) -> Result<()> {
-        // Abort only after cancellation during preparation or a failed systemd
-        // fence. A later non-lazy unmount remains mandatory. The retained journal
-        // then represents a crash prefix, like a forcibly stopped guest.
+        // Abort after cancellation during preparation, a failed systemd fence,
+        // or a fenced filesystem's terminal read-only flush failure. A later
+        // non-lazy unmount remains mandatory. The journal is a crash prefix.
         self.aborted = true;
         self.volume.stop.cancel();
 
@@ -539,11 +545,17 @@ impl Mounted {
         Ok(())
     }
 
-    pub async fn close(&mut self) -> Result<()> {
+    pub async fn close(&mut self) -> Result<Completion> {
         if self.mounted {
             if !self.aborted {
-                sync(&self.target).await?;
-                self.retained_usage = used_bytes(&self.target).ok();
+                match sync_io(&self.target).await {
+                    Ok(()) => self.retained_usage = used_bytes(&self.target).ok(),
+                    Err(error) if matches!(error.raw_os_error(), Some(libc::EROFS | libc::EIO)) => {
+                        tracing::error!(%error, "Native filesystem flush failed; retaining a crash prefix after fencing");
+                        self.abort_io().await?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             }
             unmount(&self.target).await?;
             self.mounted = false;
@@ -588,7 +600,11 @@ impl Mounted {
         }
         // No mount or backend can still use this controller-private attachment.
         retire_attachment(&self.jail).await?;
-        Ok(())
+        Ok(if self.aborted {
+            Completion::CrashPrefix
+        } else {
+            Completion::Flushed
+        })
     }
 }
 
@@ -610,6 +626,10 @@ async fn retire_attachment(jail: &Path) -> Result<()> {
 }
 
 pub async fn sync(path: &Path) -> Result<()> {
+    sync_io(path).await.map_err(Into::into)
+}
+
+async fn sync_io(path: &Path) -> std::io::Result<()> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         use std::os::fd::AsRawFd;
@@ -620,8 +640,7 @@ pub async fn sync(path: &Path) -> Result<()> {
         Ok(())
     })
     .await
-    .map_err(Error::internal)?
-    .map_err(Into::into)
+    .map_err(std::io::Error::other)?
 }
 
 pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> Result<()> {

@@ -433,7 +433,7 @@ impl Controller {
                 // volume can be released to a following attempt.
                 let _ = protection.await;
             }
-            let code = match result {
+            let mut code = match result {
                 Ok(code) => code,
                 Err(error) => {
                     let message = format!("Native execution failed: {}\n", error.message);
@@ -476,7 +476,12 @@ impl Controller {
                         }
                         .await;
                         match result {
-                            Ok(()) => break,
+                            Ok(block::Completion::Flushed) => break,
+                            Ok(block::Completion::CrashPrefix) => {
+                                code = crate::runner::CONTROLLER_FAILED;
+                                let _ = controller.append(&id, true, b"Native filesystem could not be flushed; the durable crash prefix was retained.\n").await;
+                                break;
+                            }
                             Err(error) => {
                                 tracing::error!(attempt = id, %error, "Native filesystem must finish flushing and unmounting before ownership release");
                                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -2102,6 +2107,7 @@ async fn bind_controller(path: &Path) -> Result<tokio::net::UnixListener> {
 }
 
 pub async fn serve(stop: CancellationToken) -> Result<()> {
+    super::limits::configure()?;
     let data = crate::nodes::node_data_dir();
     let state = super::state_dir();
     private_dir(&state).await?;
