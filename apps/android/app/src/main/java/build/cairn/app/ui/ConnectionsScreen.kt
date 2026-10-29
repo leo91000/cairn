@@ -160,6 +160,7 @@ fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) ->
                     } else {
                         vm.perform {
                             api.reconnectCodingAgentAccount(AccountInput(account.id))
+                                .requireConnection()
                             load()
                         }
                     }

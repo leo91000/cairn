@@ -6,6 +6,7 @@ import type {
   SignIn,
   UsageWindow,
 } from '../../../packages/contracts/accounts'
+import type { AccountMutationOutput } from '../../../packages/contracts/generated/typescript/AccountMutationOutput'
 import type { IconName } from './icons'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { cancelCodingAgentAccountSignIn } from '../../../packages/contracts/generated/cancelCodingAgentAccountSignIn'
@@ -98,6 +99,11 @@ export function resetsIn(seconds: number | null | undefined, now = Date.now()) {
 }
 
 /** Accounts of every coding agent and the sign-in in progress, kept current while mounted. */
+function requireCompleted(result: AccountMutationOutput) {
+  if (result.kind === 'humanRequired')
+    throw new Error(result.message)
+}
+
 export function useAccounts() {
   const accounts = ref<Account[]>([])
   const signIn = ref<SignIn | null>(null)
@@ -210,10 +216,10 @@ export function useAccounts() {
       throw new Error(result.kind === 'connected' ? 'Reconnect this account in Connections with an owner session.' : result.message)
     }),
     submitCode: (code: string) => action(async () => {
-      await submitCodingAgentAccountCode(api, { code })
+      requireCompleted(await submitCodingAgentAccountCode(api, { code }))
       return true
     }),
-    cancel: () => action(() => cancelCodingAgentAccountSignIn(api, {})),
+    cancel: () => action(async () => requireCompleted(await cancelCodingAgentAccountSignIn(api, {}))),
     update: (id: string, patch: Partial<Pick<Account, 'name' | 'enabled' | 'maxConcurrentRuns'>>) => action(() => {
       const account = accounts.value.find(account => account.id === id)
       if (!account)
@@ -236,7 +242,7 @@ export function useAccounts() {
       apply(result.overview)
     }),
     remove: (id: string) => action(async () => {
-      await deleteCodingAgentAccount(api, { accountId: id })
+      requireCompleted(await deleteCodingAgentAccount(api, { accountId: id }))
       return true
     }),
   }

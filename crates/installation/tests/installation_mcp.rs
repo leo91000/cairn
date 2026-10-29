@@ -4899,6 +4899,7 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
     })
     .await
     .unwrap();
+    common::relay_fixture::claimed(&s).await.unwrap();
     let main = enabled_main(&s).await;
     let (_, configuration) = active_run(&s, &main).await;
     let agent_token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
@@ -4948,6 +4949,90 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
     .await;
     assert_eq!(unsupported["kind"], "unsupported");
     assert!(s.store.coding_accounts().await.unwrap().is_empty());
+    let mut ids = Vec::new();
+    for (model_provider, key) in [
+        ("opencode", "synthetic-zen-key"),
+        ("openai", "synthetic-openai-key"),
+    ] {
+        let (status, connected) = account_http(&app, &owner, "POST", "/api/accounts", json!({
+            "provider":"opencode", "name":model_provider, "modelProvider":model_provider, "apiKey":key
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{connected}");
+        assert_eq!(connected["kind"], "connected");
+        assert!(!connected.to_string().contains(key));
+        ids.push(text(&connected["account"], "id").to_owned());
+    }
+    let (status, refreshed) =
+        account_http(&app, &owner, "POST", "/api/accounts/refresh", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{refreshed}");
+    assert_eq!(refreshed["kind"], "refreshed");
+    let (_, replaced) = account_http(
+        &app,
+        &owner,
+        "POST",
+        &format!("/api/accounts/{}/api-key", ids[0]),
+        json!({"modelProvider":"opencode","apiKey":"synthetic-replacement-key"}),
+    )
+    .await;
+    assert_eq!(replaced["kind"], "connected");
+    assert!(!replaced.to_string().contains("synthetic-replacement-key"));
+    let (_, unavailable) = account_http(
+        &app,
+        &owner,
+        "POST",
+        &format!("/api/accounts/{}/sign-in", ids[0]),
+        json!({}),
+    )
+    .await;
+    assert_eq!(unavailable["kind"], "unsupported");
+    assert_eq!(unavailable["capability"], "signIn");
+    ids.reverse();
+    let (_, ordered) = account_http(
+        &app,
+        &owner,
+        "POST",
+        "/api/accounts/order",
+        json!({"provider":"opencode","ids":ids}),
+    )
+    .await;
+    assert_eq!(ordered["kind"], "ordered");
+    for (endpoint, token) in [
+        ("/mcp", public.as_str()),
+        ("/mcp-installation", agent_token),
+    ] {
+        let (_, response) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "order_coding_agent_accounts",
+            json!({"provider":"opencode","ids":ids}),
+        )
+        .await;
+        assert_eq!(result(&response), &ordered);
+        let (_, response) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "order_coding_agent_accounts",
+            json!({"provider":"codex","ids":[]}),
+        )
+        .await;
+        assert_eq!(result(&response)["kind"], "unsupported");
+        assert_eq!(result(&response)["capability"], "order");
+        let (status, expected) =
+            account_http(&app, &owner, "GET", "/api/opencode/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{expected}");
+        assert!(!expected["models"].as_array().unwrap().is_empty());
+        let (_, response) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "list_models",
+            json!({"provider":"opencode"}),
+        )
+        .await;
+        assert_eq!(result(&response), &expected);
+    }
     for (endpoint, token) in [
         ("/mcp", public.as_str()),
         ("/mcp-installation", agent_token),
@@ -4976,6 +5061,7 @@ async fn agents_follow_owner_sign_in_without_challenge_or_mutation_authority() {
     })
     .await
     .unwrap();
+    common::relay_fixture::claimed(&s).await.unwrap();
     let main = enabled_main(&s).await;
     let (_, configuration) = active_run(&s, &main).await;
     let agent_token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
@@ -5076,6 +5162,36 @@ async fn agents_follow_owner_sign_in_without_challenge_or_mutation_authority() {
     })
     .await
     .unwrap();
+    let (status, catalog) =
+        account_http(&app, &owner, "GET", "/api/claude/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{catalog}");
+    assert!(!catalog["models"].as_array().unwrap().is_empty());
+    assert!(catalog.get("source").is_none());
+    for (endpoint, token) in [
+        ("/mcp", public.as_str()),
+        ("/mcp-installation", agent_token),
+    ] {
+        let (_, response) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "list_models",
+            json!({"provider":"claude"}),
+        )
+        .await;
+        assert_eq!(result(&response), &catalog);
+        let (_, response) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "get_coding_agent_account_sign_in",
+            json!({}),
+        )
+        .await;
+        assert_eq!(result(&response)["signIn"]["state"], "complete");
+        assert!(result(&response)["signIn"].get("url").is_none());
+        assert!(result(&response)["signIn"].get("code").is_none());
+    }
     let (_, reconnect) = account_http(
         &app,
         &owner,

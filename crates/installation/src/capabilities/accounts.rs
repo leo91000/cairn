@@ -126,13 +126,30 @@ impl AccountOperation {
             }
             _ => schema_for::<CodingAgentAccounts>(Contract::Serialize),
         };
+        let description = match self.name {
+            "list_models" => {
+                "List the models a coding agent offers on its enabled accounts: reasoning levels and, for Codex, the speeds (service tiers) each model offers with Codex's own description of their usage. Use a serviceTiers id, or \"standard\", as an agent or message speed. A tier marked limited is not confirmed by every account able to run the model; runs that ask for it prefer an account that confirms it. Before each turn attempt the run checks the tier against its Codex process model list and records a status event when the outcome changes: speed.applied is standard when the turn runs at Standard, speed.confirmed when the Codex process and the account's recent catalog both list the tier and the turn asks for it, speed.unconfirmed when it cannot be confirmed for the account and model (a model list could not be read or does not name the model exactly, or the account's catalog is unknown or older than 30 minutes)."
+            }
+            "get_coding_agent_account_sign_in" => {
+                "Read account identity, provider, state and phase of a sign-in already started by the human owner. Never returns its challenge URL, code, credentials or errors containing provider details."
+            }
+            _ => {
+                "Read model catalogs (including reasoning levels, routes and Codex service tiers), connection progress, account metadata and usage, or manage account settings/order with account policies. Refreshing credentials/usage, connecting, replacing credentials, submitting codes, cancelling sign-in and deleting credentials require an authenticated human owner; an installation grant is not human proof. Agents never receive sign-in challenges or credentials."
+            }
+        };
         json!({
             "name": self.name,
-            "description": "Read model catalogs (including reasoning levels, routes and Codex service tiers), connection progress, account metadata and usage, or manage account settings/order with account policies. Refreshing credentials/usage, connecting, replacing credentials, submitting codes, cancelling sign-in and deleting credentials require an authenticated human owner; an installation grant is not human proof. Agents never receive sign-in challenges or credentials.",
+            "description": description,
             "inputSchema": input,
             "outputSchema": output,
-            "_meta": { "securitySchemes": [{ "type":"oauth2", "scopes":[self.scope] }] },
-            "annotations": { "readOnlyHint": self.scope=="read", "destructiveHint": self.scope!="read", "openWorldHint": self.scope!="read" }
+            "_meta": {
+                "securitySchemes": [{ "type": "oauth2", "scopes": [self.scope] }]
+            },
+            "annotations": {
+                "readOnlyHint": self.scope == "read",
+                "destructiveHint": self.scope != "read",
+                "openWorldHint": self.scope != "read"
+            }
         })
     }
 
