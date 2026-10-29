@@ -320,3 +320,27 @@ test('links between larger subgraphs preserve their whole-group ordering', async
   })
   expect(ordered).toBe(true)
 })
+
+test('state notes retain their sides and unsupported local directions retain source', async ({ page }) => {
+  for (const direction of ['TB', 'BT', 'LR', 'RL']) {
+    await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\nstateDiagram-v2\ndirection ${direction}\nA-->B\nnote left of A : Left\nnote right of A : Right\n\`\`\``)
+    const positioned = await page.locator('#app figure.diagram svg').evaluate((svg) => {
+      const labels = [...svg.querySelectorAll('text')]
+      const center = (label: string) => {
+        const box = labels.find(text => text.textContent === label)!.getBoundingClientRect()
+        return { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+      }
+
+      const state = center('A')
+      const left = center('Left')
+      const right = center('Right')
+      return left.x < state.x && right.x > state.x && Math.abs(left.y - state.y) < 1 && Math.abs(right.y - state.y) < 1
+    })
+    expect(positioned).toBe(true)
+  }
+
+  await page.evaluate(text => window.chatRendering.markdown(text), '```mermaid\nflowchart TB\nsubgraph S\ndirection LR\nA-->B\nend\n```')
+  await expect(page.locator('#app .diagram-error')).toContainText('local direction')
+  await expect(page.locator('#app .diagram-error pre')).toContainText('direction LR')
+  await expect(page.locator('#app figure.diagram svg')).toHaveCount(0)
+})

@@ -253,6 +253,27 @@ class DiagramCorpusTest {
     }
 
     @Test
+    fun `keeps state notes on their physical sides in every direction`() {
+        for (direction in Direction.entries) {
+            val scene =
+                layoutDiagram(
+                    parseDiagram(
+                        "stateDiagram-v2\ndirection $direction\nA-->B\nnote left of A : Left\nnote right of A : Right"
+                    ),
+                    measure,
+                )
+            val texts = scene.items.filterIsInstance<TextItem>()
+            val state = texts.first { it.lines.firstOrNull() == "A" }
+            val left = texts.first { it.lines.firstOrNull() == "Left" }
+            val right = texts.first { it.lines.firstOrNull() == "Right" }
+            assertTrue(left.x < state.x)
+            assertTrue(right.x > state.x)
+            assertEquals(state.y, left.y, 0.01)
+            assertEquals(state.y, right.y, 0.01)
+        }
+    }
+
+    @Test
     fun `orders whole subgraphs beyond 400 member constraints`() {
         val source =
             cases("parse")
@@ -378,6 +399,12 @@ class DiagramCorpusTest {
                         node.parent?.let { put("parent", it) }
                         styleJson(node.style)?.let { put("style", it) }
                         node.link?.let { put("link", it) }
+                        node.annotation?.let { annotation ->
+                            putJsonObject("annotation") {
+                                put("target", annotation.target)
+                                put("side", annotation.side.id)
+                            }
+                        }
                     }
                 }
                 putJsonArray("edges") {

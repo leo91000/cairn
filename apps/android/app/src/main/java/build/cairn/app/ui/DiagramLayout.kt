@@ -775,6 +775,18 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     if (graph.nodes.isEmpty() && graph.clusters.isEmpty())
         throw DiagramError("This diagram has nothing to draw.")
     val horizontal = graph.direction == Direction.LR || graph.direction == Direction.RL
+    val annotations = LinkedHashMap<String, MutableList<GraphNode>>()
+    val annotationBoxes = HashMap<String, NodeBox>()
+    for (note in graph.nodes) {
+        val annotation = note.annotation ?: continue
+        val target = graph.nodes.find { it.id == annotation.target && it.annotation == null }
+        if (target == null || graph.edges.any { it.from == target.id && it.to == target.id })
+            throw DiagramError(
+                "Notes on composite states or states with self transitions are not supported."
+            )
+        annotations.getOrPut(target.id) { mutableListOf() }.add(note)
+        annotationBoxes[note.id] = nodeBox(note, horizontal, measure)
+    }
     val clusters = LinkedHashMap<String, GraphCluster>()
     for (cluster in graph.clusters) clusters[cluster.id] = cluster
     val chains = HashMap<String, List<String>>()
@@ -801,13 +813,23 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     }
 
     for (node in graph.nodes) {
+        if (node.annotation != null) continue
         val box = nodeBox(node, horizontal, measure)
+        val notes = annotations[node.id].orEmpty()
+        fun sideHeight(side: NotePlacement) =
+            notes
+                .filter { it.annotation!!.side == side }
+                .sumOf { annotationBoxes.getValue(it.id).h + 12 } - 12
+        val noteWidth = notes.maxOfOrNull { annotationBoxes.getValue(it.id).w + 28 } ?: 0.0
+        val reservedWidth = box.w + noteWidth * 2
+        val reservedHeight =
+            max(box.h, max(sideHeight(NotePlacement.LEFT), sideHeight(NotePlacement.RIGHT)))
         add(
             LNode(
                 key = node.id,
                 kind = LKind.NODE,
-                w = if (horizontal) box.h else box.w,
-                h = if (horizontal) box.w else box.h,
+                w = if (horizontal) reservedHeight else reservedWidth,
+                h = if (horizontal) reservedWidth else reservedHeight,
                 cluster = node.parent,
                 node = node,
                 box = box,
@@ -822,6 +844,7 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     // An empty cluster still draws its box around a placeholder.
     val members = LinkedHashMap<String, MutableList<String>>()
     for (node in graph.nodes) {
+        if (node.annotation != null) continue
         for (id in chainOf(node.parent)) members.append(id, node.id)
     }
 
@@ -1442,6 +1465,47 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
 
     for (node in nodes.values) node.y = rankY[node.rank]
 
+    // Notes reserve space with their target, then sit on the requested physical side in every
+    // direction.
+    for ((target, notes) in annotations) {
+        val node = nodes.getValue(target)
+        for (side in listOf(NotePlacement.LEFT, NotePlacement.RIGHT)) {
+            val attached = notes.filter { it.annotation!!.side == side }
+            val total = attached.sumOf { annotationBoxes.getValue(it.id).h + 12 } - 12
+            var y = -total / 2
+            for (note in attached) {
+                val box = annotationBoxes.getValue(note.id)
+                val dx =
+                    (if (side == NotePlacement.LEFT) -1 else 1) *
+                        (node.box!!.w / 2 + 28 + box.w / 2)
+                val dy = y + box.h / 2
+                val offset =
+                    when (graph.direction) {
+                        Direction.BT -> Pt(dx, -dy)
+                        Direction.LR -> Pt(dy, dx)
+                        Direction.RL -> Pt(dy, -dx)
+                        else -> Pt(dx, dy)
+                    }
+                val noteNode =
+                    add(
+                        LNode(
+                            key = note.id,
+                            kind = LKind.NODE,
+                            w = if (horizontal) box.h else box.w,
+                            h = if (horizontal) box.w else box.h,
+                            cluster = node.cluster,
+                            rank = node.rank,
+                            node = note,
+                            box = box,
+                        )
+                    )
+                noteNode.x = node.x + offset.x
+                noteNode.y = node.y + offset.y
+                y += box.h + 12
+            }
+        }
+    }
+
     // Cluster boxes, innermost first so parents can include their children.
     val boxes = LinkedHashMap<String, Box>()
     for (cluster in deepestFirst) {
@@ -1522,6 +1586,28 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     val labelItems = mutableListOf<SceneItem>()
     val titleItems = mutableListOf<SceneItem>()
     val nodeItems = mutableListOf<SceneItem>()
+
+    for ((target, notes) in annotations) {
+        val node = nodes.getValue(target)
+        val center = transform(Pt(node.x, node.y))
+        for (note in notes) {
+            val at = nodes.getValue(note.id)
+            val position = transform(Pt(at.x, at.y))
+            val sign = if (note.annotation!!.side == NotePlacement.LEFT) -1 else 1
+            edgeItems.add(
+                PathItem(
+                    d =
+                        listOf(
+                            PathCommand.Move(center.x + sign * node.box!!.w / 2, center.y),
+                            PathCommand.Line(position.x - sign * at.box!!.w / 2, position.y),
+                        ),
+                    stroke = DiagramPaint.Tone("edge"),
+                    width = 1.0,
+                    dash = listOf(4.0, 4.0),
+                )
+            )
+        }
+    }
 
     if (titleBlock != null) {
         items.add(
@@ -1607,6 +1693,8 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         val last = chain.last()
         fun port(node: LNode, toward: Double, side: Int): Pt {
             val shape = node.node?.shape ?: return Pt(node.x, node.y)
+            val w = node.box?.let { if (horizontal) it.h else it.w } ?: node.w
+            val h = node.box?.let { if (horizontal) it.w else it.h } ?: node.h
             val round =
                 shape == NodeShape.CIRCLE ||
                     shape == NodeShape.DOUBLE_CIRCLE ||
@@ -1614,11 +1702,11 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
                     shape == NodeShape.CHOICE ||
                     shape == NodeShape.START ||
                     shape == NodeShape.END
-            val reach = max(0.0, if (round) node.w * 0.2 else node.w / 2 - 12)
+            val reach = max(0.0, if (round) w * 0.2 else w / 2 - 12)
             val dx = max(-reach, min(reach, toward - node.x))
             // Transposed outlines only match for symmetric shapes; others leave from their flat
             // side.
-            val depth = if (horizontal && !round) node.h / 2 else outline(shape, node.w, node.h, dx)
+            val depth = if (horizontal && !round) h / 2 else outline(shape, w, h, dx)
             return Pt(node.x + dx, node.y + side * depth)
         }
 

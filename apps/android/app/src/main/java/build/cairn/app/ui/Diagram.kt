@@ -58,7 +58,10 @@ internal class GraphNode(val id: String, var label: String, var shape: NodeShape
     var parent: String? = null
     var style: DiagramStyle? = null
     var link: String? = null
+    var annotation: StateAnnotation? = null
 }
+
+internal data class StateAnnotation(val target: String, val side: NotePlacement)
 
 internal enum class EdgeLine(val id: String) {
     SOLID("solid"),
@@ -428,6 +431,7 @@ private fun direction(value: String?): Direction =
     }
 
 private class GraphBuilder {
+    val clusterDirections = LinkedHashMap<String, Direction>()
     val nodes = LinkedHashMap<String, GraphNode>()
     val edges = mutableListOf<GraphEdge>()
     val clusters = LinkedHashMap<String, GraphCluster>()
@@ -472,7 +476,11 @@ private class GraphBuilder {
             nodeClasses[id].orEmpty() + name
     }
 
-    fun build(title: String?, dir: Direction): GraphDiagram {
+    fun build(
+        title: String?,
+        dir: Direction,
+        inheritExternalDirection: Boolean = false,
+    ): GraphDiagram {
         // Reusing a cluster ID can reparent an existing ancestor. Reject cycles before layout.
         if (clusters.size > DiagramLimits.CLUSTERS)
             throw DiagramError("This diagram has too many subgraphs to draw.")
@@ -513,6 +521,33 @@ private class GraphBuilder {
         edges.forEachIndexed { index, edge ->
             val style = mergeStyle(linkStyles["default"], linkStyles[index.toString()])
             if (style != null) edge.style = style
+        }
+
+        for ((id, requested) in clusterDirections) {
+            if (requested == dir) continue
+            fun inside(key: String): Boolean {
+                if (key == id) return true
+                var parent = this.nodes[key]?.parent ?: clusters[key]?.parent
+                while (parent != null) {
+                    if (parent == id) return true
+                    parent = clusters[parent]?.parent
+                }
+                return false
+            }
+            // Mermaid inherits the parent direction when a member node has an external link.
+            val externalMemberLink =
+                this.edges.any { edge ->
+                    (this.nodes.containsKey(edge.from) &&
+                        !clusters.containsKey(edge.from) &&
+                        inside(edge.from) &&
+                        !inside(edge.to)) ||
+                        (this.nodes.containsKey(edge.to) &&
+                            !clusters.containsKey(edge.to) &&
+                            inside(edge.to) &&
+                            !inside(edge.from))
+                }
+            if (!inheritExternalDirection || !externalMemberLink)
+                throw DiagramError("Subgraphs with a different local direction are not supported.")
         }
 
         val known = nodes.map { it.id }.toSet() + clusters.keys
@@ -994,7 +1029,13 @@ private fun parseFlowchart(source: String): GraphDiagram {
             continue
         }
 
-        if (keyword == "direction") continue
+        if (keyword == "direction") {
+            val parent =
+                stack.lastOrNull()
+                    ?: throw DiagramError("Set the flowchart direction in its header.")
+            builder.clusterDirections[parent] = direction(rest)
+            continue
+        }
 
         if (keyword == "click") {
             val (id, target) = head(rest)
@@ -1009,7 +1050,7 @@ private fun parseFlowchart(source: String): GraphDiagram {
     }
 
     val dir = direction(FLOWCHART_DIRECTION.find(header ?: "")?.groupValues?.get(1))
-    return builder.build(statements.title, dir)
+    return builder.build(statements.title, dir, true)
 }
 
 private fun parseChain(line: String, builder: GraphBuilder, parent: String?) {
@@ -1105,6 +1146,7 @@ private fun parseState(source: String): GraphDiagram {
         val (keyword, rest) = head(line)
         if (keyword == "direction") {
             if (stack.isEmpty()) dir = direction(rest)
+            else builder.clusterDirections[stack.last()] = direction(rest)
             index++
             continue
         }
@@ -1137,21 +1179,16 @@ private fun parseState(source: String): GraphDiagram {
                 text = body.joinToString("\n")
             }
 
-            val id = "note-${++notes}"
-            builder.node(id, stack.lastOrNull(), NodeShape.NOTE, cleanLabel(text))
+            if (side != "left" && side != "right")
+                throw DiagramError("Only left and right state notes are supported.")
+            val id = "\u0000note:${++notes}"
+            val note = builder.node(id, stack.lastOrNull(), NodeShape.NOTE, cleanLabel(text))
             val attached = endpoint(target, from = false)
-            val left = side == "left"
-            builder.edge(
-                GraphEdge(
-                    from = if (left) id else attached,
-                    to = if (left) attached else id,
-                    label = "",
-                    line = EdgeLine.DOTTED,
-                    start = EdgeHead.NONE,
-                    end = EdgeHead.NONE,
-                    length = 1,
+            note.annotation =
+                StateAnnotation(
+                    attached,
+                    if (side == "left") NotePlacement.LEFT else NotePlacement.RIGHT,
                 )
-            )
             index++
             continue
         }

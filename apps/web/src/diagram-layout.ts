@@ -615,6 +615,20 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
   if (!graph.nodes.length && !graph.clusters.length)
     throw new DiagramError('This diagram has nothing to draw.')
   const horizontal = graph.direction === 'LR' || graph.direction === 'RL'
+  const annotations = new Map<string, GraphNode[]>()
+  const annotationBoxes = new Map<string, ReturnType<typeof nodeBox>>()
+  for (const note of graph.nodes) {
+    if (!note.annotation)
+      continue
+    const target = graph.nodes.find(node => node.id === note.annotation!.target && !node.annotation)
+    if (!target || graph.edges.some(edge => edge.from === target.id && edge.to === target.id))
+      throw new DiagramError('Notes on composite states or states with self transitions are not supported.')
+    const attached = annotations.get(target.id) ?? []
+    attached.push(note)
+    annotations.set(target.id, attached)
+    annotationBoxes.set(note.id, nodeBox(note, horizontal, measure))
+  }
+
   const clusters = new Map(graph.clusters.map(cluster => [cluster.id, cluster]))
   const chains = new Map<string, string[]>()
   const chainOf = (id: string | undefined) => {
@@ -641,12 +655,20 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
   }
 
   for (const node of graph.nodes) {
+    if (node.annotation)
+      continue
     const box = nodeBox(node, horizontal, measure)
+    const notes = annotations.get(node.id) ?? []
+    const sideHeight = (side: 'left' | 'right') => notes.filter(note => note.annotation!.side === side)
+      .reduce((height, note) => height + annotationBoxes.get(note.id)!.h + 12, -12)
+    const noteWidth = Math.max(0, ...notes.map(note => annotationBoxes.get(note.id)!.w + 28))
+    const reservedWidth = box.w + noteWidth * 2
+    const reservedHeight = Math.max(box.h, sideHeight('left'), sideHeight('right'))
     add({
       key: node.id,
       kind: 'node',
-      w: horizontal ? box.h : box.w,
-      h: horizontal ? box.w : box.h,
+      w: horizontal ? reservedHeight : reservedWidth,
+      h: horizontal ? reservedWidth : reservedHeight,
       cluster: node.parent,
       rank: 0,
       order: 0,
@@ -673,6 +695,8 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
 
   const members = new Map<string, string[]>()
   for (const node of graph.nodes) {
+    if (node.annotation)
+      continue
     for (const id of chainOf(node.parent))
       append(members, id, node.id)
   }
@@ -1352,6 +1376,41 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
   for (const node of nodes.values())
     node.y = rankY[node.rank]!
 
+  // Notes reserve space with their target, then sit on the requested physical side in every direction.
+  for (const [target, notes] of annotations) {
+    const node = nodes.get(target)!
+    for (const side of ['left', 'right'] as const) {
+      const attached = notes.filter(note => note.annotation!.side === side)
+      const total = attached.reduce((height, note) => height + annotationBoxes.get(note.id)!.h + 12, -12)
+      let y = -total / 2
+      for (const note of attached) {
+        const box = annotationBoxes.get(note.id)!
+        const dx = (side === 'left' ? -1 : 1) * (node.box!.w / 2 + 28 + box.w / 2)
+        const dy = y + box.h / 2
+        const offset: [number, number] = graph.direction === 'BT'
+          ? [dx, -dy]
+          : graph.direction === 'LR'
+            ? [dy, dx]
+            : graph.direction === 'RL' ? [dy, -dx] : [dx, dy]
+        add({
+          key: note.id,
+          kind: 'node',
+          w: horizontal ? box.h : box.w,
+          h: horizontal ? box.w : box.h,
+          cluster: node.cluster,
+          rank: node.rank,
+          order: 0,
+          x: node.x + offset[0],
+          y: node.y + offset[1],
+          extra: 0,
+          node: note,
+          box,
+        })
+        y += box.h + 12
+      }
+    }
+  }
+
   // Cluster boxes, innermost first so parents can include their children.
   const boxes = new Map<string, Box>()
   const ordered = [...graph.clusters].sort((a, b) => clusterDepth(b.id) - clusterDepth(a.id))
@@ -1444,6 +1503,23 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
   const titleItems: SceneItem[] = []
   const nodeItems: SceneItem[] = []
 
+  for (const [target, notes] of annotations) {
+    const node = nodes.get(target)!
+    const [cx, cy] = transform([node.x, node.y])
+    for (const note of notes) {
+      const at = nodes.get(note.id)!
+      const [nx, ny] = transform([at.x, at.y])
+      const sign = note.annotation!.side === 'left' ? -1 : 1
+      edgeItems.push({
+        kind: 'path',
+        d: [['M', cx + sign * node.box!.w / 2, cy], ['L', nx - sign * at.box!.w / 2, ny]],
+        stroke: { tone: 'edge' },
+        width: 1,
+        dash: [4, 4],
+      })
+    }
+  }
+
   if (titleBlock) {
     items.push({
       kind: 'text',
@@ -1519,11 +1595,13 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
       if (!node.node)
         return [node.x, node.y]
       const shape = node.node.shape
+      const w = node.box ? horizontal ? node.box.h : node.box.w : node.w
+      const h = node.box ? horizontal ? node.box.w : node.box.h : node.h
       const round = shape === 'circle' || shape === 'doublecircle' || shape === 'diamond' || shape === 'choice' || shape === 'start' || shape === 'end'
-      const reach = Math.max(0, round ? node.w * 0.2 : node.w / 2 - 12)
+      const reach = Math.max(0, round ? w * 0.2 : w / 2 - 12)
       const dx = Math.max(-reach, Math.min(reach, toward - node.x))
       // Transposed outlines only match for symmetric shapes; others leave from their flat side.
-      const depth = horizontal && !round ? node.h / 2 : outline(shape, node.w, node.h, dx)
+      const depth = horizontal && !round ? h / 2 : outline(shape, w, h, dx)
       return [node.x + dx, node.y + side * depth]
     }
 

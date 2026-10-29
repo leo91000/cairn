@@ -41,6 +41,7 @@ export interface GraphNode {
   parent?: string
   style?: DiagramStyle
   link?: string
+  annotation?: { target: string, side: 'left' | 'right' }
 }
 
 export type EdgeLine = 'solid' | 'dotted' | 'thick' | 'invisible'
@@ -350,6 +351,7 @@ function direction(value: string | undefined): Direction {
 }
 
 class GraphBuilder {
+  clusterDirections = new Map<string, Direction>()
   nodes = new Map<string, GraphNode>()
   edges: GraphEdge[] = []
   clusters = new Map<string, GraphCluster>()
@@ -388,7 +390,7 @@ class GraphBuilder {
       this.nodeClasses.set(id, [...(this.nodeClasses.get(id) ?? []), name])
   }
 
-  build(title: string | undefined, dir: Direction): GraphDiagram {
+  build(title: string | undefined, dir: Direction, inheritExternalDirection = false): GraphDiagram {
     // Reusing a cluster ID can reparent an existing ancestor. Reject cycles before layout.
     if (this.clusters.size > DIAGRAM_LIMITS.clusters)
       throw new DiagramError('This diagram has too many subgraphs to draw.')
@@ -434,6 +436,30 @@ class GraphBuilder {
       if (style)
         edge.style = style
     })
+
+    for (const [id, requested] of this.clusterDirections) {
+      if (requested === dir)
+        continue
+      const inside = (key: string) => {
+        if (key === id)
+          return true
+        let parent = this.nodes.get(key)?.parent ?? this.clusters.get(key)?.parent
+        while (parent) {
+          if (parent === id)
+            return true
+          parent = this.clusters.get(parent)?.parent
+        }
+
+        return false
+      }
+
+      // Mermaid inherits the parent direction when a member node has an external link.
+      const externalMemberLink = this.edges.some(edge =>
+        (this.nodes.has(edge.from) && !this.clusters.has(edge.from) && inside(edge.from) && !inside(edge.to))
+        || (this.nodes.has(edge.to) && !this.clusters.has(edge.to) && inside(edge.to) && !inside(edge.from)))
+      if (!inheritExternalDirection || !externalMemberLink)
+        throw new DiagramError('Subgraphs with a different local direction are not supported.')
+    }
 
     const known = new Set([...nodes.map(node => node.id), ...this.clusters.keys()])
     const edges = this.edges.filter(edge => known.has(edge.from) && known.has(edge.to))
@@ -925,8 +951,13 @@ function parseFlowchart(source: string): GraphDiagram {
       continue
     }
 
-    if (keyword === 'direction')
+    if (keyword === 'direction') {
+      const parent = stack.at(-1)
+      if (!parent)
+        throw new DiagramError('Set the flowchart direction in its header.')
+      builder.clusterDirections.set(parent, direction(rest))
       continue
+    }
 
     if (keyword === 'click') {
       const [id, target] = head(rest)
@@ -942,7 +973,7 @@ function parseFlowchart(source: string): GraphDiagram {
   }
 
   const dir = direction(/^\S+\s+(\w+)/.exec(header ?? '')?.[1])
-  return builder.build(title, dir)
+  return builder.build(title, dir, true)
 }
 
 function parseChain(line: string, builder: GraphBuilder, parent: string | undefined) {
@@ -1038,6 +1069,8 @@ function parseState(source: string): GraphDiagram {
     if (keyword === 'direction') {
       if (!stack.length)
         dir = direction(rest)
+      else
+        builder.clusterDirections.set(stack.at(-1)!, direction(rest))
       continue
     }
 
@@ -1064,19 +1097,12 @@ function parseState(source: string): GraphDiagram {
         text = body.join('\n')
       }
 
-      const id = `note-${++notes}`
-      builder.node(id, stack.at(-1), 'note', cleanLabel(text))
+      if (side !== 'left' && side !== 'right')
+        throw new DiagramError('Only left and right state notes are supported.')
+      const id = `\u0000note:${++notes}`
+      const note = builder.node(id, stack.at(-1), 'note', cleanLabel(text))
       const attached = endpoint(target, 'to')
-      const left = side === 'left'
-      builder.edge({
-        from: left ? id : attached,
-        to: left ? attached : id,
-        label: '',
-        line: 'dotted',
-        start: 'none',
-        end: 'none',
-        length: 1,
-      })
+      note.annotation = { target: attached, side }
       continue
     }
 

@@ -527,9 +527,13 @@
             "shape": "end"
           },
           {
-            "id": "note-1",
+            "id": "\u0000note:1",
             "label": "Waiting for the user",
-            "shape": "note"
+            "shape": "note",
+            "annotation": {
+              "target": "Paused",
+              "side": "right"
+            }
           }
         ],
         "edges": [
@@ -631,15 +635,6 @@
             "start": "none",
             "end": "arrow",
             "length": 1
-          },
-          {
-            "from": "Paused",
-            "to": "note-1",
-            "label": "",
-            "line": "dotted",
-            "start": "none",
-            "end": "none",
-            "length": 1
           }
         ],
         "clusters": [
@@ -650,8 +645,8 @@
         ]
       },
       "layout": {
-        "width": 384,
-        "height": 852,
+        "width": 786,
+        "height": 838,
         "items": 58
       }
     },
@@ -1391,9 +1386,13 @@
             "shape": "round"
           },
           {
-            "id": "note-1",
+            "id": "\u0000note:1",
             "label": "Multi line\nnote body",
-            "shape": "note"
+            "shape": "note",
+            "annotation": {
+              "target": "W",
+              "side": "left"
+            }
           }
         ],
         "edges": [
@@ -1459,22 +1458,13 @@
             "start": "none",
             "end": "arrow",
             "length": 1
-          },
-          {
-            "from": "note-1",
-            "to": "W",
-            "label": "",
-            "line": "dotted",
-            "start": "none",
-            "end": "none",
-            "length": 1
           }
         ],
         "clusters": []
       },
       "layout": {
-        "width": 552,
-        "height": 244,
+        "width": 777,
+        "height": 188,
         "items": 29
       }
     },
@@ -4001,6 +3991,414 @@
         "height": 2171,
         "items": 134
       }
+    },
+    {
+      "name": "state-note-sides-TB",
+      "source": "stateDiagram-v2\ndirection TB\nA-->B\nA-->C\nnote left of A : Left\nnote right of A : Right",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "round"
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "shape": "round"
+          },
+          {
+            "id": "C",
+            "label": "C",
+            "shape": "round"
+          },
+          {
+            "id": "\u0000note:1",
+            "label": "Left",
+            "shape": "note",
+            "annotation": {
+              "target": "A",
+              "side": "left"
+            }
+          },
+          {
+            "id": "\u0000note:2",
+            "label": "Right",
+            "shape": "note",
+            "annotation": {
+              "target": "A",
+              "side": "right"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A",
+            "to": "C",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 286,
+        "height": 162,
+        "items": 18
+      }
+    },
+    {
+      "name": "state-note-sides-BT",
+      "source": "stateDiagram-v2\ndirection BT\nA-->B\nA-->C\nnote left of A : Left\nnote right of A : Right",
+      "diagram": {
+        "kind": "graph",
+        "direction": "BT",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "round"
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "shape": "round"
+          },
+          {
+            "id": "C",
+            "label": "C",
+            "shape": "round"
+          },
+          {
+            "id": "\u0000note:1",
+            "label": "Left",
+            "shape": "note",
+            "annotation": {
+              "target": "A",
+              "side": "left"
+            }
+          },
+          {
+            "id": "\u0000note:2",
+            "label": "Right",
+            "shape": "note",
+            "annotation": {
+              "target": "A",
+              "side": "right"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A",
+            "to": "C",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 286,
+        "height": 162,
+        "items": 18
+      }
+    },
+    {
+      "name": "state-note-sides-LR",
+      "source": "stateDiagram-v2\ndirection LR\nA-->B\nA-->C\nnote left of A : Left\nnote right of A : Right",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "round"
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "shape": "round"
+          },
+          {
+            "id": "C",
+            "label": "C",
+            "shape": "round"
+          },
+          {
+            "id": "\u0000note:1",
+            "label": "Left",
+            "shape": "note",
+            "annotation": {
+              "target": "A",
+              "side": "left"
+            }
+          },
+          {
+            "id": "\u0000note:2",
+            "label": "Right",
+            "shape": "note",
+            "annotation": {
+              "target": "A",
+              "side": "right"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A",
+            "to": "C",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 394,
+        "height": 144,
+        "items": 18
+      }
+    },
+    {
+      "name": "state-note-sides-RL",
+      "source": "stateDiagram-v2\ndirection RL\nA-->B\nA-->C\nnote left of A : Left\nnote right of A : Right",
+      "diagram": {
+        "kind": "graph",
+        "direction": "RL",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "round"
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "shape": "round"
+          },
+          {
+            "id": "C",
+            "label": "C",
+            "shape": "round"
+          },
+          {
+            "id": "\u0000note:1",
+            "label": "Left",
+            "shape": "note",
+            "annotation": {
+              "target": "A",
+              "side": "left"
+            }
+          },
+          {
+            "id": "\u0000note:2",
+            "label": "Right",
+            "shape": "note",
+            "annotation": {
+              "target": "A",
+              "side": "right"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "A",
+            "to": "C",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": []
+      },
+      "layout": {
+        "width": 394,
+        "height": 144,
+        "items": 18
+      }
+    },
+    {
+      "name": "state-multiple-notes",
+      "source": "stateDiagram-v2\nstate C {\nA-->B\nnote left of A : One\nnote left of A : Two\nnote right of A : Three\n}",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "round",
+            "parent": "C"
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "shape": "round",
+            "parent": "C"
+          },
+          {
+            "id": "\u0000note:1",
+            "label": "One",
+            "shape": "note",
+            "parent": "C",
+            "annotation": {
+              "target": "A",
+              "side": "left"
+            }
+          },
+          {
+            "id": "\u0000note:2",
+            "label": "Two",
+            "shape": "note",
+            "parent": "C",
+            "annotation": {
+              "target": "A",
+              "side": "left"
+            }
+          },
+          {
+            "id": "\u0000note:3",
+            "label": "Three",
+            "shape": "note",
+            "parent": "C",
+            "annotation": {
+              "target": "A",
+              "side": "right"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "C",
+            "label": "C"
+          }
+        ]
+      },
+      "layout": {
+        "width": 436,
+        "height": 271,
+        "items": 21
+      }
+    },
+    {
+      "name": "subgraph-inherited-direction",
+      "source": "flowchart TB\nsubgraph S\ndirection LR\nA-->B\nend\nB-->C",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "A",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "shape": "rect",
+            "parent": "S"
+          },
+          {
+            "id": "C",
+            "label": "C",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "A",
+            "to": "B",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "B",
+            "to": "C",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "S",
+            "label": "S"
+          }
+        ]
+      },
+      "layout": {
+        "width": 137,
+        "height": 307,
+        "items": 13
+      }
     }
   ],
   "errors": [
@@ -4067,6 +4465,34 @@
     {
       "name": "long-edge-node-budget",
       "source": "flowchart TB\nA0----->A1\nA1----->A2\nA2----->A3\nA3----->A4\nA4----->A5\nA5----->A6\nA6----->A7\nA7----->A8\nA8----->A9\nA9----->A10\nA10----->A11\nA11----->A12\nA12----->A13\nA13----->A14\nA14----->A15\nA15----->A16\nA16----->A17\nA17----->A18\nA18----->A19\nA19----->A20\nA20----->A21\nA21----->A22\nA22----->A23\nA23----->A24\nA24----->A25\nA25----->A26\nA26----->A27\nA27----->A28\nA28----->A29\nA29----->A30\nA30----->A31\nA31----->A32\nA32----->A33\nA33----->A34\nA34----->A35\nA35----->A36\nA36----->A37\nA37----->A38\nA38----->A39\nA39----->A40\nA40----->A41\nA41----->A42\nA42----->A43\nA43----->A44\nA44----->A45\nA45----->A46\nA46----->A47\nA47----->A48\nA48----->A49\nA49----->A50\nA50----->A51\nA51----->A52\nA52----->A53\nA53----->A54\nA54----->A55\nA55----->A56\nA56----->A57\nA57----->A58\nA58----->A59\nA59----->A60\nA60----->A61\nA61----->A62\nA62----->A63\nA63----->A64\nA64----->A65\nA65----->A66\nA66----->A67\nA67----->A68\nA68----->A69\nA69----->A70\nA70----->A71\nA71----->A72\nA72----->A73\nA73----->A74\nA74----->A75\nA75----->A76\nA76----->A77\nA77----->A78\nA78----->A79\nA79----->A80\nA80----->A81\nA81----->A82\nA82----->A83\nA83----->A84\nA84----->A85\nA85----->A86\nA86----->A87\nA87----->A88\nA88----->A89\nA89----->A90\nA90----->A91\nA91----->A92\nA92----->A93\nA93----->A94\nA94----->A95\nA95----->A96\nA96----->A97\nA97----->A98\nA98----->A99\nA99----->A100\nA100----->A101\nA101----->A102\nA102----->A103\nA103----->A104\nA104----->A105\nA105----->A106\nA106----->A107\nA107----->A108\nA108----->A109\nA109----->A110\nA110----->A111\nA111----->A112\nA112----->A113\nA113----->A114\nA114----->A115\nA115----->A116\nA116----->A117\nA117----->A118\nA118----->A119\nA119----->A120\nA120----->A121\nA121----->A122\nA122----->A123\nA123----->A124\nA124----->A125\nA125----->A126\nA126----->A127\nA127----->A128\nA128----->A129\nA129----->A130\nA130----->A131\nA131----->A132\nA132----->A133\nA133----->A134\nA134----->A135\nA135----->A136\nA136----->A137\nA137----->A138\nA138----->A139\nA139----->A140\nA140----->A141\nA141----->A142\nA142----->A143\nA143----->A144\nA144----->A145\nA145----->A146\nA146----->A147\nA147----->A148\nA148----->A149\nA149----->A150\nA150----->A151\nA151----->A152\nA152----->A153\nA153----->A154\nA154----->A155\nA155----->A156\nA156----->A157\nA157----->A158\nA158----->A159\nA159----->A160\nA160----->A161\nA161----->A162\nA162----->A163\nA163----->A164\nA164----->A165\nA165----->A166\nA166----->A167\nA167----->A168\nA168----->A169\nA169----->A170\nA170----->A171\nA171----->A172\nA172----->A173\nA173----->A174\nA174----->A175\nA175----->A176\nA176----->A177\nA177----->A178\nA178----->A179\nA179----->A180\nA180----->A181\nA181----->A182\nA182----->A183\nA183----->A184\nA184----->A185\nA185----->A186\nA186----->A187\nA187----->A188\nA188----->A189\nA189----->A190\nA190----->A191\nA191----->A192\nA192----->A193\nA193----->A194\nA194----->A195\nA195----->A196\nA196----->A197\nA197----->A198\nA198----->A199\nA199----->A200\nA200----->A201\nA201----->A202\nA202----->A203\nA203----->A204\nA204----->A205\nA205----->A206\nA206----->A207\nA207----->A208\nA208----->A209\nA209----->A210\nA210----->A211\nA211----->A212\nA212----->A213\nA213----->A214\nA214----->A215\nA215----->A216\nA216----->A217\nA217----->A218\nA218----->A219\nA219----->A220\nA220----->A221\nA221----->A222\nA222----->A223\nA223----->A224\nA224----->A225\nA225----->A226\nA226----->A227\nA227----->A228\nA228----->A229\nA229----->A230\nA230----->A231\nA231----->A232\nA232----->A233\nA233----->A234\nA234----->A235\nA235----->A236\nA236----->A237\nA237----->A238\nA238----->A239\nA239----->A240\nA240----->A241\nA241----->A242\nA242----->A243\nA243----->A244\nA244----->A245\nA245----->A246\nA246----->A247\nA247----->A248\nA248----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\nA0----->A249\n"
+    },
+    {
+      "name": "local-subgraph-direction",
+      "source": "flowchart TB\nsubgraph S\ndirection LR\nA-->B\nend"
+    },
+    {
+      "name": "local-subgraph-direction-with-cluster-link",
+      "source": "flowchart TB\nsubgraph S\ndirection LR\nA-->B\nend\nX-->S"
+    },
+    {
+      "name": "composite-state-direction",
+      "source": "stateDiagram-v2\nstate S {\ndirection LR\nA-->B\n}"
+    },
+    {
+      "name": "composite-state-note",
+      "source": "stateDiagram-v2\nstate S {\nA-->B\n}\nnote right of S : Help"
+    },
+    {
+      "name": "self-transition-state-note",
+      "source": "stateDiagram-v2\nA-->A\nnote left of A : Help"
+    },
+    {
+      "name": "unsupported-state-note-side",
+      "source": "stateDiagram-v2\nA\nnote over A : Help"
+    },
+    {
+      "name": "composite-state-direction-with-external-transition",
+      "source": "stateDiagram-v2\nstate S {\ndirection LR\nA-->B\n}\nB-->X"
     }
   ],
   "unsupported": [

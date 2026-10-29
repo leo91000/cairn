@@ -91,6 +91,18 @@ describe('diagram layout', () => {
     }
   })
 
+  it.each(['TB', 'BT', 'LR', 'RL'])('keeps state notes on their physical sides in %s', (direction) => {
+    const scene = layoutDiagram(parseDiagram(`stateDiagram-v2\ndirection ${direction}\nA-->B\nnote left of A : Left\nnote right of A : Right`), measure)
+    const texts = scene.items.filter(item => item.kind === 'text')
+    const state = texts.find(item => item.lines[0] === 'A')!
+    const left = texts.find(item => item.lines[0] === 'Left')!
+    const right = texts.find(item => item.lines[0] === 'Right')!
+    expect(left.x).toBeLessThan(state.x)
+    expect(right.x).toBeGreaterThan(state.x)
+    expect(left.y).toBeCloseTo(state.y)
+    expect(right.y).toBeCloseTo(state.y)
+  })
+
   it('draws every flowchart node, link and label', () => {
     const scene = layoutDiagram(parseDiagram('flowchart LR\n  A[One] -->|go| B{Two?}\n  B --> C((Three))'), measure)
     const texts = scene.items.flatMap(item => item.kind === 'text' ? item.lines : [])
