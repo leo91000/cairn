@@ -806,6 +806,51 @@ test('horizontal cluster titles fit their boxes without hiding neighboring title
   }
 })
 
+test('group frames preserve membership across ranks in every direction', async ({ page }) => {
+  const cases = [
+    { body: 'subgraph S1\nN2\nN8\nend\nsubgraph S2\nN0\nN9\nend\nN3-->N8\nN3-->N7\nN10-->N0', members: [['N2', 'N8'], ['N0', 'N9']], outside: ['N3', 'N7', 'N10'] },
+    { body: 'subgraph S0\nN0\nN8\nend\nsubgraph S1\nN1\nN6\nend\nsubgraph S2\nN3\nend\nS2-->S0\nS0-->N6\nN0-->N3', members: [['N0', 'N8'], ['N1', 'N6'], ['N3']], outside: [] },
+  ]
+  for (const direction of ['TB', 'BT', 'LR', 'RL']) {
+    for (const { body, members, outside } of cases) {
+      await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\nflowchart ${direction}\n${body}\n\`\`\``)
+      const svg = page.locator('#app figure.diagram svg')
+      await expect(svg.locator('text')).toHaveCount(members.flat().length + outside.length + members.length)
+      const errors = await svg.evaluate((svg, { members, outside }) => {
+        const paths = [...svg.querySelectorAll('path')]
+        const groups = paths.filter(path => path.style.fill === 'var(--dg-cluster)' && path.style.stroke === 'var(--dg-cluster-line)').map(path => path.getBoundingClientRect())
+        const nodes = paths.filter(path => path.classList.contains('diagram-raised')).map(path => path.getBoundingClientRect())
+        const disjoint = (a: DOMRect, b: DOMRect) => a.right <= b.left + 0.01 || b.right <= a.left + 0.01 || a.bottom <= b.top + 0.01 || b.bottom <= a.top + 0.01
+        const errors: string[] = []
+        if (groups.length !== members.length)
+          errors.push('Missing group frames')
+        for (const [index, group] of groups.entries()) {
+          for (const peer of groups.slice(index + 1)) {
+            if (!disjoint(group, peer))
+              errors.push('Overlapping peer groups')
+          }
+
+          for (const name of [...members.flat(), ...outside]) {
+            const label = [...svg.querySelectorAll('text')].find(text => text.textContent === name)!.getBoundingClientRect()
+            const x = (label.left + label.right) / 2
+            const y = (label.top + label.bottom) / 2
+            const node = nodes.find(node => node.left <= x && x <= node.right && node.top <= y && y <= node.bottom)!
+            const own = members[index]!.includes(name)
+            const correct = own
+              ? node.left >= group.left - 0.01 && node.right <= group.right + 0.01 && node.top >= group.top - 0.01 && node.bottom <= group.bottom + 0.01
+              : disjoint(node, group)
+            if (!correct)
+              errors.push(`Wrong membership for ${name}`)
+          }
+        }
+
+        return errors
+      }, { members, outside })
+      expect(errors, `${direction}: ${body}`).toEqual([])
+    }
+  }
+})
+
 test('multiline flag labels stay inside their outline in every direction', async ({ page }) => {
   for (const direction of ['TD', 'BT', 'LR', 'RL']) {
     for (const lines of [1, 5, 11]) {

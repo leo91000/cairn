@@ -3,6 +3,7 @@
 ## Mermaid diagrams in Markdown (2026-10-29)
 
 Both layouts reserve the asymmetric flag notch when sizing multiline node labels.
+Group borders share separation constraints across ranks, keeping sibling groups and unrelated nodes outside each other's frames.
 
 Both apps draw closed ```` ```mermaid ```` (or `mmd`) fences in chat Markdown as native
 diagrams: flowcharts (directions, node shapes, subgraphs, link styles, heads and labels,

@@ -60,6 +60,47 @@ describe('diagrams (shared Android corpus)', () => {
 })
 
 describe('diagram layout', () => {
+  it.each(['TB', 'BT', 'LR', 'RL'].flatMap(direction => [
+    'subgraph S1\nN2\nN8\nend\nsubgraph S2\nN0\nN9\nend\nN3-->N8\nN3-->N7\nN10-->N0',
+    'subgraph S0\nN0\nN8\nend\nsubgraph S1\nN1\nN6\nend\nsubgraph S2\nN3\nend\nS2-->S0\nS0-->N6\nN0-->N3',
+  ].map(body => ({ direction, body }))))('preserves group membership across ranks in $direction %#', ({ direction, body }) => {
+    const graph = parseDiagram(`flowchart ${direction}\n${body}`)
+    if (graph.kind !== 'graph')
+      throw new Error('Expected a graph')
+    const scene = layoutDiagram(graph, measure)
+    const groups = scene.items.filter((item): item is PathItem => item.kind === 'path' && !!item.fill && 'tone' in item.fill && item.fill.tone === 'cluster' && !!item.stroke).map((item) => {
+      const vertices = points(item)
+      return {
+        left: Math.min(...vertices.map(([x]) => x)),
+        right: Math.max(...vertices.map(([x]) => x)),
+        top: Math.min(...vertices.map(([, y]) => y)),
+        bottom: Math.max(...vertices.map(([, y]) => y)),
+      }
+    })
+    const disjoint = (a: typeof groups[number], b: typeof groups[number]) => a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top
+    expect(groups).toHaveLength(graph.clusters.length)
+    for (const [index, group] of groups.entries()) {
+      for (const peer of groups.slice(index + 1))
+        expect(disjoint(group, peer)).toBe(true)
+      for (const node of graph.nodes) {
+        const label = scene.items.find(item => item.kind === 'text' && item.lines[0] === node.label)!
+        if (label.kind !== 'text')
+          throw new Error('Expected a node label')
+        const box = nodeBoxes(scene).find(box => box.left <= label.x && label.x <= box.right && box.top <= label.y && label.y <= box.bottom)!
+        expect(box).toBeDefined()
+        if (node.parent === graph.clusters[index]!.id) {
+          expect(box.left).toBeGreaterThanOrEqual(group.left)
+          expect(box.right).toBeLessThanOrEqual(group.right)
+          expect(box.top).toBeGreaterThanOrEqual(group.top)
+          expect(box.bottom).toBeLessThanOrEqual(group.bottom)
+        }
+        else {
+          expect(disjoint(box, group), `${node.id} must stay outside ${graph.clusters[index]!.id}`).toBe(true)
+        }
+      }
+    }
+  })
+
   it.each([
     ['sequenceDiagram; A->>B: first\nB->>A: response', 'sequenceDiagram\nA->>B: first\nB->>A: response'],
     ['sequenceDiagram;participant A as Alice;participant B as Bob;autonumber;A->>B: First #59; &#59; &amp;;B-->>A: Response', 'sequenceDiagram\nparticipant A as Alice\nparticipant B as Bob\nautonumber\nA->>B: First #59; &#59; &amp;\nB-->>A: Response'],

@@ -1391,9 +1391,8 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         }
     }
 
-    // Align every cluster's borders across ranks by moving them outward only: left borders to
-    // their leftmost rank, right borders to their rightmost. Whatever lies outside is pushed
-    // away, so members never move and the passes settle.
+    // A border has one position across every rank. Solve their shared separation constraints
+    // together so aligning one group cannot undo another rank's clearance.
     val borders = LinkedHashMap<String, Borders>()
     for (node in nodes.values) {
         if (node.kind != LKind.LEFT && node.kind != LKind.RIGHT) continue
@@ -1403,35 +1402,65 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
 
     fun minimumWidth(id: String) =
         if (horizontal) 0.0 else titles.getValue(id).width + CLUSTER_PAD * 2
-    for (pass in 0 until 50) {
-        var changed = false
-        for ((id, entry) in borders) {
-            val l = minimum(entry.left.map { it.x })
-            val r = maximum(entry.right.map { it.x } + (l + minimumWidth(id)))
-            for (node in entry.left + entry.right) {
-                val x = if (node.kind == LKind.LEFT) l else r
-                if (node.x == x) continue
-                node.x = x
-                changed = true
-                val layer = layers[node.rank]
-                if (node.kind == LKind.LEFT) {
-                    for (index in node.order - 1 downTo 0) layer[index].x =
-                        min(
-                            layer[index].x,
-                            layer[index + 1].x - separation(layer[index], layer[index + 1]),
-                        )
-                } else {
-                    for (index in node.order + 1 until layer.size) layer[index].x =
-                        max(
-                            layer[index].x,
-                            layer[index - 1].x + separation(layer[index - 1], layer[index]),
-                        )
-                }
-            }
+    fun representative(node: LNode): LNode =
+        when (node.kind) {
+            LKind.LEFT -> borders.getValue(node.cluster!!).left.first()
+            LKind.RIGHT -> borders.getValue(node.cluster!!).right.first()
+            else -> node
         }
 
-        if (!changed) break
+    val borderPositions = LinkedHashMap<LNode, Double>()
+    val borderIncoming = LinkedHashMap<LNode, Int>()
+    val borderOutgoing = LinkedHashMap<LNode, MutableList<Pair<LNode, Double>>>()
+    for (node in nodes.values) {
+        val key = representative(node)
+        val existing = borderPositions[key]
+        borderPositions[key] =
+            when {
+                existing == null -> node.x
+                node.kind == LKind.LEFT -> min(existing, node.x)
+                else -> max(existing, node.x)
+            }
+        borderIncoming[key] = 0
+        borderOutgoing[key] = mutableListOf()
     }
+
+    fun constrain(left: LNode, right: LNode, distance: Double) {
+        val from = representative(left)
+        val to = representative(right)
+        borderOutgoing.getValue(from).add(Pair(to, distance))
+        borderIncoming[to] = borderIncoming.getValue(to) + 1
+    }
+
+    for (layer in layers) {
+        for (index in 1 until layer.size) constrain(
+            layer[index - 1],
+            layer[index],
+            separation(layer[index - 1], layer[index]),
+        )
+    }
+    for ((id, entry) in borders) constrain(
+        entry.left.first(),
+        entry.right.first(),
+        minimumWidth(id),
+    )
+
+    val borderReady =
+        borderPositions.keys.filter { borderIncoming.getValue(it) == 0 }.toMutableList()
+    var borderIndex = 0
+    while (borderIndex < borderReady.size) {
+        val from = borderReady[borderIndex++]
+        for ((node, distance) in borderOutgoing.getValue(from)) {
+            borderPositions[node] =
+                max(borderPositions.getValue(node), borderPositions.getValue(from) + distance)
+            val remaining = borderIncoming.getValue(node) - 1
+            borderIncoming[node] = remaining
+            if (remaining == 0) borderReady.add(node)
+        }
+    }
+    if (borderReady.size != borderPositions.size)
+        throw DiagramError("These groups cannot be separated without overlap.")
+    for (node in nodes.values) node.x = borderPositions.getValue(representative(node))
 
     // Straighten long edges where their layers leave room for a direct line.
     fun fits(node: LNode, x: Double): Boolean {

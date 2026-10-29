@@ -330,6 +330,7 @@ class DiagramDeviceTest {
             for (source in
                 listOf(
                     "flowchart LR\nA-->B",
+                    "flowchart TB\nsubgraph S1\nN2\nN8\nend\nsubgraph S2\nN0\nN9\nend\nN3-->N8\nN3-->N7\nN10-->N0",
                     "flowchart LR\nsubgraph S[Long descriptive group title]\nA[Go]\nend\nsubgraph T[Another group]\nB[Done]\nend\nS-->T",
                     "flowchart TD\nA{Ready?}-->|retry|A",
                     "flowchart TD\nA>\"" + List(11) { "Hello" }.joinToString("<br>") + "\"]",

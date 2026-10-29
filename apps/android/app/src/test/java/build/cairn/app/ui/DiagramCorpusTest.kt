@@ -8,6 +8,66 @@ import org.junit.Test
 /** Mermaid parsing and layout, on the corpus the web's diagram tests check too. */
 class DiagramCorpusTest {
     @Test
+    fun `preserves group membership across ranks`() {
+        fun bounds(item: PathItem): DoubleArray {
+            val vertices = points(item)
+            return doubleArrayOf(
+                vertices.minOf { it.first },
+                vertices.maxOf { it.first },
+                vertices.minOf { it.second },
+                vertices.maxOf { it.second },
+            )
+        }
+        fun disjoint(a: DoubleArray, b: DoubleArray) =
+            a[1] <= b[0] || b[1] <= a[0] || a[3] <= b[2] || b[3] <= a[2]
+        val membershipCases =
+            cases("parse").filter {
+                it.getValue("name").jsonPrimitive.content.startsWith("group-membership-")
+            }
+        assertTrue(membershipCases.isNotEmpty())
+        for (case in membershipCases) {
+            val name = case.getValue("name").jsonPrimitive.content
+            val graph = parseDiagram(case.getValue("source").jsonPrimitive.content) as GraphDiagram
+            val scene = layoutDiagram(graph, measure)
+            val groups =
+                scene.items
+                    .filterIsInstance<PathItem>()
+                    .filter { it.fill == DiagramPaint.Tone("cluster") && it.stroke != null }
+                    .map(::bounds)
+            val nodes = scene.items.filterIsInstance<PathItem>().filter { it.shadow }.map(::bounds)
+            assertEquals(graph.clusters.size, groups.size)
+            for ((index, group) in groups.withIndex()) {
+                for (peer in groups.drop(index + 1)) assertTrue(
+                    "$name peer groups",
+                    disjoint(group, peer),
+                )
+                for (node in graph.nodes) {
+                    val label =
+                        scene.items.filterIsInstance<TextItem>().first {
+                            it.lines.firstOrNull() == node.label
+                        }
+                    val box = nodes.first {
+                        it[0] <= label.x && label.x <= it[1] && it[2] <= label.y && label.y <= it[3]
+                    }
+                    if (node.parent == graph.clusters[index].id) {
+                        assertTrue(
+                            "$name ${node.id} stays inside its group",
+                            box[0] >= group[0] &&
+                                box[1] <= group[1] &&
+                                box[2] >= group[2] &&
+                                box[3] <= group[3],
+                        )
+                    } else
+                        assertTrue(
+                            "$name ${node.id} stays outside ${graph.clusters[index].id}",
+                            disjoint(box, group),
+                        )
+                }
+            }
+        }
+    }
+
+    @Test
     fun `preserves semicolon separated sequence steps`() {
         val compact = "sequenceDiagram; A->>B: first;B->>A: response #59;"
         val expanded = "sequenceDiagram\nA->>B: first\nB->>A: response #59;"

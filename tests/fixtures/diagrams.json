@@ -3093,7 +3093,7 @@
       },
       "layout": {
         "width": 468,
-        "height": 565,
+        "height": 425,
         "items": 26
       }
     },
@@ -3190,7 +3190,7 @@
       },
       "layout": {
         "width": 468,
-        "height": 565,
+        "height": 425,
         "items": 26
       }
     },
@@ -3286,7 +3286,7 @@
         ]
       },
       "layout": {
-        "width": 586,
+        "width": 435,
         "height": 454,
         "items": 26
       }
@@ -3383,7 +3383,7 @@
         ]
       },
       "layout": {
-        "width": 586,
+        "width": 435,
         "height": 454,
         "items": 26
       }
@@ -9299,6 +9299,730 @@
         "width": 263,
         "height": 242,
         "items": 20
+      }
+    },
+    {
+      "name": "group-membership-0-TB",
+      "source": "flowchart TB\nsubgraph S1\nN2\nN8\nend\nsubgraph S2\nN0\nN9\nend\nN3-->N8\nN3-->N7\nN10-->N0",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "N2",
+            "label": "N2",
+            "shape": "rect",
+            "parent": "S1"
+          },
+          {
+            "id": "N8",
+            "label": "N8",
+            "shape": "rect",
+            "parent": "S1"
+          },
+          {
+            "id": "N0",
+            "label": "N0",
+            "shape": "rect",
+            "parent": "S2"
+          },
+          {
+            "id": "N9",
+            "label": "N9",
+            "shape": "rect",
+            "parent": "S2"
+          },
+          {
+            "id": "N3",
+            "label": "N3",
+            "shape": "rect"
+          },
+          {
+            "id": "N7",
+            "label": "N7",
+            "shape": "rect"
+          },
+          {
+            "id": "N10",
+            "label": "N10",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "N3",
+            "to": "N8",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N3",
+            "to": "N7",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N10",
+            "to": "N0",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "S1",
+            "label": "S1"
+          },
+          {
+            "id": "S2",
+            "label": "S2"
+          }
+        ]
+      },
+      "layout": {
+        "width": 615,
+        "height": 213,
+        "items": 26
+      }
+    },
+    {
+      "name": "group-membership-1-TB",
+      "source": "flowchart TB\nsubgraph S0\nN0\nN8\nend\nsubgraph S1\nN1\nN6\nend\nsubgraph S2\nN3\nend\nS2-->S0\nS0-->N6\nN0-->N3",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "N0",
+            "label": "N0",
+            "shape": "rect",
+            "parent": "S0"
+          },
+          {
+            "id": "N8",
+            "label": "N8",
+            "shape": "rect",
+            "parent": "S0"
+          },
+          {
+            "id": "N1",
+            "label": "N1",
+            "shape": "rect",
+            "parent": "S1"
+          },
+          {
+            "id": "N6",
+            "label": "N6",
+            "shape": "rect",
+            "parent": "S1"
+          },
+          {
+            "id": "N3",
+            "label": "N3",
+            "shape": "rect",
+            "parent": "S2"
+          }
+        ],
+        "edges": [
+          {
+            "from": "S2",
+            "to": "S0",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "S0",
+            "to": "N6",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N0",
+            "to": "N3",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "S0",
+            "label": "S0"
+          },
+          {
+            "id": "S1",
+            "label": "S1"
+          },
+          {
+            "id": "S2",
+            "label": "S2"
+          }
+        ]
+      },
+      "layout": {
+        "width": 352,
+        "height": 470,
+        "items": 23
+      }
+    },
+    {
+      "name": "group-membership-0-BT",
+      "source": "flowchart BT\nsubgraph S1\nN2\nN8\nend\nsubgraph S2\nN0\nN9\nend\nN3-->N8\nN3-->N7\nN10-->N0",
+      "diagram": {
+        "kind": "graph",
+        "direction": "BT",
+        "nodes": [
+          {
+            "id": "N2",
+            "label": "N2",
+            "shape": "rect",
+            "parent": "S1"
+          },
+          {
+            "id": "N8",
+            "label": "N8",
+            "shape": "rect",
+            "parent": "S1"
+          },
+          {
+            "id": "N0",
+            "label": "N0",
+            "shape": "rect",
+            "parent": "S2"
+          },
+          {
+            "id": "N9",
+            "label": "N9",
+            "shape": "rect",
+            "parent": "S2"
+          },
+          {
+            "id": "N3",
+            "label": "N3",
+            "shape": "rect"
+          },
+          {
+            "id": "N7",
+            "label": "N7",
+            "shape": "rect"
+          },
+          {
+            "id": "N10",
+            "label": "N10",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "N3",
+            "to": "N8",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N3",
+            "to": "N7",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N10",
+            "to": "N0",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "S1",
+            "label": "S1"
+          },
+          {
+            "id": "S2",
+            "label": "S2"
+          }
+        ]
+      },
+      "layout": {
+        "width": 615,
+        "height": 213,
+        "items": 26
+      }
+    },
+    {
+      "name": "group-membership-1-BT",
+      "source": "flowchart BT\nsubgraph S0\nN0\nN8\nend\nsubgraph S1\nN1\nN6\nend\nsubgraph S2\nN3\nend\nS2-->S0\nS0-->N6\nN0-->N3",
+      "diagram": {
+        "kind": "graph",
+        "direction": "BT",
+        "nodes": [
+          {
+            "id": "N0",
+            "label": "N0",
+            "shape": "rect",
+            "parent": "S0"
+          },
+          {
+            "id": "N8",
+            "label": "N8",
+            "shape": "rect",
+            "parent": "S0"
+          },
+          {
+            "id": "N1",
+            "label": "N1",
+            "shape": "rect",
+            "parent": "S1"
+          },
+          {
+            "id": "N6",
+            "label": "N6",
+            "shape": "rect",
+            "parent": "S1"
+          },
+          {
+            "id": "N3",
+            "label": "N3",
+            "shape": "rect",
+            "parent": "S2"
+          }
+        ],
+        "edges": [
+          {
+            "from": "S2",
+            "to": "S0",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "S0",
+            "to": "N6",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N0",
+            "to": "N3",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "S0",
+            "label": "S0"
+          },
+          {
+            "id": "S1",
+            "label": "S1"
+          },
+          {
+            "id": "S2",
+            "label": "S2"
+          }
+        ]
+      },
+      "layout": {
+        "width": 352,
+        "height": 491,
+        "items": 23
+      }
+    },
+    {
+      "name": "group-membership-0-LR",
+      "source": "flowchart LR\nsubgraph S1\nN2\nN8\nend\nsubgraph S2\nN0\nN9\nend\nN3-->N8\nN3-->N7\nN10-->N0",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "N2",
+            "label": "N2",
+            "shape": "rect",
+            "parent": "S1"
+          },
+          {
+            "id": "N8",
+            "label": "N8",
+            "shape": "rect",
+            "parent": "S1"
+          },
+          {
+            "id": "N0",
+            "label": "N0",
+            "shape": "rect",
+            "parent": "S2"
+          },
+          {
+            "id": "N9",
+            "label": "N9",
+            "shape": "rect",
+            "parent": "S2"
+          },
+          {
+            "id": "N3",
+            "label": "N3",
+            "shape": "rect"
+          },
+          {
+            "id": "N7",
+            "label": "N7",
+            "shape": "rect"
+          },
+          {
+            "id": "N10",
+            "label": "N10",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "N3",
+            "to": "N8",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N3",
+            "to": "N7",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N10",
+            "to": "N0",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "S1",
+            "label": "S1"
+          },
+          {
+            "id": "S2",
+            "label": "S2"
+          }
+        ]
+      },
+      "layout": {
+        "width": 220,
+        "height": 602,
+        "items": 26
+      }
+    },
+    {
+      "name": "group-membership-1-LR",
+      "source": "flowchart LR\nsubgraph S0\nN0\nN8\nend\nsubgraph S1\nN1\nN6\nend\nsubgraph S2\nN3\nend\nS2-->S0\nS0-->N6\nN0-->N3",
+      "diagram": {
+        "kind": "graph",
+        "direction": "LR",
+        "nodes": [
+          {
+            "id": "N0",
+            "label": "N0",
+            "shape": "rect",
+            "parent": "S0"
+          },
+          {
+            "id": "N8",
+            "label": "N8",
+            "shape": "rect",
+            "parent": "S0"
+          },
+          {
+            "id": "N1",
+            "label": "N1",
+            "shape": "rect",
+            "parent": "S1"
+          },
+          {
+            "id": "N6",
+            "label": "N6",
+            "shape": "rect",
+            "parent": "S1"
+          },
+          {
+            "id": "N3",
+            "label": "N3",
+            "shape": "rect",
+            "parent": "S2"
+          }
+        ],
+        "edges": [
+          {
+            "from": "S2",
+            "to": "S0",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "S0",
+            "to": "N6",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N0",
+            "to": "N3",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "S0",
+            "label": "S0"
+          },
+          {
+            "id": "S1",
+            "label": "S1"
+          },
+          {
+            "id": "S2",
+            "label": "S2"
+          }
+        ]
+      },
+      "layout": {
+        "width": 484,
+        "height": 379,
+        "items": 23
+      }
+    },
+    {
+      "name": "group-membership-0-RL",
+      "source": "flowchart RL\nsubgraph S1\nN2\nN8\nend\nsubgraph S2\nN0\nN9\nend\nN3-->N8\nN3-->N7\nN10-->N0",
+      "diagram": {
+        "kind": "graph",
+        "direction": "RL",
+        "nodes": [
+          {
+            "id": "N2",
+            "label": "N2",
+            "shape": "rect",
+            "parent": "S1"
+          },
+          {
+            "id": "N8",
+            "label": "N8",
+            "shape": "rect",
+            "parent": "S1"
+          },
+          {
+            "id": "N0",
+            "label": "N0",
+            "shape": "rect",
+            "parent": "S2"
+          },
+          {
+            "id": "N9",
+            "label": "N9",
+            "shape": "rect",
+            "parent": "S2"
+          },
+          {
+            "id": "N3",
+            "label": "N3",
+            "shape": "rect"
+          },
+          {
+            "id": "N7",
+            "label": "N7",
+            "shape": "rect"
+          },
+          {
+            "id": "N10",
+            "label": "N10",
+            "shape": "rect"
+          }
+        ],
+        "edges": [
+          {
+            "from": "N3",
+            "to": "N8",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N3",
+            "to": "N7",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N10",
+            "to": "N0",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "S1",
+            "label": "S1"
+          },
+          {
+            "id": "S2",
+            "label": "S2"
+          }
+        ]
+      },
+      "layout": {
+        "width": 220,
+        "height": 602,
+        "items": 26
+      }
+    },
+    {
+      "name": "group-membership-1-RL",
+      "source": "flowchart RL\nsubgraph S0\nN0\nN8\nend\nsubgraph S1\nN1\nN6\nend\nsubgraph S2\nN3\nend\nS2-->S0\nS0-->N6\nN0-->N3",
+      "diagram": {
+        "kind": "graph",
+        "direction": "RL",
+        "nodes": [
+          {
+            "id": "N0",
+            "label": "N0",
+            "shape": "rect",
+            "parent": "S0"
+          },
+          {
+            "id": "N8",
+            "label": "N8",
+            "shape": "rect",
+            "parent": "S0"
+          },
+          {
+            "id": "N1",
+            "label": "N1",
+            "shape": "rect",
+            "parent": "S1"
+          },
+          {
+            "id": "N6",
+            "label": "N6",
+            "shape": "rect",
+            "parent": "S1"
+          },
+          {
+            "id": "N3",
+            "label": "N3",
+            "shape": "rect",
+            "parent": "S2"
+          }
+        ],
+        "edges": [
+          {
+            "from": "S2",
+            "to": "S0",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "S0",
+            "to": "N6",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          },
+          {
+            "from": "N0",
+            "to": "N3",
+            "label": "",
+            "line": "solid",
+            "start": "none",
+            "end": "arrow",
+            "length": 1
+          }
+        ],
+        "clusters": [
+          {
+            "id": "S0",
+            "label": "S0"
+          },
+          {
+            "id": "S1",
+            "label": "S1"
+          },
+          {
+            "id": "S2",
+            "label": "S2"
+          }
+        ]
+      },
+      "layout": {
+        "width": 484,
+        "height": 379,
+        "items": 23
       }
     }
   ],

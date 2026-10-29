@@ -1305,9 +1305,8 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
     }
   }
 
-  // Align every cluster's borders across ranks by moving them outward only: left borders to
-  // their leftmost rank, right borders to their rightmost. Whatever lies outside is pushed
-  // away, so members never move and the passes settle.
+  // A border has one position across every rank. Solve their shared separation constraints
+  // together so aligning one group cannot undo another rank's clearance.
   const borders = new Map<string, { left: LNode[], right: LNode[] }>()
   for (const node of nodes.values()) {
     if (node.kind !== 'left' && node.kind !== 'right')
@@ -1318,32 +1317,54 @@ export function layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
   }
 
   const minimumWidth = (id: string) => (horizontal ? 0 : titles.get(id)!.width + CLUSTER_PAD * 2)
-  for (let iteration = 0; iteration < 50; iteration++) {
-    let changed = false
-    for (const [id, { left, right }] of borders) {
-      const l = Math.min(...left.map(node => node.x))
-      const r = Math.max(...right.map(node => node.x), l + minimumWidth(id))
-      for (const node of [...left, ...right]) {
-        const x = node.kind === 'left' ? l : r
-        if (node.x === x)
-          continue
-        node.x = x
-        changed = true
-        const layer = layers[node.rank]!
-        if (node.kind === 'left') {
-          for (let index = node.order - 1; index >= 0; index--)
-            layer[index]!.x = Math.min(layer[index]!.x, layer[index + 1]!.x - separation(layer[index]!, layer[index + 1]!))
-        }
-        else {
-          for (let index = node.order + 1; index < layer.length; index++)
-            layer[index]!.x = Math.max(layer[index]!.x, layer[index - 1]!.x + separation(layer[index - 1]!, layer[index]!))
-        }
-      }
-    }
-
-    if (!changed)
-      break
+  const representative = (node: LNode) => {
+    if (node.kind === 'left' || node.kind === 'right')
+      return borders.get(node.cluster!)![node.kind][0]!
+    return node
   }
+
+  const borderPositions = new Map<LNode, number>()
+  const borderIncoming = new Map<LNode, number>()
+  const borderOutgoing = new Map<LNode, { node: LNode, distance: number }[]>()
+  for (const node of nodes.values()) {
+    const key = representative(node)
+    const existing = borderPositions.get(key)
+    borderPositions.set(key, existing === undefined ? node.x : node.kind === 'left' ? Math.min(existing, node.x) : Math.max(existing, node.x))
+    borderIncoming.set(key, 0)
+    borderOutgoing.set(key, [])
+  }
+
+  const constrain = (left: LNode, right: LNode, distance: number) => {
+    const from = representative(left)
+    const to = representative(right)
+    borderOutgoing.get(from)!.push({ node: to, distance })
+    borderIncoming.set(to, borderIncoming.get(to)! + 1)
+  }
+
+  for (const layer of layers) {
+    for (let index = 1; index < layer.length; index++)
+      constrain(layer[index - 1]!, layer[index]!, separation(layer[index - 1]!, layer[index]!))
+  }
+
+  for (const [id, { left, right }] of borders)
+    constrain(left[0]!, right[0]!, minimumWidth(id))
+
+  const borderReady = [...borderPositions.keys()].filter(node => borderIncoming.get(node) === 0)
+  for (let index = 0; index < borderReady.length; index++) {
+    const from = borderReady[index]!
+    for (const { node, distance } of borderOutgoing.get(from)!) {
+      borderPositions.set(node, Math.max(borderPositions.get(node)!, borderPositions.get(from)! + distance))
+      const remaining = borderIncoming.get(node)! - 1
+      borderIncoming.set(node, remaining)
+      if (!remaining)
+        borderReady.push(node)
+    }
+  }
+
+  if (borderReady.length !== borderPositions.size)
+    throw new DiagramError('These groups cannot be separated without overlap.')
+  for (const node of nodes.values())
+    node.x = borderPositions.get(representative(node))!
 
   // Straighten long edges where their layers leave room for a direct line.
   const fits = (node: LNode, x: number) => {
