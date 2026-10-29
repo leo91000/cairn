@@ -184,6 +184,12 @@ const reserve = computed(() => {
             <p v-if="node.maintenance && node.maintenanceError" role="alert" class="text-xs text-coral">
               {{ node.maintenanceError }}
             </p>
+            <p v-if="node.staleDisks?.count" class="text-xs">
+              {{ formatMiB(node.staleDisks.diskMiB) }} of old disks can be freed.
+              <button type="button" class="font-semibold text-accent hover:underline" @click="section = 'storage'">
+                Open storage
+              </button>
+            </p>
             <div v-if="node.exclusiveReservation" role="status" class="grid gap-1 rounded-xl border border-line p-3.5 text-xs">
               <p class="text-sm font-semibold">
                 Exclusive reservation · {{ node.exclusiveReservation.state }}

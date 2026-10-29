@@ -1241,3 +1241,62 @@ test('slow listings still show the machines, and an older answer never replaces 
   await expect(nodeRow(page, 'Old answer')).toHaveCount(0)
   await expect(nodeRow(page, 'Slow host')).toBeVisible()
 })
+
+test('a failed refresh is reported on the page and in the panel, then clears', async ({ page, workspace: _workspace }) => {
+  test.setTimeout(60000)
+  await useRelayForHttpMocks(page)
+  const machine = {
+    id: randomUUID(),
+    name: 'Refreshed host',
+    revision: 'fixture',
+    local: false,
+    accepting: true,
+    revoked: false,
+    status: 'online',
+    executionReady: true,
+    tags: [],
+    systemTags: [],
+    slots: 2,
+    occupiedSlots: 0,
+    availableSlots: 2,
+    agents: [{ id: 'builder', name: 'Builder', allNodes: true }],
+    exclusiveAgents: [],
+    staleDisks: { count: 1, diskMiB: 2048 },
+    storage: {
+      cacheMiB: 102400,
+      memoryCacheMiB: 256,
+      reserveMiB: 10240,
+      reservePercent: 5,
+      backupSeconds: 60,
+      maxDirtySeconds: 300,
+    },
+    limits: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 },
+    capabilities: {
+      os: 'linux',
+      arch: 'x86_64',
+      backend: 'firecracker',
+      kvm: true,
+      cpu: 4,
+      memoryMiB: 8192,
+      diskMiB: 65536,
+    },
+    lastSeen: Date.now(),
+  }
+  let failing = false
+  await page.route('**/api/nodes', route => failing
+    ? route.fulfill({ status: 503, json: { error: 'The manager is restarting.' } })
+    : route.fulfill({ json: [{ ...machine, lastSeen: Date.now() }] }))
+  await page.goto(workspacePath('/nodes'))
+  await authenticateWorkspace(page)
+  const panel = await openNode(page, 'Refreshed host')
+  // Old disks are pointed out on the overview.
+  await panel.getByRole('button', { name: 'Open storage', exact: true }).click()
+  await expect(panel.getByRole('button', { name: 'Free old disks', exact: true })).toBeVisible()
+  failing = true
+  await expect(panel.getByRole('status').filter({ hasText: 'figures may be out of date' })).toContainText('The manager is restarting.', { timeout: 20000 })
+  await expect(panel.getByRole('alert')).toHaveCount(0)
+  failing = false
+  await expect(panel.getByRole('status').filter({ hasText: 'figures may be out of date' })).toHaveCount(0, { timeout: 20000 })
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('alert')).toHaveCount(0)
+})

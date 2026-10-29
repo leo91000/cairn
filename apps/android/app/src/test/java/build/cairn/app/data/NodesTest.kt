@@ -292,6 +292,33 @@ class NodesTest {
                 ready.copy(slots = 2, runtimeSlots = 0, occupiedSlots = 0, availableSlots = 2)
             ),
         )
+        // Time changing privileges does not count either.
+        val changing =
+            waiting.copy(
+                capabilities =
+                    waiting.capabilities.copy(
+                        backend = NATIVE_BACKEND,
+                        ublk = true,
+                        nativeModeProtocol = 1,
+                    ),
+                nativeEnabled = true,
+                nativeAccounts = listOf("person"),
+                nativeModeStatus = "pending",
+            )
+        assertTrue(observeUnready(listOf(changing), emptyMap(), 0).isEmpty())
+        // Deliberate choices: native execution switched off, an unused built-in runner.
+        val switchedOff =
+            changing.copy(nativeEnabled = false, nativeModeStatus = null, executionReady = true)
+        assertEquals(
+            NodeHealth(NodeHealthState.PAUSED, "En pause", "Exécution native désactivée"),
+            nodeHealth(switchedOff),
+        )
+        val unused =
+            ready.copy(local = true, status = "local", lastSeen = null, agents = emptyList())
+        assertEquals(NodeHealthState.SETUP, nodeHealth(unused).state)
+        assertEquals(0, fleetSummary(listOf(unused, switchedOff)).attention)
+        // Revoked machines leave the summary.
+        assertEquals(0, fleetSummary(listOf(ready.copy(revoked = true))).machines)
         assertEquals(3L, slotCapacity(ready.copy(slots = null, runtimeSlots = 3)))
         assertEquals(4L, slotCapacity(ready.copy(slots = null, runtimeSlots = null)))
 

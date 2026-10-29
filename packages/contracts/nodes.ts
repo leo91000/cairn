@@ -261,6 +261,9 @@ export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number 
 
   if (native && node.nativeModeProposal)
     return { state: 'attention', label: 'Needs attention', detail: `An agent requested ${nativeModeLabel(node.nativeModeProposal.mode)}` }
+  // With trusted people chosen, disabled native execution is the owner's off switch, like pausing new work.
+  if (native && !node.nativeEnabled && node.nativeAccounts?.length)
+    return { state: 'paused', label: 'Paused', detail: 'Native execution is disabled' }
   if (native && (!node.nativeEnabled || !node.nativeAccounts?.length))
     return { state: 'setup', label: 'Setup needed', detail: 'Enable native execution and choose trusted people' }
   if (!node.agents?.length)
@@ -302,7 +305,8 @@ export function fleetSummary(nodes: ExecutionNode[], now = Date.now(), clock: nu
     connected: live.length,
     usedSlots: live.reduce((total, node) => total + Math.min(node.occupiedSlots ?? 0, slotCapacity(node)), 0),
     totalSlots: live.reduce((total, node) => total + slotCapacity(node), 0),
-    attention: healths.filter(health => ['offline', 'attention', 'setup'].includes(health.state)).length,
+    // A built-in runner no agent may use is a common choice (remote machines only), not a task for the owner.
+    attention: healths.filter((health, index) => ['offline', 'attention'].includes(health.state) || (health.state === 'setup' && !active[index].local)).length,
   }
 }
 

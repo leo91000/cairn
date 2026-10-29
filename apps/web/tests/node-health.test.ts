@@ -276,6 +276,31 @@ describe('node health', () => {
     expect(slotCapacity(node({ slots: null, runtimeSlots: null }))).toBe(4)
   })
 
+  it('reads deliberate choices as such: native execution switched off, an unused built-in runner', () => {
+    const native = node({
+      capabilities: {
+        ...node().capabilities,
+        backend: 'native',
+        kvm: false,
+        ublk: true,
+        nativeModeProtocol: 1,
+      },
+      nativeEnabled: false,
+      nativeAccounts: ['person'],
+    })
+    expect(nodeHealth(native)).toEqual({ state: 'paused', label: 'Paused', detail: 'Native execution is disabled' })
+    const unused = node({
+      id: 'runner',
+      local: true,
+      status: 'local',
+      lastSeen: null,
+      agents: [],
+    })
+    expect(nodeHealth(unused).state).toBe('setup')
+    expect(fleetSummary([unused, native]).attention).toBe(0)
+    expect(fleetSummary([{ ...unused, local: false, status: 'online' }]).attention).toBe(1)
+  })
+
   it('summarizes the fleet as placement sees it', () => {
     const runner = node({
       id: 'runner',

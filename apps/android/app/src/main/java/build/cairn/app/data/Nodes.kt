@@ -384,6 +384,10 @@ fun nodeHealth(
             "À vérifier",
             "Un agent demande ${nativeModeLabel(node.nativeModeProposal.mode)}",
         )
+    // With trusted people chosen, disabled native execution is the owner's off switch, like pausing
+    // new work.
+    if (native && !node.nativeEnabled && node.nativeAccounts.isNotEmpty())
+        return NodeHealth(NodeHealthState.PAUSED, "En pause", "Exécution native désactivée")
     if (native && (!node.nativeEnabled || node.nativeAccounts.isEmpty()))
         return NodeHealth(
             NodeHealthState.SETUP,
@@ -458,14 +462,13 @@ fun fleetSummary(
         connected = live.size,
         usedSlots = live.sumOf { minOf(it.occupiedSlots, slotCapacity(it)) },
         totalSlots = live.sumOf { slotCapacity(it) },
+        // A built-in runner no agent may use is a common choice (remote machines only), not a task
+        // for the owner.
         attention =
-            healths.values.count {
-                it.state in
-                    listOf(
-                        NodeHealthState.OFFLINE,
-                        NodeHealthState.ATTENTION,
-                        NodeHealthState.SETUP,
-                    )
+            healths.count { (node, health) ->
+                health.state == NodeHealthState.OFFLINE ||
+                    health.state == NodeHealthState.ATTENTION ||
+                    (health.state == NodeHealthState.SETUP && !node.local)
             },
     )
 }
