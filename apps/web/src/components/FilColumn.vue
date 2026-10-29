@@ -12,7 +12,7 @@ import {
 import { useRouter } from 'vue-router'
 import { runMission as queueMission } from '../../../../packages/contracts/generated/runMission'
 import { setMissionState } from '../../../../packages/contracts/generated/setMissionState'
-import { canUseAgent } from '../agent-use'
+import { canDirectChat, canUseAgent } from '../agent-use'
 import {
   api,
   notify,
@@ -167,7 +167,9 @@ function tone(item: FilItem) {
 }
 
 function action(item: FilItem) {
-  const usable = canUseAgent(state.usableAgents, item.agentKey)
+  // A delegated task may also be directed through its requesting conversation's agent.
+  const chat = item.chatId ? props.chats.find(chat => chat.id === item.chatId) : undefined
+  const usable = chat ? canDirectChat(state.usableAgents, chat, props.chats) : canUseAgent(state.usableAgents, item.agentKey)
   return item.kind === 'question' ? (usable ? 'Answer' : 'Open') : item.kind === 'failed' ? (usable ? 'Resume' : 'Open') : isUnread(item) && !read(item) ? 'Read' : 'Open'
 }
 

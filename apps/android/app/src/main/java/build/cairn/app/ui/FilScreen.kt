@@ -471,6 +471,12 @@ fun FilScreen(
     val trash = rememberConversationTrash(vm)
     val chats = live.state?.chats?.filter { it.id !in trash.hidden }
     val feed = buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads, now)
+    // A delegated task may also be directed through its requesting conversation's agent.
+    fun directable(item: FeedItem): Boolean =
+        item.chatId
+            ?.let { id -> chats?.find { it.id == id } }
+            ?.let { canDirectChat(state.usableAgents, it, chats.orEmpty()) }
+            ?: canUseAgent(state.usableAgents, item.agentKey)
     // Deleting a conversation needs access to its agent (ADR-0075).
     fun deletion(item: FeedItem): (() -> Unit)? =
         item.chatId
@@ -578,7 +584,7 @@ fun FilScreen(
                     dismiss = { setAside(item) },
                     snooze = { setAside(item, tomorrowMorning(now)) },
                     archive = { archive(item) },
-                    usable = canUseAgent(state.usableAgents, item.agentKey),
+                    usable = directable(item),
                 )
             }
         }

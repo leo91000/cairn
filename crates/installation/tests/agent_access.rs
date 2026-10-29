@@ -319,6 +319,20 @@ async fn retries_follow_the_tasks_current_agent_and_authors_can_move_a_suspended
         StatusCode::FORBIDDEN
     );
 
+    // Pausing it with the full settings stays open, like the state command.
+    let mut paused = moved.clone();
+    paused["enabled"] = false.into();
+    let replace = json!({ "taskId": id, "revision": owned["revision"], "settings": paused });
+    let (status, owned) = member(&s, "PUT", &path, replace).await;
+    assert_eq!(status, StatusCode::OK, "{owned}");
+    let mut edited = moved.clone();
+    edited["prompt"] = "Something else".into();
+    let replace = json!({ "taskId": id, "revision": owned["revision"], "settings": edited });
+    assert_eq!(
+        member(&s, "PUT", &path, replace).await.0,
+        StatusCode::FORBIDDEN
+    );
+
     // Like a rule, its author moves it to an agent they may use.
     relay_fixture::allow_member(&s, MEMBER, &writer).await;
     let mut usable = settings.clone();
@@ -327,6 +341,21 @@ async fn retries_follow_the_tasks_current_agent_and_authors_can_move_a_suspended
     let (status, moved) = member(&s, "PUT", &path, replace).await;
     assert_eq!(status, StatusCode::OK, "{moved}");
     assert!(moved["scheduleWaitReason"].is_null());
+}
+
+#[tokio::test]
+async fn an_entry_from_an_ended_membership_is_dropped_before_it_allows_work() {
+    let root = tempfile::tempdir().unwrap();
+    let s = service(root.path()).await;
+    let reviewer = agent(&s, "Reviewer").await;
+    relay_fixture::allow_member(&s, MEMBER, &reviewer).await;
+
+    // Removed and invited again while the installation missed both reconciliations.
+    relay_fixture::remove_member(&s, MEMBER).await;
+    relay_fixture::add_member(&s, MEMBER, "membership-2").await;
+    let (status, _) = member(&s, "POST", "/api/chats", json!({ "agentId": reviewer })).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(usable(&s).await, json!([]));
 }
 
 #[tokio::test]

@@ -18,10 +18,11 @@ use crate::{
     store::Db,
     validation::text,
 };
-use cairn_contracts::{AgentAccount, AgentId, ListAgentAccountsOutput, Mission};
+use cairn_contracts::{AgentAccount, AgentId, ListAgentAccountsOutput, Mission, MissionSettings};
 use cairn_protocol::TaskAuthorPolicy;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE agent_account_access(
@@ -151,39 +152,46 @@ pub(crate) fn uses_chat(
     }
 }
 
-fn require(allowed: bool) -> Result<()> {
+/// Allowed requests report whether a member's entry allowed them.
+fn require(allowed: bool, member: bool) -> Result<bool> {
     if allowed {
-        Ok(())
+        Ok(member)
     } else {
         Err(Error::forbidden(DENIED))
     }
 }
 
-fn require_agent(db: &Db<'_>, identity: &InstallationIdentity, agent: &str) -> Result<()> {
-    require(uses_agent(db, identity, agent)?)
+fn member(identity: &InstallationIdentity) -> bool {
+    identity.role == InstallationRole::Member && identity.mcp_scopes.is_none()
 }
 
-fn require_chat(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<()> {
+fn require_agent(db: &Db<'_>, identity: &InstallationIdentity, agent: &str) -> Result<bool> {
+    require(uses_agent(db, identity, agent)?, member(identity))
+}
+
+fn require_chat(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<bool> {
     let chat = required(db.get("chats", id)?, "Chat not found")?;
-    require(uses_chat(db, identity, &chat)?)
+    require(uses_chat(db, identity, &chat)?, member(identity))
 }
 
 /// A conversation's run follows its conversation; a task run follows its agent.
-fn require_run(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<()> {
+fn require_run(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<bool> {
     if let Some(chat) = crate::chats::chat_for_run(db, id)? {
-        return require(uses_chat(db, identity, &chat)?);
+        return require(uses_chat(db, identity, &chat)?, member(identity));
     }
     let run = required(db.run(id)?, "Run not found")?;
     require_agent(db, identity, crate::nodes::run_agent(&run))
 }
 
-fn require_task(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<()> {
+fn require_task(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<bool> {
     let task = required(db.mission(id)?, "Mission not found")?;
     require_agent(db, identity, &task.settings.agent_id.to_string())
 }
 
 /// Read-only admission preflight for people, before dispatch, like native authority.
 /// Reductions (pause, archive, stop, cancel) and reads stay open to every member.
+/// Access allowed by a member's entry relies on a recently verified membership, so an
+/// entry from an ended membership never serves a re-invited member for long.
 pub(crate) async fn authorize_request(s: &Service, input: &crate::http::Input) -> Result<()> {
     let Some(identity) = input.identity.clone() else {
         return Ok(());
@@ -191,75 +199,116 @@ pub(crate) async fn authorize_request(s: &Service, input: &crate::http::Input) -
     if identity.role == InstallationRole::Owner || identity.mcp_scopes.is_some() {
         return Ok(());
     }
-    let parts = input
-        .path
+    let request = Arc::new((input.method.clone(), input.path.clone(), input.body.clone()));
+    let check = || {
+        let (identity, request) = (identity.clone(), request.clone());
+        s.store.read(move |db| {
+            let (method, path, body) = &*request;
+            gate(db, &identity, method, path, body)
+        })
+    };
+    if !check().await? || s.missions.membership_verified_within(MEMBERSHIP_AGE) {
+        return Ok(());
+    }
+
+    // A failed check fails closed: these requests direct an agent.
+    {
+        let _authors = s.missions.authors.lock().await;
+        s.missions.observe(s).await?;
+    }
+    check().await.map(|_| ())
+}
+
+/// How long a membership check vouches for a member's entries.
+const MEMBERSHIP_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whether the request needs access to an agent, and then that the identity holds it.
+/// Returns true when a member's entry allowed it.
+fn gate(
+    db: &Db<'_>,
+    identity: &InstallationIdentity,
+    method: &str,
+    path: &str,
+    body: &Value,
+) -> Result<bool> {
+    let parts = path
         .trim_start_matches("/api/")
         .split('/')
-        .map(str::to_owned)
         .collect::<Vec<_>>();
-    let method = input.method.clone();
-    let body = input.body.clone();
-    s.store
-        .read(move |db| {
-            let parts = parts.iter().map(String::as_str).collect::<Vec<_>>();
-            match (method.as_str(), parts.as_slice()) {
-                ("POST", ["chats"]) => require_agent(
-                    db,
-                    &identity,
-                    body["agentId"]
-                        .as_str()
-                        .unwrap_or(crate::config::MAIN_AGENT_ID),
-                ),
-                // Deleting needs the conversation's own agent, even for a delegated task.
-                ("DELETE", ["chats", id]) => {
-                    let chat = required(db.get("chats", id)?, "Chat not found")?;
-                    require_agent(db, &identity, text(&chat, "agentId"))
-                }
-                ("POST", ["chats", id, "messages"])
-                | ("PUT", ["chats", id, "messages", _])
-                | ("POST", ["chats", id, "questions", _, "answer" | "cancel"])
-                | ("POST", ["chats", id, "new-session" | "compact" | "coding-agent"]) => {
-                    require_chat(db, &identity, id)
-                }
-                ("POST", ["chats", id, "pause"]) if body["paused"] != true => {
-                    require_chat(db, &identity, id)
-                }
-                // A retry starts the task again as it is now, on its current agent.
-                ("POST", ["runs", id, "retry"]) => {
-                    let run = required(db.run(id)?, "Run not found")?;
-                    match db.mission(text(&run, "taskId"))? {
-                        Some(task) => {
-                            require_agent(db, &identity, &task.settings.agent_id.to_string())
-                        }
-                        None => require_run(db, &identity, id),
-                    }
-                }
-                ("POST", ["runs", id, "resume" | "chat"]) => require_run(db, &identity, id),
-                // A missing agent is left to the command's own validation.
-                ("POST", ["tasks"]) => match body["settings"]["agentId"].as_str() {
-                    Some(agent) => require_agent(db, &identity, agent),
-                    None => Ok(()),
-                },
-                // Members edit only their own tasks; like a rule, a suspended task can
-                // move to an agent its author may use.
-                ("PUT", ["tasks", _]) => match body["settings"]["agentId"].as_str() {
-                    Some(agent) => require_agent(db, &identity, agent),
-                    None => Ok(()),
-                },
-                ("POST", ["tasks", id, "state"]) => {
-                    let task = required(db.mission(id)?, "Mission not found")?;
-                    let reduces = body["enabled"] == false
-                        && (body["archived"] == true || !task.settings.archived);
-                    if reduces {
-                        return Ok(());
-                    }
-                    require_agent(db, &identity, &task.settings.agent_id.to_string())
-                }
-                ("POST", ["tasks", id, "run"]) => require_task(db, &identity, id),
-                _ => Ok(()),
+    match (method, parts.as_slice()) {
+        ("POST", ["chats"]) => require_agent(
+            db,
+            identity,
+            body["agentId"]
+                .as_str()
+                .unwrap_or(crate::config::MAIN_AGENT_ID),
+        ),
+        // Deleting needs the conversation's own agent, even for a delegated task.
+        ("DELETE", ["chats", id]) => {
+            let chat = required(db.get("chats", id)?, "Chat not found")?;
+            require_agent(db, identity, text(&chat, "agentId"))
+        }
+        ("POST", ["chats", id, "messages"])
+        | ("PUT", ["chats", id, "messages", _])
+        | ("POST", ["chats", id, "questions", _, "answer" | "cancel"])
+        | ("POST", ["chats", id, "new-session" | "compact" | "coding-agent"]) => {
+            require_chat(db, identity, id)
+        }
+        ("POST", ["chats", id, "pause"]) if body["paused"] != true => {
+            require_chat(db, identity, id)
+        }
+        // A retry starts the task again as it is now, on its current agent.
+        ("POST", ["runs", id, "retry"]) => {
+            let run = required(db.run(id)?, "Run not found")?;
+            match db.mission(text(&run, "taskId"))? {
+                Some(task) => require_agent(db, identity, &task.settings.agent_id.to_string()),
+                None => require_run(db, identity, id),
             }
-        })
-        .await
+        }
+        ("POST", ["runs", id, "resume" | "chat"]) => require_run(db, identity, id),
+        // A missing agent is left to the command's own validation.
+        ("POST", ["tasks"]) => match body["settings"]["agentId"].as_str() {
+            Some(agent) => require_agent(db, identity, agent),
+            None => Ok(false),
+        },
+        // Members edit only their own tasks; like a rule, a suspended task can move to an
+        // agent its author may use. Pausing or archiving it stays open to everyone.
+        ("PUT", ["tasks", id]) => match body["settings"]["agentId"].as_str() {
+            Some(_) if reduces_task(db, id, &body["settings"])? => Ok(false),
+            Some(agent) => require_agent(db, identity, agent),
+            None => Ok(false),
+        },
+        ("POST", ["tasks", id, "state"]) => {
+            let task = required(db.mission(id)?, "Mission not found")?;
+            let reduces =
+                body["enabled"] == false && (body["archived"] == true || !task.settings.archived);
+            if reduces {
+                return Ok(false);
+            }
+            require_agent(db, identity, &task.settings.agent_id.to_string())
+        }
+        ("POST", ["tasks", id, "run"]) => require_task(db, identity, id),
+        _ => Ok(false),
+    }
+}
+
+/// The same reduction as a task save: only pausing, or archiving, and nothing else.
+fn reduces_task(db: &Db<'_>, id: &str, settings: &Value) -> Result<bool> {
+    let Some(current) = db.mission(id)? else {
+        return Ok(false);
+    };
+    let Ok(mut settings) = serde_json::from_value::<MissionSettings>(settings.clone()) else {
+        return Ok(false);
+    };
+    if settings.validate().is_err() {
+        return Ok(false);
+    }
+    let mut unchanged = settings.clone();
+    unchanged.enabled = current.settings.enabled;
+    unchanged.archived = current.settings.archived;
+    Ok(!settings.enabled
+        && (!current.settings.archived || settings.archived)
+        && unchanged == current.settings)
 }
 
 /// A scheduled task runs only while its author may use its agent. Tasks without a
@@ -319,7 +368,8 @@ fn mark_suspensions(
 /// (including a removal followed by a new invitation), then completes the rollout.
 pub(crate) fn reconcile(db: &Db<'_>, policy: Option<&TaskAuthorPolicy>) -> Result<()> {
     let Some(policy) = policy else {
-        // An unclaimed installation has no member to keep the existing agents for.
+        // Only an unclaimed installation, without a relay identity, observes no policy: it
+        // has no member to keep the existing agents for. Unreadable identities fail instead.
         return db.delete(ROLLOUT);
     };
     let entries =

@@ -743,7 +743,10 @@ Removal, leaving and member account deletion request task reconciliation on the
 live relay after committing the access change. If that request is lost, the
 installation reconciles before admitting scheduled work and on reconnection.
 The same reconciliation drops the account access to agents of every ended
-membership, so a new invitation starts without any agent. A member's scheduled
+membership, so a new invitation starts without any agent. Accepting an invitation
+also requests it, and before a member's access entry lets them direct an agent, the
+installation repeats it when the last check is older than 30 seconds; if the
+Beacon cannot answer, the request fails rather than trusting the entry. A member's scheduled
 task on an agent they cannot use skips its occurrences, with a wait reason, until
 access returns. No account session or member list is persisted on the installation
 for access control; it keeps only, per agent, the accounts the owner allowed with

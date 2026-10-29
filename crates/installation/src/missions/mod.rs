@@ -20,6 +20,8 @@ pub(crate) use storage::SCHEMA;
 #[derive(Default)]
 pub struct Missions {
     pub(crate) authors: tokio::sync::Mutex<()>,
+    /// When the Beacon last confirmed the memberships, reconciled with account access.
+    verified: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 pub(crate) enum Actor {
@@ -293,8 +295,16 @@ impl Missions {
             .await
     }
 
+    pub(crate) fn membership_verified_within(&self, age: std::time::Duration) -> bool {
+        self.verified
+            .lock()
+            .unwrap()
+            .is_some_and(|verified| verified.elapsed() < age)
+    }
+
     /// Callers hold `authors`.
     pub(crate) async fn observe(&self, s: &Service) -> Result<Option<TaskAuthorPolicy>> {
+        let checked = std::time::Instant::now();
         let policy = crate::relay::task_author_policy(s).await?;
         let observed = policy.clone();
         s.store
@@ -332,6 +342,7 @@ impl Missions {
                 crate::agent_access::reconcile(db, observed.as_ref())
             })
             .await?;
+        *self.verified.lock().unwrap() = Some(checked);
         Ok(policy)
     }
 
@@ -406,6 +417,7 @@ impl Missions {
             })
             .await?;
         s.worker.notify();
+        drop(active);
 
         // Moved tasks show at once whether their authors may use the receiving agent;
         // their admission checks it again regardless.

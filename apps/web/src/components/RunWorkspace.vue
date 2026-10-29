@@ -7,7 +7,7 @@ import { cancelRun } from '../../../../packages/contracts/generated/cancelRun'
 import { cleanupRun } from '../../../../packages/contracts/generated/cleanupRun'
 import { resumeRun } from '../../../../packages/contracts/generated/resume-run'
 import { retryRun } from '../../../../packages/contracts/generated/retryRun'
-import { canUseAgent } from '../agent-use'
+import { canDirectChat, canUseAgent } from '../agent-use'
 import {
   api,
   date,
@@ -100,7 +100,13 @@ const active = computed(
   () => run.value && ['running', 'queued', 'waiting'].includes(run.value.status),
 )
 // Members direct only runs whose agent they may use (ADR-0075).
-const directable = computed(() => !run.value || canUseAgent(state.usableAgents, run.value.snapshot?.agent?.id))
+const directable = computed(() => {
+  if (!run.value)
+    return true
+  // A conversation's run follows its conversation, including a delegated task's requester.
+  const chat = chatList.value.find(chat => chat.id === run.value!.taskId)
+  return chat ? canDirectChat(state.usableAgents, chat, chatList.value) : canUseAgent(state.usableAgents, run.value.snapshot?.agent?.id)
+})
 // A retry starts the task again as it is now, on its current agent.
 const retryable = computed(() => {
   const current = run.value && state.tasks.find(task => task.id === run.value!.taskId)
