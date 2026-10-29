@@ -19,7 +19,7 @@ keep readable source. Self-transitions on composite states or subgraphs, and con
 regions (`--`), and sequence participant creation/destruction or `box` groups also keep source with an explanation. Subgraphs with a differing local direction keep source unless
 an external member link invokes Mermaid's documented parent-direction inheritance
 ([syntax](https://mermaid.js.org/syntax/flowchart.html#direction-in-subgraphs)). Each drawing has a source toggle, copy and a full-screen viewer with
-zoom and pan, including two-finger translation while pinching. Node links remain usable in the card and the full-screen viewer; dragging a
+zoom and pan, including two-finger translation while pinching. Node links remain usable in the card and the full-screen viewer; Cairn file links use the same installation routing and in-app file viewer in both presentations; dragging a
 linked node pans without opening it. This is presentation of existing message text, so public MCP and
 `cairn_installation` are unchanged: agents already read and write the Mermaid source.
 

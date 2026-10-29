@@ -233,6 +233,79 @@ test('cyclic and unsupported composite semantics preserve readable source', asyn
   }
 })
 
+test('full-screen artifact nodes retain installation routing and the file viewer', async ({ page, context }) => {
+  await page.evaluate(async (path) => {
+    const { state } = await import(path)
+    state.installationId = 'fixture'
+  }, '/apps/web/src/api.ts')
+  const path = '/api/installations/fixture/api/runs/run-1/artifacts'
+  const first = Promise.withResolvers<void>()
+  let lists = 0
+  const file = {
+    id: 'file-1',
+    runId: 'run-1',
+    messageId: null,
+    key: 'report',
+    version: 1,
+    title: 'Report',
+    name: 'report.txt',
+    group: '',
+    kind: 'code',
+    mediaType: 'text/plain',
+    size: 20,
+    createdAt: 1,
+    url: '/api/runs/run-1/artifacts/file-1',
+    previewStatus: 'none',
+  }
+  await page.route(`**${path}`, async (route) => {
+    lists++
+    if (lists === 1) {
+      await first.promise
+      await route.fulfill({ json: [] })
+    }
+    else {
+      await route.fulfill({ json: [file] })
+    }
+  })
+  await page.route(`**${path}/file-1`, route => route.fulfill({ contentType: 'text/plain', body: 'Scoped file contents' }))
+  const beforeUrl = page.url()
+  const target = `${new URL(beforeUrl).origin}/api/runs/run-1/artifacts/file-1`
+  await page.evaluate(source => window.chatRendering.markdown(source), `\`\`\`mermaid\nflowchart TD\nA[Report]\nclick A "${target}"\n\`\`\``)
+  await expect(page.locator('#app figure.diagram svg a')).toHaveAttribute('href', `${path}/file-1`)
+  await page.getByRole('button', { name: 'Open diagram' }).click()
+  const viewer = page.getByRole('dialog', { name: 'Flowchart', exact: true })
+  const link = viewer.locator('svg a')
+  await expect(link).toHaveAttribute('href', `${path}/file-1`)
+  const center = () => link.locator('text').evaluate((element) => {
+    const box = element.getBoundingClientRect()
+    return { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+  })
+  let point = await center()
+  await page.mouse.move(point.x, point.y)
+  await page.mouse.down()
+  await page.mouse.move(point.x + 40, point.y + 25, { steps: 5 })
+  await page.mouse.up()
+  expect(lists).toBe(0)
+  const transform = await viewer.locator('.diagram-stage > div').getAttribute('style')
+  point = await center()
+  await page.mouse.click(point.x, point.y)
+  await expect(viewer.getByRole('status')).toHaveText('Opening file…')
+  first.resolve()
+  await expect(viewer.getByRole('alert')).toHaveText('This file is no longer available.')
+  expect(lists).toBe(1)
+  point = await center()
+  await page.mouse.click(point.x, point.y)
+  const artifact = page.getByRole('dialog', { name: 'Deliverables viewer', exact: true })
+  await expect(artifact).toBeVisible()
+  await expect(artifact).toContainText('Scoped file contents')
+  expect(lists).toBe(2)
+  expect(context.pages()).toHaveLength(1)
+  expect(page.url()).toBe(beforeUrl)
+  await artifact.getByRole('button', { name: 'Close viewer', exact: true }).click()
+  await expect(viewer).toBeVisible()
+  await expect(viewer.locator('.diagram-stage > div')).toHaveAttribute('style', transform!)
+})
+
 test('two-pointer gestures preserve the drawing under a moving pinch centroid', async ({ page }) => {
   await page.evaluate(text => window.chatRendering.markdown(text), '\`\`\`mermaid\nflowchart LR\nA-->B\n\`\`\`')
   await page.getByRole('button', { name: 'Open diagram' }).click()

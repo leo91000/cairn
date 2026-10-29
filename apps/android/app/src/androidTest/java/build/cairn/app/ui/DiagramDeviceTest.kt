@@ -35,12 +35,19 @@ class DiagramDeviceTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val context = instrumentation.targetContext
 
-    private fun show(density: Float? = null, content: () -> String) {
+    private fun show(
+        density: Float? = null,
+        openArtifact: (String) -> Boolean = { false },
+        content: () -> String,
+    ) {
         compose.setContent {
             val platformDensity = LocalDensity.current
             val testDensity =
                 density?.let { Density(it, platformDensity.fontScale) } ?: platformDensity
-            CompositionLocalProvider(LocalDensity provides testDensity) {
+            CompositionLocalProvider(
+                LocalDensity provides testDensity,
+                LocalArtifactLinks provides openArtifact,
+            ) {
                 CairnTheme("light") {
                     Surface(Modifier.fillMaxSize()) {
                         Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
@@ -218,6 +225,30 @@ class DiagramDeviceTest {
         } finally {
             instrumentation.removeMonitor(monitor)
         }
+    }
+
+    @Test
+    fun artifactNodesUseTheSameInAppOpenerInCardAndViewer() {
+        val link = "https://example.test/api/runs/run-1/artifacts/file-1"
+        val opened = CopyOnWriteArrayList<String>()
+        val source = "flowchart TD\nA[Report]\nclick A \"$link\""
+        show(
+            openArtifact = {
+                opened.add(it)
+                true
+            }
+        ) {
+            "```mermaid\n$source\n```"
+        }
+        compose.waitUntil(20000) {
+            compose.onAllNodesWithTag("diagram-drawing").fetchSemanticsNodes().size == 1
+        }
+        compose.onNodeWithContentDescription(link).performTouchInput { click(center) }
+        compose.waitUntil(10000) { opened.size == 1 }
+        compose.onNodeWithContentDescription("Agrandir").performClick()
+        compose.onNodeWithTag("diagram-stage").performTouchInput { click(center) }
+        compose.waitUntil(10000) { opened.size == 2 }
+        assertEquals(listOf(link, link), opened.toList())
     }
 
     @Test

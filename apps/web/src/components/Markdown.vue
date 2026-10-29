@@ -62,6 +62,7 @@ function diagramAction(event: MouseEvent) {
     })
   }
   else if (kind === 'expand') {
+    error.value = ''
     viewing.value = { source, returnFocus: button }
   }
 
@@ -281,6 +282,9 @@ const html = computed(() => {
     v-if="viewing"
     :source="viewing.source"
     :return-focus="viewing.returnFocus"
+    :opening-link="loading"
+    :link-error="error"
+    @open-link="openLink"
     @close="viewing = undefined"
   />
 </template>

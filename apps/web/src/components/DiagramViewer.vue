@@ -7,6 +7,8 @@ import {
   onMounted,
   ref,
 } from 'vue'
+import { apiResourceUrl } from '../api'
+import { artifactLink } from '../deliverables'
 import { diagramKind } from '../diagram'
 import { sceneFor, sceneSvg } from '../diagram-svg'
 import {
@@ -21,8 +23,13 @@ import { iconButton } from '../ui'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
 
-const props = defineProps<{ source: string, returnFocus?: HTMLElement }>()
-const emit = defineEmits<{ close: [] }>()
+const props = defineProps<{
+  source: string
+  returnFocus?: HTMLElement
+  openingLink?: boolean
+  linkError?: string
+}>()
+const emit = defineEmits<{ close: [], openLink: [event: MouseEvent] }>()
 
 const TITLES = {
   flowchart: 'Flowchart',
@@ -176,6 +183,8 @@ function onStageClick(event: MouseEvent) {
   }
 
   suppressClick = false
+  if (!event.defaultPrevented)
+    emit('openLink', event)
 }
 
 function onKey(event: KeyboardEvent) {
@@ -259,6 +268,12 @@ onMounted(async () => {
   if (!scene)
     return
   const svg = sceneSvg(scene)
+  for (const link of svg.querySelectorAll('a[href]')) {
+    const href = link.getAttribute('href')!
+    if (artifactLink(href, window.location.origin))
+      link.setAttribute('href', apiResourceUrl(href))
+  }
+
   drawing.value!.append(svg)
   window.addEventListener('pointermove', onPointerMove, { passive: false })
   window.addEventListener('pointerup', onPointerUp)
@@ -346,6 +361,12 @@ onBeforeUnmount(() => {
           <Icon :name="Download" :size="16" /> PNG
         </button>
       </div>
+      <p v-if="openingLink" role="status" class="border-b border-line px-4 py-2 text-sm text-muted">
+        Opening file…
+      </p>
+      <p v-if="linkError" role="alert" class="border-b border-line px-4 py-2 text-sm text-danger">
+        {{ linkError }}
+      </p>
       <div
         ref="stage"
         class="diagram-stage relative min-h-0 flex-1 touch-none overflow-hidden select-none"
