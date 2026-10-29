@@ -262,6 +262,9 @@ test('registers, configures and revokes a node through the owner interface', asy
   await page.screenshot({ path: 'test-results/nodes-desktop-panel.png' })
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.screenshot({ path: 'test-results/nodes-desktop-dark.png' })
+  // Laptop widths keep usage and agents; narrower windows drop them for the name.
+  await page.setViewportSize({ width: 1100, height: 844 })
+  await expect(row.getByText('Usage unavailable')).toBeVisible()
   await page.setViewportSize({ width: 800, height: 844 })
   await expect(row.getByText('Usage unavailable')).toBeHidden()
   await expect(row.getByText('VM', { exact: true })).toBeVisible()
@@ -1097,6 +1100,12 @@ test('the overview links an agent\'s privilege request to its review, and keeps 
   const unrelated = page.getByRole('dialog', { name: /^Requested host/ })
   await expect(unrelated).toBeVisible()
   await expect(unrelated.getByRole('alert')).toHaveCount(0)
+  // The page still names the failed machine; reopening that machine starts clean.
+  await page.keyboard.press('Escape')
+  await expect(unrelated).toHaveCount(0)
+  await expect(page.getByRole('alert').filter({ hasText: 'Other host: Other host is unreachable.' })).toBeVisible()
+  const reopened = await openNode(page, 'Other host')
+  await expect(reopened.getByRole('alert')).toHaveCount(0)
 })
 
 test('a silent built-in runner needs attention, and rows open and return focus from the keyboard', async ({ page, workspace: _workspace }) => {

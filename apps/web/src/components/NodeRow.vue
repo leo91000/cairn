@@ -48,7 +48,7 @@ const label = computed(() => {
 <template>
   <button
     type="button"
-    class="node-row group grid w-full grid-cols-[minmax(0,1fr)_7rem_5.5rem_8.5rem_4.5rem_1rem] items-center gap-4 border-t border-line px-4.5 py-3.5 text-left transition-colors hover:bg-hover/40 focus-visible:-outline-offset-2 focus-visible:outline-2 focus-visible:outline-accent compact:grid-cols-[minmax(0,1fr)_7rem_5.5rem_1rem] phone:grid-cols-[minmax(0,1fr)_auto]! phone:gap-3 phone:px-4"
+    class="node-row group grid w-full grid-cols-[minmax(0,1fr)_7rem_5.5rem_8.5rem_5rem_1rem] items-center gap-4 border-t border-line px-4.5 py-3.5 text-left transition-colors hover:bg-hover/40 focus-visible:-outline-offset-2 focus-visible:outline-2 focus-visible:outline-accent max-[1024px]:grid-cols-[minmax(0,1fr)_7rem_5.5rem_1rem] phone:grid-cols-[minmax(0,1fr)_auto]! phone:gap-3 phone:px-4"
     :class="{ 'bg-soft/40': selected }"
     :aria-label="label"
     :data-node-id="node.id"
@@ -70,7 +70,7 @@ const label = computed(() => {
       </template>
       <template v-else>—</template>
     </span>
-    <span class="grid gap-1.5 text-[11px] text-muted compact:hidden" :class="{ 'opacity-40': !live }">
+    <span class="grid gap-1.5 text-[11px] text-muted max-[1024px]:hidden" :class="{ 'opacity-40': !live }">
       <template v-if="node.usage && live">
         <span class="grid grid-cols-[2.2rem_minmax(0,1fr)] items-center gap-2" :title="`${formatMiB(node.usage.memoryMiB)} of ${formatMiB(node.limits.memoryMiB)} RAM`">RAM<NodeMeter :used="usedPercent(node.usage.memoryMiB, node.limits.memoryMiB)" :label="`${node.name} RAM in use`" /></span>
         <span class="grid grid-cols-[2.2rem_minmax(0,1fr)] items-center gap-2" :title="`${formatMiB(node.usage.diskMiB)} of ${formatMiB(node.limits.diskMiB)} disk`">Disk<NodeMeter :used="usedPercent(node.usage.diskMiB, node.limits.diskMiB)" :label="`${node.name} disk in use`" /></span>
@@ -79,7 +79,7 @@ const label = computed(() => {
         Usage unavailable
       </template>
     </span>
-    <span class="flex items-center compact:hidden">
+    <span class="flex items-center max-[1024px]:hidden">
       <AgentAvatar
         v-for="agent in agents.slice(0, 3)"
         :key="agent.id"

@@ -236,7 +236,13 @@ function switchBackend(node: ExecutionNode) {
   adding.value = true
 }
 
+// Reopening a machine starts clean: its earlier error was seen. Other machines' errors stay on the page.
 function openNode(node: ExecutionNode) {
+  if (errorNodeId.value === node.id) {
+    error.value = ''
+    errorNodeId.value = null
+  }
+
   openedId.value = node.id
 }
 
@@ -573,8 +579,8 @@ function revoke() {
       Machines
     </h2>
     <section class="overflow-hidden rounded-2xl border border-line bg-surface shadow-arcade" aria-labelledby="machines-heading">
-      <div class="grid grid-cols-[minmax(0,1fr)_7rem_5.5rem_8.5rem_4.5rem_1rem] gap-4 bg-inset px-4.5 py-2 text-[10.5px] tracking-[.06em] text-muted uppercase compact:grid-cols-[minmax(0,1fr)_7rem_5.5rem_1rem] phone:hidden" aria-hidden="true">
-        <span>Machine</span><span>Runtime</span><span>Slots</span><span class="compact:hidden">Usage</span><span class="compact:hidden">Agents</span><span />
+      <div class="grid grid-cols-[minmax(0,1fr)_7rem_5.5rem_8.5rem_5rem_1rem] gap-4 bg-inset px-4.5 py-2 text-[10.5px] tracking-[.06em] text-muted uppercase max-[1024px]:grid-cols-[minmax(0,1fr)_7rem_5.5rem_1rem] phone:hidden" aria-hidden="true">
+        <span>Machine</span><span>Runtime</span><span>Slots</span><span class="max-[1024px]:hidden">Usage</span><span class="max-[1024px]:hidden">Agents</span><span />
       </div>
       <ul aria-label="Machines" class="[&>li:first-child>button]:border-t-0">
         <li v-for="node in visible" :key="node.id">
