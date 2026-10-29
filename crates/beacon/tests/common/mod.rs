@@ -371,7 +371,7 @@ impl RelayedInstallation {
         Self::with_app(extra_routes, String::new(), app).await
     }
 
-    async fn with_app(extra_routes: axum::Router, runner_url: String, app: Fixture) -> Self {
+    pub async fn with_app(extra_routes: axum::Router, runner_url: String, app: Fixture) -> Self {
         use cairn_installation::{config::Config, service::Service};
         use serde_json::json;
         use std::time::Duration;
@@ -418,8 +418,11 @@ impl RelayedInstallation {
             .unwrap()
             .merge(extra_routes);
         let identity_dir = installation.config.data_dir.join("installation-relay");
+        // Machine clients do not share the HTTP fixture client's DNS override.
+        // The claimed origin is also retained by the real relay connector.
+        let beacon = app.url.replace("localhost", "127.0.0.1");
         cairn_installation::relay::claim(
-            &app.url,
+            &beacon,
             &identity_dir,
             claim["code"].as_str().unwrap(),
             "Real installation",
