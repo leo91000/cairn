@@ -36,11 +36,57 @@ impl Control {
     }
 
     pub async fn apply(&self, state: &Path, configuration: Configuration) -> Result<()> {
+        let mut applied = self.0.lock().await;
+        Self::apply_locked(state, configuration, &mut applied).await
+    }
+
+    /// Reserve reductions must reach blocked journal writers even while native
+    /// close owns the disk gate. Other changes retain that gate's serialization
+    /// with disk opening and its cached CPU/memory limits.
+    pub async fn apply_relief(&self, state: &Path, configuration: &Configuration) -> Result<bool> {
+        let mut applied = self.0.lock().await;
+        let previous = match applied.as_ref() {
+            Some(current) if configuration.generation <= current.generation => {
+                Self::apply_locked(state, configuration.clone(), &mut applied).await?;
+                return Ok(true);
+            }
+            Some(current) => current.policy.clone(),
+            None => {
+                // A restarted controller has no applied generation yet. Its
+                // persisted policy can still block newly opened journal I/O.
+                let saved = tokio::fs::read(state.join("storage-policy.json"))
+                    .await
+                    .ok();
+                let Some(policy) =
+                    saved.and_then(|bytes| serde_json::from_slice::<Policy>(&bytes).ok())
+                else {
+                    return Ok(false);
+                };
+                policy
+            }
+        };
+        let mut reduced = previous.clone();
+        reduced.reserve_mi_b = configuration.policy.reserve_mi_b;
+        reduced.reserve_percent = configuration.policy.reserve_percent;
+        if reduced != configuration.policy
+            || reduced.reserve_mi_b > previous.reserve_mi_b
+            || reduced.reserve_percent > previous.reserve_percent
+        {
+            return Ok(false);
+        }
+        Self::apply_locked(state, configuration.clone(), &mut applied).await?;
+        Ok(true)
+    }
+
+    async fn apply_locked(
+        state: &Path,
+        configuration: Configuration,
+        applied: &mut Option<Configuration>,
+    ) -> Result<()> {
         configuration.policy.validate().map_err(Error::bad)?;
         if configuration.generation > 9_007_199_254_740_991 {
             return Err(Error::bad("Invalid storage policy generation."));
         }
-        let mut applied = self.0.lock().await;
         if let Some(current) = applied.as_ref() {
             if configuration.generation < current.generation {
                 return Ok(());
@@ -113,6 +159,130 @@ mod tests {
 #[cfg(test)]
 mod configuration_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn restarted_control_relaxes_only_a_compatible_persisted_policy() {
+        let root = tempfile::TempDir::new().unwrap();
+        let first = Configuration {
+            generation: 8,
+            policy: Policy::default(),
+        };
+        Control::default()
+            .apply(root.path(), first.clone())
+            .await
+            .unwrap();
+        let restarted = Control::default();
+        let mut relief = Configuration {
+            generation: 1,
+            policy: Policy {
+                reserve_mi_b: 64,
+                reserve_percent: 1,
+                ..first.policy.clone()
+            },
+        };
+        relief.policy.memory_cache_mi_b = 128;
+        assert!(!restarted.apply_relief(root.path(), &relief).await.unwrap());
+        assert_eq!(restarted.current().await, None);
+        relief.policy.memory_cache_mi_b = first.policy.memory_cache_mi_b;
+        assert!(restarted.apply_relief(root.path(), &relief).await.unwrap());
+        assert_eq!(restarted.current().await, Some(relief));
+    }
+
+    #[tokio::test]
+    async fn relief_is_monotonic_and_preserves_generation_ordering() {
+        let root = tempfile::TempDir::new().unwrap();
+        let control = Control::default();
+        let first = Configuration {
+            generation: 1,
+            policy: Policy {
+                reserve_mi_b: 4096,
+                reserve_percent: 10,
+                ..Policy::default()
+            },
+        };
+        assert!(!control.apply_relief(root.path(), &first).await.unwrap());
+        assert!(!root.path().join("storage-policy.json").exists());
+        control.apply(root.path(), first.clone()).await.unwrap();
+        for policy in [
+            Policy {
+                reserve_mi_b: 8192,
+                reserve_percent: 5,
+                ..first.policy.clone()
+            },
+            Policy {
+                reserve_mi_b: 2048,
+                reserve_percent: 20,
+                ..first.policy.clone()
+            },
+            Policy {
+                reserve_mi_b: 2048,
+                memory_cache_mi_b: 128,
+                ..first.policy.clone()
+            },
+        ] {
+            let configuration = Configuration {
+                generation: 2,
+                policy,
+            };
+            assert!(
+                !control
+                    .apply_relief(root.path(), &configuration)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(control.current().await, Some(first.clone()));
+        }
+
+        let second = Configuration {
+            generation: 2,
+            policy: Policy {
+                reserve_mi_b: 128,
+                reserve_percent: 2,
+                ..first.policy.clone()
+            },
+        };
+        let latest = Configuration {
+            generation: 3,
+            policy: Policy {
+                reserve_mi_b: 64,
+                reserve_percent: 1,
+                ..first.policy.clone()
+            },
+        };
+        let (second_result, latest_result) = tokio::join!(
+            control.apply_relief(root.path(), &second),
+            control.apply_relief(root.path(), &latest),
+        );
+        assert!(second_result.unwrap());
+        assert!(latest_result.unwrap());
+        assert!(control.apply_relief(root.path(), &first).await.unwrap());
+        assert!(control.apply_relief(root.path(), &latest).await.unwrap());
+        let conflict = Configuration {
+            generation: 3,
+            policy: first.policy.clone(),
+        };
+        assert_eq!(
+            control
+                .apply_relief(root.path(), &conflict)
+                .await
+                .unwrap_err()
+                .status,
+            409
+        );
+        let increase = Configuration {
+            generation: 4,
+            ..second
+        };
+        assert!(!control.apply_relief(root.path(), &increase).await.unwrap());
+        assert_eq!(control.current().await, Some(latest.clone()));
+        let saved: Policy = serde_json::from_slice(
+            &tokio::fs::read(root.path().join("storage-policy.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved, latest.policy);
+    }
 
     #[tokio::test]
     async fn applied_generations_ignore_late_writes_and_recover_after_controller_restart() {
