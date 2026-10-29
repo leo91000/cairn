@@ -115,7 +115,12 @@ internal class MarkdownBlocks(
         if (!isDiagramLanguage(fenceLanguage(fence.info))) return null
         // Closed by a last line of the opening fence's character, at least as long as it.
         val trimmed = content.trimEnd()
-        val closing = trimmed.substringAfterLast('\n').trimStart(' ', '\t', '>').trim()
+        val closing =
+            trimmed
+                .lineSequence()
+                .map { it.trimStart(' ', '\t', '>').trim() }
+                .lastOrNull { it.isNotEmpty() }
+                .orEmpty()
         val closed =
             trimmed.contains('\n') &&
                 closing.length >= fence.fenceLength &&

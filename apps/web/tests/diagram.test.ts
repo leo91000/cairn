@@ -103,6 +103,28 @@ describe('diagram layout', () => {
     expect(right.y).toBeCloseTo(state.y)
   })
 
+  it('wraps supplementary characters without splitting surrogate pairs', () => {
+    const word = `aa${'😀'.repeat(20)}`
+    const lines = wrapText(word, 14, 500, 200, measure)
+    expect(lines.join('')).toBe(word)
+    expect(lines.every(line => !/[\uD800-\uDFFF]/u.test(line))).toBe(true)
+  })
+
+  it('uses configured sequence increments and exact hundredths', () => {
+    const diagram = parseDiagram('sequenceDiagram\nautonumber 0.5 0.25\nA->>B: one\nA->>B: two\nA->>B: three')
+    expect(diagram.kind).toBe('sequence')
+    if (diagram.kind === 'sequence')
+      expect(diagram.items.filter(item => item.type === 'message').map(item => item.number)).toEqual([0.5, 0.75, 1])
+  })
+
+  it('moves large pie totals to the legend without clipping their digits', () => {
+    const scene = layoutDiagram(parseDiagram('pie\n"A":1000000000000000000'), measure)
+    const texts = scene.items.filter(item => item.kind === 'text')
+    const center = texts.find(item => item.size === 18)!
+    expect(measure.width(center.lines[0]!, center.size)).toBeLessThan(88)
+    expect(texts.flatMap(item => item.lines)).toContain('Total: 1,000,000,000,000,000,000')
+  })
+
   it('draws every flowchart node, link and label', () => {
     const scene = layoutDiagram(parseDiagram('flowchart LR\n  A[One] -->|go| B{Two?}\n  B --> C((Three))'), measure)
     const texts = scene.items.flatMap(item => item.kind === 'text' ? item.lines : [])

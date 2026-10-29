@@ -4399,6 +4399,270 @@
         "height": 307,
         "items": 13
       }
+    },
+    {
+      "name": "emoji-wrapping",
+      "source": "flowchart TD\nA[\"aa😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\"]",
+      "diagram": {
+        "kind": "graph",
+        "direction": "TB",
+        "nodes": [
+          {
+            "id": "A",
+            "label": "aa😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+            "shape": "rect"
+          }
+        ],
+        "edges": [],
+        "clusters": []
+      },
+      "layout": {
+        "width": 241,
+        "height": 86,
+        "items": 2
+      }
+    },
+    {
+      "name": "sequence-number-increment",
+      "source": "sequenceDiagram\nautonumber 10 10\nA->>B: one\nA->>B: two",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "message",
+            "from": "A",
+            "to": "B",
+            "label": "one",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 10
+          },
+          {
+            "type": "message",
+            "from": "A",
+            "to": "B",
+            "label": "two",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 20
+          }
+        ]
+      },
+      "layout": {
+        "width": 260,
+        "height": 226,
+        "items": 20
+      }
+    },
+    {
+      "name": "sequence-fractional-numbers",
+      "source": "sequenceDiagram\nautonumber 0.5 0.25\nA->>B: one\nA->>B: two\nA->>B: three",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "message",
+            "from": "A",
+            "to": "B",
+            "label": "one",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 0.5
+          },
+          {
+            "type": "message",
+            "from": "A",
+            "to": "B",
+            "label": "two",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 0.75
+          },
+          {
+            "type": "message",
+            "from": "A",
+            "to": "B",
+            "label": "three",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 1
+          }
+        ]
+      },
+      "layout": {
+        "width": 260,
+        "height": 268,
+        "items": 25
+      }
+    },
+    {
+      "name": "sequence-zero-and-off",
+      "source": "sequenceDiagram\nautonumber 0 0.1\nA->>B: one\nA->>B: two\nautonumber off\nA->>B: plain\nautonumber\nA->>B: again",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          },
+          {
+            "id": "B",
+            "label": "B",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "message",
+            "from": "A",
+            "to": "B",
+            "label": "one",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 0
+          },
+          {
+            "type": "message",
+            "from": "A",
+            "to": "B",
+            "label": "two",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 0.1
+          },
+          {
+            "type": "message",
+            "from": "A",
+            "to": "B",
+            "label": "plain",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          },
+          {
+            "type": "message",
+            "from": "A",
+            "to": "B",
+            "label": "again",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false,
+            "number": 1
+          }
+        ]
+      },
+      "layout": {
+        "width": 260,
+        "height": 310,
+        "items": 28
+      }
+    },
+    {
+      "name": "pie-large-total",
+      "source": "pie\n\"A\": 1000000000000000000",
+      "diagram": {
+        "kind": "pie",
+        "showData": false,
+        "slices": [
+          {
+            "label": "A",
+            "value": 1000000000000000000
+          }
+        ]
+      },
+      "layout": {
+        "width": 472,
+        "height": 208,
+        "items": 8
+      }
+    },
+    {
+      "name": "pie-very-large-value",
+      "source": "pie showData\n\"A\": 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "diagram": {
+        "kind": "pie",
+        "showData": true,
+        "slices": [
+          {
+            "label": "A",
+            "value": 1e+100
+          }
+        ]
+      },
+      "layout": {
+        "width": 1206,
+        "height": 208,
+        "items": 8
+      }
+    },
+    {
+      "name": "pie-tiny-total",
+      "source": "pie showData\n\"A\":1e-308",
+      "diagram": {
+        "kind": "pie",
+        "showData": true,
+        "slices": [
+          {
+            "label": "A",
+            "value": 1e-308
+          }
+        ]
+      },
+      "layout": {
+        "width": 361,
+        "height": 208,
+        "items": 7
+      }
     }
   ],
   "errors": [
@@ -4493,6 +4757,22 @@
     {
       "name": "composite-state-direction-with-external-transition",
       "source": "stateDiagram-v2\nstate S {\ndirection LR\nA-->B\n}\nB-->X"
+    },
+    {
+      "name": "sequence-number-extra-precision",
+      "source": "sequenceDiagram\nautonumber 0.001 1\nA->>B: one"
+    },
+    {
+      "name": "sequence-number-huge",
+      "source": "sequenceDiagram\nautonumber 9007199254740992\nA->>B: one"
+    },
+    {
+      "name": "sequence-number-unknown-arguments",
+      "source": "sequenceDiagram\nautonumber 10 10 10\nA->>B: one"
+    },
+    {
+      "name": "pie-total-overflow",
+      "source": "pie\n\"A\":1e308\n\"B\":1e308"
     }
   ],
   "unsupported": [

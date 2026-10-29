@@ -274,6 +274,42 @@ class DiagramCorpusTest {
     }
 
     @Test
+    fun `wraps supplementary characters without splitting surrogate pairs`() {
+        val word = "aa" + "😀".repeat(20)
+        val lines = wrapText(word, 14.0, 500, 200.0, measure)
+        assertEquals(word, lines.joinToString(""))
+        for (line in lines) for (index in line.indices) {
+            val char = line[index]
+            if (Character.isHighSurrogate(char))
+                assertTrue(index + 1 < line.length && Character.isLowSurrogate(line[index + 1]))
+            if (Character.isLowSurrogate(char))
+                assertTrue(index > 0 && Character.isHighSurrogate(line[index - 1]))
+        }
+    }
+
+    @Test
+    fun `uses configured sequence increments and exact hundredths`() {
+        val diagram =
+            parseDiagram(
+                "sequenceDiagram\nautonumber 0.5 0.25\nA->>B: one\nA->>B: two\nA->>B: three"
+            )
+                as SequenceDiagram
+        assertEquals(
+            listOf(0.5, 0.75, 1.0),
+            diagram.items.filterIsInstance<SequenceMessage>().map { it.number },
+        )
+    }
+
+    @Test
+    fun `moves large pie totals to the legend without clipping their digits`() {
+        val scene = layoutDiagram(parseDiagram("pie\n\"A\":1000000000000000000"), measure)
+        val texts = scene.items.filterIsInstance<TextItem>()
+        val center = texts.first { it.size == 18.0 }
+        assertTrue(measure.width(center.lines.first(), center.size, center.weight) < 88)
+        assertTrue(texts.flatMap { it.lines }.contains("Total: 1,000,000,000,000,000,000"))
+    }
+
+    @Test
     fun `orders whole subgraphs beyond 400 member constraints`() {
         val source =
             cases("parse")

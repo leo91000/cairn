@@ -130,6 +130,20 @@ class DiagramMarkdownTest {
     }
 
     @Test
+    fun `blank quoted lines preserve explicitly closed diagrams while open fences stay code`() {
+        val renderer = MarkdownBlocks(Markwon.create(context))
+        val open = "> ```mermaid\n> flowchart TD\n> A-->B"
+        assertTrue(renderer.render("$open\n>").none { it.diagram != null })
+        val closed = "$open\n> ```"
+        val diagram = renderer.render(closed).single().diagram
+        assertNotNull(diagram)
+        for (suffix in listOf("\n>", "\n> \n>\t", "\n>\n")) assertSame(
+            diagram,
+            renderer.render(closed + suffix).single().diagram,
+        )
+    }
+
+    @Test
     fun `unsupported kinds keep their code block and failures explain themselves`() {
         val gantt = "gantt\n  title A plan\n  section One\n  Task :a1, 2024-01-01, 3d"
         var content by mutableStateOf(fence(gantt))

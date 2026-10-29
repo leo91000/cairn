@@ -341,6 +341,22 @@ test('state notes retain their sides and unsupported local directions retain sou
 
   await page.evaluate(text => window.chatRendering.markdown(text), '```mermaid\nflowchart TB\nsubgraph S\ndirection LR\nA-->B\nend\n```')
   await expect(page.locator('#app .diagram-error')).toContainText('local direction')
-  await expect(page.locator('#app .diagram-error pre')).toContainText('direction LR')
+  await expect(page.locator('#app .diagram-source')).toContainText('direction LR')
   await expect(page.locator('#app figure.diagram svg')).toHaveCount(0)
+})
+
+test('Unicode wrapping, sequence increments and large totals remain readable', async ({ page }) => {
+  await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\nflowchart TD\nA["aa${'😀'.repeat(20)}"]\n\`\`\``)
+  const unicode = await page.locator('#app figure.diagram svg text').allTextContents()
+  expect(unicode.every(line => !/[\uD800-\uDFFF]/u.test(line))).toBe(true)
+  await page.evaluate(text => window.chatRendering.markdown(text), '```mermaid\nsequenceDiagram\nautonumber 0.5 0.25\nA->>B: one\nA->>B: two\n```')
+  await expect(page.locator('#app figure.diagram svg text')).toContainText(['0.5', '0.75'])
+  await page.evaluate(text => window.chatRendering.markdown(text), '```mermaid\npie\n"A":1000000000000000000\n```')
+  await expect(page.locator('#app figure.diagram svg text')).toContainText(['Σ', 'Total: 1,000,000,000,000,000,000'])
+  expect(await page.locator('#app figure.diagram svg text').filter({ hasText: /^Σ$/ }).evaluate(el => (el as SVGTextElement).getComputedTextLength())).toBeLessThan(88)
+  const quoted = '> ```mermaid\n> flowchart TD\n> A-->B\n> ```'
+  await page.evaluate(text => window.chatRendering.markdown(text), quoted)
+  await expect(page.locator('#app figure.diagram svg')).toHaveCount(1)
+  await page.evaluate(text => window.chatRendering.markdown(text), `${quoted}\n>`)
+  await expect(page.locator('#app figure.diagram svg')).toHaveCount(1)
 })

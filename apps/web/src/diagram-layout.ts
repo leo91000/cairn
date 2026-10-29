@@ -118,33 +118,37 @@ export function wrapText(text: string, size: number, weight: number, max: number
       if (line)
         lines.push(line)
       line = ''
+      const offsets = [0]
+      for (const character of word)
+        offsets.push(offsets.at(-1)! + character.length)
+      const characters = offsets.length - 1
       let start = 0
-      while (start < word.length) {
-        const remaining = word.length - start
+      while (start < characters) {
+        const remaining = characters - start
         let low = 1
         let high = Math.min(2, remaining)
         // Grow from the start of each segment, never rescan the entire remaining word.
-        while (high < remaining && measure.width(word.slice(start, start + high), size, weight) <= max) {
+        while (high < remaining && measure.width(word.slice(offsets[start], offsets[start + high]), size, weight) <= max) {
           low = high
           high = Math.min(high * 2, remaining)
         }
 
-        if (measure.width(word.slice(start, start + high), size, weight) <= max) {
+        if (measure.width(word.slice(offsets[start], offsets[start + high]), size, weight) <= max) {
           low = high
         }
         else {
           while (high - low > 1) {
             const middle = Math.floor((low + high) / 2)
-            if (measure.width(word.slice(start, start + middle), size, weight) <= max)
+            if (measure.width(word.slice(offsets[start], offsets[start + middle]), size, weight) <= max)
               low = middle
             else
               high = middle
           }
         }
 
-        const segment = word.slice(start, start + low)
+        const segment = word.slice(offsets[start], offsets[start + low])
         start += low
-        if (start < word.length)
+        if (start < characters)
           lines.push(segment)
         else
           line = segment
@@ -2460,14 +2464,18 @@ export function layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
   const titleBlock = diagram.title ? textBlock(diagram.title, TITLE_FONT, 600, 480, measure) : undefined
   const top = MARGIN + (titleBlock ? titleBlock.height + 16 : 0)
   const total = diagram.slices.reduce((sum, slice) => sum + slice.value, 0)
+  if (!Number.isFinite(total))
+    throw new DiagramError('The pie total is too large to draw.')
   const radius = 92
   const inner = 56
   const cx = MARGIN + radius
   const visible = diagram.slices.filter(slice => slice.value > 0)
   const rowHeight = 24
-  const legendHeight = visible.length * rowHeight
+  const format = (value: number) => value > 0 && value < 0.01 ? String(value) : (value < 1e12 ? Math.round(value * 100) / 100 : value).toLocaleString('en-US')
+  const totalText = format(total)
+  const totalInLegend = measure.width(totalText, 18, 700) > inner * 2 - 24
+  const legendHeight = (visible.length + (totalInLegend ? 1 : 0)) * rowHeight
   const cy = top + Math.max(radius, legendHeight / 2)
-  const format = (value: number) => (Math.round(value * 100) / 100).toLocaleString('en-US')
 
   let angle = 0
   visible.forEach((slice, position) => {
@@ -2504,7 +2512,7 @@ export function layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
     kind: 'text',
     x: cx,
     y: cy - 8,
-    lines: [format(total)],
+    lines: [totalInLegend ? 'Σ' : totalText],
     size: 18,
     weight: 700,
     anchor: 'middle',
@@ -2552,6 +2560,21 @@ export function layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
     })
     legendWidth = Math.max(legendWidth, 20 + labelWidth + 8 + measure.width(detail, 12, 500))
     legendY += rowHeight
+  }
+
+  if (totalInLegend) {
+    const label = `Total: ${totalText}`
+    items.push({
+      kind: 'text',
+      x: legendX + 20,
+      y: legendY,
+      lines: [label],
+      size: 12,
+      weight: 600,
+      anchor: 'start',
+      fill: { tone: 'ink' },
+    })
+    legendWidth = Math.max(legendWidth, 20 + measure.width(label, 12, 600))
   }
 
   const width = Math.ceil(Math.max(legendX + legendWidth + MARGIN, titleBlock ? titleBlock.width + MARGIN * 2 : 0))

@@ -1202,12 +1202,23 @@ function findArrow(line: string) {
   return undefined
 }
 
+/** Numbering uses hundredths to avoid accumulating floating-point rounding errors. */
+function sequenceNumber(value: string) {
+  const sign = value.startsWith('-') ? -1 : 1
+  const [whole, fraction = ''] = value.replace(/^[+-]/, '').split('.')
+  const cents = sign * Number((whole || '0') + fraction.padEnd(2, '0'))
+  if (!Number.isSafeInteger(cents))
+    throw new DiagramError('The sequence number is too large.')
+  return cents
+}
+
 function parseSequence(source: string): SequenceDiagram {
   const { title: frontTitle, lines } = statements(source)
   let title = frontTitle
   const participants = new Map<string, Participant>()
   const items: SequenceItem[] = []
   let autonumber: number | undefined
+  let increment = 100
   // Boxes group participant columns; they open and close like blocks but draw nothing here.
   const open: ('block' | 'box')[] = []
 
@@ -1240,7 +1251,17 @@ function parseSequence(source: string): SequenceDiagram {
     }
 
     if (keyword === 'autonumber') {
-      autonumber = rest === 'off' ? undefined : (Number.parseInt(rest, 10) || 1)
+      if (rest === 'off') {
+        autonumber = undefined
+      }
+      else {
+        const values = rest ? rest.split(/\s+/) : ['1']
+        if (values.length > 2 || values.some(value => !/^[+-]?(?:\d+(?:\.\d{1,2})?|\.\d{1,2})$/.test(value)))
+          throw new DiagramError('Sequence numbering supports a start and increment with at most two decimal places.')
+        autonumber = sequenceNumber(values[0]!)
+        increment = sequenceNumber(values[1] ?? '1')
+      }
+
       continue
     }
 
@@ -1338,8 +1359,13 @@ function parseSequence(source: string): SequenceDiagram {
         activate: mark === '+',
         deactivate: mark === '-',
       }
-      if (autonumber !== undefined)
-        item.number = autonumber++
+      if (autonumber !== undefined) {
+        item.number = autonumber / 100
+        autonumber += increment
+        if (!Number.isSafeInteger(autonumber))
+          throw new DiagramError('The sequence number is too large.')
+      }
+
       push(item)
       continue
     }

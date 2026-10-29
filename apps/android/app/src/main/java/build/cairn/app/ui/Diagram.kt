@@ -1327,12 +1327,27 @@ private val BLOCK_KEYWORDS =
     setOf("loop", "alt", "opt", "par", "par_over", "critical", "break", "rect")
 private val ALL_SPACE = Regex("$SPACE")
 
+private val SEQUENCE_NUMBER = Regex("[+-]?(?:[0-9]+(?:\\.[0-9]{1,2})?|\\.[0-9]{1,2})")
+private const val MAX_SEQUENCE_NUMBER = 9007199254740991L
+
+/** Numbering uses hundredths to avoid accumulating floating-point rounding errors. */
+private fun sequenceNumber(value: String): Long {
+    val parts = value.removePrefix("-").removePrefix("+").split('.')
+    val digits =
+        (parts[0] + parts.getOrElse(1) { "" }.padEnd(2, '0')).trimStart('0').ifEmpty { "0" }
+    val cents =
+        digits.toLongOrNull()?.takeIf { it <= MAX_SEQUENCE_NUMBER }
+            ?: throw DiagramError("The sequence number is too large.")
+    return if (value.startsWith('-')) -cents else cents
+}
+
 private fun parseSequence(source: String): SequenceDiagram {
     val statements = statements(source)
     var title = statements.title
     val participants = LinkedHashMap<String, Participant>()
     val items = mutableListOf<SequenceItem>()
-    var autonumber: Double? = null
+    var autonumber: Long? = null
+    var increment = 100L
     // Boxes group participant columns; they open and close like blocks but draw nothing here.
     val open = mutableListOf<Boolean>()
 
@@ -1365,9 +1380,16 @@ private fun parseSequence(source: String): SequenceDiagram {
         }
 
         if (keyword == "autonumber") {
-            autonumber =
-                if (rest == "off") null
-                else jsParseInt(rest).takeUnless { it.isNaN() || it == 0.0 } ?: 1.0
+            if (rest == "off") autonumber = null
+            else {
+                val values = if (rest.isEmpty()) listOf("1") else rest.split(SPACES)
+                if (values.size > 2 || values.any { !SEQUENCE_NUMBER.matches(it) })
+                    throw DiagramError(
+                        "Sequence numbering supports a start and increment with at most two decimal places."
+                    )
+                autonumber = sequenceNumber(values[0])
+                increment = sequenceNumber(values.getOrElse(1) { "1" })
+            }
             continue
         }
 
@@ -1471,8 +1493,12 @@ private fun parseSequence(source: String): SequenceDiagram {
                 }
             val from = participant(origin)
             val to = participant(target)
-            val number = autonumber
-            if (autonumber != null) autonumber += 1
+            val number = autonumber?.toDouble()?.div(100)
+            if (autonumber != null) {
+                autonumber += increment
+                if (autonumber > MAX_SEQUENCE_NUMBER || autonumber < -MAX_SEQUENCE_NUMBER)
+                    throw DiagramError("The sequence number is too large.")
+            }
             push(
                 SequenceMessage(
                     from = from,

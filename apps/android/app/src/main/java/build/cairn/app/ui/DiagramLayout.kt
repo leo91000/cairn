@@ -136,35 +136,55 @@ internal fun wrapText(
 
             if (line.isNotEmpty()) lines.add(line)
             line = ""
+            val offsets = mutableListOf(0)
+            var offset = 0
+            while (offset < word.length) {
+                offset += Character.charCount(word.codePointAt(offset))
+                offsets.add(offset)
+            }
+            val characters = offsets.size - 1
             var start = 0
-            while (start < word.length) {
-                val remaining = word.length - start
+            while (start < characters) {
+                val remaining = characters - start
                 var low = 1
                 var high = min(2, remaining)
                 // Grow from the start of each segment, never rescan the entire remaining word.
                 while (
                     high < remaining &&
-                        measure.width(word.substring(start, start + high), size, weight) <= max
+                        measure.width(
+                            word.substring(offsets[start], offsets[start + high]),
+                            size,
+                            weight,
+                        ) <= max
                 ) {
                     low = high
                     high = min(high * 2, remaining)
                 }
-                if (measure.width(word.substring(start, start + high), size, weight) <= max) {
+                if (
+                    measure.width(
+                        word.substring(offsets[start], offsets[start + high]),
+                        size,
+                        weight,
+                    ) <= max
+                ) {
                     low = high
                 } else {
                     while (high - low > 1) {
                         val middle = (low + high) / 2
                         if (
-                            measure.width(word.substring(start, start + middle), size, weight) <=
-                                max
+                            measure.width(
+                                word.substring(offsets[start], offsets[start + middle]),
+                                size,
+                                weight,
+                            ) <= max
                         )
                             low = middle
                         else high = middle
                     }
                 }
-                val segment = word.substring(start, start + low)
+                val segment = word.substring(offsets[start], offsets[start + low])
                 start += low
-                if (start < word.length) lines.add(segment) else line = segment
+                if (start < characters) lines.add(segment) else line = segment
             }
         }
 
@@ -2761,14 +2781,19 @@ internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
     val titleBlock = diagram.title?.let { textBlock(it, TITLE_FONT, 600, 480.0, measure) }
     val top = MARGIN + (if (titleBlock != null) titleBlock.height + 16 else 0.0)
     val total = diagram.slices.fold(0.0) { sum, slice -> sum + slice.value }
+    if (!total.isFinite()) throw DiagramError("The pie total is too large to draw.")
     val radius = 92.0
     val inner = 56.0
     val cx = MARGIN + radius
     val visible = diagram.slices.filter { it.value > 0 }
     val rowHeight = 24.0
-    val legendHeight = visible.size * rowHeight
+    fun format(value: Double) =
+        if (value > 0 && value < 0.01) jsNumberString(value)
+        else jsLocaleNumber(if (value < 1e12) jsRound(value * 100) / 100 else value)
+    val totalText = format(total)
+    val totalInLegend = measure.width(totalText, 18.0, 700) > inner * 2 - 24
+    val legendHeight = (visible.size + if (totalInLegend) 1 else 0) * rowHeight
     val cy = top + max(radius, legendHeight / 2)
-    fun format(value: Double) = jsLocaleNumber(jsRound(value * 100) / 100)
 
     var angle = 0.0
     visible.forEachIndexed { position, slice ->
@@ -2817,7 +2842,7 @@ internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
         TextItem(
             x = cx,
             y = cy - 8,
-            lines = listOf(format(total)),
+            lines = listOf(if (totalInLegend) "Σ" else totalText),
             size = 18.0,
             weight = 700,
             anchor = TextAnchor.MIDDLE,
@@ -2876,6 +2901,22 @@ internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
         )
         legendWidth = max(legendWidth, 20 + labelWidth + 8 + measure.width(detail, 12.0, 500))
         legendY += rowHeight
+    }
+
+    if (totalInLegend) {
+        val label = "Total: $totalText"
+        items.add(
+            TextItem(
+                x = legendX + 20,
+                y = legendY,
+                lines = listOf(label),
+                size = 12.0,
+                weight = 600,
+                anchor = TextAnchor.START,
+                fill = tone("ink"),
+            )
+        )
+        legendWidth = max(legendWidth, 20 + measure.width(label, 12.0, 600))
     }
 
     val width =
