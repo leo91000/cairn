@@ -1715,6 +1715,18 @@ mod tests {
         const BLOCK: u64 = 4 * 1024 * 1024;
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("disks/conversation");
+        // This fixture tests the shared quota, not the production 10 GiB
+        // physical reserve, which can exceed the free space on a test tmpfs.
+        let policy = Policy {
+            reserve_mi_b: 64,
+            reserve_percent: 1,
+            ..Default::default()
+        };
+        std::fs::write(
+            root.path().join("storage-policy.json"),
+            serde_json::to_vec(&policy).unwrap(),
+        )
+        .unwrap();
         let manifest = json!({
             "version": 1,
             "size": 16 * BLOCK,
@@ -1728,7 +1740,7 @@ mod tests {
         let context = json!({
             "master": "http://127.0.0.1:1/",
             "grant": "test",
-            "policy": Policy::default()
+            "policy": policy
         });
         let disk = create(&directory.join("lazy"), &manifest, &context)
             .await
