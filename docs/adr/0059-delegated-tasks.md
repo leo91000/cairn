@@ -1,4 +1,4 @@
-> Statut : les approbations de bots de plugins disparaissent avec la délégation externe ([ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md)) ; la couverture des droits d’un agent délégué compare désormais les contributions et les ressources accordées, pas seulement les instances, revérifiée à chaque action ; l’accès à l’agent de la conversation demandeuse suffit pour poursuivre la tâche ou répondre à ses questions.
+> Statut : les approbations de bots de plugins disparaissent avec la délégation externe ([ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md)) ; la couverture des droits d’un agent délégué compare désormais les contributions et les ressources accordées, pas seulement les instances, revérifiée à chaque action ; l’accès à l’agent de la conversation demandeuse suffit pour poursuivre la tâche ou répondre à ses questions, tant que cette conversation existe.
 
 # Delegated tasks across coding agents and models
 

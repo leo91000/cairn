@@ -153,7 +153,8 @@ qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l’arbre.
 - **Formules** : toute valeur d’une action ou d’une condition peut être une formule en
   [CEL](https://cel.dev) (Common Expression Language), complétée par des fonctions de
   Cairn (tronquer, découper en morceaux, formater une date…). Une formule est pure,
-  sans effet de bord ni boucle, et son coût d’évaluation est borné.
+  sans effet de bord ni boucle non bornée, et son coût d’évaluation est borné. L’agent
+  qu’une action démarre est choisi dans la règle, jamais calculé par une formule.
 - **Actions** : démarrer un agent, orienter une conversation, appeler un outil de
   plugin (jamais un outil de Cairn comme `cairn_installation` ou la délégation),
   annuler la conversation d’une clé, répondre à la question d’un agent, mémoriser une
@@ -237,10 +238,10 @@ celui qui l’importe, risque résiduel accepté comme ci-dessous), ou dont l’
 des instructions ou des skills qu’un agent a écrites, à quelque moment que ce soit
 (les instructions d’un plugin comptent comme écrites par le propriétaire qui l’a
 accordé). Il écrit au nom de cette personne : il crée des règles à son nom, et ne
-modifie, désactive, réactive ou supprime que les règles de ce compte. Tant qu’une
-règle de cette personne est en pause d’urgence, il n’écrit aucune de ses règles : ni
-création, ni duplication, ni modification, ni réactivation, ni suppression ; il ne
-lève jamais cette pause. Il n’accorde de droits à aucun agent ni à aucun compte, et ne
+modifie, désactive, réactive ou supprime que les règles de ce compte. Tant qu’une règle de cette personne est en pause d’urgence, il n’écrit aucune de ses
+règles : ni création, ni duplication, ni modification, ni réactivation, ni
+suppression ; il ne lève jamais cette pause, ne duplique la règle en pause de personne,
+et ne relance pas une règle au budget épuisé. Il n’accorde de droits à aucun agent ni à aucun compte, et ne
 touche pas à la règle d’un autre compte. Enfin, dans toute conversation, il ne réduit
 pas un droit sur un hook ou un outil qu’utilise, sur son agent d’exécution, la règle
 d’un autre compte que cette personne (le propriétaire, ou un membre dont l’adhésion
@@ -254,7 +255,11 @@ conversation qui s’exécute en natif, que si son créateur détenait l’autor
 ([ADR-0050](0050-trusted-native-execution.md)) dans la requête authentifiée qui a
 enregistré cette version de la règle. Une requête de `cairn_installation`, ou du MCP
 public sans autorité native, ne peut pas l’accorder, comme pour les tâches déléguées
-([ADR-0059](0059-delegated-tasks.md)). L’autorité est conservée avec la version ; à
+([ADR-0059](0059-delegated-tasks.md)). L’autorité est conservée avec la version, et une conversation qu’une règle démarre ou
+oriente la porte pour tout ce qu’elle lance ensuite (tâches déléguées, missions,
+migrations, tours repris) : l’autorité native retenue est l’intersection de cette
+autorité conservée et de l’autorité actuelle du créateur, et sans elle ce travail
+échoue ([ADR-0050](0050-trusted-native-execution.md)). à
 chaque action qui résout, au moment du déclenchement, un agent ou une conversation
 natifs, Cairn vérifie à la fois cette autorité conservée et l’autorité native actuelle
 du créateur ; sans elles, l’action échoue. Le travail natif qu’une règle démarre garde
@@ -331,7 +336,12 @@ créateur quand l’agent démarré a des droits de plugin ou l’accès à l’
 comme le faisait l’assistant des bots
 ([ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md)).
 
-Les risques d’un droit trop large relèvent du propriétaire ; Cairn doit en revanche
+Avant qu’un droit élargisse un agent (droits de plugin, accès à l’installation), la
+revue du propriétaire, sur le web, Android et le MCP public, liste les règles de tous
+les comptes qui démarrent ou orientent cet agent ; ce que l’agent peut alors faire pour
+des inconnus est ainsi visible au moment de l’accorder.
+
+Les risques d’un droit trop large relèvent du propriétaire ; Cairn doit en revanche
 rendre ces droits lisibles et n’en accorder aucun par défaut. Les capacités d’un
 plugin qui ne passent pas par des entrées d’outil ne peuvent pas être restreintes : un
 outil doit recevoir en entrée ce qu’il touche.
