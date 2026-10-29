@@ -21,7 +21,8 @@ Current run references are checked. Message IDs, delivery states, text, selectio
 private answer maps, equal-timestamp row order and attachment order are retained.
 Messages without a revision receive one. Engine-switch receipts keep their exact
 expiration; a current switch retains its separate expiry, pending state, model,
-error and retry timestamp. Missing inactivity policy still means seven days.
+error and retry timestamp. Unreachable switch keys left by version-12 conversation purges are discarded;
+no deleted conversation is recreated. Missing inactivity policy still means seven days.
 
 Malformed data, unsupported states, identity mismatches and failed constraints or
 foreign keys roll back the entire version-12 upgrade, including schema changes.
