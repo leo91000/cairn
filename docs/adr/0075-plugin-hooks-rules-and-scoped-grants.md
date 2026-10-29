@@ -126,11 +126,12 @@ ses règles, survit à son départ (une mission a le propriétaire pour auteur).
 
 Seul le propriétaire donne ou retire ces accès, et seulement depuis le web et
 Android ; l’interface le prévient quand l’agent a l’accès à l’installation. Comme la
-gestion des membres, ils sont exclus du MCP public et de `cairn_installation`, pour
-qu’aucun agent ni client externe ne puisse le faire. Le propriétaire a accès à tous
-les agents ; un nouvel agent n’est accessible qu’à lui. À la mise en place, les
-membres gardent l’accès aux agents existants. Ces accès appartiennent à une adhésion :
-réinviter un membre ne les rend pas.
+gestion des membres, les donner ou les retirer est exclu du MCP public et de
+`cairn_installation`, pour qu’aucun agent ni client externe ne puisse le faire ; les
+lire reste possible. Le propriétaire a accès à tous les agents ; un nouvel agent n’est
+accessible qu’à lui. À la mise en place, les membres gardent l’accès aux agents
+existants. Ces accès appartiennent à une adhésion : réinviter un membre ne les rend
+pas.
 
 Les personnes externes (un auteur Discord) n’ont ni identité ni droit dans Cairn :
 elles ne sont qu’une donnée de la payload, que les conditions d’une règle examinent.
@@ -218,8 +219,8 @@ supprimer sa règle, et le propriétaire n’importe laquelle ; supprimer une r
 ses déclenchements en cours. Comme les tâches
 ([ADR-0029](0029-sharing-whole-installations.md)), une règle appartient à une
 adhésion, et, pour un membre, un déclenchement exige une adhésion vérifiée récemment,
-de nouveau avant toute action qui suit une attente ; si
-elle ne peut pas l’être, il attend.
+de nouveau avant toute action qui suit une attente ; si elle ne peut pas l’être, il
+attend.
 
 Une règle ne se déclenche que si rien ne l’en empêche. Chaque empêchement se lève
 indépendamment des autres :
@@ -361,13 +362,14 @@ faisait l’assistant des bots
 
 Avant qu’un droit élargisse un agent (des droits de plugin, des connexions MCP,
 plusieurs projets, l’écriture de fichiers ou l’exécution de commandes, le pouvoir de
-déléguer, l’exécution native ou l’accès à l’installation), la revue du propriétaire liste, sur le web et Android, les comptes qui ont accès à cet
-agent, et partout, MCP public compris, les règles de tous les comptes qui le démarrent, l’utilisent comme agent d’exécution
-ou, quand leur créateur a des clés rattachées à ses conversations, orientent des
-conversations ou répondent à leurs questions par une clé ; l’approbation d’une mise à
-jour de plugin montre de même les agents en accès complet, leurs comptes et leurs
-règles qui reçoivent ses nouvelles contributions ; ce que l’agent peut alors faire
-pour des inconnus est ainsi visible au moment de l’accorder.
+déléguer, l’exécution native ou l’accès à l’installation), la revue du propriétaire
+liste, sur le web et Android, les comptes qui ont accès à cet agent, et partout, MCP
+public compris, les règles de tous les comptes qui le démarrent, l’utilisent comme
+agent d’exécution ou, quand leur créateur a des clés rattachées à ses conversations,
+orientent des conversations ou répondent à leurs questions par une clé ; l’approbation
+d’une mise à jour de plugin montre de même les agents en accès complet, leurs comptes
+et leurs règles qui reçoivent ses nouvelles contributions ; ce que l’agent peut alors
+faire pour des inconnus est ainsi visible au moment de l’accorder.
 
 Les risques d’un droit trop large relèvent du propriétaire ; Cairn doit en revanche
 rendre ces droits lisibles et n’en accorder aucun par défaut. Les capacités d’un
