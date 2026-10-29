@@ -558,7 +558,15 @@ impl Turn<'_> {
             })
             .max_by_key(|message| {
                 let info = &message["info"];
+                // Overlapping prompts can create responses out of order. Settle
+                // the newest submission before comparing its assistant messages.
+                let submission = self
+                    .receipt
+                    .submissions
+                    .iter()
+                    .rposition(|(_, wire)| info["parentID"] == wire.as_str());
                 (
+                    submission,
                     info["time"]["created"].as_i64().unwrap_or(0),
                     text(info, "id"),
                 )

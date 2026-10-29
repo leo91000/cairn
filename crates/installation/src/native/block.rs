@@ -734,9 +734,14 @@ pub async fn published(state: &Path, run: &str, receipt: &Value) -> Result<Value
     let backup = text(receipt, "backupId").to_owned();
     crate::validation::uuid(&backup)?;
     let disk = volume.disk.clone();
-    tokio::task::spawn_blocking(move || disk.commit_published(generation, &backup))
-        .await
-        .map_err(Error::internal)??;
+    let state = state.to_owned();
+    tokio::task::spawn_blocking(move || {
+        volume
+            .source
+            .acknowledge(&state, &disk, generation, &backup)
+    })
+    .await
+    .map_err(Error::internal)??;
     Ok(json!({ "committed": true }))
 }
 

@@ -47,11 +47,11 @@ internal fun ConversationRetentionSettings(load: suspend () -> Int, save: suspen
     }
     Panel {
         Text(
-            "Suppression automatique des conversations",
+            "Nettoyage automatique des environnements",
             style = MaterialTheme.typography.titleLarge,
         )
         Text(
-            "Supprime définitivement les conversations après ce délai sans activité, y compris celles déjà présentes dans cette installation. L’historique, les fichiers et les liens partagés sont supprimés. Indiquez 0 pour désactiver."
+            "Supprime les environnements de travail après ce délai sans activité, y compris pour les conversations existantes. L’historique, les pièces jointes, toutes les versions des livrables et les liens partagés sont conservés. Les modifications non publiées, outils stockés dans l’environnement et autres fichiers de travail sont définitivement supprimés. Le prochain message crée un nouvel environnement et en informe l’agent. Indiquez 0 pour désactiver."
         )
         Text(
             "Les agents actifs, messages en attente, questions ouvertes et réveils programmés sont protégés. Le délai part de la dernière activité ou de la fin du travail de l’agent. Lire une conversation ne relance pas le délai."
@@ -84,9 +84,9 @@ internal fun ConversationRetentionSettings(load: suspend () -> Int, save: suspen
         Confirm(
             "Enregistrer le délai ?",
             if (days.toIntOrNull() == 0)
-                "La suppression automatique sera désactivée. Les conversations déjà supprimées ne peuvent pas être récupérées."
+                "Le nettoyage automatique sera désactivé. Les fichiers de travail déjà supprimés ne peuvent pas être récupérés."
             else
-                "Les conversations inactives depuis $days jours seront définitivement supprimées, y compris celles déjà présentes. Cette action est irréversible.",
+                "Les environnements inactifs depuis $days jours seront définitivement supprimés, y compris pour les conversations existantes. L’historique, les pièces jointes et les livrables sont conservés. Les modifications non publiées ne pourront pas être récupérées.",
             busy,
             error,
             { confirming = false },

@@ -384,6 +384,21 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await header.click()
   await expect(panel).toContainText('182.5 MiB on this node')
   await expect(panel).toContainText('175.4 MiB not yet saved')
+  workspace.service.store.updateRun(detail.run.id, {
+    storage: {
+      mode: 'on-demand',
+      localBytes: 191392768,
+      dirtyBytes: 183890000,
+      dirtySince: Date.now() - 600000,
+      backupDegraded: true,
+    },
+  } as any)
+  await heartbeat()
+  await expect(header).toContainText('Sync overdue', { timeout: 15000 })
+  await expect(panel).toContainText('Work can continue while local storage is safe')
+  workspace.service.store.updateRun(detail.run.id, { storage: { backupDegraded: false } } as any)
+  await heartbeat()
+  await expect(header).toContainText('Saving…', { timeout: 15000 })
   await page.screenshot({ path: 'test-results/execution-desktop.png' })
   await page.keyboard.press('Escape')
   await page.setViewportSize({ width: 390, height: 844 })
@@ -731,8 +746,8 @@ test('switching a machine to native enrolls it again and retires the previous no
   expect((await workspace.api(`/api/nodes/placement/${detail.run.id}`)).pinnedNodeId).toBeNull()
 })
 
-for (const automatic of [false, true]) {
-  test(`existing conversation explicitly confirms backend migration and follows its progress (${automatic ? 'automatic' : 'fixed'})`, async ({ page, workspace }) => {
+for (const { automatic, expired } of [{ automatic: false, expired: false }, { automatic: true, expired: false }, { automatic: false, expired: true }]) {
+  test(`existing conversation explicitly confirms backend migration and follows its progress (${expired ? 'expired' : automatic ? 'automatic' : 'fixed'})`, async ({ page, workspace }) => {
     test.setTimeout(60000)
     await useRelayForHttpMocks(page)
     // Earlier enrollment journeys may change Main's backend or allowed nodes.
@@ -759,6 +774,7 @@ for (const automatic of [false, true]) {
           fromBackend: phase === 'complete' ? 'native' : 'firecracker',
           toBackend: automatic && phase === 'complete' ? 'firecracker' : 'native',
           pending: phase === 'pending',
+          environmentExpired: expired,
           nodes: [{ id: 'native-fixture', name: 'Desktop GPU' }],
         },
       })
@@ -769,10 +785,18 @@ for (const automatic of [false, true]) {
     await page.getByRole('button', { name: 'Migrate this conversation…', exact: true }).click()
     const confirm = page.getByRole('dialog', { name: 'Migrate this conversation?', exact: true })
     await expect(confirm).toContainText('fresh engine session')
-    await expect(confirm).toContainText('original environment is retained')
+    if (expired) {
+      await expect(confirm).toContainText('new empty environment')
+      await expect(confirm).toContainText('uploads and published artifacts')
+      await expect(confirm).not.toContainText('original environment is retained')
+    }
+    else {
+      await expect(confirm).toContainText('original environment is retained')
+    }
+
     expect(requestBody).toBeUndefined()
     await page.screenshot({ path: 'test-results/backend-migration-confirm.png' })
-    await confirm.getByRole('button', { name: 'Stop and migrate', exact: true }).click()
+    await confirm.getByRole('button', { name: expired ? 'Confirm backend change' : 'Stop and migrate', exact: true }).click()
     await expect(page.getByRole('status').filter({ hasText: 'Migrating to native execution' })).toBeVisible()
     expect(requestBody).toEqual({ nodeId: 'native-fixture', backend: 'native', confirm: true })
     phase = 'complete'

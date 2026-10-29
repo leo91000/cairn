@@ -701,6 +701,23 @@ impl Execution<'_> {
         let adapter = self.provider.adapter();
         let chat_execution = self.run["chatExecution"].is_object();
         private_dir(&self.directory.join("chat-input")).await?;
+        if self.run["environmentExpiredAt"].is_number() {
+            let run_id = self.id.clone();
+            let attachments = s
+                .store
+                .read(move |db| {
+                    let Some(chat) = crate::chats::chat_for_run(db, &run_id)? else {
+                        return Ok(Vec::new());
+                    };
+                    Ok(db
+                        .keys(&format!("chat-attachment:{}:", text(&chat, "id")))?
+                        .into_iter()
+                        .map(|(_, attachment)| attachment)
+                        .collect::<Vec<_>>())
+                })
+                .await?;
+            s.prepare_chat_files(&self.id, &attachments.into()).await?;
+        }
         s.prepare_chat_files(&self.id, &self.run["chatExecution"]["attachments"])
             .await?;
         let run = crate::plugins::agents::with_instructions(s, self.run).await;

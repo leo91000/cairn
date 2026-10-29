@@ -897,6 +897,211 @@ async fn automatic_profiles_offer_optional_conversion_to_the_other_environment()
 }
 
 #[tokio::test]
+async fn expired_conversations_explicitly_change_backend_without_recovering_deleted_disks() {
+    for destination_backend in ["native", "firecracker"] {
+        let f = Fixture::new().await;
+        let vm = f.vm_node().await;
+        let (chat, run) = f.conversation().await;
+        let chat_id = text(&chat, "id").to_owned();
+        let run_id = text(&run, "id").to_owned();
+        let from = if destination_backend == "native" {
+            "firecracker"
+        } else {
+            "native"
+        };
+        let mut snapshot = run["snapshot"].clone();
+        snapshot["agent"]["access"]["backend"] = from.into();
+        let (cid, rid) = (chat_id.clone(), run_id.clone());
+        f.service
+            .store
+            .transaction(move |db| {
+                for mut message in db.messages(&cid)? {
+                    message["status"] = "delivered".into();
+                    db.put_message(&message)?;
+                }
+                db.change_run(
+                    &rid,
+                    cairn_installation::runs::RunChanges {
+                        status: Some(cairn_installation::run_status::RunStatus::Succeeded),
+                        snapshot: Some(serde_json::from_value(snapshot).unwrap()),
+                        recovery_pending: Some(false),
+                        boundary: Some(json!({
+                            "environmentState": "expired",
+                            "environmentExpiredAt": now(),
+                            "isolated": false,
+                            "nodeId": null,
+                        })),
+                        ..Default::default()
+                    },
+                )?;
+                db.save_checkpoint_boundary(&rid, &json!({ "completed": true }))?;
+                let mut chat = db.get("chats", &cid)?.unwrap();
+                chat["environmentState"] = "expired".into();
+                chat["environmentExpiredAt"] = now().into();
+                chat["paused"] = true.into();
+                db.put("chats", &chat)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let destination = if destination_backend == "native" {
+            &f.node
+        } else {
+            &vm
+        };
+        let mut preferred = destination.clone();
+        preferred["id"] = id().into();
+        preferred["nativeAccounts"] = json!([TRUSTED, OTHER]);
+        f.service
+            .store
+            .put_node_fixture(preferred.clone())
+            .await
+            .unwrap();
+        f.service.agent_fixture(json!({
+            "access": { "backend": destination_backend, "nodes": [preferred["id"], destination["id"]] },
+            "nodePriorities": [preferred["id"], destination["id"]],
+        }), f.agent["id"].as_str()).await.unwrap();
+        let path = format!("/api/nodes/placement/{run_id}/backend-migration");
+        let input =
+            json!({ "nodeId": destination["id"], "backend": destination_backend, "confirm": true });
+        let (status, preview) = f.owner_call("GET", &path, Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{preview}");
+        assert_eq!(preview["environmentExpired"], true);
+        assert_eq!(preview["required"], true);
+        // Only the trusted caller has native authority; management cannot invent it.
+        if destination_backend == "native" {
+            assert!(
+                !preview["nodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|node| node["id"] == destination["id"])
+            );
+            assert_eq!(
+                f.owner_call("POST", &path, input.clone()).await.0,
+                StatusCode::FORBIDDEN
+            );
+            let mut node = f.node.clone();
+            node["nativeAccounts"] = json!([TRUSTED, OTHER]);
+            f.service.store.put_node_fixture(node).await.unwrap();
+        }
+        let mut unconfirmed = input.clone();
+        unconfirmed["confirm"] = false.into();
+        assert_eq!(
+            f.owner_call("POST", &path, unconfirmed).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        // Expiration does not bypass the existing restriction on other reduced access.
+        let before = f.service.store.run(&run_id).await.unwrap();
+        let mut broader = before["snapshot"].clone();
+        broader["agent"]["access"]["installation"] = true.into();
+        f.service
+            .store
+            .change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    snapshot: Some(serde_json::from_value(broader).unwrap()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let (status, denied) = f.owner_call("POST", &path, input.clone()).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{denied}");
+        assert!(text(&denied, "error").contains("Other agent access was reduced"));
+        f.service
+            .store
+            .change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    snapshot: Some(serde_json::from_value(before["snapshot"].clone()).unwrap()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let (status, result) = f.owner_call("POST", &path, input).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        let migrated = f.service.store.run(&run_id).await.unwrap();
+        assert_eq!(
+            migrated["snapshot"]["agent"]["access"]["backend"],
+            destination_backend
+        );
+        assert_eq!(migrated["nodeId"], destination["id"]);
+        assert!(migrated["backup"].is_null());
+        assert!(migrated["backendMigration"].is_null());
+        assert!(migrated["sessionId"].is_null());
+        let checkpoint = f
+            .service
+            .store
+            .checkpoint_boundary(&run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(checkpoint["prepared"].is_null());
+        assert_eq!(migrated["pinnedNodeId"], destination["id"]);
+        // No disk has been created, so the existing preference control can
+        // change this choice without trying to transfer a deleted environment.
+        let placement_path = format!("/api/nodes/placement/{run_id}");
+        for selected in [&preferred, destination] {
+            let (status, selection) = f
+                .owner_call(
+                    "PUT",
+                    &placement_path,
+                    json!({
+                        "pinnedNodeId": selected["id"],
+                        "preferredNodeId": null,
+                    }),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{selection}");
+            assert_eq!(selection["pinnedNodeId"], selected["id"]);
+        }
+        assert_eq!(
+            f.service.get("chats", &chat_id).await.unwrap()["paused"],
+            true
+        );
+        assert_eq!(
+            f.owner_call(
+                "POST",
+                &format!("/api/chats/{chat_id}/pause"),
+                json!({ "paused": false })
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let (status, message) = f
+            .owner_call(
+                "POST",
+                &format!("/api/chats/{chat_id}/messages"),
+                json!({ "id": id(), "text": "Continue in a fresh environment" }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{message}");
+        f.service.chat_tick(&HashSet::new()).await.unwrap();
+        let continued = f.service.store.run(&run_id).await.unwrap();
+        assert_eq!(continued["status"], "queued");
+        assert!(continued["environmentState"].is_null());
+        assert_eq!(
+            continued["snapshot"]["agent"]["access"]["backend"],
+            destination_backend
+        );
+        assert_eq!(
+            f.service.get("chats", &chat_id).await.unwrap()["runId"],
+            run_id
+        );
+        let admission = placement::reserve(&f.service, &continued, &id())
+            .await
+            .unwrap();
+        assert_eq!(
+            admission["nodeId"], destination["id"],
+            "An explicitly confirmed destination must win over automatic priorities"
+        );
+    }
+}
+
+#[tokio::test]
 async fn native_authority_outage_preserves_automatic_vm_admission_and_vm_continuations() {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};

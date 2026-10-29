@@ -436,6 +436,8 @@ class BlockedMissionJourneyTest {
     @Test
     fun `a run handed back to its requester links the conversation that started it`() = journey {
         waitText("Checks de la PR315")
+        // The parent snapshot moves this card out of Pour vous. Tap after that layout change.
+        waitText("Tâche bloquée · En attente de Orchestrer les chantiers F8")
         compose.onNodeWithText("Checks de la PR315").performClick()
         waitText("En attente de « Orchestrer les chantiers F8 »", substring = true)
         waitText("Ouvrir « Orchestrer les chantiers F8 »")

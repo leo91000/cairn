@@ -187,10 +187,12 @@ async function main() {
       // A completed-turn prefix can precede queued block writes. Publish the
       // current paused disk at each eviction boundary; other guest starts can
       // give those queued writes time to land after an earlier acknowledgement.
-      const current = await (await api(`/disks/${runId}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
-      await flushPublication(current)
-      const status = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
-      assert.equal(status.dirtyBytes, 0, 'Eviction requires the current journal to be acknowledged')
+      await until(async () => {
+        const current = await (await api(`/disks/${runId}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
+        await flushPublication(current)
+        const status = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
+        return status.dirtyBytes === 0
+      })
     }
 
     let sessionId

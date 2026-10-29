@@ -404,6 +404,10 @@ async fn drain_remote_deletions(service: &Service) {
                 "UPDATE shared_objects SET unused_at=0 WHERE unused_at IS NOT NULL",
                 [],
             )?;
+            // No live callers remain in these synthetic cleanup fixtures. Advance
+            // capability/read-pin deadlines instead of waiting several minutes.
+            db.0.execute("UPDATE direct_storage_grants SET expires_at=0", [])?;
+            db.0.execute("UPDATE shared_objects SET retry_at=0", [])?;
             Ok(())
         })
         .await
@@ -419,7 +423,11 @@ fn shared_object_key(manifest: &Value, hash: &str) -> String {
         .iter()
         .find(|block| block["hash"] == hash)
         .unwrap();
-    shared_blocks::key(hash, block["object"].as_str().unwrap())
+    shared_blocks::object_key(
+        block["envelope"].as_u64().unwrap_or(2),
+        hash,
+        block["object"].as_str().unwrap(),
+    )
 }
 
 #[tokio::test]
@@ -1987,6 +1995,8 @@ async fn workspace_transfer_preserves_files_and_links_without_following_them() {
         std::fs::Permissions::from_mode(0o755),
     )
     .unwrap();
+    std::fs::write(source.join("empty"), []).unwrap();
+    std::fs::set_permissions(source.join("empty"), std::fs::Permissions::from_mode(0o640)).unwrap();
     std::os::unix::fs::symlink("/etc", source.join("external")).unwrap();
     let mut bytes = Vec::new();
     files::send(&source, &mut bytes).await.unwrap();
@@ -1999,6 +2009,8 @@ async fn workspace_transfer_preserves_files_and_links_without_following_them() {
         Path::new("/etc")
     );
     assert_eq!(mode(&target.join("nested/tool")), 0o755);
+    assert!(std::fs::read(target.join("empty")).unwrap().is_empty());
+    assert_eq!(mode(&target.join("empty")), 0o640);
     let malicious =
         b"{\"path\":\"external/passwd\",\"kind\":\"file\",\"size\":0}\n{\"complete\":true}\n";
     assert!(
@@ -3332,6 +3344,10 @@ fn snapshot_controller(
             snapshot.clone(),
         );
         async move {
+            if request.method() == "DELETE" && request.uri().path().ends_with("/direct-reader") {
+                return direct_reader_closed(request.uri().path());
+            }
+
             assert_eq!(
                 request.headers()["authorization"],
                 "Bearer controller-fixture"
@@ -3342,6 +3358,21 @@ fn snapshot_controller(
             if request.uri().path().ends_with("/snapshot") {
                 let manifest = manifest.lock().await.clone();
                 return Json(json!({ "id": snapshot, "manifest": manifest })).into_response();
+            }
+
+            if request.method() == "POST" && request.uri().path().ends_with("/direct-reader") {
+                return direct_reader_response(request.uri().path());
+            }
+            if request.uri().path().ends_with("/direct-upload") {
+                batched.store(true, Ordering::SeqCst);
+                let body = to_bytes(request.into_body(), 131_072).await.unwrap();
+                return direct_snapshot_upload(
+                    &disk,
+                    manifest.lock().await.clone(),
+                    &body,
+                    corrupt.load(Ordering::SeqCst),
+                )
+                .await;
             }
             if request.uri().path().ends_with("/blocks")
                 || request.uri().path().ends_with("/publication")
@@ -3492,7 +3523,12 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
     let owner = Owner::at(address.to_string()).await;
     let (node, attempt, run, token) = (id(), id(), id(), auth::token());
     owner.register_node(&node, &token).await;
+    owner
+        .grant_nodes(MAIN_AGENT_ID, json!([node, LOCAL_NODE_ID]))
+        .await;
     let mut record = run_record(&run, RunStatus::Running);
+    record["snapshot"] = json!({});
+    record["nodeId"] = node.clone().into();
     record["sessionId"] = "synthetic-native-session".into();
     owner.add_run_fixture(&record).await;
     owner
@@ -3993,6 +4029,13 @@ fn movement_controller(
                 "Bearer controller-fixture"
             );
             let route = request.uri().path().to_owned();
+            if request.method() == "DELETE" && route.ends_with("/direct-reader") {
+                let parts = route.split('/').collect::<Vec<_>>();
+                snapshots::close_direct_reader(&state.join("snapshots").join(parts[2]))
+                    .await
+                    .unwrap();
+                return Json(json!({ "closed": true })).into_response();
+            }
             if request.method() == "DELETE" {
                 return Json(json!({ "ok": true })).into_response();
             }
@@ -4068,6 +4111,20 @@ fn movement_controller(
             if route.starts_with("/snapshots/") {
                 let parts = route.split('/').collect::<Vec<_>>();
                 let directory = state.join("snapshots").join(parts[2]);
+                if parts[3] == "direct-reader" {
+                    let body = to_bytes(request.into_body(), 4096).await.unwrap();
+                    return snapshots::direct_reader(&directory, &body)
+                        .await
+                        .unwrap()
+                        .into_response();
+                }
+                if request.method() == "POST" && parts[3] == "direct-upload" {
+                    let body = to_bytes(request.into_body(), 131_072).await.unwrap();
+                    return match snapshots::upload_direct(&directory, &body).await {
+                        Ok(receipt) => Json(receipt).into_response(),
+                        Err(error) => error.into_response(),
+                    };
+                }
                 if request.method() == "DELETE" {
                     tokio::fs::remove_dir_all(directory).await.unwrap();
                     return Json(json!({ "ok": true })).into_response();
@@ -4771,6 +4828,7 @@ async fn stale_node_disks_are_reported_and_freed_on_request() {
 fn isolated_run(run: &str, node: &str) -> Value {
     json!({
         "id": run,
+        "snapshot": {},
         "taskId": run,
         "createdAt": 0,
         "status": RunStatus::Running,
@@ -4805,6 +4863,269 @@ struct CaptureLog {
     block_reads: Arc<AtomicUsize>,
     failing: Arc<AtomicBool>,
     lost_ack: Arc<AtomicBool>,
+    acknowledge: Arc<AtomicBool>,
+}
+
+#[tokio::test]
+async fn historical_read_reports_quarantine_only_the_issued_incarnation_after_revocation() {
+    let owner = Owner::new().await;
+    let run = id();
+    owner
+        .add_run_fixture(&json!({
+            "id":run,"taskId":id(),"status":"succeeded","createdAt":0,
+            "backup":{"snapshotId":"old-baseline"}
+        }))
+        .await;
+    let object = id();
+    let replacement = id();
+    let hash = format!("b3-{}", "c".repeat(64));
+    let credential = "synthetic-historical-read-grant";
+    let (saved_object, saved_replacement, saved_hash, saved_run) = (
+        object.clone(),
+        replacement.clone(),
+        hash.clone(),
+        run.clone(),
+    );
+    owner.service.store.transaction(move|db|{
+        db.0.execute("INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES(?1,'old',?3,4096,'{}','ready'),(?2,'new',?3,4096,'{}','ready')",rusqlite::params![saved_object,saved_replacement,saved_hash])?;
+        db.0.execute("INSERT INTO direct_read_authorizations(grant_id,object,hash,run_id) VALUES(?1,?2,?3,?4)",rusqlite::params![cairn_installation::auth::digest(credential),saved_object,saved_hash,saved_run])?;
+        Ok(())
+    }).await.unwrap();
+    // No current disk grant or publication remains. This credential can only
+    // report the exact prior GET; it cannot renew access or invalidate a replacement.
+    let report = json!({"object":object,"hash":hash});
+    for _ in 0..2 {
+        let (status, value) = owner
+            .call(
+                "POST",
+                "/internal/node-restore/report",
+                report.clone(),
+                Some(credential),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        assert_eq!(value["invalidated"], true);
+    }
+    assert!(owner.run(&run).await["backup"]["snapshotId"].is_null());
+    let (status, _) = owner
+        .call(
+            "POST",
+            "/internal/node-restore/report",
+            json!({"object":replacement,"hash":hash}),
+            Some(credential),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = owner
+        .call(
+            "POST",
+            "/internal/node-restore/report",
+            report,
+            Some("different-holder"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = owner
+        .call(
+            "POST",
+            "/internal/node-restore/renew",
+            json!({}),
+            Some(credential),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let states = owner
+        .service
+        .store
+        .read(move |db| {
+            Ok((
+                db.0.query_row(
+                    "SELECT state FROM shared_objects WHERE id=?1",
+                    [object],
+                    |r| r.get::<_, String>(0),
+                )?,
+                db.0.query_row(
+                    "SELECT state FROM shared_objects WHERE id=?1",
+                    [replacement],
+                    |r| r.get::<_, String>(0),
+                )?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!(states, ("invalid".into(), "ready".into()));
+}
+
+#[tokio::test]
+async fn cross_node_quarantine_drains_an_ambiguous_ack_before_invalidating_and_survives_a_lost_reply()
+ {
+    let state = TempDir::new().unwrap();
+    let state_path = state.path().to_owned();
+    let publishing_run = id();
+    let reading_run = id();
+    let publication = id();
+    let object = id();
+    let hash = format!("b3-{}", "d".repeat(64));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = CancellationToken::new();
+    let (seen, gate, run, expected) = (
+        entered.clone(),
+        release.clone(),
+        publishing_run.clone(),
+        publication.clone(),
+    );
+    let controller = Router::new().fallback(move |request: Request<Body>| {
+        let (seen, gate, state, run, expected) = (
+            seen.clone(),
+            gate.clone(),
+            state_path.clone(),
+            run.clone(),
+            expected.clone(),
+        );
+        async move {
+            assert!(request.uri().path().ends_with("/publication-fence"));
+            let body = to_bytes(request.into_body(), 16384).await.unwrap();
+            let fence: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(fence["backupId"], expected);
+            seen.notify_one();
+            gate.cancelled().await;
+            runtime::fence_publication(&state, &run, &expected)
+                .await
+                .unwrap();
+            Json(json!({"fenced":expected})).into_response()
+        }
+    });
+    let (url, server) = common::serve_locally(controller).await;
+    let owner = Owner::with_runner(common::HOST.into(), url).await;
+    for run in [&publishing_run, &reading_run] {
+        owner.add_run_fixture(&json!({"id":run,"taskId":id(),"status":"succeeded","createdAt":0,"backup":{"snapshotId":"retained-baseline"}})).await;
+    }
+    let credential = "synthetic-cross-node-report";
+    let (saved_publication, saved_object, saved_hash, publisher, reader) = (
+        publication.clone(),
+        object.clone(),
+        hash.clone(),
+        publishing_run.clone(),
+        reading_run.clone(),
+    );
+    owner.service.store.transaction(move|db|{
+        db.0.execute("INSERT INTO shared_publications VALUES(?1,?2)",rusqlite::params![saved_publication,publisher])?;
+        db.0.execute("INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES(?1,'bucket',?2,4096,'{}','ready')",rusqlite::params![saved_object,saved_hash])?;
+        db.0.execute("INSERT INTO shared_references VALUES(?1,?2)",rusqlite::params![saved_publication,saved_object])?;
+        // A lost ACK reply retained this inventory even after its point expired.
+        db.0.execute("INSERT INTO direct_journal_acknowledgements(publication,run_id,node_id,retired) VALUES(?1,?2,?3,1)",rusqlite::params![saved_publication,publisher,LOCAL_NODE_ID])?;
+        db.0.execute("INSERT INTO direct_read_authorizations VALUES(?1,?2,?3,?4)",rusqlite::params![cairn_installation::auth::digest(credential),saved_object,saved_hash,reader])?;
+        Ok(())
+    }).await.unwrap();
+    let report = json!({"object":object,"hash":hash});
+    let mut reporting = Box::pin(owner.call(
+        "POST",
+        "/internal/node-restore/report",
+        report.clone(),
+        Some(credential),
+    ));
+    tokio::select! {
+        _ = &mut reporting => panic!("Quarantine must wait for the other node's durable fence"),
+        () = entered.notified() => {},
+        () = tokio::time::sleep(Duration::from_secs(5)) => panic!("Missing publication fence request"),
+    }
+    let observed = object.clone();
+    owner
+        .service
+        .store
+        .read(move |db| {
+            assert_eq!(
+                db.0.query_row(
+                    "SELECT state FROM shared_objects WHERE id=?1",
+                    [&observed],
+                    |r| r.get::<_, String>(0)
+                )?,
+                "ready"
+            );
+            assert_eq!(
+                db.0.query_row(
+                    "SELECT count(*) FROM direct_object_quarantines WHERE object=?1",
+                    [&observed],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                1
+            );
+            assert_eq!(
+                db.0.query_row(
+                    "SELECT count(*) FROM shared_references WHERE object=?1",
+                    [observed],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    // Lost browser/node response does not cancel the manager's owned fencing.
+    drop(reporting);
+    release.cancel();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let target = object.clone();
+            let invalid = owner
+                .service
+                .store
+                .read(move |db| {
+                    Ok(db.0.query_row(
+                        "SELECT state='invalid' FROM shared_objects WHERE id=?1",
+                        [target],
+                        |r| r.get::<_, bool>(0),
+                    )?)
+                })
+                .await
+                .unwrap();
+            if invalid {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let (status, value) = owner
+        .call(
+            "POST",
+            "/internal/node-restore/report",
+            report,
+            Some(credential),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let count = owner
+        .service
+        .store
+        .read(|db| {
+            Ok(db.0.query_row(
+                "SELECT count(*) FROM direct_journal_acknowledgements",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    let retained: Value = serde_json::from_slice(
+        &std::fs::read(
+            state
+                .path()
+                .join("publication-fences/direct-read-failures.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        retained["rejected"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(publication))
+    );
+    server.abort();
 }
 
 #[tokio::test]
@@ -4915,6 +5236,19 @@ async fn coalesced_final_publication_survives_a_new_attempt_and_preserves_later_
             );
             async move {
                 let path = request.uri().path().to_owned();
+                if path.ends_with("/direct-reader") {
+                    let parts = path.split('/').collect::<Vec<_>>();
+                    let directory = state.join("snapshots").join(parts[2]);
+                    if request.method() == "DELETE" {
+                        snapshots::close_direct_reader(&directory).await.unwrap();
+                        return Json(json!({ "closed": true })).into_response();
+                    }
+                    let body = to_bytes(request.into_body(), 4096).await.unwrap();
+                    return snapshots::direct_reader(&directory, &body)
+                        .await
+                        .unwrap()
+                        .into_response();
+                }
                 if request.method() == "DELETE" {
                     return Json(json!({})).into_response();
                 }
@@ -4971,6 +5305,19 @@ async fn coalesced_final_publication_survives_a_new_attempt_and_preserves_later_
                     .unwrap()
                     .unwrap();
                     return Json(json!({ "committed": true })).into_response();
+                }
+                if request.method() == "POST" && path.ends_with("/direct-upload") {
+                    if reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                        transfer_entered.notify_one();
+                        transfer_release.cancelled().await;
+                    }
+                    let parts: Vec<_> = path.split('/').collect();
+                    let body = to_bytes(request.into_body(), 131_072).await.unwrap();
+                    let receipt =
+                        snapshots::upload_direct(&state.join("snapshots").join(parts[2]), &body)
+                            .await
+                            .unwrap();
+                    return Json(receipt).into_response();
                 }
                 if request.method() != "POST" || !path.ends_with("/publication") {
                     return StatusCode::METHOD_NOT_ALLOWED.into_response();
@@ -5122,11 +5469,18 @@ fn capture_controller(disk: PathBuf, manifest: Value, grant: String, log: Captur
         let (disk, manifest, grant, log) =
             (disk.clone(), manifest.clone(), grant.clone(), log.clone());
         async move {
+            if request.method() == "DELETE" && request.uri().path().ends_with("/direct-reader") {
+                return direct_reader_closed(request.uri().path());
+            }
+
             let path = request.uri().path().to_owned();
             if request.method() == "DELETE" {
                 return Json(json!({ "ok": true })).into_response();
             }
             if path.ends_with("/published") {
+                if log.acknowledge.load(Ordering::SeqCst) {
+                    return Json(json!({ "published": true })).into_response();
+                }
                 return (StatusCode::SERVICE_UNAVAILABLE, "ack lost").into_response();
             }
             if path.ends_with("/snapshot") {
@@ -5147,6 +5501,17 @@ fn capture_controller(disk: PathBuf, manifest: Value, grant: String, log: Captur
                 }
                 return Json(json!({ "id": snapshot, "manifest": manifest, "grantId": grant }))
                     .into_response();
+            }
+
+            if request.method() == "POST" && request.uri().path().ends_with("/direct-reader") {
+                return direct_reader_response(request.uri().path());
+            }
+            if request.method() == "POST" && path.ends_with("/direct-upload") {
+                let body = to_bytes(request.into_body(), 131_072).await.unwrap();
+                let plan: Value = serde_json::from_slice(&body).unwrap();
+                log.block_reads
+                    .fetch_add(plan["objects"].as_array().unwrap().len(), Ordering::SeqCst);
+                return direct_snapshot_upload(&disk, manifest.clone(), &body, false).await;
             }
             if request.method() != "POST" || !path.ends_with("/publication") {
                 return StatusCode::METHOD_NOT_ALLOWED.into_response();
@@ -5254,18 +5619,23 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         .await;
     let current = || owner.run(&run);
     let baseline_of = |index: usize| log.bodies.lock().unwrap()[index]["baseline"].clone();
+    owner
+        .put_node_fixture(json!({ "id": LOCAL_NODE_ID, "revoked": false }))
+        .await;
 
     publication::capture(&owner.service, &current().await)
         .await
         .unwrap();
     let first = log.snapshots.lock().unwrap()[0].clone();
     assert_eq!(current().await["backup"]["snapshotId"], first);
-    // An unchanged capture reuses the published S3 block without asking the
-    // controller to transfer it again after its local receipt is evicted.
+    // An unchanged capture reuses S3 without transferring a block through the manager.
     let initial_reads = log.block_reads.load(Ordering::SeqCst);
     let hash = manifest["blocks"][0]["hash"].as_str().unwrap();
     let block = owner.backup_directory(&run).join("blocks").join(hash);
-    std::fs::remove_dir_all(block.parent().unwrap()).unwrap();
+    assert!(
+        !block.exists(),
+        "direct publication leaves no manager payload cache"
+    );
     publication::capture(&owner.service, &current().await)
         .await
         .unwrap();
@@ -5323,6 +5693,60 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         b"workspace blocks"
     );
     assert_lost_acknowledgement_keeps_the_new_pointer(&owner, &run, &grant_id, &log, hash).await;
+
+    // Model the durable state after failover: the retained ACK belongs to a
+    // permanently revoked source, while a fresh destination owns the checkpoint.
+    // Keep the actual lost-ACK publication and shared references from above.
+    let revoked_source = id();
+    owner
+        .put_node_fixture(json!({ "id": revoked_source, "revoked": true }))
+        .await;
+    let (saved_run, source) = (run.clone(), revoked_source.clone());
+    owner
+        .service
+        .store
+        .transaction(move |db| {
+            assert_eq!(
+                db.0.execute(
+                    "UPDATE direct_journal_acknowledgements SET node_id=?1 WHERE run_id=?2",
+                    rusqlite::params![source, saved_run]
+                )?,
+                1
+            );
+            db.save_checkpoint_boundary(
+                &saved_run,
+                &json!({
+                    "nodeId": LOCAL_NODE_ID,
+                    "runnerId": id()
+                }),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    log.acknowledge.store(true, Ordering::SeqCst);
+    let recovered = publication::capture(&owner.service, &current().await)
+        .await
+        .unwrap();
+    assert_eq!(recovered["nodeId"], LOCAL_NODE_ID);
+    assert_eq!(recovered["blockEnvelope"], 3);
+    assert_eq!(current().await["backup"]["status"], "ready");
+    owner
+        .service
+        .store
+        .read(|db| {
+            assert_eq!(
+                db.0.query_row(
+                    "SELECT count(*) FROM direct_journal_acknowledgements",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                0
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 /// A recovery point of `run` published by `node` for disk `generation`.
@@ -5702,7 +6126,7 @@ async fn obsolete_object_collection_deletes_versions_without_deleting_prefix_nei
     storage.purge_key(&neighbor).await.unwrap();
 }
 
-/// A runner controller whose snapshot waits for `resume` after signalling `captured`.
+/// Holds the transfer receipt after uploading, before the manager can publish its manifest.
 fn paused_capture_controller(
     disk: PathBuf,
     manifest: Value,
@@ -5717,13 +6141,26 @@ fn paused_capture_controller(
             manifest.clone(),
         );
         async move {
+            if request.method() == "DELETE" && request.uri().path().ends_with("/direct-reader") {
+                return direct_reader_closed(request.uri().path());
+            }
+
             if request.method() == "DELETE" {
                 return Json(json!({})).into_response();
             }
             if request.uri().path().ends_with("/snapshot") {
+                return Json(json!({ "id": id(), "manifest": manifest })).into_response();
+            }
+
+            if request.method() == "POST" && request.uri().path().ends_with("/direct-reader") {
+                return direct_reader_response(request.uri().path());
+            }
+            if request.method() == "POST" && request.uri().path().ends_with("/direct-upload") {
+                let body = to_bytes(request.into_body(), 131_072).await.unwrap();
+                let response = direct_snapshot_upload(&disk, manifest.clone(), &body, false).await;
                 captured.notify_one();
                 resume.notified().await;
-                return Json(json!({ "id": id(), "manifest": manifest })).into_response();
+                return response;
             }
             if request.method() != "POST" || !request.uri().path().ends_with("/publication") {
                 return StatusCode::METHOD_NOT_ALLOWED.into_response();
@@ -5757,9 +6194,13 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
             paused_capture_controller(disk, manifest.clone(), captured.clone(), resume.clone());
         let (url, server) = common::serve_locally(runner).await;
         let owner = Owner::with_runner(common::HOST.into(), url).await;
+        owner
+            .put_node_fixture(json!({ "id": LOCAL_NODE_ID, "revoked": false }))
+            .await;
         let (run, attempt) = (id(), id());
         let record = json!({
             "id": run,
+            "snapshot": {},
             "taskId": run,
             "createdAt": 0,
             "status": RunStatus::Succeeded,
@@ -5776,7 +6217,7 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
         let service = owner.service.clone();
         let capture = tokio::spawn(async move { publication::capture(&service, &record).await });
         captured.notified().await;
-        // The S3 writes finish, but the ownership fence rejects the database commit.
+        // Block PUTs finished, but the ownership fence rejects manifest publication.
         owner
             .set_checkpoint(&run, json!({ "nodeId": LOCAL_NODE_ID, "runnerId": id() }))
             .await;
@@ -5811,7 +6252,14 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
             manifest["blocks"][0]["hash"].as_str().unwrap(),
         );
         let storage = Storage::configured(&owner.service).unwrap();
-        assert!(storage.download_bytes(&object, 65536).await.is_ok());
+        assert_eq!(
+            storage
+                .download_bytes(&object, 65536)
+                .await
+                .unwrap_err()
+                .status,
+            409
+        );
         assert!(storage.download_bytes(&block, 65536).await.is_ok());
         // Missing receipts model an interruption between remote PUT and local verification receipt.
         std::fs::remove_dir_all(directory.join("blocks")).unwrap();
@@ -5846,6 +6294,7 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
 fn local_run(run: &str) -> Value {
     json!({
         "id": run,
+        "snapshot": {},
         "taskId": run,
         "createdAt": 0,
         "status": RunStatus::Succeeded,
@@ -5855,6 +6304,18 @@ fn local_run(run: &str) -> Value {
 
 /// Stores `record` with a checkpoint that places it on the local node.
 async fn add_local_run(owner: &Owner, record: &Value) {
+    if owner
+        .service
+        .store
+        .node(LOCAL_NODE_ID)
+        .await
+        .unwrap()
+        .is_none()
+    {
+        owner
+            .put_node_fixture(json!({ "id": LOCAL_NODE_ID, "revoked": false }))
+            .await;
+    }
     owner.add_run_fixture(record).await;
     owner
         .set_checkpoint(
@@ -5892,6 +6353,10 @@ fn shared_publication_controller(
             upload_barrier.clone(),
         );
         async move {
+            if request.method() == "DELETE" && request.uri().path().ends_with("/direct-reader") {
+                return direct_reader_closed(request.uri().path());
+            }
+
             if request.method() == "DELETE" {
                 return Json(json!({})).into_response();
             }
@@ -5902,6 +6367,22 @@ fn shared_publication_controller(
                 }
                 let manifest = manifest.lock().await.clone();
                 return Json(json!({ "id": id(), "manifest": manifest })).into_response();
+            }
+
+            if request.method() == "POST" && request.uri().path().ends_with("/direct-reader") {
+                return direct_reader_response(request.uri().path());
+            }
+            if request.uri().path().ends_with("/direct-upload") {
+                let body = to_bytes(request.into_body(), 131_072).await.unwrap();
+                let plan: Value = serde_json::from_slice(&body).unwrap();
+                for _ in plan["objects"].as_array().unwrap() {
+                    gates.requests.fetch_add(1, Ordering::SeqCst);
+                    if gates.racing.load(Ordering::SeqCst) {
+                        upload_barrier.wait().await;
+                    }
+                }
+                return direct_snapshot_upload(&disk, manifest.lock().await.clone(), &body, false)
+                    .await;
             }
             if request.uri().path().ends_with("/blocks")
                 || request.uri().path().ends_with("/publication")
@@ -6210,7 +6691,7 @@ async fn compressed_publications_restore_mixed_blocks_reuse_objects_and_repair_c
             .download_bytes(&shared_object_key(&first_manifest, hash), MAX_ENCODED_BYTES)
             .await
             .unwrap();
-        assert!(encoded.starts_with(b"CAIRNB\x02\0"));
+        assert!(encoded.starts_with(b"CAIRNB\x03\0"));
         if index == 0 {
             assert!(encoded.len() < 4096);
         } else if index == 1 {
@@ -6347,7 +6828,7 @@ async fn stalled_sync_does_not_block_other_conversations_and_same_disk_stays_fen
 }
 
 #[tokio::test]
-async fn synchronization_scheduler_starts_two_disks_and_leaves_the_third_queued() {
+async fn direct_synchronizations_do_not_queue_behind_two_independent_disks() {
     let (entered, mut requests) = tokio::sync::mpsc::unbounded_channel();
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let wait = release.clone();
@@ -6378,13 +6859,6 @@ async fn synchronization_scheduler_starts_two_disks_and_leaves_the_third_queued(
         .unwrap()
         .unwrap();
     assert_ne!(first, second);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), requests.recv())
-            .await
-            .is_err()
-    );
-
-    release.add_permits(1);
     let third = tokio::time::timeout(Duration::from_secs(8), requests.recv())
         .await
         .unwrap()
@@ -6675,5 +7149,91 @@ async fn saved_storage_policy_is_retried_after_the_controller_fails_to_confirm_i
         serde_json::to_value(policy).unwrap()
     );
     assert_eq!(applied.lock().unwrap()["generation"], 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn recovered_quarantines_continue_past_an_unreachable_acknowledgement_node() {
+    let unavailable = Router::new().fallback(|| async { StatusCode::SERVICE_UNAVAILABLE });
+    let (url, server) = common::serve_locally(unavailable).await;
+    let owner = Owner::with_runner(common::HOST.into(), url).await;
+    let mut objects = [id(), id()];
+    objects.sort();
+    let [blocked, independent] = objects;
+    let (saved_blocked, saved_independent) = (blocked.clone(), independent.clone());
+    owner.service.store.transaction(move |db| {
+        let publication = id();
+        let run = id();
+        db.0.execute("INSERT INTO shared_publications VALUES(?1,?2)", rusqlite::params![publication, run])?;
+        for (object, hash) in [(&saved_blocked, format!("b3-{}", "a".repeat(64))), (&saved_independent, format!("b3-{}", "b".repeat(64)))] {
+            db.0.execute("INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES(?1,'bucket',?2,4096,'{}','ready')", rusqlite::params![object, hash])?;
+            // Model durable accepted preparations left by a previous manager.
+            db.0.execute("INSERT INTO direct_object_quarantines VALUES(?1)", [object])?;
+        }
+        db.0.execute("INSERT INTO shared_references VALUES(?1,?2)", rusqlite::params![publication, saved_blocked])?;
+        db.0.execute("INSERT INTO direct_journal_acknowledgements(publication,run_id,node_id) VALUES(?1,?2,?3)", rusqlite::params![publication, run, LOCAL_NODE_ID])?;
+        Ok(())
+    }).await.unwrap();
+    let maintenance = tokio::spawn(publication::maintain(owner.service.clone()));
+    let reconciled = tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            let target = independent.clone();
+            let done = owner
+                .service
+                .store
+                .read(move |db| {
+                    Ok(db.0.query_row(
+                        "SELECT state='invalid' FROM shared_objects WHERE id=?1",
+                        [target],
+                        |r| r.get::<_, bool>(0),
+                    )?)
+                })
+                .await
+                .unwrap();
+            if done {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    owner.service.shutdown.cancel();
+    maintenance.await.unwrap();
+    assert!(
+        reconciled.is_ok(),
+        "An unavailable earlier fencing target must not starve independent recovery"
+    );
+    owner
+        .service
+        .store
+        .read(move |db| {
+            assert_eq!(
+                db.0.query_row(
+                    "SELECT state FROM shared_objects WHERE id=?1",
+                    [&blocked],
+                    |r| r.get::<_, String>(0)
+                )?,
+                "ready"
+            );
+            assert_eq!(
+                db.0.query_row(
+                    "SELECT count(*) FROM direct_object_quarantines WHERE object=?1",
+                    [&blocked],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                1
+            );
+            assert_eq!(
+                db.0.query_row(
+                    "SELECT count(*) FROM direct_object_quarantines WHERE object=?1",
+                    [&independent],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                0
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
     server.abort();
 }

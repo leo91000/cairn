@@ -126,12 +126,15 @@ The native runtime records `storage: ublk-rootless-v1` before mounting or
 reconciling file owners. Older controllers require `storage: ublk` and refuse the
 new identity, including during restore on another node. Current tool bundles may
 advance without changing the disk platform or conversation identity. Unknown
-storage identities fail closed. The manager database schema is unchanged.
+storage identities fail closed. This runtime format change does not itself alter
+the manager database schema.
 
-The current [production contract](PRODUCTION-CAIRN.md#réinstallation-complète)
-requires a fresh installation for the next release and matching manager, runner,
-node and guest versions; historical data formats are not migrated. This PR does
-not perform that reinstallation, release or deployment. Do not run an older
+The current [production contract](PRODUCTION-CAIRN.md#data-preserving-upgrades)
+preserves supported installation data and requires matching manager, runner,
+node and guest versions. Version-11 manager databases upgrade to version 12;
+other manager or runtime storage formats need explicit compatibility checks.
+The inventory migration does not convert rootless Docker storage identities.
+Do not run an older
 controller against conversation state written with the rootless identity.
 
 Administrator mode retains its existing owner-reviewed host execution and sudo

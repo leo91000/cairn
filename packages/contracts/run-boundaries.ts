@@ -8,6 +8,7 @@ export interface RunBackup {
 }
 export interface RunStorage {
   mode: string
+  backupDegraded?: boolean
   waitingFor?: string | null
   dirtyBytes?: number
   localBytes?: number
