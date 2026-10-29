@@ -1,5 +1,4 @@
-#[path = "../../tests/common/mod.rs"]
-mod common;
+use super::test_common as common;
 
 use super::{Duration, Relay};
 use std::{
