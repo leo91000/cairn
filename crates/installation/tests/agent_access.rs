@@ -175,6 +175,67 @@ async fn only_the_owner_gives_access_and_members_use_only_their_agents() {
 }
 
 #[tokio::test]
+async fn every_route_that_directs_an_agent_needs_access_to_it() {
+    let root = tempfile::tempdir().unwrap();
+    let s = service(root.path()).await;
+    let reviewer = agent(&s, "Reviewer").await;
+    relay_fixture::add_member(&s, MEMBER, "membership-1").await;
+    let grant = format!("/api/agents/{reviewer}/accounts/{MEMBER}");
+
+    let (_, chat) = owner(&s, "POST", "/api/chats", json!({ "agentId": reviewer })).await;
+    let chat = chat["id"].as_str().unwrap().to_owned();
+    let settings = json!({ "name": "Review", "prompt": "Review the changes", "agentId": reviewer });
+    let (_, task) = owner(&s, "POST", "/api/tasks", json!({ "settings": settings })).await;
+    let run = s
+        .enqueue(task["id"].as_str().unwrap(), "manual", None)
+        .await
+        .unwrap();
+    let run = run["id"].as_str().unwrap().to_owned();
+    let unknown = cairn_installation::config::id();
+    let routes = [
+        (
+            "PUT",
+            format!("/api/chats/{chat}/messages/{unknown}"),
+            json!({ "text": "Steer" }),
+        ),
+        (
+            "POST",
+            format!("/api/chats/{chat}/questions/{unknown}/answer"),
+            json!({}),
+        ),
+        (
+            "POST",
+            format!("/api/chats/{chat}/questions/{unknown}/cancel"),
+            json!({}),
+        ),
+        (
+            "POST",
+            format!("/api/chats/{chat}/new-session"),
+            json!({ "confirm": true }),
+        ),
+        ("POST", format!("/api/chats/{chat}/compact"), json!({})),
+        (
+            "POST",
+            format!("/api/chats/{chat}/coding-agent"),
+            json!({ "provider": "claude" }),
+        ),
+        ("POST", format!("/api/runs/{run}/resume"), json!({})),
+        ("POST", format!("/api/runs/{run}/chat"), json!({})),
+    ];
+
+    // Each route reaches its own handler, whatever it then decides, only with access.
+    for (method, path, body) in &routes {
+        let (status, refused) = member(&s, method, path, body.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {refused}");
+    }
+    assert_eq!(owner(&s, "PUT", &grant, json!({})).await.0, StatusCode::OK);
+    for (method, path, body) in &routes {
+        let (status, _) = member(&s, method, path, body.clone()).await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "{method} {path}");
+    }
+}
+
+#[tokio::test]
 async fn access_belongs_to_one_membership_and_a_new_invitation_does_not_restore_it() {
     let root = tempfile::tempdir().unwrap();
     let s = service(root.path()).await;

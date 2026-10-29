@@ -196,7 +196,10 @@ pub(crate) async fn authorize_request(s: &Service, input: &crate::http::Input) -
     let Some(identity) = input.identity.clone() else {
         return Ok(());
     };
-    if identity.role == InstallationRole::Owner || identity.mcp_scopes.is_some() {
+    if identity.role == InstallationRole::Owner
+        || identity.mcp_scopes.is_some()
+        || matches!(input.method.as_str(), "GET" | "HEAD")
+    {
         return Ok(());
     }
     let request = Arc::new((input.method.clone(), input.path.clone(), input.body.clone()));
@@ -214,7 +217,10 @@ pub(crate) async fn authorize_request(s: &Service, input: &crate::http::Input) -
     // A failed check fails closed: these requests direct an agent.
     {
         let _authors = s.missions.authors.lock().await;
-        s.missions.observe(s).await?;
+        // Another request may have checked while this one waited.
+        if !s.missions.membership_verified_within(MEMBERSHIP_AGE) {
+            s.missions.observe(s).await?;
+        }
     }
     check().await.map(|_| ())
 }
