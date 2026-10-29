@@ -114,7 +114,7 @@ const revoked = computed(() => nodes.value.filter(node => node.revoked))
 const visible = computed(() => showRevoked.value ? nodes.value : active.value)
 // When the built-in runner's contact last changed, as seen by this device: an unchanged contact means it went stale.
 const runner = ref<RunnerObservation | null>(null)
-const clock = computed(() => fleetClock(nodes.value))
+const clock = computed(() => fleetClock(nodes.value, runner.value))
 const healths = computed(() => active.value.map(node => nodeHealth(node, Date.now(), clock.value, runner.value)))
 // Connected machines answer heartbeats; the built-in runner too, unless its contact went stale.
 const live = computed(() => active.value.filter((node, index) => (node.local || node.status === 'online') && healths.value[index].state !== 'offline' && !runnerStale(node, clock.value, runner.value)))
@@ -153,6 +153,9 @@ async function load() {
     catch (e) {
       callersError.value = `Trusted people could not be loaded: ${(e as Error).message}`
     }
+  }
+  else {
+    callersError.value = ''
   }
 
   if (!enrollment.value)

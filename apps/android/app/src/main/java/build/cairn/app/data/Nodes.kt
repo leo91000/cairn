@@ -175,14 +175,38 @@ private const val HEARTBEAT_TIMEOUT_MS = 60_000L
  * The server's clock as seen in an inventory: the latest contact of a machine the server reports
  * online. Device clocks can drift from the server's, so staleness is judged against this.
  */
-fun fleetClock(nodes: List<ExecutionNode>): Long? =
-    nodes
-        .filter { !it.local && !it.revoked && it.status == "online" }
-        .mapNotNull { it.lastSeen }
-        .maxOrNull()
+fun fleetClock(
+    nodes: List<ExecutionNode>,
+    runner: RunnerObservation? = null,
+    now: Long = System.currentTimeMillis(),
+): Long? {
+    val seen =
+        nodes
+            .filter { !it.local && !it.revoked && it.status == "online" }
+            .mapNotNull { it.lastSeen }
+    // A runner contact that changed while this device watched was server time then; device time
+    // has elapsed since.
+    val watched =
+        runner?.takeIf { it.refreshed }?.let { it.lastSeen + maxOf(0, now - it.observedAt) }
+    return (seen + listOfNotNull(watched)).maxOrNull()
+}
+
+/**
+ * Free slots as placement counts them: the runtime's pool can be smaller than the configured slots.
+ */
+fun freeSlots(node: ExecutionNode): Long {
+    val slots = node.slots ?: 0
+    val capacity = minOf(slots, node.runtimeSlots ?: slots)
+    return maxOf(0, minOf(node.availableSlots, capacity - node.occupiedSlots))
+}
 
 /** The built-in runner's last contact, and when this device first saw that value. */
-data class RunnerObservation(val lastSeen: Long, val observedAt: Long)
+data class RunnerObservation(
+    val lastSeen: Long,
+    val observedAt: Long,
+    /** The contact changed while this device watched: it was fresh when observed. */
+    val refreshed: Boolean = false,
+)
 
 /** Keeps the first time each runner contact was seen across inventory refreshes. */
 fun observeRunner(
@@ -191,7 +215,8 @@ fun observeRunner(
     now: Long = System.currentTimeMillis(),
 ): RunnerObservation? {
     val seen = nodes.firstOrNull { it.local && !it.revoked }?.lastSeen ?: return null
-    return if (previous?.lastSeen == seen) previous else RunnerObservation(seen, now)
+    if (previous?.lastSeen == seen) return previous
+    return RunnerObservation(seen, now, refreshed = previous != null)
 }
 
 /** How long the built-in runner's contact is known to lag server time, if it is. */
@@ -347,7 +372,7 @@ fun nodeHealth(
         )
     }
     val slots = node.slots ?: 0
-    val free = node.availableSlots
+    val free = freeSlots(node)
     if (slots > 0 && free <= 0)
         return NodeHealth(NodeHealthState.FULL, "Pleine", "Les $slots slots sont occupés")
     val running = node.occupiedSlots

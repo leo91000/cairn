@@ -3,6 +3,7 @@ import type { ExecutionNode, RunnerObservation } from '../../../../packages/cont
 import { computed } from 'vue'
 import {
   formatMiB,
+  freeSlots,
   nodeAdministrator,
   nodeHealth,
   runnerStale,
@@ -26,7 +27,7 @@ defineEmits<{ open: [] }>()
 const health = computed(() => nodeHealth(props.node, Date.now(), props.clock ?? null, props.runner ?? null))
 const live = computed(() => !['offline', 'revoked'].includes(health.value.state) && !runnerStale(props.node, props.clock ?? null, props.runner ?? null))
 const slots = computed(() => props.node.slots ?? 0)
-const free = computed(() => props.node.availableSlots ?? 0)
+const free = computed(() => freeSlots(props.node))
 const runtime = computed(() => props.node.capabilities.backend === 'native' ? nodeAdministrator(props.node) ? 'Native · admin' : 'Native' : 'VM')
 const agents = computed(() => props.node.agents ?? [])
 // The button's name replaces its content for screen readers: it carries what the row shows.

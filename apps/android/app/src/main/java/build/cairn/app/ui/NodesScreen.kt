@@ -109,7 +109,7 @@ fun NodesScreen(
             "Gérez vos machines et leur capacité. L’accès des agents se règle sur leur fiche.",
         )
         val active = nodes.filter { !it.revoked }
-        val clock = fleetClock(nodes)
+        val clock = fleetClock(nodes, runner)
         // Connected machines answer heartbeats; the built-in runner too, unless its contact went
         // stale.
         val live = active.filter {

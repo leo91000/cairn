@@ -9,6 +9,7 @@ import {
 import {
   formatBytes,
   formatMiB,
+  freeSlots,
   nativeModeLabel,
   nodeDiagnostics,
   nodeHealth,
@@ -55,12 +56,12 @@ type Section = 'overview' | 'access' | 'storage' | 'settings'
 
 const section = ref<Section>('overview')
 const content = ref<HTMLElement>()
-const accessHeading = ref<HTMLElement>()
+const nativeHeading = ref<HTMLElement>()
 
 async function reviewRequest() {
   section.value = 'access'
   await nextTick()
-  accessHeading.value?.focus()
+  nativeHeading.value?.focus()
 }
 
 // A control that did its job disappears (old disks freed, reservation released): keep focus in the panel.
@@ -79,7 +80,7 @@ const health = computed(() => nodeHealth(props.node, Date.now(), props.clock ?? 
 const diagnostics = computed(() => nodeDiagnostics(props.node, Date.now(), props.clock ?? null, props.runner ?? null))
 const native = computed(() => props.node.capabilities.backend === 'native')
 const slots = computed(() => props.node.slots ?? 0)
-const free = computed(() => props.node.availableSlots ?? 0)
+const free = computed(() => freeSlots(props.node))
 const runtime = computed(() => `${props.node.local ? 'Built-in runner · ' : ''}${native.value ? 'Native process · shares the host GPU' : 'Firecracker VM'}`)
 const banner = computed(() => ({
   ready: 'bg-success/10 text-success',
@@ -117,7 +118,7 @@ const reserve = computed(() => {
         <UiAlert>{{ error }}</UiAlert>
       </div>
       <p v-if="refreshError" class="px-6.5 pt-3 text-xs text-warning phone:px-5" role="status">
-        Could not refresh this machine: {{ refreshError }}
+        Machines could not be refreshed; figures may be out of date. {{ refreshError }}
       </p>
       <template v-if="node.revoked">
         <section class="grid gap-3 px-6.5 py-5 phone:px-5">
@@ -139,7 +140,7 @@ const reserve = computed(() => {
 
         <template v-if="section === 'overview'">
           <section class="grid gap-3 border-b border-line px-6.5 py-5 phone:px-5" aria-label="Health">
-            <div class="rounded-xl px-4 py-3" :class="banner" role="status">
+            <div class="rounded-xl px-4 py-3" :class="banner">
               <p class="text-sm font-semibold">
                 {{ health.label }}
               </p>
@@ -309,7 +310,7 @@ const reserve = computed(() => {
         <template v-else-if="section === 'access'">
           <section class="border-b border-line px-6.5 py-5 phone:px-5" :aria-label="`Agents on ${node.name}`">
             <div class="mb-3.5 flex items-baseline justify-between gap-3">
-              <h3 ref="accessHeading" class="eyebrow outline-none" tabindex="-1">
+              <h3 class="eyebrow">
                 Agents allowed
               </h3>
               <RouterLink to="/agents" class="text-xs font-semibold text-accent hover:underline">
@@ -343,7 +344,12 @@ const reserve = computed(() => {
             </p>
           </section>
           <section v-if="native" class="px-6.5 py-5 phone:px-5" aria-labelledby="node-native">
-            <h3 id="node-native" class="eyebrow mb-3.5">
+            <h3
+              id="node-native"
+              ref="nativeHeading"
+              class="eyebrow mb-3.5 outline-none"
+              tabindex="-1"
+            >
               Native execution
             </h3>
             <p class="text-sm">

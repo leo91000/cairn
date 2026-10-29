@@ -1048,7 +1048,7 @@ test('the overview links an agent\'s privilege request to its review, and keeps 
   await expect(page.getByRole('region', { name: 'Fleet summary' }).locator('div').filter({ hasText: 'attention' }).locator('dd')).toHaveText('1')
   const panel = await openNode(page, 'Requested host')
   await panel.getByRole('button', { name: 'Review the request', exact: true }).click()
-  await expect(panel.getByRole('heading', { name: 'Agents allowed' })).toBeFocused()
+  await expect(panel.getByRole('heading', { name: 'Native execution' })).toBeFocused()
   await expect(panel.getByRole('button', { name: 'Review requested mode', exact: true })).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(panel).toHaveCount(0)
@@ -1066,4 +1066,78 @@ test('the overview links an agent\'s privilege request to its review, and keeps 
   const unrelated = page.getByRole('dialog', { name: /^Requested host/ })
   await expect(unrelated).toBeVisible()
   await expect(unrelated.getByRole('alert')).toHaveCount(0)
+})
+
+test('a silent built-in runner needs attention, and rows open and return focus from the keyboard', async ({ page, workspace: _workspace }) => {
+  await useRelayForHttpMocks(page)
+  const base = {
+    revision: 'fixture',
+    accepting: true,
+    revoked: false,
+    executionReady: true,
+    tags: [],
+    systemTags: [],
+    slots: 2,
+    occupiedSlots: 0,
+    availableSlots: 2,
+    agents: [{ id: 'builder', name: 'Builder', allNodes: true }],
+    exclusiveAgents: [],
+    staleDisks: { count: 0, diskMiB: 0 },
+    storage: {
+      cacheMiB: 102400,
+      memoryCacheMiB: 256,
+      reserveMiB: 10240,
+      reservePercent: 5,
+      backupSeconds: 60,
+      maxDirtySeconds: 300,
+    },
+    limits: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 },
+    capabilities: {
+      os: 'linux',
+      arch: 'x86_64',
+      backend: 'firecracker',
+      kvm: true,
+      cpu: 4,
+      memoryMiB: 8192,
+      diskMiB: 65536,
+    },
+  }
+  // Server time comes from the online machine: the device clock does not matter.
+  const server = Date.now() - 3_600_000
+  const nodes = [
+    {
+      ...base,
+      id: '00000000-0000-4000-8000-000000000002',
+      name: 'This server',
+      local: true,
+      status: 'local',
+      lastSeen: server - 5 * 60_000,
+    },
+    {
+      ...base,
+      id: randomUUID(),
+      name: 'Online host',
+      local: false,
+      status: 'online',
+      lastSeen: server,
+    },
+  ]
+  await page.route('**/api/nodes', route => route.fulfill({ json: nodes }))
+  await page.goto(workspacePath('/nodes'))
+  await authenticateWorkspace(page)
+
+  const runner = nodeRow(page, 'This server (built-in runner)')
+  await expect(runner).toContainText('Needs attention')
+  await expect(runner).toContainText('Last usable report 5 min ago')
+  const summary = page.getByRole('region', { name: 'Fleet summary' })
+  await expect(summary.locator('div').filter({ hasText: 'connected' }).locator('dd')).toHaveText('1 / 2')
+
+  const row = nodeRow(page, 'Online host')
+  await row.focus()
+  await page.keyboard.press('Enter')
+  const panel = page.getByRole('dialog', { name: /^Online host/ })
+  await expect(panel).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(panel).toHaveCount(0)
+  await expect(row).toBeFocused()
 })

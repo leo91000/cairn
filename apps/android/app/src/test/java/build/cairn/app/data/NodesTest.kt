@@ -148,7 +148,7 @@ class NodesTest {
         assertEquals(RunnerObservation(1_000, 3_600_000), seen)
         assertEquals(seen, observeRunner(listOf(alone), seen, 3_700_000))
         assertEquals(
-            RunnerObservation(11_000, 3_610_000),
+            RunnerObservation(11_000, 3_610_000, refreshed = true),
             observeRunner(listOf(runner.copy(lastSeen = 11_000)), seen, 3_610_000),
         )
         assertEquals(NodeHealthState.READY, nodeHealth(alone, 3_659_000, null, seen).state)
@@ -159,6 +159,16 @@ class NodesTest {
                 "Aucun rapport exploitable depuis plus d’une minute",
             ),
             nodeHealth(alone, 3_660_000, null, seen),
+        )
+        // A contact that changed while watched is server time: it dates other machines.
+        val watched = observeRunner(listOf(runner.copy(lastSeen = 11_000)), seen, 3_610_000)
+        assertEquals(71_000L, fleetClock(listOf(alone), watched, 3_670_000))
+        // Free slots follow the runtime pool, as placement does.
+        assertEquals(
+            1L,
+            freeSlots(
+                ready.copy(slots = 4, runtimeSlots = 2, occupiedSlots = 1, availableSlots = 3)
+            ),
         )
         // A runner already stale when the screen opened does not shorten other ages.
         val stale = observeRunner(listOf(runner), null, 7_200_000)

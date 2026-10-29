@@ -31,6 +31,13 @@ export function nodeAdministrator(node: ExecutionNode) {
   return node.capabilities.backend === 'native' && (node.nativeModeObserved ?? node.nativeModeRequest)?.mode === 'administrator'
 }
 
+/** Free slots as placement counts them: the runtime's pool can be smaller than the configured slots. */
+export function freeSlots(node: ExecutionNode) {
+  const slots = node.slots ?? 0
+  const capacity = Math.min(slots, node.runtimeSlots ?? slots)
+  return Math.max(0, Math.min(node.availableSlots ?? 0, capacity - (node.occupiedSlots ?? 0)))
+}
+
 /** Percentage of a limit in use, between 0 and 100. */
 export function usedPercent(used: number, limit: number) {
   return limit > 0 ? Math.min(100, Math.max(0, used / limit * 100)) : 0
@@ -100,10 +107,13 @@ const HEARTBEAT_TIMEOUT_MS = 60_000
  * The server's clock as seen in an inventory: the latest contact of a machine the server reports online.
  * Device clocks can drift from the server's, so staleness is judged against this rather than `Date.now()`.
  */
-export function fleetClock(nodes: ExecutionNode[]): number | null {
+export function fleetClock(nodes: ExecutionNode[], runner: RunnerObservation | null = null, now = Date.now()): number | null {
   const seen = nodes
     .filter(node => !node.local && !node.revoked && node.status === 'online' && node.lastSeen != null)
     .map(node => node.lastSeen!)
+  // A runner contact that changed while this device watched was server time then; device time has elapsed since.
+  if (runner?.refreshed)
+    seen.push(runner.lastSeen + Math.max(0, now - runner.observedAt))
   return seen.length ? Math.max(...seen) : null
 }
 
@@ -111,6 +121,8 @@ export function fleetClock(nodes: ExecutionNode[]): number | null {
 export interface RunnerObservation {
   lastSeen: number
   observedAt: number
+  // The contact changed while this device watched: it was fresh when observed. A first observation may be old.
+  refreshed: boolean
 }
 
 /** Keeps the first time each runner contact was seen across inventory refreshes. */
@@ -118,7 +130,9 @@ export function observeRunner(nodes: ExecutionNode[], previous: RunnerObservatio
   const runner = nodes.find(node => node.local && !node.revoked)
   if (runner?.lastSeen == null)
     return null
-  return previous?.lastSeen === runner.lastSeen ? previous : { lastSeen: runner.lastSeen, observedAt: now }
+  if (previous?.lastSeen === runner.lastSeen)
+    return previous
+  return { lastSeen: runner.lastSeen, observedAt: now, refreshed: previous != null }
 }
 
 /** How long the built-in runner's contact is known to lag server time, if it is. */
@@ -211,7 +225,7 @@ export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number 
 
   const slots = node.slots ?? 0
   const running = node.occupiedSlots ?? 0
-  const free = node.availableSlots ?? 0
+  const free = freeSlots(node)
   if (slots > 0 && free <= 0)
     return { state: 'full', label: 'Full', detail: `All ${slots} slots in use` }
   return { state: 'ready', label: 'Ready', detail: running ? `${running} running · ${free} of ${slots} slots free` : `${free} of ${slots} slots free` }
@@ -234,7 +248,7 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now(), clock: nu
     reasons.push('KVM is unavailable: enable virtualization in the BIOS and load the kvm module.')
   if (node.capabilities.backend === 'native' && !node.capabilities.ublk)
     reasons.push('ublk is unavailable: this node needs a current native runtime and the ublk_drv kernel module (/dev/ublk-control) to mount S3-backed conversation disks.')
-  if (node.status !== 'offline' && node.executionReady === false)
+  if (node.status !== 'offline' && !node.executionReady)
     reasons.push(node.budgetError ? `The shared budget could not be applied: ${node.budgetError}` : node.updateError ? `The runtime is not ready: ${node.updateError}` : 'The runtime is not ready yet or does not match the version approved by the master.')
   if (node.maintenance)
     reasons.push('Maintenance in progress: new work waits until the update finishes.')

@@ -2,6 +2,7 @@ import type { ExecutionNode } from '../../../packages/contracts/nodes'
 import { describe, expect, it } from 'vitest'
 import {
   fleetClock,
+  freeSlots,
   nodeAdministrator,
   nodeDiagnostics,
   nodeHealth,
@@ -144,11 +145,11 @@ describe('node health', () => {
     // The device clock is an hour ahead of the server: only elapsed time matters.
     const fresh = [node({ local: true, status: 'local', lastSeen: 1_000 })]
     const seen = observeRunner(fresh, null, 3_600_000)!
-    expect(seen).toEqual({ lastSeen: 1_000, observedAt: 3_600_000 })
+    expect(seen).toEqual({ lastSeen: 1_000, observedAt: 3_600_000, refreshed: false })
     expect(nodeHealth(fresh[0], 3_600_000, null, seen).state).toBe('ready')
     // Refreshed contacts restart the count; an unchanged one goes stale after a minute on this device.
     const refreshed = [node({ local: true, status: 'local', lastSeen: 11_000 })]
-    expect(observeRunner(refreshed, seen, 3_610_000)).toEqual({ lastSeen: 11_000, observedAt: 3_610_000 })
+    expect(observeRunner(refreshed, seen, 3_610_000)).toEqual({ lastSeen: 11_000, observedAt: 3_610_000, refreshed: true })
     expect(observeRunner(fresh, seen, 3_700_000)).toBe(seen)
     expect(nodeHealth(fresh[0], 3_659_000, null, seen).state).toBe('ready')
     expect(nodeHealth(fresh[0], 3_660_000, null, seen)).toEqual({ state: 'attention', label: 'Needs attention', detail: 'No usable report for over a minute' })
@@ -158,7 +159,11 @@ describe('node health', () => {
     const fleet = [node({ local: true, status: 'local', lastSeen: 0 }), node({ id: 'remote', status: 'offline', lastSeen: 0 })]
     const stale = observeRunner(fleet, null, 7_200_000)
     expect(fleetClock(fleet)).toBeNull()
-    expect(nodeHealth(fleet[1], 7_200_000, fleetClock(fleet), stale).detail).toBe('Last contact 2 h ago')
+    expect(nodeHealth(fleet[1], 7_200_000, fleetClock(fleet, stale, 7_200_000), stale).detail).toBe('Last contact 2 h ago')
+    // A contact that changed while watched is server time: it dates other machines without the device clock.
+    const watched = observeRunner(refreshed, seen, 3_610_000)
+    expect(fleetClock(refreshed, watched, 3_670_000)).toBe(71_000)
+    expect(nodeHealth(node({ id: 'remote', status: 'offline', lastSeen: 0 }), 99_999_999, fleetClock(refreshed, watched, 3_670_000)).detail).toBe('Last contact 1 min ago')
   })
 
   it('asks for native activation before a native node takes work', () => {
@@ -181,6 +186,27 @@ describe('node health', () => {
     expect(nodeAdministrator({ ...native, nativeModeRequest: { mode: 'administrator' } as ExecutionNode['nativeModeRequest'] })).toBe(true)
     expect(nodeAdministrator({ ...native, nativeModeRequest: { mode: 'administrator' } as ExecutionNode['nativeModeRequest'], nativeModeObserved: { mode: 'protected' } as ExecutionNode['nativeModeObserved'] })).toBe(false)
     expect(nodeAdministrator(node({ nativeModeRequest: { mode: 'administrator' } as ExecutionNode['nativeModeRequest'] }))).toBe(false)
+  })
+
+  it('counts free slots as placement does, within the runtime pool', () => {
+    expect(freeSlots(node({
+      slots: 4,
+      runtimeSlots: 2,
+      occupiedSlots: 1,
+      availableSlots: 3,
+    }))).toBe(1)
+    expect(freeSlots(node({
+      slots: 4,
+      runtimeSlots: null,
+      occupiedSlots: 1,
+      availableSlots: 3,
+    }))).toBe(3)
+    expect(nodeHealth(node({
+      slots: 4,
+      runtimeSlots: 2,
+      occupiedSlots: 2,
+      availableSlots: 2,
+    }))).toMatchObject({ state: 'full' })
   })
 
   it('bounds usage to the limit', () => {
