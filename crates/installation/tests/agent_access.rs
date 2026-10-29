@@ -576,9 +576,9 @@ async fn existing_members_keep_existing_agents_at_rollout_only() {
         agent(&s, "Existing").await
     };
 
-    // Reconstruct a version-14 database: the same tables without account access.
+    // Reconstruct a version-15 database: the same tables without account access.
     let db = rusqlite::Connection::open(root.path().join("data/manager.db")).unwrap();
-    db.execute_batch("DROP TABLE agent_account_access; PRAGMA user_version=14;")
+    db.execute_batch("DROP TABLE agent_account_access; PRAGMA user_version=15;")
         .unwrap();
     drop(db);
 
@@ -627,9 +627,9 @@ async fn a_members_scheduled_task_keeps_running_after_the_rollout() {
         task["id"].as_str().unwrap().to_owned()
     };
 
-    // The same membership, on a version-14 database without account access.
+    // The same membership, on a version-15 database without account access.
     let db = rusqlite::Connection::open(root.path().join("data/manager.db")).unwrap();
-    db.execute_batch("DROP TABLE agent_account_access; PRAGMA user_version=14;")
+    db.execute_batch("DROP TABLE agent_account_access; PRAGMA user_version=15;")
         .unwrap();
     drop(db);
 

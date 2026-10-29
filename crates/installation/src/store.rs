@@ -33,7 +33,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-const DATABASE_VERSION: i64 = 15;
+const DATABASE_VERSION: i64 = 16;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -79,7 +79,7 @@ impl Store {
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
             // Another startup can finish later atomic steps while this one
             // waits for the inventory migration's immediate transaction.
-            if !matches!(version, 13..=DATABASE_VERSION) {
+            if !matches!(version, 12..=DATABASE_VERSION) {
                 upgraded?;
             }
         }
@@ -106,23 +106,23 @@ impl Store {
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
         }
         if !fresh && version == 14 {
+            crate::chats::migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 15 {
             crate::agent_access::upgrade(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
             tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('agentAccounts','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('agentAccounts','chats','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS records_kind ON records(kind,updated_at DESC);
 CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),type TEXT NOT NULL CHECK(length(type)>0),text TEXT NOT NULL,payload TEXT CHECK(payload IS NULL OR json_valid(payload)));
 CREATE TABLE run_checkpoints(run_id TEXT PRIMARY KEY NOT NULL REFERENCES runs(id) ON DELETE CASCADE,state TEXT NOT NULL CHECK(json_valid(state) AND json_type(state)='object'));
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id,id);
-CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%'),data TEXT NOT NULL,expires INTEGER);
+CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%' AND key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key!='conversation-expiration'),data TEXT NOT NULL,expires INTEGER);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at INTEGER NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL);",
-        )?;
-            tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS chat_messages(id TEXT PRIMARY KEY,chat_id TEXT NOT NULL,data TEXT NOT NULL,created_at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id,created_at);",
         )?;
             tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
             // Backwards history excludes superseded text snapshots. These small keys
@@ -144,8 +144,9 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             crate::plugins::registry::initialize(&Db(&tx))?;
             tx.execute_batch(crate::agent_grants::SCHEMA)?;
             tx.execute_batch(crate::missions::SCHEMA)?;
+            tx.execute_batch(crate::chats::storage::SCHEMA)?;
+            tx.execute_batch(crate::chats::engine_switch::SCHEMA)?;
             tx.execute_batch(crate::agent_access::SCHEMA)?;
-            tx.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS records_chat_slug ON records(json_extract(data,'$.slug')) WHERE kind='chats';")?;
             tx.commit()?;
         }
         // total_changes also counts rows undone by a transition savepoint. Keep
@@ -443,34 +444,11 @@ impl Db<'_> {
         )
     }
 
-    pub fn chat_id_for_slug(&self, slug: &str) -> Result<Option<String>> {
-        Ok(self
-            .0
-            .prepare_cached(
-                "SELECT id FROM records WHERE kind='chats' AND json_extract(data,'$.slug')=?",
-            )?
-            .query_row([slug], |row| row.get(0))
-            .optional()?)
-    }
-
-    fn new_chat_slug(&self) -> Result<String> {
-        loop {
-            let slug = cairn_protocol::slugs::readable(uuid::Uuid::new_v4().as_bytes());
-            let used: bool = self.0.query_row(
-                "SELECT EXISTS(SELECT 1 FROM records WHERE kind='chats' AND json_extract(data,'$.slug')=?)",
-                [&slug],
-                |row| row.get(0),
-            )?;
-            if !used {
-                return Ok(slug);
-            }
-        }
-    }
-
     pub fn put(&self, kind: &str, value: &Value) -> Result<Value> {
         if matches!(
             kind,
             "agentAccounts"
+                | "chats"
                 | "nodes"
                 | "projects"
                 | "agents"
@@ -487,22 +465,6 @@ impl Db<'_> {
         ) {
             return Err(Error::bad("Use typed domain commands."));
         }
-        let mut chat;
-        let value = if kind == "chats" {
-            chat = value.clone();
-            let existing = self.get(kind, value["id"].as_str().unwrap_or(""))?;
-            chat["slug"] = match existing {
-                Some(existing) => existing["slug"]
-                    .as_str()
-                    .ok_or_else(|| Error::bad("Missing persisted chat slug."))?
-                    .into(),
-                None => self.new_chat_slug()?.into(),
-            };
-            &chat
-        } else {
-            value
-        };
-
         self.0
             .prepare_cached(
                 "INSERT INTO records VALUES(?,?,?,?)
@@ -634,9 +596,7 @@ impl Db<'_> {
         let fields = if full { "data" } else { RUN_SUMMARY };
         let mut filters = vec![
             "NOT EXISTS (
-               SELECT 1 FROM records c
-               WHERE c.kind='chats' AND json_extract(c.data,'$.runId')=runs.id
-                 AND COALESCE(json_extract(c.data,'$.lifecycle'),'active')<>'active'
+               SELECT 1 FROM conversations c WHERE c.run_id=runs.id AND c.lifecycle<>'active'
              )",
         ];
         let mut values: Vec<rusqlite::types::Value> = Vec::new();
@@ -718,9 +678,7 @@ impl Db<'_> {
              WHERE r.status='succeeded' AND r.trigger='chat'
                AND (?1 IS NULL OR r.id=?1)
                AND NOT EXISTS (
-                 SELECT 1 FROM records c
-                 WHERE c.kind='chats' AND json_extract(c.data,'$.runId')=r.id
-                   AND COALESCE(json_extract(c.data,'$.lifecycle'),'active')!='active'
+                 SELECT 1 FROM conversations c WHERE c.run_id=r.id AND c.lifecycle!='active'
                )
                AND length(trim(COALESCE(r.summary,''),char(9)||char(10)||char(13)||' '))>0
                AND NOT EXISTS (
@@ -858,28 +816,6 @@ WHERE e.run_id=? AND e.id>? AND e.id<? AND (
             return Err(Error::not_found("Run not found."));
         }
         Ok(())
-    }
-
-    pub fn messages(&self, chat: &str) -> Result<Vec<Value>> {
-        self.json_rows(
-            "SELECT data FROM chat_messages WHERE chat_id=? ORDER BY created_at,rowid",
-            [chat],
-        )
-    }
-
-    pub fn put_message(&self, message: &Value) -> Result<Value> {
-        self.0
-            .prepare_cached(
-                "INSERT INTO chat_messages VALUES(?,?,?,?)
-                 ON CONFLICT(id) DO UPDATE SET data=excluded.data",
-            )?
-            .execute(params![
-                message["id"].as_str(),
-                message["chatId"].as_str(),
-                message.to_string(),
-                message["createdAt"].as_i64()
-            ])?;
-        Ok(message.clone())
     }
 
     pub fn audit(&self, action: &str, detail: &Value) -> Result<()> {
@@ -1129,7 +1065,8 @@ mod schema_tests {
         drop(Store::open(root.path()).unwrap());
         let file = root.path().join("manager.db");
         let db = Connection::open(&file).unwrap();
-        db.execute_batch("DROP TABLE account_leases; DROP TABLE account_usage_windows; DROP TABLE account_usage; DROP TABLE account_exhaustion; DROP TABLE coding_agent_accounts; DROP TABLE direct_journal_acknowledgements; DROP TABLE direct_object_quarantines; DROP TABLE direct_storage_grants; DROP TABLE direct_read_authorizations; DROP TABLE agent_account_access; PRAGMA user_version=12;
+        crate::chats::migration::tests::version14(&db);
+        db.execute_batch("DROP TABLE account_leases; DROP TABLE account_usage_windows; DROP TABLE account_usage; DROP TABLE account_exhaustion; DROP TABLE coding_agent_accounts; DROP TABLE direct_journal_acknowledgements; DROP TABLE direct_object_quarantines; DROP TABLE direct_storage_grants; DROP TABLE direct_read_authorizations; PRAGMA user_version=12;
             INSERT INTO kv(key,data) VALUES('migration-fixture','{\"preserved\":true}');
             INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES('old-object','bucket','hash',4096,'{}','ready');").unwrap();
         drop(db);
@@ -1175,7 +1112,7 @@ mod schema_tests {
 
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 99] {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();

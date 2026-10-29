@@ -274,7 +274,9 @@ async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result
             crate::live::history(s, kind, id, input).await?
         }
         ("GET", ["runs", id]) => s.store.run(id).await?,
-        ("POST", ["runs", id, "chat"]) => s.chat_from_run(id).await?,
+        ("POST", ["runs", id, "chat"]) => {
+            chat_command(s, input, "convert_run_to_chat", json!({ "runId": id })).await?
+        }
         ("GET", ["runs", id, "events"]) => {
             s.store.run(id).await?;
             let after = input.number("after", 0, 0, i64::MAX)?;
@@ -302,38 +304,22 @@ async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result
 
 /// Queued messages only, with answers to secret questions redacted.
 async fn chat_detail(s: &Service, id: &str) -> Result<Value> {
-    let mut detail = s.chat_detail(id).await?;
-    let private = detail["questions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|q| {
-            q["fields"]
-                .as_array()
-                .is_some_and(|fields| fields.iter().any(|f| f["secret"] == true))
-        })
-        .map(|q| q["id"].clone())
-        .collect::<Vec<_>>();
+    let chat_id = id.to_owned();
+    let mut detail = s
+        .store
+        .read(move |db| crate::chats::public_detail(db, &chat_id))
+        .await?;
     if let Some(messages) = detail["messages"].as_array_mut() {
         messages.retain(|m| m["status"] != crate::chats::MessageStatus::Delivered);
-        for message in messages {
-            if private.contains(&message["questionId"]) {
-                message["text"] = "Private answer".into();
-                if let Some(message) = message.as_object_mut() {
-                    message.remove("answers");
-                }
-            }
-        }
     }
-    detail["error"] = if crate::conversation_lifecycle::is_active(&detail) {
-        s.store
-            .kv(&format!("chat-error:{id}"))
-            .await?
-            .unwrap_or(Value::Null)
-    } else {
-        Value::Null
-    };
     Ok(detail)
+}
+
+async fn chat_command(s: &Arc<Service>, input: &Input, name: &str, args: Value) -> Result<Value> {
+    crate::capabilities::chat_operation(name)
+        .expect("registered conversation command")
+        .invoke(s, args, crate::capabilities::ResumeContext::http(input)?)
+        .await
 }
 
 async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
@@ -345,39 +331,108 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
                 .await?
                 .into()
         }
-        ("DELETE", ["chats", id]) => s.chat_trash(id, confirmed).await?,
+        ("DELETE", ["chats", id]) => {
+            chat_command(
+                s,
+                input,
+                "delete_chat",
+                json!({ "chatId": id, "confirm": confirmed }),
+            )
+            .await?
+        }
         ("POST", ["chats", id, "new-session"]) => {
-            s.chat_new_session_authorized(
-                id,
-                confirmed,
-                crate::native::policy::chat_authorization(id),
+            chat_command(
+                s,
+                input,
+                "restart_chat_session",
+                json!({ "chatId": id, "confirm": confirmed }),
             )
             .await?
         }
         ("POST", ["chats", id, "compact"]) => {
-            s.chat_compact_authorized(id, crate::native::policy::chat_authorization(id))
-                .await?
+            chat_command(s, input, "compact_chat", json!({ "chatId": id })).await?
         }
         ("POST", ["chats", id, "restore"]) => {
-            s.chat_restore_authorized(id, crate::native::policy::chat_authorization(id))
-                .await?
+            chat_command(s, input, "restore_chat", json!({ "chatId": id })).await?
         }
-        ("POST", ["chats"]) => s.chat_create(input.body.clone()).await?,
+        ("POST", ["chats", id, "pause"]) => {
+            chat_command(
+                s,
+                input,
+                "set_chat_paused",
+                json!({ "chatId": id, "paused": input.body["paused"] }),
+            )
+            .await?
+        }
+        ("POST", ["chats", id, "stop"]) => {
+            chat_command(s, input, "stop_chat", json!({ "chatId": id })).await?
+        }
+        ("POST", ["chats"]) => chat_command(s, input, "create_chat", input.body.clone()).await?,
+        ("PUT", ["chats", id]) => {
+            let mut args = input.body.clone();
+            args["chatId"] = (*id).into();
+            chat_command(s, input, "rename_chat", args).await?
+        }
         ("GET", ["chats", id]) => chat_detail(s, id).await?,
         ("GET", ["chats", id, "coding-agent"]) => {
-            crate::chats::coding_agent::options(s, id, |_| Ok(())).await?
+            chat_command(
+                s,
+                input,
+                "get_chat_coding_agent_options",
+                json!({ "chatId": id }),
+            )
+            .await?
         }
         ("POST", ["chats", id, "coding-agent"]) => {
             let mut args = input.body.clone();
             args["chatId"] = (*id).into();
-            s.switch_chat_coding_agent(args, crate::native::policy::chat_proof(id))
-                .await?
+            chat_command(s, input, "switch_chat_coding_agent", args).await?
         }
-        ("POST", ["chats", id, "messages"]) => s.chat_send(id, input.body.clone()).await?,
-        ("PUT", ["chats", id, "messages", message]) => {
-            s.chat_edit(id, message, Some(input.body.clone())).await?
+        ("POST", ["chats", id, "messages"]) => {
+            let message = input.body.get("message").unwrap_or(&input.body);
+            chat_command(
+                s,
+                input,
+                "send_chat_message",
+                json!({ "chatId": id, "message": message }),
+            )
+            .await?
         }
-        ("DELETE", ["chats", id, "messages", message]) => s.chat_edit(id, message, None).await?,
+        ("PUT", ["chats", id, "messages", message_id]) => {
+            let mut message = input.body.get("message").unwrap_or(&input.body).clone();
+            // The existing UI editor submits a displayed message; only command settings
+            // enter the shared typed editor, with the path supplying its identity.
+            if let Some(fields) = message.as_object_mut() {
+                fields.retain(|key, _| {
+                    matches!(
+                        key.as_str(),
+                        "text"
+                            | "attachmentIds"
+                            | "mode"
+                            | "provider"
+                            | "model"
+                            | "reasoning"
+                            | "speed"
+                    )
+                });
+            }
+            chat_command(
+                s,
+                input,
+                "edit_chat_message",
+                json!({ "chatId": id, "messageId": message_id, "message": message }),
+            )
+            .await?
+        }
+        ("DELETE", ["chats", id, "messages", message]) => {
+            chat_command(
+                s,
+                input,
+                "delete_chat_message",
+                json!({ "chatId": id, "messageId": message }),
+            )
+            .await?
+        }
         ("POST", ["chats", id, "questions", question, "cancel"]) => {
             s.question_cancel_authorized(
                 id,
@@ -601,9 +656,9 @@ async fn settings_routes(
 ) -> Result<Option<Value>> {
     let result = match route {
         ("GET", ["settings"]) => settings(s),
-        ("GET", ["settings", "conversations"]) => s.conversation_retention().await?,
+        ("GET", ["settings", "conversations"]) => chat_command(s, input, "get_conversation_retention", json!({})).await?,
         ("PUT", ["settings", "conversations"]) => {
-            s.save_conversation_retention(input.body.clone()).await?
+            chat_command(s, input, "set_conversation_retention", input.body.clone()).await?
         }
         ("GET", ["settings", "storage"]) => crate::object_storage::settings(s)?,
         ("PUT", ["settings", "storage"]) => {

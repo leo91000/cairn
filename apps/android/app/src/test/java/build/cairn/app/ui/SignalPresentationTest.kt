@@ -14,7 +14,7 @@ class SignalPresentationTest {
         val reservation = ExclusiveReservation("reservation", "node", "owner", "Build", "acquired")
         val chat =
             Chat(
-                "suspended",
+                id = "suspended",
                 status = "running",
                 agentName = "Cairn",
                 suspendedByExclusive = reservation,
@@ -62,7 +62,7 @@ class SignalPresentationTest {
     fun `automatic quota waits follow dated resumptions and preserve attention and suspension`() {
         val quota =
             Chat(
-                "quota",
+                id = "quota",
                 status = "running",
                 accountWaitReason =
                     "Usage exhausted. Waiting for an available Codex account to resume.",
@@ -93,7 +93,7 @@ class SignalPresentationTest {
                             ),
                     ),
                     Chat(
-                        "dated",
+                        id = "dated",
                         status = "succeeded",
                         wakeup =
                             ChatWakeup(
@@ -146,15 +146,15 @@ class SignalPresentationTest {
         val chats =
             listOf(
                 Chat(
-                    "question",
-                    "Choisir la pagination",
+                    id = "question",
+                    title = "Choisir la pagination",
                     agentName = "Designer",
                     pendingQuestions = 2,
                     updatedAt = 5,
                 ),
                 Chat(
-                    "running",
-                    "Refonte Android",
+                    id = "running",
+                    title = "Refonte Android",
                     agentName = "Cairn",
                     projectName = "Manager",
                     status = "running",
@@ -167,26 +167,32 @@ class SignalPresentationTest {
                         ),
                     updatedAt = 4,
                 ),
-                Chat("queued", "En file", agentName = "Cairn", status = "queued", updatedAt = 3),
                 Chat(
-                    "paused",
-                    "Mise en pause",
+                    id = "queued",
+                    title = "En file",
+                    agentName = "Cairn",
+                    status = "queued",
+                    updatedAt = 3,
+                ),
+                Chat(
+                    id = "paused",
+                    title = "Mise en pause",
                     agentName = "Cairn",
                     status = "running",
                     paused = true,
                     updatedAt = 2,
                 ),
                 Chat(
-                    "failed",
-                    "Échec du build",
+                    id = "failed",
+                    title = "Échec du build",
                     agentName = "Ops",
                     status = "failed",
                     error = "Tests rouges\ndétail",
                     updatedAt = 1,
                 ),
                 Chat(
-                    "reconnect",
-                    "Attente Claude",
+                    id = "reconnect",
+                    title = "Attente Claude",
                     agentName = "Claude",
                     status = "queued",
                     updatedAt = 6,
@@ -200,7 +206,12 @@ class SignalPresentationTest {
                             taskId = "",
                         ),
                 ),
-                Chat("idle", "Ancienne conversation", agentName = "Cairn", updatedAt = 0),
+                Chat(
+                    id = "idle",
+                    title = "Ancienne conversation",
+                    agentName = "Cairn",
+                    updatedAt = 0,
+                ),
             )
         val tasks =
             listOf(
@@ -292,12 +303,12 @@ class SignalPresentationTest {
             buildFeed(
                 listOf(
                     Chat(
-                        "switched",
+                        id = "switched",
                         status = "running",
                         provider = "claude",
-                        requester = ChatRequester("parent", "Review request"),
+                        requester = ChatRequester(chatId = "parent", title = "Review request"),
                     ),
-                    Chat("new"),
+                    Chat(id = "new"),
                 ),
                 listOf(
                     Run(
@@ -402,7 +413,7 @@ class SignalPresentationTest {
             )
         val feed =
             buildFeed(
-                listOf(Chat("parent", title = "Orchestrer F8", updatedAt = 1)),
+                listOf(Chat(id = "parent", title = "Orchestrer F8", updatedAt = 1)),
                 activity,
                 tasks,
             )
@@ -476,8 +487,8 @@ class SignalPresentationTest {
         val chats =
             listOf(
                 Chat(
-                    "done",
-                    "Notes de version",
+                    id = "done",
+                    title = "Notes de version",
                     agentName = "Rédacteur",
                     status = "succeeded",
                     finishedAt = 40,
@@ -485,8 +496,14 @@ class SignalPresentationTest {
                     unread = true,
                     preview = "J'ai publié les notes.",
                 ),
-                Chat("read", "Relecture", status = "succeeded", finishedAt = 50, updatedAt = 50),
-                Chat("question", "Choisir", pendingQuestions = 1, updatedAt = 1),
+                Chat(
+                    id = "read",
+                    title = "Relecture",
+                    status = "succeeded",
+                    finishedAt = 50,
+                    updatedAt = 50,
+                ),
+                Chat(id = "question", title = "Choisir", pendingQuestions = 1, updatedAt = 1),
             )
         val activity =
             listOf(
@@ -534,9 +551,9 @@ class SignalPresentationTest {
     fun `swipes move through conversations and missions in the order of the Fil`() {
         val chats =
             listOf(
-                Chat("question", "Choisir", pendingQuestions = 1, updatedAt = 5),
-                Chat("live", "Refonte", status = "running", updatedAt = 4),
-                Chat("idle", "Relecture", updatedAt = 3),
+                Chat(id = "question", title = "Choisir", pendingQuestions = 1, updatedAt = 5),
+                Chat(id = "live", title = "Refonte", status = "running", updatedAt = 4),
+                Chat(id = "idle", title = "Relecture", updatedAt = 3),
             )
         val activity =
             listOf(
@@ -579,9 +596,21 @@ class SignalPresentationTest {
     fun `read acknowledgement keeps the open conversation before the next unread page`() {
         val chats =
             listOf(
-                Chat("a", "First result", unread = true, finishedAt = 30, updatedAt = 30),
-                Chat("b", "Second result", unread = true, finishedAt = 20, updatedAt = 20),
-                Chat("c", "Recent", updatedAt = 10),
+                Chat(
+                    id = "a",
+                    title = "First result",
+                    unread = true,
+                    finishedAt = 30,
+                    updatedAt = 30,
+                ),
+                Chat(
+                    id = "b",
+                    title = "Second result",
+                    unread = true,
+                    finishedAt = 20,
+                    updatedAt = 20,
+                ),
+                Chat(id = "c", title = "Recent", updatedAt = 10),
             )
         val before = buildFeed(chats, emptyList(), emptyList()).keys()
         val after =
@@ -601,8 +630,8 @@ class SignalPresentationTest {
     fun `navigation badge distinguishes action from reading and clears optimistic reads`() {
         val chats =
             listOf(
-                Chat("a", "Result", unread = true, finishedAt = 30),
-                Chat("b", "Question", pendingQuestions = 1),
+                Chat(id = "a", title = "Result", unread = true, finishedAt = 30),
+                Chat(id = "b", title = "Question", pendingQuestions = 1),
             )
         assertEquals(FilAttention(1, 1), filAttention(buildFeed(chats, emptyList(), emptyList())))
         assertEquals(1, FilAttention(1, 4).count)
@@ -800,12 +829,16 @@ class SignalPresentationTest {
         val chats =
             listOf(
                 Chat(
-                    "c",
-                    "Relecture PR",
+                    id = "c",
+                    title = "Relecture PR",
                     agentName = "Revue de code",
                     agentId = "5ca9d6c5-caa1-5234-8069-c22f7aa2da85",
                 ),
-                Chat("22db892f-1069-55df-8435-9b003528bdcf", "Autre", agentName = "Cairn"),
+                Chat(
+                    id = "22db892f-1069-55df-8435-9b003528bdcf",
+                    title = "Autre",
+                    agentName = "Cairn",
+                ),
             )
         val hits = searchWorkspace("revue", chats, state)
         assertEquals(

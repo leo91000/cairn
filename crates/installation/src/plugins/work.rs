@@ -408,7 +408,7 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
                 let bound = db.kv(&binding_key)?.and_then(|value| value.as_str().map(str::to_owned));
                 let usable = bound
                     .as_deref()
-                    .and_then(|id| db.get("chats", id).ok().flatten())
+                    .and_then(|id| db.conversation_boundary(id).ok().flatten())
                     .filter(|chat| {
                         crate::conversation_lifecycle::is_active(chat)
                             && chat["agentId"] == connection.agent_id
@@ -458,7 +458,7 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
     };
     // Follow Cairn's resume path for a stopped run; merely clearing `paused` would
     // make chat_tick pause it again. Resume also restores the checkpoint budget.
-    let chat = s.get("chats", &chat_id).await?;
+    let chat = s.conversation_boundary(&chat_id).await?;
     if let Some(run_id) = chat["runId"].as_str() {
         let run = s.store.run(run_id).await?;
         if crate::run_status::RunStatus::of(&run)
@@ -494,11 +494,11 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
             if let Some(receipt) = db.kv(&dedupe)? {
                 return Ok(receipt);
             }
-            let mut chat = db.get("chats", &chat_id)?
+            let mut chat = db.conversation_boundary(&chat_id)?
                 .ok_or_else(|| Error::not_found("Conversation no longer exists."))?;
             crate::conversation_lifecycle::require_active(&chat)?;
             chat["paused"] = json!(false);
-            db.put("chats", &chat)?;
+            db.save_conversation_boundary(&chat)?;
             let counters = limits(db, &connection, &author)?;
             let message_id = id();
             let queued = crate::chats::send_as_in(
@@ -648,7 +648,7 @@ pub async fn cancel(s: &Service, context: &Context, args: &Value) -> Result<Valu
             conversation(db, &connection, &author, &input)
         })
         .await?;
-    let detail = s.get("chats", &chat).await?;
+    let detail = s.conversation_boundary(&chat).await?;
     s.chat_pause(&chat, true).await?;
     if let Some(run) = detail["runId"].as_str()
         && crate::run_status::RunStatus::of(&s.store.run(run).await?)
@@ -689,7 +689,7 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Delivery) -> Result<Tur
         return Err(Error::forbidden("Reply authorization was revoked."));
     }
     let chat = db
-        .get("chats", &delivery.chat_id)?
+        .conversation_boundary(&delivery.chat_id)?
         .ok_or_else(|| Error::not_found("Conversation no longer exists."))?;
     if !crate::conversation_lifecycle::is_active(&chat) {
         return Err(Error::forbidden("Conversation is no longer active."));

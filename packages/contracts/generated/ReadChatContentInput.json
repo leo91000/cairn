@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "chatId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "offset": {
+      "default": 0,
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "sha256": {
+      "default": null,
+      "pattern": "^[a-f0-9]{64}$",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "chatId"
+  ],
+  "title": "ReadChatContentInput",
+  "type": "object"
+}

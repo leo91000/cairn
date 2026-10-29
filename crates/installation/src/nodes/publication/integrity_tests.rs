@@ -56,7 +56,7 @@ async fn lost_ack_is_fenced_before_purge_or_expiry_releases_its_dependencies() {
             db.add_run_fixture(&json!({
                 "id": saved_run, "taskId": id(), "status": "succeeded", "createdAt": 0
             }), None)?;
-            db.put("chats", &saved_chat)?;
+            db.save_conversation_boundary(&saved_chat)?;
             db.save_checkpoint_boundary(&saved_run, &json!({"nodeId": super::super::LOCAL_NODE_ID}))?;
             db.0.execute("INSERT INTO shared_publications VALUES(?1,?2)", rusqlite::params![saved_publication, saved_run])?;
             db.0.execute("INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES(?1,'fixture',?2,4096,'{}','ready')", rusqlite::params![saved_object, digest::block(&[4;4096])])?;

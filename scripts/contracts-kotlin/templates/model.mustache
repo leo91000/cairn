@@ -9,7 +9,11 @@ value class {{&className}}(val value: Map<String, {{#additionalProperties}}{{>ty
 {{/constValue}}{{/properties}}){{#interfaces}}{{#first}} : {{/first}}{{^first}}, {{/first}}{{&className}}{{/interfaces}} {
     init {
 {{#properties}}{{^constValue}}{{#validations}}{{#type}}{{#PATTERN}}        {{#nullable}}{{&kotlinName}}?.let { require(Regex({{&value.value.kotlinString}}).containsMatchIn(it)) }{{/nullable}}{{^nullable}}require(Regex({{&value.value.kotlinString}}).containsMatchIn({{&kotlinName}})){{/nullable}}
-{{/PATTERN}}{{#MINIMUM_INT}}        {{#nullable}}{{&kotlinName}}?.let { require(it >= {{&value}}) }{{/nullable}}{{^nullable}}require({{&kotlinName}} >= {{&value}}){{/nullable}}
+{{/PATTERN}}{{#MAX_ITEMS}}        {{#nullable}}{{&kotlinName}}?.let { require(it.size <= {{&value}}) }{{/nullable}}{{^nullable}}require({{&kotlinName}}.size <= {{&value}}){{/nullable}}
+{{/MAX_ITEMS}}{{#MIN_ITEMS}}        {{#nullable}}{{&kotlinName}}?.let { require(it.size >= {{&value}}) }{{/nullable}}{{^nullable}}require({{&kotlinName}}.size >= {{&value}}){{/nullable}}
+{{/MIN_ITEMS}}{{#CONST_ITEMS}}        {{#nullable}}{{&kotlinName}}?.let { require(it.size == {{&value}}) }{{/nullable}}{{^nullable}}require({{&kotlinName}}.size == {{&value}}){{/nullable}}
+{{/CONST_ITEMS}}{{#RANGE_ITEMS}}        {{#nullable}}{{&kotlinName}}?.let { require(it.size in {{&value.first}}..{{&value.second}}) }{{/nullable}}{{^nullable}}require({{&kotlinName}}.size in {{&value.first}}..{{&value.second}}){{/nullable}}
+{{/RANGE_ITEMS}}{{#MINIMUM_INT}}        {{#nullable}}{{&kotlinName}}?.let { require(it >= {{&value}}) }{{/nullable}}{{^nullable}}require({{&kotlinName}} >= {{&value}}){{/nullable}}
 {{/MINIMUM_INT}}{{#MINIMUM_LONG}}        {{#nullable}}{{&kotlinName}}?.let { require(it >= {{&value}}L) }{{/nullable}}{{^nullable}}require({{&kotlinName}} >= {{&value}}L){{/nullable}}
 {{/MINIMUM_LONG}}{{#MAXIMUM_INT}}        {{#nullable}}{{&kotlinName}}?.let { require(it <= {{&value}}) }{{/nullable}}{{^nullable}}require({{&kotlinName}} <= {{&value}}){{/nullable}}
 {{/MAXIMUM_INT}}{{#MAXIMUM_LONG}}        {{#nullable}}{{&kotlinName}}?.let { require(it <= {{&value}}L) }{{/nullable}}{{^nullable}}require({{&kotlinName}} <= {{&value}}L){{/nullable}}
