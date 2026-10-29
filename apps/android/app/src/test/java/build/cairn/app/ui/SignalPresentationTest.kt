@@ -46,7 +46,7 @@ class SignalPresentationTest {
 
     @Test
     fun `questions a member cannot answer wait for someone with access`() {
-        val question = Chat("question", agentId = MAIN_AGENT_ID, pendingQuestions = 1)
+        val question = Chat(id = "question", agentId = MAIN_AGENT_ID, pendingQuestions = 1)
         val member = buildFeed(listOf(question), emptyList(), emptyList(), usable = emptyList())
         assertTrue(member.forYou.isEmpty())
         assertEquals(

@@ -47,8 +47,8 @@ class MemberConversationTest {
 
     private val chat =
         Chat(
-            "shared",
-            "Préparer la version 0.53",
+            id = "shared",
+            title = "Préparer la version 0.53",
             agentId = MAIN_AGENT_ID,
             agentName = "Agent principal",
             status = "succeeded",

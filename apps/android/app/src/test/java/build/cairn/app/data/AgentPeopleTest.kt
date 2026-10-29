@@ -36,12 +36,15 @@ class AgentPeopleTest {
 
     @Test
     fun aDelegatedTaskFollowsItsRequestingConversationWhileItExists() {
-        val requesting = Chat("requesting", agentId = reviewer)
-        val delegated = Chat("delegated", agentId = writer, requester = ChatRequester("requesting"))
+        val requesting = Chat(id = "requesting", agentId = reviewer)
+        val delegated =
+            Chat(id = "delegated", agentId = writer, requester = ChatRequester("requesting"))
         assertTrue(canDirectChat(listOf(reviewer), delegated, listOf(requesting, delegated)))
         assertFalse(canDirectChat(listOf(reviewer), delegated, listOf(delegated)))
         assertTrue(canDirectChat(listOf(writer), delegated, emptyList()))
-        assertFalse(canDirectChat(emptyList(), Chat("alone", agentId = writer), listOf(requesting)))
+        assertFalse(
+            canDirectChat(emptyList(), Chat(id = "alone", agentId = writer), listOf(requesting))
+        )
     }
 
     @Test
