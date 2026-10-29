@@ -629,15 +629,17 @@ these local timings are separate from production network latency.
 
 ## Coding-agent accounts and usage (A15)
 
-Fresh SQLite v13 replaces `agentAccounts` with `coding_agent_accounts`,
+SQLite v14 replaces `agentAccounts` with `coding_agent_accounts`,
 `account_usage`, ordered `account_usage_windows`, `account_exhaustion` and
 `account_leases`. Named columns own selection state, parallel limits, priority,
 model-provider binding and both current/exhausted usage. Relations reference their
 account; lease deletion is restricted while a slot is held. The lease run key also
 supports background title/avatar work without fabricating a retained run. Startup
 invalidates runtime leases before new admission, keeping the existing credential
-recovery and recovering-run exclusion. No historical reader, migration or records
-mirror exists. The existing Driver and worker still own connection, refresh/reset,
+recovery and recovering-run exclusion. The one-time startup migration from v12
+preserves all account state and encrypted credentials transactionally; see
+[migration 0014](migrations/0014-typed-account-pool.md). There is no runtime legacy
+reader or records mirror. The existing Driver and worker still own connection, refresh/reset,
 remaining-capacity selection, exhaustion switching and run-scoped credential isolation.
 
 Rust owns public account/usage/sign-in views and closed commands. Both apps remove
