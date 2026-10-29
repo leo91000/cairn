@@ -338,8 +338,8 @@ Members can read agents, projects and skills, and create conversations and work
 with the agents the owner lets them use: each agent page has an owner-only **Who can
 use it** section on web and Android ([ADR-0075](adr/0075-plugin-hooks-rules-and-scoped-grants.md)).
 A new agent is the owner's alone; at rollout, existing members kept the existing
-agents. Starting, continuing, steering, answering, launching by hand, deleting a
-conversation and creating or editing a task require access to its agent; every
+agents. Starting, continuing, steering, answering, launching by hand, deleting or
+restoring a conversation and creating or editing a task require access to its agent; every
 member still sees every conversation and can pause, archive or stop any work. A
 delegated task can be directed with access to its requesting conversation's agent.
 The installation refuses management of agents, projects, skills,

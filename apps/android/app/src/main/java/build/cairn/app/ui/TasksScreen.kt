@@ -51,6 +51,11 @@ internal fun TaskEditor(
                 )
         )
     var revision by rememberSaveable { mutableStateOf(initial?.revision.orEmpty()) }
+    // A member's usable agents may load after a new mission opened.
+    LaunchedEffect(state.usableAgents) {
+        if (initial == null && !canUseAgent(state.usableAgents, form.agentId))
+            form = form.copy(agentId = defaultAgent(state.usableAgents, state.agents))
+    }
     val saving = rememberResourceSave(initial?.id.orEmpty())
     var saveError by rememberSaveable { mutableStateOf<String?>(null) }
     var cadence by rememberSaveable {

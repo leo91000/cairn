@@ -313,7 +313,8 @@ impl Missions {
     /// Confirms the memberships unless a check within `age` already did. Observations stay
     /// under `authors`, consistent with grants and task saves; while another holds it (a
     /// scheduling pass, a save), a member's request waits for that holder's own check or
-    /// for the lock, whichever comes first, rather than for the holder's whole work.
+    /// for the lock, whichever comes first, and fails rather than waiting for the holder's
+    /// whole work.
     pub(crate) async fn verify_membership(
         &self,
         s: &Service,
@@ -339,7 +340,13 @@ impl Missions {
                 match waited {
                     Ok(Some(authors)) => authors,
                     Ok(None) if self.membership_verified_within(age) => return Ok(()),
-                    _ => self.authors.lock().await,
+                    // The holder's own check failed, or its work outlasts the wait: like an
+                    // unanswering Beacon, the membership cannot be confirmed now.
+                    _ => {
+                        return Err(Error::unavailable(
+                            "Memberships could not be confirmed right now.",
+                        ));
+                    }
                 }
             }
         };

@@ -142,6 +142,11 @@ watch(
       form.value.projectId = null
   },
 )
+// A member's usable agents may load after a new mission opened.
+watch(() => state.usableAgents, (usable) => {
+  if (!savedId.value && !canUseAgent(usable, form.value.agentId))
+    form.value.agentId = defaultAgent(usable, state.agents)
+})
 watch(cadence, (value) => {
   form.value.cron
     = value === 'once'

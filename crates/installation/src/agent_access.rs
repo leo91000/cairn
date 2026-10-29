@@ -452,9 +452,11 @@ fn mark_suspensions(
 /// (including a removal followed by a new invitation), then completes the rollout.
 pub(crate) fn reconcile(db: &Db<'_>, policy: Option<&TaskAuthorPolicy>) -> Result<()> {
     let Some(policy) = policy else {
-        // Only an unclaimed installation, without a relay identity, observes no policy: it
-        // has no member to keep the existing agents for. Unreadable identities fail instead.
-        return db.delete(ROLLOUT);
+        // Only an installation without a relay identity observes no policy. The rollout
+        // waits for a real observation: right after a claim it has no member yet and is
+        // consumed harmlessly, while a claimed installation never loses it. Unreadable
+        // identities fail instead.
+        return Ok(());
     };
     let entries =
         db.0.prepare("SELECT agent_id,account_id,access_id FROM agent_account_access")?
@@ -792,6 +794,27 @@ mod tests {
             s.missions
                 .membership_verified_within(std::time::Duration::from_secs(30))
         );
+    }
+
+    #[tokio::test]
+    async fn a_request_fails_closed_behind_a_long_lock_holder() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(&root).await;
+        relay_fixture::claimed(&s).await.unwrap();
+        s.missions.expire_membership_check();
+
+        // A long merge or scheduling pass keeps the lock and checks no membership.
+        let authors = s.missions.authors.lock().await;
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            s.missions
+                .verify_membership(&s, std::time::Duration::from_secs(30)),
+        )
+        .await
+        .expect("the request must not wait for the holder's whole work")
+        .unwrap_err();
+        assert_eq!(error.status, 503);
+        drop(authors);
     }
 
     #[tokio::test]
