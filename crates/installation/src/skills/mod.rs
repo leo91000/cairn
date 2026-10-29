@@ -499,12 +499,14 @@ impl Skills {
         Ok(bundle_response(scope, skill, &described))
     }
 
-    /// Resolves the JSON changes of a batch, reading staged uploads. Returns the
+    /// Resolves canonical batch changes, reading staged uploads. Returns the
     /// upload ids to discard once the batch succeeds.
-    pub async fn changes(&self, value: &Value) -> Result<(Vec<Change>, Vec<String>)> {
-        let items = value
-            .as_array()
-            .ok_or_else(|| Error::bad("changes: expected a list"))?;
+    pub(crate) async fn changes(
+        &self,
+        items: Vec<cairn_contracts::SkillChange>,
+    ) -> Result<(Vec<Change>, Vec<String>)> {
+        use cairn_contracts::SkillChange;
+
         if items.len() > 4 * bundle::FILES {
             return Err(Error::bad("Too many changes in one save."));
         }
@@ -512,47 +514,40 @@ impl Skills {
         let mut uploads = Vec::new();
         let mut written = 0;
         for item in items {
-            let field = |key: &str| {
-                item[key]
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| Error::bad(format!("{key}: expected text")))
-            };
-            let change = match item["op"].as_str() {
-                Some("write") => {
-                    let bytes = if let Some(upload) = item["upload"].as_str() {
-                        if uploads.iter().any(|used| used == upload) {
+            let change = match item {
+                SkillChange::Write {
+                    path,
+                    content,
+                    encoding,
+                    upload,
+                    executable,
+                } => {
+                    let bytes = if let Some(upload) = upload {
+                        if uploads.iter().any(|used| used == &upload) {
                             return Err(Error::bad("Each upload can be used once."));
                         }
-                        uploads.push(upload.to_owned());
-                        self.upload(upload).await?
+                        let bytes = self.upload(&upload).await?;
+                        uploads.push(upload);
+                        bytes
                     } else {
-                        decode(&field("content")?, item["encoding"].as_str())?
+                        let content = content
+                            .as_deref()
+                            .ok_or_else(|| Error::bad("content: expected text"))?;
+                        decode(content, encoding.as_deref())?
                     };
                     written += bytes.len() as u64;
                     if written > 2 * bundle::BUNDLE_BYTES {
                         return Err(Error::too_large("This save writes too much at once."));
                     }
                     Change::Write {
-                        path: field("path")?,
+                        path,
                         bytes,
-                        executable: item["executable"].as_bool(),
+                        executable,
                     }
                 }
-                Some("delete") => Change::Delete {
-                    path: field("path")?,
-                },
-                Some("move") => Change::Move {
-                    from: field("from")?,
-                    to: field("to")?,
-                },
-                Some("mode") => Change::Mode {
-                    path: field("path")?,
-                    executable: item["executable"]
-                        .as_bool()
-                        .ok_or_else(|| Error::bad("executable: expected a boolean"))?,
-                },
-                _ => return Err(Error::bad("op: use write, delete, move or mode")),
+                SkillChange::Delete { path } => Change::Delete { path },
+                SkillChange::Move { from, to } => Change::Move { from, to },
+                SkillChange::Mode { path, executable } => Change::Mode { path, executable },
             };
             changes.push(change);
         }

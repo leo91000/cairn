@@ -335,10 +335,7 @@ impl ResourceOperation {
             "edit_skill_files" => {
                 let input: EditSkillFilesInput = decode(input)?;
                 let project = authority.project(s, &input.scope).await?;
-                let (changes, uploads) = s
-                    .skills
-                    .changes(&serde_json::to_value(input.changes)?)
-                    .await?;
+                let (changes, uploads) = s.skills.changes(input.changes).await?;
                 authority.recheck(s).await?;
                 let saved = s
                     .skills
