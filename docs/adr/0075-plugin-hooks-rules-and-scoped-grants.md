@@ -13,7 +13,6 @@ droits par instance d’[ADR-0045](0045-declarative-plugin-contributions.md) et
 d’[ADR-0051](0051-agent-centric-permissions.md), l’édition des droits
 d’[ADR-0056](0056-plugin-oauth-file-transfers-and-gmail.md), la couverture des tâches
 déléguées d’[ADR-0059](0059-delegated-tasks.md), la règle d’une instance par package
-et celle de l’agent ouvert à tout le monde
 d’[ADR-0053](0053-github-as-a-bundled-plugin.md), la réutilisation des étapes
 partagées d’[ADR-0057](0057-guided-plugin-setup.md) et le rôle de membre
 d’[ADR-0029](0029-sharing-whole-installations.md) ; précise
@@ -50,9 +49,9 @@ Un plugin ne fait que déclarer ; le propriétaire et les membres décident du 
   un salon, qui appartient à un serveur) et les entrées d’outil, arguments de commande
   et champs de payload qui les désignent.
 - **Modèles de règles** : des ensembles de règles prêts à l’emploi (« Bot
-  conversationnel », « Support »). Installer un modèle demande ses paramètres (agent,
-  salon…) puis crée des règles ordinaires appartenant à celui qui l’installe, sans
-  lien avec le modèle : une mise à jour du plugin ne les modifie pas.
+  conversationnel », « Support »). Installer un modèle de règles demande ses
+  paramètres (agent, salon…) puis crée des règles ordinaires appartenant à celui qui
+  l’installe, sans lien avec ce modèle : une mise à jour du plugin ne les modifie pas.
 
 Les obligations du protocole d’un service (accuser réception d’un clic Discord en
 moins de 3 secondes, heartbeats, reconnexions) restent au transport, qui répond
@@ -181,6 +180,8 @@ qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l’arbre.
   toutes les 8 secondes, une étape courte sans détail, une seule en attente par
   conversation) et fin (terminée, échouée ou annulée). Une règle ne les reçoit que
   pour les clés de son créateur, et tant qu’il a accès à l’agent de la conversation.
+  Leur payload indique qui a écrit l’entrée à l’origine du tour (une personne et son
+  compte, ou une règle).
 - **Conversations démarrées** : une conversation démarrée par une règle a son créateur
   pour auteur, qui ne la rend pas privée
   ([ADR-0029](0029-sharing-whole-installations.md)) ; elle note l’auteur externe comme
@@ -275,9 +276,12 @@ renouvellement de bail de tout travail natif.
 
 Fusionner ou supprimer des agents ([guide](../AGENT-MERGE.md)) met les règles dont
 l’agent d’exécution, ou un agent qu’elles démarrent, disparaît en « Droits perdus »
-jusqu’à ce que leur créateur les modifie ; une conversation déplacée vers un autre
-agent ne permet plus d’écrire de règles. Les accès des comptes à l’agent fusionné ne
-passent pas à l’agent qui le reçoit : seul le propriétaire les accorde.
+jusqu’à ce que leur créateur les modifie, tout comme les règles qui orientent des clés
+rattachées aux conversations que la fusion déplace : un agent qui reçoit des
+conversations ne reçoit pas ainsi les inconnus qui les orientent ; une conversation
+déplacée vers un autre agent ne permet plus d’écrire de règles. Les accès des comptes
+à l’agent fusionné ne passent pas à l’agent qui le reçoit : seul le propriétaire les
+accorde.
 
 ### Budget du moteur
 
@@ -342,10 +346,10 @@ reste donc de confiance pour ces déclarations, comme il l’était pour l’adm
 
 Une règle qui ne teste pas l’auteur ouvre son agent à n’importe qui : l’éditeur, le
 MCP public, `cairn_installation` (par une notification à la personne pour qui l’agent
-écrit) et l’installation d’un modèle préviennent son créateur quand l’agent démarré a
-des droits de plugin, des connexions MCP, plusieurs projets, l’écriture de fichiers ou
-l’exécution de commandes, le pouvoir de déléguer, l’exécution native ou l’accès à
-l’installation, comme le faisait l’assistant des bots
+écrit) et l’installation d’un modèle de règles préviennent son créateur quand l’agent
+démarré a des droits de plugin, des connexions MCP, plusieurs projets, l’écriture de
+fichiers ou l’exécution de commandes, le pouvoir de déléguer, l’exécution native ou
+l’accès à l’installation, comme le faisait l’assistant des bots
 ([ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md)).
 
 Avant qu’un droit élargisse un agent (des droits de plugin, des connexions MCP,
@@ -369,9 +373,11 @@ un auteur externe peut tenter de lui faire faire tout le reste de ce que permet 
 accès, y compris supprimer l’agent ou l’instance dont dépendent les règles d’autres
 comptes : un agent qui répond à un salon public ne devrait pas l’avoir. De même, dans
 un tour qu’une personne a lancé, un agent qui lit un contenu externe par un outil (un
-salon, une issue) peut être poussé à écrire une règle durable au nom de cette
-personne ; ce risque résiduel est accepté, et l’historique d’une règle montre dans
-quelle conversation elle a été écrite.
+salon, une issue), ou les fichiers d’instructions d’un dépôt (`AGENTS.md`, skills d’un
+projet, qui sont du contenu de projet et non des instructions de Cairn), peut être
+poussé à écrire une règle durable au nom de cette personne ; ce risque résiduel est
+accepté, et l’historique d’une règle montre dans quelle conversation elle a été
+écrite.
 
 Comme toute capacité de l’interface, les règles (éditeur compris) et les droits par
 ressource arrivent sur le web, Android, le MCP public et `cairn_installation` en même
