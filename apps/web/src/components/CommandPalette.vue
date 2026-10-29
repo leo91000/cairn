@@ -174,7 +174,7 @@ const commands = computed<Command[]>(() => {
     }
   }
 
-  const fil = filOf(chatList.value, state.tasks, runs.value, localReads)
+  const fil = filOf(chatList.value, state.tasks, runs.value, localReads, undefined, state.usableAgents)
   for (const item of fil.forYou) {
     items.push({
       id: `need-${item.key}`,

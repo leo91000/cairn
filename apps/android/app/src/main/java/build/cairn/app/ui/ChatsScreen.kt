@@ -1250,7 +1250,7 @@ internal fun ChatPage(
                             ) {
                                 Text("Repartir avec une nouvelle session agent")
                             }
-                        if (chat?.sessionRestartRequested == true)
+                        if (chat?.sessionRestartRequested == true && !readOnly)
                             Text(
                                 "Écrivez un nouveau message, puis reprenez la file pour continuer.",
                                 Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
@@ -1269,14 +1269,15 @@ internal fun ChatPage(
                                 ) {
                                     cancelled.forEach { message ->
                                         Text(message.text)
-                                        TextButton({
-                                            composer.setTextAndPlaceCursorAtEnd(message.text)
-                                            attachments =
-                                                message.attachments.map { DraftAttachment(it) }
-                                            cancelledExpanded = false
-                                        }) {
-                                            Text("Copier dans le message")
-                                        }
+                                        if (!readOnly)
+                                            TextButton({
+                                                composer.setTextAndPlaceCursorAtEnd(message.text)
+                                                attachments =
+                                                    message.attachments.map { DraftAttachment(it) }
+                                                cancelledExpanded = false
+                                            }) {
+                                                Text("Copier dans le message")
+                                            }
                                     }
                                 }
                         }

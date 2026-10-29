@@ -158,6 +158,7 @@ internal fun buildFeed(
     tasks: List<Task>,
     read: Map<String, Long> = emptyMap(),
     now: Long = System.currentTimeMillis(),
+    usable: List<String>? = null,
 ): Feed {
     fun unreadNow(key: String, finishedAt: Long?) =
         (read[key] ?: Long.MIN_VALUE) < (finishedAt ?: 0)
@@ -195,6 +196,13 @@ internal fun buildFeed(
                 )
             val wait = chatWaitNotice(chat.run)
             when {
+                // A question only those with access to its agent may answer waits for them.
+                chat.pendingQuestions > 0 && !canDirectChat(usable, chat, chats) ->
+                    waiting +=
+                        item(
+                            FeedKind.WAITING_CHAT,
+                            "En attente d’une personne ayant accès à l’agent",
+                        )
                 chat.pendingQuestions > 0 ->
                     forYou +=
                         item(
@@ -470,7 +478,8 @@ fun FilScreen(
     }
     val trash = rememberConversationTrash(vm)
     val chats = live.state?.chats?.filter { it.id !in trash.hidden }
-    val feed = buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads, now)
+    val feed =
+        buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads, now, state.usableAgents)
     // A delegated task may also be directed through its requesting conversation's agent.
     fun directable(item: FeedItem): Boolean =
         item.chatId

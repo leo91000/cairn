@@ -91,7 +91,7 @@ const missionRuns = useMissionRuns()
 const outcomeItem = computed(() => {
   if (!run.value || run.value.trigger === 'chat' || !run.value.outcome || run.value.outcome.status === 'completed')
     return undefined
-  const fil = filOf(chatList.value, state.tasks, missionRuns.value, localReads)
+  const fil = filOf(chatList.value, state.tasks, missionRuns.value, localReads, undefined, state.usableAgents)
   return [...fil.forYou, ...fil.waiting, ...fil.recent].find(item => item.runId === run.value!.id)
 })
 const confirm = ref(false)

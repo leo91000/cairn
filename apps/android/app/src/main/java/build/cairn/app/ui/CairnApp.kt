@@ -329,6 +329,7 @@ private fun WorkspaceApp(
             activity.orEmpty(),
             state.tasks,
             vm.localReads,
+            usable = state.usableAgents,
         )
     val attention = filAttention(feed)
     fun navigate(target: String) {

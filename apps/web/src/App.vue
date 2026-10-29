@@ -109,7 +109,7 @@ const selectedChatId = computed(() => {
   return chats.value.find(chat => chat.id === id || chat.slug === id)?.id ?? id
 })
 const runs = useMissionRuns({ eager: false })
-const fil = computed(() => filOf(chats.value, state.tasks, runs.value, localReads))
+const fil = computed(() => filOf(chats.value, state.tasks, runs.value, localReads, undefined, state.usableAgents))
 const toRead = computed(() => fil.value.forYou.filter(isUnread).length)
 const needsYou = computed(() => fil.value.forYou.length - toRead.value)
 // The Fil's badge: coral when something needs the user, the accent when work only waits to be read.

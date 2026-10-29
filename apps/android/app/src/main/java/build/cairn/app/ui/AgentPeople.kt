@@ -249,6 +249,18 @@ internal fun PeopleSection(
                         )
                     }
             }
+            // A change for a row that is no longer listed still reports its failure.
+            people.failure
+                ?.takeIf { failed -> people.rows.none { it.accountId == failed.first } }
+                ?.let { (_, message) ->
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Text(
+                        message,
+                        Modifier.padding(16.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             if (people.loaded && people.rows.isEmpty()) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 Text(

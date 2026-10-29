@@ -1290,7 +1290,7 @@ function key(event: KeyboardEvent) {
                 Start a fresh agent session
               </UiButton>
             </div>
-            <p v-if="detail?.sessionRestartRequested" class="mb-3 text-sm text-muted">
+            <p v-if="detail?.sessionRestartRequested && !readOnly" class="mb-3 text-sm text-muted">
               Ready for a fresh session. Write a new message, then resume the queue.
             </p>
             <details v-if="detail?.messages.some(message => message.status === 'cancelled')" class="mb-3 rounded-lg border border-line p-3 text-xs">
@@ -1302,7 +1302,7 @@ function key(event: KeyboardEvent) {
                   {{ message.text }}
                 </p>
                 <MessageAttachments v-if="message.attachments?.length" :attachments="message.attachments" class="mt-2 items-start!" />
-                <button class="mt-2 text-accent" @click="draft = message.text; textarea?.focus()">
+                <button v-if="!readOnly" class="mt-2 text-accent" @click="draft = message.text; textarea?.focus()">
                   Copy to message
                 </button>
               </div>

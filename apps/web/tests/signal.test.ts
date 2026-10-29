@@ -190,6 +190,14 @@ describe('the Fil', () => {
     expect(fil.forYou[1]).toMatchObject({ to: '/chats/question', subtitle: 'Needs your answer' })
   })
 
+  it('leaves questions a member cannot answer waiting for someone with access', () => {
+    const question = chat('question', { pendingQuestions: 1, status: 'running' })
+    const fil = filOf([question], [], [], {}, Date.now(), [])
+    expect(fil.forYou).toEqual([])
+    expect(fil.waiting).toMatchObject([{ title: 'question', kind: 'waiting', subtitle: 'Waiting for someone with access' }])
+    expect(filOf([question], [], [], {}, Date.now(), ['main']).forYou.map(item => item.kind)).toEqual(['question'])
+  })
+
   it('marks each conversation and mission with the coding agent of its latest turn', () => {
     const fil = filOf([
       chat('switched', { status: 'running', provider: 'claude' }),

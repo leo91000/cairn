@@ -654,10 +654,8 @@ mod tests {
         .map_err(|error| (error.status, error.message))
     }
 
-    #[tokio::test]
-    async fn a_stale_membership_check_is_repeated_and_fails_closed_without_the_beacon() {
-        let root = tempfile::tempdir().unwrap();
-        let s = Service::new(crate::config::Config {
+    async fn service(root: &tempfile::TempDir) -> Arc<Service> {
+        Service::new(crate::config::Config {
             data_dir: root.path().join("data"),
             home: root.path().join("home"),
             workspace_roots: vec![root.path().to_owned()],
@@ -674,7 +672,60 @@ mod tests {
             runner_url: String::new(),
         })
         .await
-        .unwrap();
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn questions_reach_the_members_who_may_answer_through_either_agent() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(&root).await;
+        relay_fixture::claimed(&s).await.unwrap();
+        let reviewer = s
+            .agent_fixture(json!({ "name": "Reviewer" }), None)
+            .await
+            .unwrap();
+        let reviewer = text(&reviewer, "id").to_owned();
+        relay_fixture::allow_member(&s, MEMBER, &reviewer).await;
+        relay_fixture::allow_member(&s, "main-member", crate::config::MAIN_AGENT_ID).await;
+
+        let requesting =
+            json!({ "id": crate::config::id(), "agentId": reviewer, "lifecycle": "active" });
+        let delegated = json!({
+            "id": crate::config::id(),
+            "agentId": crate::config::MAIN_AGENT_ID,
+            "lifecycle": "active",
+            "requestedBy": { "chatId": requesting["id"] },
+        });
+        let members = |requesting: Value, delegated: Value| {
+            let s = s.clone();
+            async move {
+                s.store
+                    .transaction(move |db| {
+                        db.put("chats", &requesting)?;
+                        chat_members(db, &delegated)
+                    })
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // The delegated task's own agent, and its requesting conversation's while it exists.
+        assert_eq!(
+            members(requesting.clone(), delegated.clone()).await,
+            vec!["main-member".to_owned(), MEMBER.to_owned()]
+        );
+        let mut deleted = requesting;
+        deleted["lifecycle"] = "trash".into();
+        assert_eq!(
+            members(deleted, delegated).await,
+            vec!["main-member".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_membership_check_is_repeated_and_fails_closed_without_the_beacon() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(&root).await;
         std::fs::create_dir_all(&s.config.home).unwrap();
         relay_fixture::claimed(&s).await.unwrap();
         let reviewer = s
@@ -705,24 +756,7 @@ mod tests {
     #[tokio::test]
     async fn a_request_waits_only_for_the_lock_holders_own_membership_check() {
         let root = tempfile::tempdir().unwrap();
-        let s = Service::new(crate::config::Config {
-            data_dir: root.path().join("data"),
-            home: root.path().join("home"),
-            workspace_roots: vec![root.path().to_owned()],
-            public_url: "http://localhost:4310".into(),
-            host: "127.0.0.1".into(),
-            port: 0,
-            codex_bin: "codex".into(),
-            claude_bin: "claude".into(),
-            opencode_bin: "opencode".into(),
-            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
-            concurrency: 1,
-            logger: false,
-            worker_enabled: false,
-            runner_url: String::new(),
-        })
-        .await
-        .unwrap();
+        let s = service(&root).await;
         relay_fixture::claimed(&s).await.unwrap();
         s.missions.expire_membership_check();
 

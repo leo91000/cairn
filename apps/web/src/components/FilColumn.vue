@@ -69,7 +69,7 @@ const now = ref(Date.now())
 const clock = setInterval(() => now.value = Date.now(), 30000)
 onBeforeUnmount(() => clearInterval(clock))
 
-const fil = computed(() => filOf(props.chats, state.tasks, runs.value, localReads, now.value))
+const fil = computed(() => filOf(props.chats, state.tasks, runs.value, localReads, now.value, state.usableAgents))
 const opened = (item: FilItem) => (item.chatId && item.chatId === props.selected) || (item.runId && item.runId === props.selectedRun)
 
 // Finished work opened from For you stays there, read, while it is open: it moves to Recent once
