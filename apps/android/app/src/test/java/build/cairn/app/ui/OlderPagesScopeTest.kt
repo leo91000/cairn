@@ -92,7 +92,12 @@ class OlderPagesScopeTest {
                                                     )
                                                 ),
                                                 LiveState(
-                                                    chat = Chat(id = "fixture", title = "Test")
+                                                    chat =
+                                                        Chat(
+                                                            id =
+                                                                "be1410ba-6c1a-5ab2-b0c8-2733e2a5eb13",
+                                                            title = "Test",
+                                                        )
                                                 ),
                                                 false,
                                                 false,

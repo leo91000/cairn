@@ -103,7 +103,13 @@ class CacheMissReproductionTest {
                     wireJson.encodeToString(
                         LiveBatch(
                             events,
-                            LiveState(chat = Chat(id = "diagnostic", title = "Diagnostic cache")),
+                            LiveState(
+                                chat =
+                                    Chat(
+                                        id = "aa61a476-87e5-5034-b813-8a63564107d7",
+                                        title = "Diagnostic cache",
+                                    )
+                            ),
                             reset = false,
                             more = false,
                             history = "v1:fixture:1",
@@ -128,7 +134,7 @@ class CacheMissReproductionTest {
                             }
                             if (
                                 request.requestUrl?.encodedPath ==
-                                    "/api/installations/fixture/api/chats/diagnostic/stream"
+                                    "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream"
                             ) {
                                 requests.add(request.path!!)
                                 // Hold the reconnect indefinitely: visible content must come from
@@ -215,7 +221,13 @@ class CacheMissReproductionTest {
                     if (workspace.session.authenticated && opened) {
                         CairnTheme("dark") {
                             Surface(Modifier.fillMaxSize()) {
-                                ChatScreen(vm, workspace, "diagnostic", openChat = {}, openRun = {})
+                                ChatScreen(
+                                    vm,
+                                    workspace,
+                                    "aa61a476-87e5-5034-b813-8a63564107d7",
+                                    openChat = {},
+                                    openRun = {},
+                                )
                             }
                         }
                     }
@@ -236,7 +248,7 @@ class CacheMissReproductionTest {
                         vm.historyCache.key(
                             vm.api.cacheScope,
                             vm.api.csrf,
-                            "/chats/diagnostic/stream",
+                            "/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream",
                         )
                     val cached = runBlocking { vm.historyCache.read(key) }
                     assertNotNull("Both sizes retain recent messages", cached)
@@ -251,7 +263,7 @@ class CacheMissReproductionTest {
                     }
                     compose.waitForIdle()
                     assertEquals(
-                        "/api/installations/fixture/api/chats/diagnostic/stream?after=$accepted&history=v1%3Afixture%3A1&window=1&recent=1",
+                        "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=$accepted&history=v1%3Afixture%3A1&window=1&recent=1",
                         requests[1],
                     )
                     compose.onNodeWithText("Diagnostic cache").assertIsDisplayed()

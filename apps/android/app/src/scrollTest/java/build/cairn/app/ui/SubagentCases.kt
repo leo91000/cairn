@@ -80,7 +80,7 @@ abstract class SubagentCases {
             val now = System.currentTimeMillis()
             val chat =
                 Chat(
-                    id = "chat",
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
                     title = "Audit des webhooks",
                     agentId = MAIN_AGENT_ID,
                     agentName = "Agent principal",
@@ -152,7 +152,10 @@ abstract class SubagentCases {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
+                        if (
+                            path ==
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream"
+                        ) {
                             val first = initial.getAndSet(false)
                             val batch =
                                 wireJson.encodeToString(
@@ -197,7 +200,7 @@ abstract class SubagentCases {
                                             )
                                         )
                                     )
-                                "/api/installations/fixture/api/chats/chat" ->
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1" ->
                                     wireJson.encodeToString(chat)
                                 "/api/installations/fixture/api/overview" -> "{}"
                                 else ->
@@ -244,7 +247,14 @@ abstract class SubagentCases {
                 }
                 CairnTheme {
                     if (state.session.authenticated)
-                        ChatScreen(vm, state, "chat", openChat = {}, openRun = {}, back = {})
+                        ChatScreen(
+                            vm,
+                            state,
+                            "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                            openChat = {},
+                            openRun = {},
+                            back = {},
+                        )
                 }
             }
             compose.waitUntil(20000) {

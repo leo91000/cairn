@@ -63,14 +63,14 @@ class FilPagerDeviceTest {
     private val chats =
         listOf(
             Chat(
-                id = "question",
+                id = "765886cd-efa2-5d30-bdce-99340ee87a3d",
                 title = "Choisir la pagination",
                 agentName = "Agent principal",
                 pendingQuestions = 1,
                 updatedAt = now - 60_000,
             ),
             Chat(
-                id = "live",
+                id = "451f26a2-b83b-5559-b07e-9a031e6de7cb",
                 title = "Refonte de l’application",
                 agentName = "Agent principal",
                 status = "running",

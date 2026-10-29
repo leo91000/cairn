@@ -58,7 +58,7 @@ abstract class CacheRefreshCases {
                                 runId = "fixture",
                             )
                         ),
-                        LiveState(chat = Chat(id = "cache-refresh")),
+                        LiveState(chat = Chat(id = "f59b275f-667e-58c8-a788-33a78b29fa25")),
                         false,
                         false,
                         "v1:fixture:1",
@@ -72,7 +72,9 @@ abstract class CacheRefreshCases {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val endpoint = request.requestUrl!!.encodedPath
-                        if (endpoint.endsWith("/chats/cache-refresh/stream")) {
+                        if (
+                            endpoint.endsWith("/chats/f59b275f-667e-58c8-a788-33a78b29fa25/stream")
+                        ) {
                             if (streams.getAndIncrement() == 0)
                                 return MockResponse()
                                     .setHeader("Content-Type", "text/event-stream")
@@ -148,7 +150,12 @@ abstract class CacheRefreshCases {
                             ready = true
                         }
                         if (ready) {
-                            val live = rememberLive(vm, workspace, "/chats/cache-refresh/stream")
+                            val live =
+                                rememberLive(
+                                    vm,
+                                    workspace,
+                                    "/chats/f59b275f-667e-58c8-a788-33a78b29fa25/stream",
+                                )
                             Text(live.events.lastOrNull()?.text ?: "Waiting")
                         }
                     }

@@ -407,8 +407,8 @@ fn compact(db: &Db<'_>, chat_id: &str, origin: &crate::native::policy::Origin) -
         "Compacting the conversation context",
         None,
     )?;
-    db.save_conversation(&chat)?;
-    view(db, serde_json::to_value(chat)?)
+    let saved = db.save_conversation(&chat)?;
+    Ok(serde_json::to_value(conversation_view(db, saved)?)?)
 }
 
 /// Active conversations. Deleted ones are skipped before their view is built.

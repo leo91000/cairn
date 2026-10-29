@@ -38,13 +38,21 @@ abstract class QueueStripCases {
         "Également je ne vois pas de bouton pour mettre la file en pause sur Android, alors qu’il existe sur le web."
     private val messages =
         listOf(
-            ChatMessage(id = "first", chatId = "chat", text = long),
             ChatMessage(
-                id = "second",
-                chatId = "chat",
+                id = "84118824-11e7-5c29-8a52-a6e7fe0f27d2",
+                chatId = "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                text = long,
+            ),
+            ChatMessage(
+                id = "f1cca79e-9de6-5e26-b7b0-ea7cbbcc6bdb",
+                chatId = "6cc6efab-10af-54c7-a91b-dcff664166a1",
                 text = "Et relance la CI une fois que c’est fait.",
             ),
-            ChatMessage(id = "third", chatId = "chat", text = "Puis publie les screenshots."),
+            ChatMessage(
+                id = "8db386b2-dd18-5953-b1cf-601fe4533502",
+                chatId = "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                text = "Puis publie les screenshots.",
+            ),
         )
 
     @Test
@@ -53,7 +61,7 @@ abstract class QueueStripCases {
             val calls = CopyOnWriteArrayList<Triple<String, String, String>>()
             val chat =
                 Chat(
-                    id = "chat",
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
                     title = "Refonte de la file",
                     agentName = "Agent principal",
                     status = "running",
@@ -71,7 +79,7 @@ abstract class QueueStripCases {
             // A neighbour enables the conversation pager, whose swipe must not steal the queue's.
             val neighbour =
                 Chat(
-                    id = "neighbour",
+                    id = "0788c8fb-8e0a-5fbf-a792-d3e259e21e5b",
                     title = "Conversation voisine",
                     agentName = "Agent principal",
                     updatedAt = chat.updatedAt - 60000,
@@ -131,9 +139,9 @@ abstract class QueueStripCases {
                             when (path) {
                                 "/api/installations/fixture/api/chats/stream" ->
                                     return stream(LiveState(chats = listOf(chat, neighbour)))
-                                "/api/installations/fixture/api/chats/neighbour/stream" ->
+                                "/api/installations/fixture/api/chats/0788c8fb-8e0a-5fbf-a792-d3e259e21e5b/stream" ->
                                     return stream(LiveState(chat = neighbour))
-                                "/api/installations/fixture/api/chats/chat/stream" ->
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream" ->
                                     return stream(LiveState(chat = chat, run = chat.run), events)
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
@@ -163,13 +171,18 @@ abstract class QueueStripCases {
                                         )
                                     )
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                "/api/installations/fixture/api/chats/chat" ->
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1" ->
                                     wireJson.encodeToString(chat)
                                 "/api/installations/fixture/api/projects" -> """{"projects":[]}"""
                                 "/api/installations/fixture/api/tasks" -> """{"tasks":[]}"""
                                 "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
                                 else ->
-                                    if (path.endsWith("/models")) """{"models":[]}"""
+                                    if (path.contains("/messages/")) {
+                                        if (request.method == "DELETE") """{"deleted":true}"""
+                                        else wireJson.encodeToString(messages.first())
+                                    } else if (path.endsWith("/pause"))
+                                        wireJson.encodeToString(chat)
+                                    else if (path.endsWith("/models")) """{"models":[]}"""
                                     else if (request.method == "GET") "[]" else "{}"
                             }
                         return MockResponse()
@@ -197,7 +210,13 @@ abstract class QueueStripCases {
                         color = MaterialTheme.colorScheme.background,
                     ) {
                         if (state.session.authenticated)
-                            ChatScreen(vm, state, "chat", openChat = {}, openRun = {})
+                            ChatScreen(
+                                vm,
+                                state,
+                                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                                openChat = {},
+                                openRun = {},
+                            )
                     }
                 }
             }
@@ -241,7 +260,8 @@ abstract class QueueStripCases {
             compose.waitUntil(10000) {
                 calls.any {
                     it.first == "PUT" &&
-                        it.second == "/api/installations/fixture/api/chats/chat/messages/first"
+                        it.second ==
+                            "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/messages/84118824-11e7-5c29-8a52-a6e7fe0f27d2"
                 }
             }
             val steer =
@@ -270,7 +290,7 @@ abstract class QueueStripCases {
             compose.onNodeWithText(long).performClick()
             compose.onNodeWithText("Modifier").performClick()
             compose.runOnIdle {
-                val draft = checkNotNull(vm.chatDrafts["chat"])
+                val draft = checkNotNull(vm.chatDrafts["6cc6efab-10af-54c7-a91b-dcff664166a1"])
                 assertNull(draft.editing)
                 assertEquals("", draft.text)
                 assertEquals("queue-oversized.png", draft.rejected.single().name)
@@ -293,7 +313,10 @@ abstract class QueueStripCases {
             capture("queue-sheet")
             compose.onNodeWithText("Mettre la file en pause").performClick()
             compose.waitUntil(10000) {
-                calls.any { it.second == "/api/installations/fixture/api/chats/chat/pause" }
+                calls.any {
+                    it.second ==
+                        "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/pause"
+                }
             }
             assertTrue(
                 wireJson
@@ -331,7 +354,8 @@ abstract class QueueStripCases {
             compose.waitUntil(10000) {
                 calls.any {
                     it.first == "DELETE" &&
-                        it.second == "/api/installations/fixture/api/chats/chat/messages/first"
+                        it.second ==
+                            "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/messages/84118824-11e7-5c29-8a52-a6e7fe0f27d2"
                 }
             }
             vm.api.closeStreams()

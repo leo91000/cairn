@@ -52,7 +52,7 @@ class ScrollResumeTest {
                 val requests = CopyOnWriteArrayList<String>()
                 val chat =
                     Chat(
-                        id = "diagnostic",
+                        id = "aa61a476-87e5-5034-b813-8a63564107d7",
                         title = "Diagnostic",
                         agentName = "Cairn",
                         status = "succeeded",
@@ -104,7 +104,7 @@ class ScrollResumeTest {
                             }
                             if (
                                 request.requestUrl?.encodedPath ==
-                                    "/api/installations/fixture/api/chats/diagnostic/stream"
+                                    "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream"
                             ) {
                                 requests.add(request.path!!)
                                 val history =
@@ -154,7 +154,7 @@ class ScrollResumeTest {
                                     ChatScreen(
                                         vm,
                                         workspace,
-                                        "diagnostic",
+                                        "aa61a476-87e5-5034-b813-8a63564107d7",
                                         openChat = {},
                                         openRun = {},
                                     )
@@ -229,7 +229,7 @@ class ScrollResumeTest {
                 assertTrue(visible(60))
                 // Following the latest output accepts the recent window instead of a long replay.
                 assertEquals(
-                    "/api/installations/fixture/api/chats/diagnostic/stream?after=60&history=v1%3Afixture%3A1&window=1&recent=1",
+                    "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=60&history=v1%3Afixture%3A1&window=1&recent=1",
                     requests[1],
                 )
                 // Reopening from the feed restores the cached tail before its first visible frame.
@@ -298,7 +298,7 @@ class ScrollResumeTest {
                 compose.waitForIdle()
                 assertEquals(before, position(), 0.01f)
                 assertEquals(
-                    "/api/installations/fixture/api/chats/diagnostic/stream?after=60&history=v1%3Afixture%3A1&window=1",
+                    "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=60&history=v1%3Afixture%3A1&window=1",
                     requests[3],
                 )
                 compose.runOnIdle { opened = false }
@@ -314,7 +314,7 @@ class ScrollResumeTest {
                 compose.waitForIdle()
                 assertEquals(before, position(), 0.01f)
                 assertEquals(
-                    "/api/installations/fixture/api/chats/diagnostic/stream?after=60&history=v1%3Afixture%3A1&window=1",
+                    "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=60&history=v1%3Afixture%3A1&window=1",
                     requests[4],
                 )
                 // Keep a real drag active long enough for the fade-out to finish.

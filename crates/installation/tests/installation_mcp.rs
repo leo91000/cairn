@@ -3781,6 +3781,25 @@ async fn chat_compaction_matches_public_mcp_and_installation_tools() {
 
         let compacted = invoke("compact_chat", json!({ "chatId": chat_id })).await;
         assert_eq!(result(&compacted)["compaction"]["running"], true);
+        let saved = s
+            .store
+            .conversation_boundary(&chat_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result(&compacted)["revision"], saved["revision"]);
+        let renamed = public_call(
+            &s,
+            &["manage"],
+            "rename_chat",
+            json!({
+                "chatId": chat_id,
+                "title": "Renamed after compaction",
+                "revision": result(&compacted)["revision"],
+            }),
+        )
+        .await;
+        assert_ne!(renamed["result"]["isError"], true, "{renamed}");
         let run = s.store.run(run_id).await.unwrap();
         assert_eq!(run["status"], "queued");
         assert_eq!(run["chatExecution"]["operation"], "compact");
