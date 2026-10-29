@@ -167,7 +167,8 @@ function tone(item: FilItem) {
 }
 
 function action(item: FilItem) {
-  return item.kind === 'question' ? (canUseAgent(state.usableAgents, item.agentKey) ? 'Answer' : 'Open') : item.kind === 'failed' ? 'Resume' : isUnread(item) && !read(item) ? 'Read' : 'Open'
+  const usable = canUseAgent(state.usableAgents, item.agentKey)
+  return item.kind === 'question' ? (usable ? 'Answer' : 'Open') : item.kind === 'failed' ? (usable ? 'Resume' : 'Open') : isUnread(item) && !read(item) ? 'Read' : 'Open'
 }
 
 function open(item: FilItem) {

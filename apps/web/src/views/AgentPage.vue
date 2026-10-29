@@ -373,7 +373,7 @@ const overview = computed(() => [
         title: 'People',
         summary: peopleSummary.value.long,
         detail: people.count.value
-          ? names(people.rows.value.filter(row => row.allowed).map(row => row.email), email => email)
+          ? names(people.rows.value.filter(row => row.known && row.allowed).map(row => row.email), email => email)
           : 'Members cannot start or continue its conversations',
         chip: people.error.value
           ? { tone: 'unavailable' as const, label: 'Unavailable' }

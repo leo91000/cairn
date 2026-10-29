@@ -288,6 +288,48 @@ async fn members_manage_tasks_only_on_agents_they_can_use_and_lost_access_suspen
 }
 
 #[tokio::test]
+async fn retries_follow_the_tasks_current_agent_and_authors_can_move_a_suspended_task() {
+    let root = tempfile::tempdir().unwrap();
+    let s = service(root.path()).await;
+    let reviewer = agent(&s, "Reviewer").await;
+    let writer = agent(&s, "Writer").await;
+    relay_fixture::allow_member(&s, MEMBER, &reviewer).await;
+
+    let settings = json!({
+        "name": "Nightly review",
+        "prompt": "Review the changes",
+        "agentId": reviewer,
+        "cron": "0 3 * * *",
+    });
+    let (_, task) = member(&s, "POST", "/api/tasks", json!({ "settings": settings })).await;
+    let id = task["id"].as_str().unwrap().to_owned();
+    let run = s.enqueue(&id, "manual", None).await.unwrap();
+    let retry = format!("/api/runs/{}/retry", run["id"].as_str().unwrap());
+
+    // The owner moves the task: a retry would now start it on Main.
+    let mut moved = settings.clone();
+    moved["agentId"] = MAIN_AGENT_ID.into();
+    let path = format!("/api/tasks/{id}");
+    let replace = json!({ "taskId": id, "revision": task["revision"], "settings": moved });
+    let (status, owned) = owner(&s, "PUT", &path, replace).await;
+    assert_eq!(status, StatusCode::OK, "{owned}");
+    assert_eq!(owned["scheduleWaitReason"], SUSPENDED);
+    assert_eq!(
+        member(&s, "POST", &retry, json!({})).await.0,
+        StatusCode::FORBIDDEN
+    );
+
+    // Like a rule, its author moves it to an agent they may use.
+    relay_fixture::allow_member(&s, MEMBER, &writer).await;
+    let mut usable = settings.clone();
+    usable["agentId"] = writer.clone().into();
+    let replace = json!({ "taskId": id, "revision": owned["revision"], "settings": usable });
+    let (status, moved) = member(&s, "PUT", &path, replace).await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    assert!(moved["scheduleWaitReason"].is_null());
+}
+
+#[tokio::test]
 async fn merging_an_agent_never_passes_its_account_access_to_the_receiving_agent() {
     let root = tempfile::tempdir().unwrap();
     let s = service(root.path()).await;

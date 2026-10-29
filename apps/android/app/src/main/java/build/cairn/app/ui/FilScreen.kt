@@ -578,6 +578,7 @@ fun FilScreen(
                     dismiss = { setAside(item) },
                     snooze = { setAside(item, tomorrowMorning(now)) },
                     archive = { archive(item) },
+                    usable = canUseAgent(state.usableAgents, item.agentKey),
                 )
             }
         }
@@ -658,6 +659,8 @@ private fun ForYouAction(
     dismiss: () -> Unit = {},
     snooze: () -> Unit = {},
     archive: () -> Unit = {},
+    /** Whether the account may use the item's agent, to answer rather than only read. */
+    usable: Boolean = true,
 ) {
     if (item.kind == FeedKind.REVIEW_TASK)
         Row(
@@ -722,7 +725,7 @@ private fun ForYouAction(
             onClick = markRead,
         )
     else if (item.kind == FeedKind.QUESTION)
-        SignalButton("Répondre", height = 36.dp, onClick = open)
+        SignalButton(if (usable) "Répondre" else "Ouvrir", height = 36.dp, onClick = open)
     else if (item.kind == FeedKind.RECONNECT)
         SignalButton("Connexions", height = 36.dp, onClick = open)
     else if (item.kind == FeedKind.FAILED_TASK && retry != null)

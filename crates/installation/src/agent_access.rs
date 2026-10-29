@@ -224,21 +224,28 @@ pub(crate) async fn authorize_request(s: &Service, input: &crate::http::Input) -
                 ("POST", ["chats", id, "pause"]) if body["paused"] != true => {
                     require_chat(db, &identity, id)
                 }
-                ("POST", ["runs", id, "resume" | "retry" | "chat"]) => {
-                    require_run(db, &identity, id)
+                // A retry starts the task again as it is now, on its current agent.
+                ("POST", ["runs", id, "retry"]) => {
+                    let run = required(db.run(id)?, "Run not found")?;
+                    match db.mission(text(&run, "taskId"))? {
+                        Some(task) => {
+                            require_agent(db, &identity, &task.settings.agent_id.to_string())
+                        }
+                        None => require_run(db, &identity, id),
+                    }
                 }
+                ("POST", ["runs", id, "resume" | "chat"]) => require_run(db, &identity, id),
                 // A missing agent is left to the command's own validation.
                 ("POST", ["tasks"]) => match body["settings"]["agentId"].as_str() {
                     Some(agent) => require_agent(db, &identity, agent),
                     None => Ok(()),
                 },
-                ("PUT", ["tasks", id]) => {
-                    require_task(db, &identity, id)?;
-                    match body["settings"]["agentId"].as_str() {
-                        Some(agent) => require_agent(db, &identity, agent),
-                        None => Ok(()),
-                    }
-                }
+                // Members edit only their own tasks; like a rule, a suspended task can
+                // move to an agent its author may use.
+                ("PUT", ["tasks", _]) => match body["settings"]["agentId"].as_str() {
+                    Some(agent) => require_agent(db, &identity, agent),
+                    None => Ok(()),
+                },
                 ("POST", ["tasks", id, "state"]) => {
                     let task = required(db.mission(id)?, "Mission not found")?;
                     let reduces = body["enabled"] == false
@@ -442,7 +449,7 @@ impl Service {
                 let id = agent.to_string();
                 required(db.agent(&id)?, "Agent not found")?;
                 // Observing reconciled ended memberships under the same lock.
-                db.0.execute(
+                let granted = db.0.execute(
                     "INSERT OR IGNORE INTO agent_account_access VALUES(?1,?2,?3,?4)",
                     params![
                         id,
@@ -451,10 +458,12 @@ impl Service {
                         crate::config::now()
                     ],
                 )?;
-                db.audit(
-                    "agent.account_access_granted",
-                    &json!({ "agentId": id, "accountId": member.account_id }),
-                )?;
+                if granted > 0 {
+                    db.audit(
+                        "agent.account_access_granted",
+                        &json!({ "agentId": id, "accountId": member.account_id }),
+                    )?;
+                }
                 mark_suspensions(db, Some(&member.account_id), Some(&policy))?;
                 list(db, agent)
             })

@@ -101,6 +101,11 @@ const active = computed(
 )
 // Members direct only runs whose agent they may use (ADR-0075).
 const directable = computed(() => !run.value || canUseAgent(state.usableAgents, run.value.snapshot?.agent?.id))
+// A retry starts the task again as it is now, on its current agent.
+const retryable = computed(() => {
+  const current = run.value && state.tasks.find(task => task.id === run.value!.taskId)
+  return current ? canUseAgent(state.usableAgents, current.agentId) : directable.value
+})
 const task = computed(() => props.mission && run.value && run.value.trigger !== 'chat' ? state.tasks.find(task => task.id === run.value!.taskId) : undefined)
 const tabs = computed(() => [
   { value: 'events', label: 'Conversation', icon: Terminal },
@@ -193,7 +198,7 @@ async function copy() {
         <RouterLink v-if="run.trigger === 'chat'" :to="`/chats/${run.taskId}`" class="text-sm text-accent">
           Open chat
         </RouterLink>
-        <UiButton v-else-if="directable" size="small" @click="retry">
+        <UiButton v-else-if="retryable" size="small" @click="retry">
           Run again
         </UiButton>
         <UiButton

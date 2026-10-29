@@ -63,7 +63,8 @@ const menu = ref(false)
 const agent = computed(() => state.agents.find(agent => agent.id === props.task.agentId))
 // Members direct only missions whose agent they may use (ADR-0075).
 const usable = computed(() => canUseAgent(state.usableAgents, props.task.agentId))
-const canEdit = computed(() => usable.value && (state.installationRole === 'owner' || props.task.authorId === state.accountId))
+// Its author may still edit a suspended task, to move it to an agent they can use.
+const canEdit = computed(() => state.installationRole === 'owner' || props.task.authorId === state.accountId)
 const project = computed(() => state.projects.find(project => project.id === props.task.projectId))
 const wording = computed(() => describeSchedule(props.task))
 const time = computed(() => wording.value.match(/\d{2}:\d{2}$/)?.[0])
@@ -158,7 +159,7 @@ const statusLabels: Record<RunListItem['status'], string> = {
           <button
             class="mission-menu-item"
             role="menuitem"
-            :disabled="busy || (task.archived && !canEdit)"
+            :disabled="busy || (task.archived && !(canEdit && usable))"
             @click="act('archive')"
           >
             <Icon :name="Archive" :size="15" />{{ task.archived ? 'Restore (paused)' : 'Archive' }}
@@ -269,7 +270,10 @@ const statusLabels: Record<RunListItem['status'], string> = {
     <p v-if="task.scheduleFailure && task.cron && task.enabled && !task.archived" role="alert" class="m-0! text-sm text-danger">
       The run scheduled for {{ date(task.scheduleFailure.scheduledFor) }} did not start: {{ task.scheduleFailure.message }}
     </p>
-    <p v-if="!usable" class="m-0! text-sm text-muted">
+    <p v-if="!usable && canEdit" class="m-0! text-sm text-muted">
+      You no longer have access to its agent, so it cannot run or resume. Edit it to choose an agent you can use, or ask the installation owner for access.
+    </p>
+    <p v-else-if="!usable" class="m-0! text-sm text-muted">
       Only people with access to its agent can run, edit or resume this mission. Ask the installation owner for access.
     </p>
     <p v-else-if="!canEdit" class="m-0! text-sm text-muted">
@@ -288,7 +292,7 @@ const statusLabels: Record<RunListItem['status'], string> = {
         v-if="!task.archived && task.cron"
         class="mission-round"
         :aria-label="task.enabled ? 'Pause schedule' : 'Resume schedule'"
-        :disabled="busy || task.authorRemoved === true || (!task.enabled && !canEdit)"
+        :disabled="busy || task.authorRemoved === true || (!task.enabled && !(canEdit && usable))"
         @click="emit('pause')"
       >
         <Icon :name="task.enabled ? Pause : Clock" :size="18" />

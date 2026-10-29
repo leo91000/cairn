@@ -511,7 +511,8 @@ private fun MissionDetail(
 ) {
     // Members direct only missions whose agent they may use (ADR-0075).
     val usable = canUseAgent(state.usableAgents, task.agentId)
-    val canEdit = usable && (state.isOwner || task.authorId == state.session.account?.id)
+    // Its author may still edit a suspended task, to move it to an agent they can use.
+    val canEdit = state.isOwner || task.authorId == state.session.account?.id
     var history by remember(task.id) { mutableStateOf<List<Run>?>(null) }
     var occurrences by
         remember(task.id, task.cron, task.timezone, task.enabled) {
@@ -603,7 +604,7 @@ private fun MissionDetail(
                 )
                 DropdownMenuItem(
                     text = { Text(if (task.archived) "Restaurer (en pause)" else "Archiver") },
-                    enabled = !state.busy && (!task.archived || canEdit),
+                    enabled = !state.busy && (!task.archived || (canEdit && usable)),
                     onClick = {
                         menu = false
                         toggle(task.copy(archived = !task.archived, enabled = false))
@@ -702,7 +703,13 @@ private fun MissionDetail(
                 }
         }
     }
-    if (!usable)
+    if (!usable && canEdit)
+        Text(
+            "Vous n’avez plus accès à son agent : elle ne peut ni se lancer ni reprendre. Modifiez-la pour choisir un agent auquel vous avez accès, ou demandez l’accès au propriétaire de l’installation.",
+            Modifier.padding(top = 12.dp),
+            style = MaterialTheme.typography.bodySmall,
+        )
+    else if (!usable)
         Text(
             "Seules les personnes ayant accès à son agent peuvent lancer, modifier ou reprendre cette mission. Demandez l’accès au propriétaire de l’installation.",
             Modifier.padding(top = 12.dp),
@@ -810,7 +817,8 @@ private fun MissionDetail(
                 if (task.enabled) "Mettre en pause" else "Reprendre la planification",
                 if (task.enabled) CairnIcons.Pause else CairnIcons.Clock,
                 size = 52.dp,
-                enabled = !state.busy && !task.authorRemoved && (task.enabled || canEdit),
+                enabled =
+                    !state.busy && !task.authorRemoved && (task.enabled || (canEdit && usable)),
             ) {
                 toggle(task.copy(enabled = !task.enabled))
             }
