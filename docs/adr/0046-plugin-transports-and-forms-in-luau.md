@@ -1,4 +1,4 @@
-> Statut : les capacités `inbound` (`cairn.inbound.accept`) et `conversations.submit`, les règles d’admission, la délégation et sa partie de la page d’un plugin (personnes, demandes, agent, limites) sont remplacées par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) : un transport émet des hooks, auxquels réagissent des règles.
+> Statut : les capacités `inbound` (`cairn.inbound.accept`) et `conversations.submit`, les règles d’admission, la délégation et sa partie de la page d’un plugin (personnes, demandes, agent, limites, usage et activité récente) sont remplacées par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) : un transport émet des hooks, auxquels réagissent des règles.
 
 # Plugin transports and setup forms in Luau
 

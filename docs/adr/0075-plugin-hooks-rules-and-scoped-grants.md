@@ -116,8 +116,8 @@ conversation exige l’accès à son agent ; il continue de voir toutes les con
 auquel il n’a pas ou plus accès, y compris après une modification par le propriétaire,
 sont suspendues comme ses règles. L’agent agit comme un rôle : y avoir accès, c’est
 pouvoir obtenir tout ce qu’il peut faire. Pour une tâche déléguée, l’accès à l’agent
-de sa conversation demandeuse suffit à la poursuivre ou à répondre à ses questions :
-la couverture par ce demandeur borne ses droits. Un agent qui a l’accès à
+de sa conversation demandeuse suffit à la poursuivre, à l’orienter ou à répondre à ses
+questions : la couverture par ce demandeur borne ses droits. Un agent qui a l’accès à
 l’installation la gère entière, avec l’autorité de gestion du propriétaire
 ([ADR-0064](0064-opt-in-installation-tools-for-agents.md)) : avoir accès à cet agent
 revient, par ce qu’il peut faire, à avoir accès à tous les agents (les vérifications
@@ -183,8 +183,9 @@ qui ne teste pas l’auteur. Il n’y a pas de filtre séparé de l’arbre.
   toutes les 8 secondes, une étape courte sans détail, une seule en attente par
   conversation) et fin (terminée, échouée ou annulée). Une règle ne les reçoit que
   pour les clés de son créateur, et tant qu’il a accès à l’agent de la conversation.
-  Leur payload indique qui a écrit l’entrée à l’origine du tour (une personne et son
-  compte, ou une règle).
+  Leur payload indique l’origine du tour : une personne et son compte, une règle, un
+  agent ou `cairn_installation`, ou une reprise sans nouvelle entrée (réveil, fin
+  d’attente).
 - **Conversations démarrées** : une conversation démarrée par une règle a son créateur
   pour auteur, qui ne la rend pas privée
   ([ADR-0029](0029-sharing-whole-installations.md)) ; elle note l’auteur externe comme

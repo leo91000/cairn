@@ -162,7 +162,7 @@ Une conversation qu’un agent autorisé à déléguer crée depuis une conversa
 lui revient. Elle garde sa conversation demandeuse, s’exécute dans son propre
 espace avec les droits de son agent, que l’agent demandeur doit couvrir, et ne
 délègue pas à son tour. L’accès à l’agent de sa conversation demandeuse suffit pour la
-poursuivre ou répondre à ses questions, tant que cette conversation existe.
+poursuivre, l’orienter ou répondre à ses questions, tant que cette conversation existe.
 _Avoid_ : sous-agent (réservé aux sous-agents natifs d’un agent de code), parent, enfant
 
 **Mise de côté d’un résultat** :
@@ -170,7 +170,7 @@ Le choix d’un compte de retirer de « Pour vous » le résultat bloqué d’un
 _Avoid_ : archivage (qui retire la mission elle-même)
 
 **Auteur d’une tâche** :
-Le compte Cairn qui a créé une tâche. Le retrait de cet auteur met fin aux lancements planifiés de ses tâches, et une tâche sur un agent auquel il n’a pas ou plus accès est suspendue ; leur travail reste partagé avec toute l’installation.
+Le compte Cairn qui a créé une tâche. Le retrait de cet auteur met fin aux lancements planifiés de ses tâches, et les lancements planifiés d’une tâche sur un agent auquel il n’a pas ou plus accès sont suspendus ; leur travail reste partagé avec toute l’installation.
 
 **Skill** :
 Un savoir-faire réutilisable que les agents appliquent : ses instructions et les fichiers qui les accompagnent (références, modèles, scripts, images). Une skill est globale ou propre à un projet ; une conversation ou une exécution reçoit les skills sélectionnées telles qu’elles étaient à sa création.
