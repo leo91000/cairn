@@ -233,6 +233,7 @@ impl Execution<'_> {
             .update(|checkpoint| {
                 checkpoint.runner_id = Some(Some(saved_runner));
                 checkpoint.controller_recovery_reservation = None;
+                checkpoint.provider_retry_reservation = None;
                 checkpoint.turn_pending = None;
                 checkpoint.recovery_deadline_ms = None;
                 checkpoint.terminal_code = None;
@@ -812,6 +813,7 @@ impl Execution<'_> {
             .update(|c| {
                 c.runner_id = Some(Some(runner.clone()));
                 c.controller_recovery_reservation = None;
+                c.provider_retry_reservation = None;
                 c.turn_pending = None;
                 c.recovery_deadline_ms = None;
                 c.terminal_code = None;

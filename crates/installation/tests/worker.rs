@@ -2696,6 +2696,131 @@ async fn controller_interruptions_resume_saved_threads_and_stop_after_three_reco
     }
 }
 
+#[tokio::test]
+async fn managed_provider_retries_do_not_spend_controller_recoveries() {
+    for ending in ["exhausted", "changed", "cancel"] {
+        let mut fixture = Fixture::new().await;
+        fixture.stop(false).await;
+        let controller = Arc::new(Controller {
+            data: fixture.service.config.data_dir.clone(),
+            plans: tokio::sync::Mutex::new(Vec::new()),
+            failures: usize::MAX,
+            slots: 4,
+            hold: std::sync::atomic::AtomicBool::new(false),
+        });
+        let app = Router::new().fallback(any(move |state: State<Arc<Controller>>, request: Request| async move {
+            let path = request.uri().path().to_owned();
+            if path.ends_with("/logs") {
+                let attempt = path.split('/').nth(2).unwrap();
+                let index = state.attempt_index(attempt).await;
+                let error = if ending == "changed" && index >= 1 {
+                    json!({ "code": "authentication_error", "message": "Reconnect account" })
+                } else {
+                    json!({ "code": "server_overloaded", "message": "Provider busy" })
+                };
+                let output = format!("{}\n{}\n", json!({ "type": "thread.started", "thread_id": "fixture-session" }),
+                                     json!({ "type": "turn.failed", "error": error }));
+                return Body::from(format!("{}\n", json!({ "type": "output", "stderr": false, "data": STANDARD.encode(output) }))).into_response();
+            }
+            if path.ends_with("/wait") {
+                return Json(json!({ "StatusCode": 1 })).into_response();
+            }
+            serve_controller(state, request).await
+        })).with_state(controller.clone());
+        let (listener, address) = common::bind().await;
+        common::reconfigure(&mut fixture.service, |config| {
+            config.runner_url = format!("http://{address}")
+        })
+        .await;
+        let server = common::serve(listener, app);
+        let home = fixture.service.config.home.join(".codex");
+        tokio::fs::create_dir_all(&home).await.unwrap();
+        tokio::fs::write(home.join("auth.json"), "{}")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            fixture.service.config.data_dir.join("storage-s3.json"),
+            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+        )
+        .await
+        .unwrap();
+        fixture.start().await;
+        let chat = fixture
+            .start_chat(message("Exercise a confirmed provider retry"))
+            .await;
+        let run_id = fixture.chat_run(&chat).await;
+        let attempts = if ending == "exhausted" { 5 } else { 1 };
+        for retry_number in 1..=attempts {
+            let waiting = fixture
+                .until(&run_id, |run| {
+                    (run["status"] == RunStatus::Queued && run["retry"]["attempt"] == retry_number)
+                        || finished(run)
+                })
+                .await;
+            assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
+            let saved = fixture.checkpoint(&run_id).await;
+            assert_eq!(saved["prepared"]["backend"], "firecracker");
+            assert_eq!(
+                saved["controllerRecoveries"].as_u64().unwrap_or(0),
+                0,
+                "{saved}"
+            );
+            if ending == "cancel" {
+                fixture
+                    .service
+                    .worker
+                    .cancel(&fixture.service, &run_id)
+                    .await
+                    .unwrap();
+                let stopped = fixture
+                    .until(&run_id, |run| run["status"] == RunStatus::Cancelled)
+                    .await;
+                assert_eq!(stopped["status"], RunStatus::Cancelled);
+                break;
+            }
+            let mut retry = waiting["retry"].clone();
+            retry["nextAttemptAt"] = now().into();
+            fixture
+                .service
+                .store
+                .change_run(
+                    &run_id,
+                    cairn_installation::runs::RunChanges {
+                        retry: Some(Some(serde_json::from_value(retry).unwrap())),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        if ending != "cancel" {
+            let failed = fixture.until_finished(&run_id).await;
+            assert_eq!(failed["status"], RunStatus::Failed, "{failed}");
+            assert_eq!(failed["retry"]["attempt"], attempts);
+            assert_eq!(
+                failed["summary"],
+                if ending == "changed" {
+                    "Reconnect account"
+                } else {
+                    "Provider busy"
+                }
+            );
+        }
+        assert_eq!(
+            controller.plans.lock().await.len(),
+            if ending == "exhausted" {
+                6
+            } else if ending == "changed" {
+                2
+            } else {
+                1
+            }
+        );
+        fixture.stop(false).await;
+        server.abort();
+    }
+}
+
 /// Exercises the real manager -> runner client -> disposable HTTP controller.
 /// Even at the replay ceiling a read of the same attempt is permitted.
 #[tokio::test]

@@ -29,24 +29,19 @@ pub(super) async fn schedule(
         return Ok(false);
     }
     let id = checkpoint.id.clone();
-    let expected = saved.clone();
-    let deadline = checkpoint.deadline();
     let cancel = cancel.clone();
     let shutdown = s.shutdown.clone();
     let cause = cause.clone();
-    s.store
-        .transaction(move |db| {
+    checkpoint
+        .decide(move |current, db| {
             let run = db
                 .run_state(&id)?
                 .ok_or_else(|| Error::not_found("Run not found"))?;
-            let current = super::checkpoint::RunCheckpoint::load_in(db, &id)?;
             if cancel.is_cancelled()
                 || shutdown.is_cancelled()
-                || deadline.is_some_and(|deadline| now() >= deadline)
-                || current.as_ref().map_or(
-                    expected.runner_id().is_some() || expected.process().is_some(),
-                    |current| !crate::recovery::same_execution(Some(current), Some(&expected)),
-                )
+                || matches!(current.remaining_ms, Some(Some(i64::MIN..=0)))
+                || current.completed()
+                || current.retry_cause.as_ref().and_then(Option::as_ref) != Some(&cause)
                 || run.cancel_requested_at.is_some()
                 || (run.session_id.is_none() && !cause.startup)
                 || !run.status.is_active()
@@ -74,6 +69,9 @@ pub(super) async fn schedule(
                 account_required: Some(None),
                 ..Default::default()
             };
+            if current.managed() {
+                current.provider_retry_reservation = current.runner_id().map(str::to_owned);
+            }
             db.change_run(&id, patch)?;
             db.event(
                 &id,

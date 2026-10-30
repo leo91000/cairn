@@ -442,9 +442,42 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
     Ok(false)
 }
 
+// A provider retry is paid by Retry::next, not by the controller recovery
+// budget. Bind that authorization to the attempt and its confirmed cause.
+fn provider_retry_paid(saved: &RunCheckpoint, state: &RunState) -> bool {
+    saved.turn_pending != Some(true)
+        && saved.has_provider_retry_reservation()
+        && state.retry.as_ref().is_some_and(|retry| {
+            retry.next_attempt_at.is_some()
+                && saved.retry_cause.as_ref().and_then(Option::as_ref) == Some(&retry.cause)
+        })
+}
+
+fn controller_budget_exhausted(saved: &RunCheckpoint, state: &RunState, run: &Value) -> bool {
+    if !saved.managed() || saved.terminal_code() == Some(0) || provider_retry_paid(saved, state) {
+        return false;
+    }
+    let count = saved.controller_recoveries();
+    if count < super::execution::MAX_CONTROLLER_RECOVERIES {
+        return false;
+    }
+    let exception = (saved
+        .prepared()
+        .is_some_and(|prepared| prepared["backend"] == "native")
+        && run["nativeModeInterruption"].is_string())
+        || run["moveRequest"].is_object();
+    if exception {
+        return false;
+    }
+    !(count == super::execution::MAX_CONTROLLER_RECOVERIES
+        && saved.has_controller_recovery_reservation())
+}
+
 fn recovery_cannot_replay(
     checkpoint: Option<&RunCheckpoint>,
     recovery_deadline: Option<i64>,
+    state: &RunState,
+    run: &Value,
 ) -> bool {
     checkpoint.is_some_and(|saved| {
         recovery_deadline.is_some_and(|deadline| now() >= deadline)
@@ -455,11 +488,7 @@ fn recovery_cannot_replay(
             || saved.settled().is_some_and(|settled| {
                 matches!(settled.status, RunStatus::Failed | RunStatus::Cancelled)
             })
-            || (saved.managed()
-                && saved.terminal_code() != Some(0)
-                && saved.controller_recoveries() >= super::execution::MAX_CONTROLLER_RECOVERIES
-                && !(saved.controller_recoveries() == super::execution::MAX_CONTROLLER_RECOVERIES
-                    && saved.has_controller_recovery_reservation()))
+            || controller_budget_exhausted(saved, state, run)
     })
 }
 
@@ -669,7 +698,7 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     // A parked turn only needs fencing/release, including a completed turn
     // requeued because its first fencing attempt failed. Placement and possible
     // disk relocation belong to admission after its wakeup.
-    let cannot_replay = recovery_cannot_replay(checkpoint.as_ref(), recovery_deadline);
+    let cannot_replay = recovery_cannot_replay(checkpoint.as_ref(), recovery_deadline, &state, run);
     // A move requested after a conversation has already succeeded is a disk
     // transfer, not admission of another turn. Its idle marker is recorded by
     // the public request while the run is succeeded; active-turn moves lack it.
@@ -732,7 +761,14 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     if !recovery::same_execution(current.as_ref(), expected_fenced.as_ref()) {
         return Ok(false);
     }
-    let cannot_replay_after_fence = recovery_cannot_replay(current.as_ref(), recovery_deadline);
+    let current_state = s.store.run_state(run_id).await?;
+    let current_run = s.store.run(run_id).await?;
+    let cannot_replay_after_fence = recovery_cannot_replay(
+        current.as_ref(),
+        recovery_deadline,
+        &current_state,
+        &current_run,
+    );
     if cannot_replay_after_fence && !parked {
         crate::nodes::moves::abort_terminal_recovery(s, run_id, expected_fenced.as_ref()).await?;
     } else if cannot_replay
@@ -865,11 +901,7 @@ pub(super) fn finish_recovery(
             db.change_run(id, patch)?;
             return Ok(false);
         }
-        if checkpoint.managed()
-            && checkpoint.controller_recoveries() >= super::execution::MAX_CONTROLLER_RECOVERIES
-            && !(checkpoint.controller_recoveries() == super::execution::MAX_CONTROLLER_RECOVERIES
-                && checkpoint.has_controller_recovery_reservation())
-        {
+        if controller_budget_exhausted(checkpoint, current, &record.wire()?) {
             let expired = matches!(checkpoint.remaining_ms, None | Some(Some(i64::MIN..=0)));
             let message = if expired {
                 "Run exceeded its time limit."
@@ -889,6 +921,7 @@ pub(super) fn finish_recovery(
         && saved.runner_id().is_some()
         && saved.turn_pending != Some(true)
         && !saved.has_controller_recovery_reservation()
+        && !provider_retry_paid(saved, current)
     {
         let mut paid = saved.clone();
         paid.controller_recoveries = Some(saved.controller_recoveries() + 1);
@@ -1707,6 +1740,45 @@ mod tests {
                     })
                     .await
                     .unwrap();
+            }
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn paid_native_mode_recovery_can_settle_at_and_above_controller_ceiling() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for count in [3, 4, 5] {
+            for (mode, cancelled, expired) in [
+                (true, false, false),
+                (false, false, false),
+                (true, true, false),
+                (true, false, true),
+            ] {
+                let id = run.clone();
+                service.store.transaction(move |db| {
+                    db.change_run(&id, crate::runs::RunChanges {
+                        status: Some(RunStatus::Queued), session_id: Some(None),
+                        cancel_requested_at: Some(cancelled.then(now)),
+                        boundary: Some(json!({ "nativeModeInterruption": mode.then(crate::config::id) })),
+                        ..Default::default()
+                    })?;
+                    let saved = RunCheckpoint::from_value(json!({
+                        "prepared": { "backend": "native", "isolated": true },
+                        "runnerId": "attempt", "completed": false, "terminalCode": 75,
+                        "remainingMs": if expired { Some(0) } else { None },
+                        "controllerRecoveries": count, "controllerRecoveryReservation": "attempt",
+                    }))?;
+                    saved.store_in(db, &id)?;
+                    let admitted = finish_recovery(db, &id, Some(&saved))?;
+                    assert_eq!(admitted, mode && !cancelled && !expired || count == 3 && !cancelled && !expired,
+                               "count={count}, mode={mode}, cancelled={cancelled}, expired={expired}");
+                    let current = db.run_state(&id)?.unwrap();
+                    if cancelled { assert_eq!(current.status, RunStatus::Cancelled); }
+                    if expired && !cancelled { assert_eq!(current.status, RunStatus::Failed); }
+                    if admitted { assert!(RunCheckpoint::load_in(db, &id)?.unwrap().has_controller_recovery_reservation()); }
+                    Ok(())
+                }).await.unwrap();
             }
         }
         service.shutdown.cancel();

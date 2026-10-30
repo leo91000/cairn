@@ -78,6 +78,9 @@ pub struct RunCheckpoint {
     /// A recovery already charged to the budget, bound to the stopped attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub controller_recovery_reservation: Option<String>,
+    /// A provider retry already scheduled and charged to this attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_retry_reservation: Option<String>,
     /// A controller's capacity refusal delays admission without consuming a recovery attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity_retry_at: Option<i64>,
@@ -326,6 +329,11 @@ impl RunCheckpoint {
 
     pub fn controller_recoveries(&self) -> u64 {
         self.controller_recoveries.unwrap_or(0)
+    }
+
+    pub fn has_provider_retry_reservation(&self) -> bool {
+        self.runner_id()
+            .is_some_and(|id| self.provider_retry_reservation.as_deref() == Some(id))
     }
 
     pub fn has_controller_recovery_reservation(&self) -> bool {

@@ -1229,6 +1229,7 @@ pub(crate) async fn tick_missions(s: &Service, active: &HashSet<String>) -> Resu
                 checkpoint.retry_cause = Some(None);
                 checkpoint.controller_recoveries = None;
                 checkpoint.controller_recovery_reservation = None;
+                checkpoint.provider_retry_reservation = None;
                 checkpoint.controller_observation = None;
                 checkpoint.store_in(db, &run_id)?;
                 wakeup.progress.observation = Some(observed);
