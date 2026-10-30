@@ -141,16 +141,7 @@ fn cancel_pending_input(
 
 /// Trashed conversations must not stay reachable through public artifact links.
 fn unshare_artifacts(db: &Db<'_>, run: &str) -> Result<()> {
-    for (key, mut artifact) in db.keys(&format!("artifact:{run}:"))? {
-        if let Some(token) = artifact["publicToken"].as_str() {
-            db.delete(&format!("artifact-share:{token}"))?;
-        }
-        artifact["visibility"] = "private".into();
-        artifact["publicToken"] = Value::Null;
-        artifact["publicUrl"] = Value::Null;
-        db.set(&key, &artifact, None)?;
-    }
-    Ok(())
+    db.unshare_artifacts(run)
 }
 
 /// Drops pending push notifications and MCP grants tied to the chat or its run.

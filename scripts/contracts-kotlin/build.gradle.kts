@@ -23,6 +23,7 @@ sourceSets.test {
 }
 
 tasks.test {
+    inputs.file(rootProject.file("../../tests/fixtures/artifact-contracts.json"))
     inputs.file(rootProject.file("../../tests/fixtures/questions-waits-contracts.json"))
 
     inputs.file(rootProject.file("../../tests/fixtures/skill-contracts.json"))

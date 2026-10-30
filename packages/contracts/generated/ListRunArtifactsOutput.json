@@ -1,0 +1,163 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "Deliverable": {
+      "additionalProperties": false,
+      "properties": {
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "duration": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "excerpt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "group": {
+          "default": "",
+          "type": "string"
+        },
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "default": "file",
+          "pattern": "^(image|video|audio|pdf|markdown|code|file)$",
+          "type": "string"
+        },
+        "mediaType": {
+          "default": "application/octet-stream",
+          "type": "string"
+        },
+        "messageId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "previewStatus": {
+          "default": "none",
+          "pattern": "^(pending|ready|unavailable|none)$",
+          "type": "string"
+        },
+        "publicToken": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "publicUrl": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "size": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "title": {
+          "default": "",
+          "type": "string"
+        },
+        "url": {
+          "default": "",
+          "type": "string"
+        },
+        "version": {
+          "default": 1,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "visibility": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "runId",
+        "key"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "artifacts": {
+      "items": {
+        "$ref": "#/definitions/Deliverable"
+      },
+      "type": "array"
+    },
+    "hasMore": {
+      "type": "boolean"
+    },
+    "nextOffset": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "artifacts",
+    "hasMore"
+  ],
+  "title": "ListRunArtifactsOutput",
+  "type": "object"
+}
