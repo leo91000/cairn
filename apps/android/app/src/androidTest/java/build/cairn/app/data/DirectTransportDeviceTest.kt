@@ -40,6 +40,17 @@ import org.junit.runner.RunWith
 class DirectTransportDeviceTest {
     @get:Rule val compose = createComposeRule()
 
+    private suspend fun <T> duringPhase(
+        name: String,
+        timeoutMillis: Long,
+        block: suspend CoroutineScope.() -> T,
+    ): T =
+        try {
+            withTimeout(timeoutMillis, block)
+        } catch (error: TimeoutCancellationException) {
+            throw AssertionError("Direct bench timed out during $name", error)
+        }
+
     @Test
     fun authorizedInstallationCarriesAnObservedDirectResponse() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -164,16 +175,19 @@ class DirectTransportDeviceTest {
             selectedVm?.let { vm -> CairnTheme { CairnApp(vm = vm) } }
         }
 
-        suspend fun read() {
-            assertEquals("[]", api.request("GET", "/chats"))
-            if (api.transport.route.value == "direct") directReads++
+        suspend fun read(client: CairnApi = api) {
+            assertEquals("[]", client.request("GET", "/chats"))
+            if (client === api && client.transport.route.value == "direct") directReads++
         }
-        suspend fun awaitDirect() =
-            withTimeout(60000) {
+        suspend fun awaitDirect(
+            client: CairnApi = api,
+            phase: String = "initial direct response",
+        ) =
+            duringPhase(phase, 60000) {
                 do {
                     delay(200)
-                    read()
-                } while (api.transport.route.value != "direct")
+                    read(client)
+                } while (client.transport.route.value != "direct")
             }
         fun shell(command: String) {
             instrumentation.uiAutomation.executeShellCommand(command).use { descriptor ->
@@ -182,7 +196,6 @@ class DirectTransportDeviceTest {
                 }
             }
         }
-        var phase = "initial direct connection"
         try {
             read()
             assertEquals("relay", api.transport.route.value)
@@ -225,7 +238,7 @@ class DirectTransportDeviceTest {
                         val authorizations = control.count { it == "authorize:200" }
                         try {
                             shell(command)
-                            withTimeout(15000) {
+                            duringPhase("network transition", 15000) {
                                 while (
                                     manager.activeNetwork == previous ||
                                         manager
@@ -245,7 +258,6 @@ class DirectTransportDeviceTest {
                 }
 
                 if (scenario == "same-lan") {
-                    phase = "background and foreground recovery"
                     val authorizations = control.count { it == "authorize:200" }
                     val inFlight =
                         List(8) {
@@ -254,7 +266,7 @@ class DirectTransportDeviceTest {
                             }
                         }
                     instrumentation.runOnMainSync { assertTrue(activity.moveTaskToBack(true)) }
-                    withTimeout(5000) {
+                    duringPhase("background transport stop", 5000) {
                         while (api.transport.route.value != "relay") delay(100)
                     }
                     delay(500)
@@ -303,12 +315,13 @@ class DirectTransportDeviceTest {
                     val capacity = CairnApi(origin, vault, capacityClient, api.installationId)
                     capacity.csrf = api.csrf
                     try {
-                        phase = "capacity initial authorization"
                         capacity.startDirect(context)
-                        withTimeout(10000) { while (capacityAttempts.get() == 0) delay(100) }
+                        duringPhase("capacity initial authorization", 10000) {
+                            while (capacityAttempts.get() == 0) delay(100)
+                        }
                         delay(500)
                         instrumentation.runOnMainSync { assertTrue(activity.moveTaskToBack(true)) }
-                        withTimeout(5000) {
+                        duringPhase("background transport stop", 5000) {
                             while (api.transport.route.value != "relay") delay(100)
                         }
                         delay(1000)
@@ -324,8 +337,7 @@ class DirectTransportDeviceTest {
                             1,
                             capacityAttempts.get(),
                         )
-                        phase = "capacity retry direct response"
-                        withTimeout(25000) {
+                        duringPhase("capacity retry direct response", 25000) {
                             do {
                                 delay(200)
                                 assertEquals("[]", capacity.request("GET", "/chats"))
@@ -354,6 +366,10 @@ class DirectTransportDeviceTest {
                                     renewalAttempts.incrementAndGet()
                                 val response = chain.proceed(request)
                                 if (path.endsWith("/direct/authorize") && response.isSuccessful) {
+                                    // The control call permits 30 s. Exercise successful setup
+                                    // beyond the former 10 s fixture precondition before testing
+                                    // the unavailable renewal.
+                                    Thread.sleep(12000)
                                     val grant =
                                         wireJson
                                             .parseToJsonElement(response.body.string())
@@ -399,16 +415,9 @@ class DirectTransportDeviceTest {
                     val renewal = CairnApi(origin, vault, renewalClient, api.installationId)
                     renewal.csrf = api.csrf
                     try {
-                        phase = "unavailable renewal initial direct response"
                         renewal.startDirect(context)
-                        withTimeout(10000) {
-                            do {
-                                delay(100)
-                                assertEquals("[]", renewal.request("GET", "/chats"))
-                            } while (renewal.transport.route.value != "direct")
-                        }
-                        phase = "unavailable renewal acknowledgement"
-                        withTimeout(20000) {
+                        awaitDirect(renewal, "unavailable renewal initial direct response")
+                        duringPhase("unavailable renewal acknowledgement", 20000) {
                             while (
                                 renewalReplies.get() == 0 ||
                                     renewal.transport.route.value != "relay"
@@ -455,9 +464,10 @@ class DirectTransportDeviceTest {
                         val probe = CairnApi(origin, vault, unavailableClient, api.installationId)
                         probe.csrf = api.csrf
                         try {
-                            phase = "control rejection initial authorization: $status"
                             probe.startDirect(context)
-                            withTimeout(10000) { while (attempts.get() == 0) delay(100) }
+                            duringPhase("control rejection initial authorization: $status", 10000) {
+                                while (attempts.get() == 0) delay(100)
+                            }
                             delay(18000)
                             assertEquals(
                                 "Control rejection must suspend reconnects: $status",
@@ -470,7 +480,6 @@ class DirectTransportDeviceTest {
                             probe.closeStreams()
                         }
                     }
-                    phase = "large request and UI"
                     suspendedControl = true
                     val largeRequest = runCatching {
                         api.request(
@@ -514,9 +523,8 @@ class DirectTransportDeviceTest {
                     vm.api.closeStreams()
                     ui = true
 
-                    phase = "real renewal"
                     // The delivered lease lasts 180 s: observe a real renewal before expiry.
-                    withTimeout(180000) {
+                    duringPhase("real renewal", 180000) {
                         while (!control.contains("renew:200")) {
                             delay(1000)
                             read()
@@ -540,11 +548,11 @@ class DirectTransportDeviceTest {
                             .onEach { if (it.state?.chats != null) streaming.complete(Unit) }
                             .first { it.httpStatus == 401 || it.httpStatus == 403 }
                     }
-                    withTimeout(15000) { streaming.await() }
+                    duringPhase("live stream startup", 15000) { streaming.await() }
                     assertEquals("direct", api.transport.route.value)
-                    phase = "live revocation"
                     api.request("POST", "/account/logout")
-                    val status = withTimeout(10000) { terminal.await().httpStatus }
+                    val status =
+                        duringPhase("live revocation", 10000) { terminal.await().httpStatus }
                     assertEquals(401, status)
                     assertEquals("relay", api.transport.route.value)
                     val rejected = runCatching { api.request("GET", "/chats") }.exceptionOrNull()
@@ -576,13 +584,6 @@ class DirectTransportDeviceTest {
                     }
                         .toString()
                 )
-        } catch (error: TimeoutCancellationException) {
-            throw AssertionError(
-                "Direct bench timed out during $phase; elapsedMs=" +
-                    (System.nanoTime() - started) / 1000000 +
-                    "; route=${api.transport.route.value}; controlResponses=${control.size}",
-                error,
-            )
         } finally {
             api.closeStreams()
             if (scenario == "network-change") shell("svc wifi enable")
