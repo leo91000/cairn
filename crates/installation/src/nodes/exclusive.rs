@@ -764,6 +764,19 @@ pub(crate) fn release_before_wait(db: &Db<'_>, run_id: &str) -> Result<()> {
 
 pub async fn administrative_pause_ms(s: &Service, run: &str, attempt: &str) -> Result<u64> {
     let node = super::transport::url(s, run).await?;
+    administrative_pause_at(s, &node, attempt).await
+}
+
+pub(crate) async fn administrative_pause_for_node(
+    s: &Service,
+    node: Option<&str>,
+    attempt: &str,
+) -> Result<u64> {
+    let node = super::transport::url_for_node(s, node);
+    administrative_pause_at(s, &node, attempt).await
+}
+
+async fn administrative_pause_at(s: &Service, node: &str, attempt: &str) -> Result<u64> {
     let response = s
         .http
         .get(format!("{node}/runs/{attempt}/administrative-pause"))
