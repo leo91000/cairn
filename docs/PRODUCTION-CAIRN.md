@@ -70,8 +70,11 @@ Version 14 then upgrades to 15 through the
 Version 15 then upgrades to 16 through the
 [typed questions and waits migration](migrations/0016-typed-questions-and-waits.md).
 Version 16 then upgrades to 17 through the
-[attachment reservation migration](migrations/0017-attachment-reservations.md),
-and version 17 to 18 through the [plan request migration](migrations/0018-plan-requests.md).
+[attachment reservation migration](migrations/0017-attachment-reservations.md).
+Version 17 then upgrades to 18 through the
+[per-account read state migration](migrations/0018-personal-read-state.md).
+Version 18 then upgrades to 19 through the
+[plan request migration](migrations/0019-plan-requests.md).
 Stop the old manager and retain a consistent database/WAL backup first. Keep the
 installation identity, configuration, data roots, node state and object storage.
 The migration preserves node identities, credentials, configuration and references;

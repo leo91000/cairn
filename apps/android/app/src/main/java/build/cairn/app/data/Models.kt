@@ -105,42 +105,11 @@ val Run.title
 typealias RunEvent = build.cairn.contracts.RunEvent
 
 @Serializable
-data class Overview(
-    val counts: Map<String, Int> = emptyMap(),
-    val agents: Int = 0,
-    val projects: Int = 0,
-    val tasks: List<Task> = emptyList(),
-    val runs: List<Run> = emptyList(),
-    val concurrency: Int = 1,
-)
-
-@Serializable
-data class Settings(
-    val nativeMcpOauth: Boolean = false,
-    val publicUrl: String = "",
-    val workspaceRoots: List<String> = emptyList(),
-    val home: String = "",
-    val concurrency: Int = 1,
-    val mcpUrl: String = "",
-    val version: String = "",
-    val commit: String = "",
-    val protocol: String = "",
-)
-
-@Serializable
 data class Grant(
     val id: String,
     val label: String = "",
     val scopes: List<String> = emptyList(),
     val clientId: String = "",
-)
-
-@Serializable
-data class Audit(
-    val id: Long,
-    @kotlinx.serialization.SerialName("created_at") val at: Long = 0,
-    val action: String = "",
-    val detail: String = "",
 )
 
 typealias Occurrences = build.cairn.contracts.SchedulePreviewOutput
@@ -160,6 +129,6 @@ typealias TaskOutcome = build.cairn.boundary.TaskOutcome
 typealias RunRequester = build.cairn.contracts.RunRequester
 
 /** A dismissed outcome has no [until]; a snoozed one asks again then. */
-typealias OutcomeDismissal = build.cairn.boundary.OutcomeDismissal
+typealias OutcomeDismissal = build.cairn.contracts.OutcomeDismissal
 
 typealias ChatExecution = build.cairn.boundary.ChatExecution

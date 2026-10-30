@@ -10,6 +10,12 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import build.cairn.app.data.*
+import build.cairn.contracts.AuditEntry
+import build.cairn.contracts.GetInstallationSettingsInput
+import build.cairn.contracts.InstallationSettings
+import build.cairn.contracts.ListAuditInput
+import build.cairn.contracts.getInstallationSettings
+import build.cairn.contracts.listAudit
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
@@ -17,16 +23,16 @@ import kotlinx.serialization.json.put
 @Composable
 fun SettingsScreen(vm: CairnViewModel, state: Workspace) {
     val theme by vm.theme.collectAsStateWithLifecycle(initialValue = "system")
-    var settings by remember { mutableStateOf<Settings?>(null) }
+    var settings by remember { mutableStateOf<InstallationSettings?>(null) }
     var grants by remember { mutableStateOf<List<Grant>>(emptyList()) }
-    var audit by remember { mutableStateOf<List<Audit>>(emptyList()) }
+    var audit by remember { mutableStateOf<List<AuditEntry>>(emptyList()) }
     var creating by rememberSaveable { mutableStateOf(false) }
     var revoke by rememberSaveable { mutableStateOf<String?>(null) }
     var logout by remember { mutableStateOf(false) }
     suspend fun load() {
-        settings = vm.api.get("/settings")
+        settings = vm.api.getInstallationSettings(GetInstallationSettingsInput())
         grants = vm.api.get("/tokens")
-        audit = vm.api.get("/audit")
+        audit = vm.api.listAudit(ListAuditInput()).entries
     }
     if (state.isOwner)
         Poll("settings", 30000) {
@@ -52,6 +58,7 @@ fun SettingsScreen(vm: CairnViewModel, state: Workspace) {
         NotificationSettings(vm)
         PerformanceSettings(vm)
         if (state.isOwner) {
+            StorageSettings(vm)
             ConversationRetentionSettings(vm)
             settings?.let { info ->
                 Panel {
@@ -123,7 +130,7 @@ fun SettingsScreen(vm: CairnViewModel, state: Workspace) {
             audit.forEach { entry ->
                 Panel {
                     Text(entry.action, style = MaterialTheme.typography.titleMedium)
-                    Text(date(entry.at), style = MaterialTheme.typography.labelMedium)
+                    Text(date(entry.createdAt), style = MaterialTheme.typography.labelMedium)
                     Code(entry.detail)
                 }
             }

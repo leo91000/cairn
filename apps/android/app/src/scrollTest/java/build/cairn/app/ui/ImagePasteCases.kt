@@ -131,7 +131,8 @@ abstract class ImagePasteCases {
                                     )
                                 }
                                 "/api/installations/fixture/api/codex/models" -> """{"models":[]}"""
-                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 else ->
                                     if (
                                         request.requestUrl

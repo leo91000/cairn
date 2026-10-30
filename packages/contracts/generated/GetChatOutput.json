@@ -1196,6 +1196,22 @@
       ],
       "type": "object"
     },
+    "OutcomeDismissal": {
+      "additionalProperties": false,
+      "description": "An outcome set aside by the calling account: dismissed (`until` null) or snoozed.",
+      "properties": {
+        "until": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "PluginWaitData": {
       "additionalProperties": true,
       "type": "object",
@@ -1507,13 +1523,15 @@
           "type": "integer"
         },
         "dismissal": {
-          "additionalProperties": true,
-          "default": null,
-          "type": [
-            "object",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OutcomeDismissal"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "x-kotlin-type": "OutcomeDismissal"
+          "default": null
         },
         "error": {
           "default": null,

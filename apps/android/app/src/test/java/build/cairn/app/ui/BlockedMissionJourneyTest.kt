@@ -7,6 +7,9 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
+import build.cairn.contracts.OutcomeAsideAction
+import build.cairn.contracts.SetOutcomeAsideInput
+import build.cairn.contracts.SetOutcomeAsideOutput
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -178,12 +181,16 @@ class BlockedMissionJourneyTest {
         dismissals[run.taskId]?.let { run.copy(dismissal = it) } ?: run
     }
 
-    private fun setAside(body: String) {
-        val item = wireJson.parseToJsonElement(body).jsonObject["items"]!!.jsonArray.single()
-        val task = item.jsonObject["key"]!!.jsonPrimitive.content.removePrefix("task:")
-        if (item.jsonObject["restore"]?.jsonPrimitive?.boolean == true) dismissals.remove(task)
-        else
-            dismissals[task] = OutcomeDismissal(item.jsonObject["until"]?.jsonPrimitive?.longOrNull)
+    private fun setAside(body: String): String {
+        val input = wireJson.decodeFromString<SetOutcomeAsideInput>(body)
+        when (val action = input.action) {
+            is OutcomeAsideAction.C -> dismissals.remove(input.taskId)
+            is OutcomeAsideAction.A -> dismissals[input.taskId] = OutcomeDismissal(null)
+            is OutcomeAsideAction.B -> dismissals[input.taskId] = OutcomeDismissal(action.until)
+        }
+        return wireJson.encodeToString(
+            SetOutcomeAsideOutput(dismissal = dismissals[input.taskId], taskId = input.taskId)
+        )
     }
 
     private fun journey(body: (CairnViewModel) -> Unit) {
@@ -241,10 +248,7 @@ class BlockedMissionJourneyTest {
                                 activityReads += snapshot
                                 json(wireJson.encodeToString(snapshot))
                             }
-                            path == "$api/dismissals" -> {
-                                setAside(text)
-                                json("{\"updated\":1}")
-                            }
+                            path == "$api/dismissals" -> json(setAside(text))
                             path == "$api/chats/stream" -> stream(LiveState(chats = listOf(parent)))
                             path.startsWith("$api/runs/") && path.endsWith("/stream") -> {
                                 val id = path.removePrefix("$api/runs/").removeSuffix("/stream")
@@ -336,17 +340,11 @@ class BlockedMissionJourneyTest {
             waitCall("POST", "/api/installations/fixture/api/dismissals")
             waitText("Rappel prévu · Votre réponse est nécessaire")
             val snooze =
-                wireJson
-                    .parseToJsonElement(calls.last { it.second.endsWith("/dismissals") }.third)
-                    .jsonObject["items"]!!
-                    .jsonArray
-                    .single()
-                    .jsonObject
-            assertEquals(
-                "task:348988cc-0279-5ed4-801b-ac44d6987c6e",
-                snooze["key"]!!.jsonPrimitive.content,
-            )
-            assertEquals(tomorrowMorning(), snooze["until"]!!.jsonPrimitive.long)
+                wireJson.decodeFromString<SetOutcomeAsideInput>(
+                    calls.last { it.second.endsWith("/dismissals") }.third
+                )
+            assertEquals("348988cc-0279-5ed4-801b-ac44d6987c6e", snooze.taskId)
+            assertEquals(tomorrowMorning(), (snooze.action as OutcomeAsideAction.B).until)
 
             compose.onNodeWithContentDescription("Écarter Preuve appareil F8").performClick()
             waitText("Tâche bloquée · Écartée")
@@ -429,7 +427,7 @@ class BlockedMissionJourneyTest {
             }
 
             // A later dismissal elsewhere supersedes Android's local restore too.
-            dismissals[proof.id] = OutcomeDismissal()
+            dismissals[proof.id] = OutcomeDismissal(null)
             waitText("Écartée : elle reste hors de Pour vous jusqu’au prochain résultat.")
         }
 
