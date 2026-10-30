@@ -702,8 +702,9 @@ owning domain adapters until A10/A11/A18. These adapters read the typed SQL writ
 never `records`, and do not accept another persisted format.
 
 SQLite v15 upgrades version 14 atomically at startup; see
-[the preserving migration](migrations/0015-typed-conversations.md); v18 adds the
-message and question plan flags ([migration](migrations/0018-plan-requests.md)). Fresh installs use `conversations`, `chat_messages`, `message_attachments`,
+[the preserving migration](migrations/0015-typed-conversations.md); v19 adds the
+message and question plan flags ([migration](migrations/0019-plan-requests.md)).
+Fresh installs use `conversations`, `chat_messages`, `message_attachments`,
 `conversation_engine_switches` and the singleton `conversation_retention` policy.
 Conversation and message revisions rotate with writes. Slugs are unique and never
 change on rename. The unique partial run index replaces `chat_for_run`'s collection
