@@ -158,7 +158,7 @@ where
         tokio::select! {
             () = s.shutdown.cancelled() => return Ok(()),
             () = cancel.cancelled() => return Ok(()),
-            _ = tokio::time::sleep_until(next_read) => {}
+            () = tokio::time::sleep_until(next_read) => {}
         }
     }
 }

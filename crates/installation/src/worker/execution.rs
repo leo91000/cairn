@@ -123,7 +123,7 @@ pub(super) async fn reconcile(
             checkpoint
                 .update(|current| match action {
                     recovery::ObservationAction::Reserve => {
-                        reserved = current.reserve_observation(attempt)
+                        reserved = current.reserve_observation(attempt);
                     }
                     recovery::ObservationAction::Release => current.release_observation(attempt),
                     recovery::ObservationAction::Exhausted => {

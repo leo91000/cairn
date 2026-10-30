@@ -482,10 +482,10 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
                             let mut reserved = false;
                             match action {
                                 recovery::ObservationAction::Reserve => {
-                                    reserved = current.reserve_observation(&attempt)
+                                    reserved = current.reserve_observation(&attempt);
                                 }
                                 recovery::ObservationAction::Release => {
-                                    current.release_observation(&attempt)
+                                    current.release_observation(&attempt);
                                 }
                                 recovery::ObservationAction::Exhausted => {
                                     if !shutdown.is_cancelled()
