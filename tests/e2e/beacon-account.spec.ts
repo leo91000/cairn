@@ -3,6 +3,68 @@ import { once } from 'node:events'
 import { createServer } from 'node:http'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
+import { beaconRelayFixture, executeBeaconSql } from './beacon-relay-fixture'
+
+test('web diagnostics upload privately without an installation and honor opt-out', async ({ page }) => {
+  test.setTimeout(60_000)
+  const fixture = await beaconRelayFixture(4499)
+  const database = new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!)
+  const schema = `performance_${crypto.randomUUID().replaceAll('-', '')}`
+  executeBeaconSql(database, `CREATE SCHEMA ${schema}`)
+  const isolated = new URL(database)
+  isolated.searchParams.set('options', `-c search_path=${schema}`)
+  fixture.beacon(isolated.toString())
+  try {
+    await expect.poll(() => fetch(`${fixture.url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
+    await page.clock.install()
+    await page.goto(fixture.url)
+    await page.getByLabel('Email address').fill('performance-browser@example.test')
+    await page.getByRole('button', { name: 'Send code', exact: true }).click()
+    await expect.poll(() => fixture.messages.length).toBe(1)
+    await page.getByLabel('Email code').fill(fixture.messages[0]!.match(/\b\d{8}\b/)![0])
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
+    // A real account read supplies API/JSON samples without selecting an installation.
+    await page.getByRole('button', { name: 'Sign-in methods', exact: true }).click()
+    await expect(page.getByRole('button', { name: /Remove Email/ })).toBeVisible()
+    await page.getByRole('button', { name: 'Back to installations', exact: true }).click()
+    await page.getByRole('button', { name: 'Performance diagnostics', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Performance diagnostics', exact: true })
+    await expect(dialog.getByRole('switch', { name: 'Send performance diagnostics' })).toBeChecked()
+    let uploads = 0
+    page.on('request', (request) => {
+      if (new URL(request.url()).pathname === '/api/account/telemetry/performance' && request.method() === 'POST')
+        uploads++
+    })
+    const uploaded = page.waitForResponse(response => new URL(response.url()).pathname === '/api/account/telemetry/performance' && response.request().method() === 'POST')
+    await page.clock.fastForward(10_000)
+    expect((await uploaded).status()).toBe(204)
+    const response = await page.request.get(`${fixture.url}/api/account/telemetry/performance`)
+    const stored = await response.json()
+    expect(stored.reports).toHaveLength(1)
+    const report = stored.reports[0]
+    expect(report).toMatchObject({ schema: 2, platform: 'web', connection: 'NONE' })
+    expect(report.measurements.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operation: 'API_READ' }),
+      expect.objectContaining({ operation: 'JSON_DECODE' }),
+    ]))
+    const encoded = JSON.stringify(report)
+    for (const privateText of ['performance-browser@example.test', fixture.url, 'Active sessions', 'csrf'])
+      expect(encoded).not.toContain(privateText)
+    await dialog.getByRole('switch', { name: 'Send performance diagnostics' }).uncheck()
+    await page.clock.fastForward(120_000)
+    expect(uploads).toBe(1)
+    await dialog.getByRole('button', { name: 'Close dialog' }).click()
+    await page.getByRole('button', { name: 'Sign out', exact: true }).click()
+    await expect(page.getByLabel('Email address')).toBeVisible()
+    await page.clock.fastForward(120_000)
+    expect(uploads).toBe(1)
+  }
+  finally {
+    await fixture.close()
+    executeBeaconSql(database, `DROP SCHEMA ${schema} CASCADE`)
+  }
+})
 
 test('beacon pages deny framing and enable HSTS only for an HTTPS beacon origin', async ({ page, request }) => {
   const url = 'http://localhost:4398'

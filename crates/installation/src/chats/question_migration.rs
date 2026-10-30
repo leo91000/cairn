@@ -112,12 +112,73 @@ ALTER TABLE kv_v16 RENAME TO kv;")?;
     Ok(())
 }
 
+// Before GitHub became a plugin, these two native condition kinds had no
+// pluginId. That upgrade amended current waits, but retained history still has
+// the old shape. Name its known owner only at this historical import boundary;
+// this creates no plugin connection, grant or active continuation.
+fn legacy_github(value: &serde_json::Value) -> bool {
+    value.get("pluginId").is_none()
+        && matches!(
+            value["type"].as_str(),
+            Some("github_workflow" | "github_pr_checks")
+        )
+}
+
+fn identify_legacy_github(value: &mut serde_json::Value) {
+    if legacy_github(value) {
+        value["pluginId"] = "github".into();
+    }
+}
+
+fn condition(value: &serde_json::Value) -> Result<cairn_contracts::WaitCondition> {
+    if legacy_github(value) {
+        // Native conditions had a concrete contract. Do not let malformed native
+        // history bypass it by treating the remaining fields as opaque input.
+        let project = value["projectId"].as_str().ok_or_else(invalid)?;
+        crate::validation::uuid(project).map_err(|_| invalid())?;
+        let sha = value["headSha"].as_str().ok_or_else(invalid)?;
+        let (key, maximum) = if value["type"] == "github_workflow" {
+            ("runId", 9007199254740991)
+        } else {
+            ("prNumber", 2147483647)
+        };
+        let allowed = ["type", "projectId", key, "headSha"];
+        if value.as_object().is_none_or(|object| {
+            object
+                .keys()
+                .any(|field| !allowed.contains(&field.as_str()))
+        }) || sha.len() != 40
+            || !sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !value[key]
+                .as_u64()
+                .is_some_and(|id| (1..=maximum).contains(&id))
+        {
+            return Err(invalid());
+        }
+    }
+    let mut value = value.clone();
+    identify_legacy_github(&mut value);
+    if value["type"] == "group" {
+        let members = value
+            .get_mut("conditions")
+            .and_then(serde_json::Value::as_array_mut)
+            .ok_or_else(invalid)?;
+        // Convert each historical member before deserializing the typed group.
+        for member in members {
+            *member = serde_json::to_value(condition(member)?)?;
+        }
+        return serde_json::from_value(value).map_err(|_| invalid());
+    }
+    crate::waits::condition_from_wire(&value).map_err(|_| invalid())
+}
+
 // Retained events are snapshots, not current authority. Convert their owned
 // condition/result fields without dropping event metadata or plugin payloads.
 fn observation(value: &mut serde_json::Value, event_envelope: bool) -> Result<()> {
     if !value.is_object() {
         return Err(invalid());
     }
+    identify_legacy_github(value);
     if value["pluginId"].is_string() {
         let object = value.as_object_mut().unwrap();
         let mut plugin = serde_json::Map::new();
@@ -133,9 +194,7 @@ fn observation(value: &mut serde_json::Value, event_envelope: bool) -> Result<()
         object.insert("pluginResult".into(), plugin.into());
     }
     if value["condition"].is_object() {
-        value["condition"] = serde_json::to_value(
-            crate::waits::condition_from_wire(&value["condition"]).map_err(|_| invalid())?,
-        )?;
+        value["condition"] = serde_json::to_value(condition(&value["condition"])?)?;
     }
     if value["type"] == "group" {
         let members = value
@@ -143,9 +202,7 @@ fn observation(value: &mut serde_json::Value, event_envelope: bool) -> Result<()
             .and_then(serde_json::Value::as_array_mut)
             .ok_or_else(invalid)?;
         for member in members {
-            member["condition"] = serde_json::to_value(
-                crate::waits::condition_from_wire(&member["condition"]).map_err(|_| invalid())?,
-            )?;
+            member["condition"] = serde_json::to_value(condition(&member["condition"])?)?;
             if !member["result"].is_null() {
                 observation(&mut member["result"], false)?;
             }
@@ -156,9 +213,7 @@ fn observation(value: &mut serde_json::Value, event_envelope: bool) -> Result<()
 
 fn wakeup_snapshot(value: &mut serde_json::Value) -> Result<()> {
     if value["condition"].is_object() {
-        value["condition"] = serde_json::to_value(
-            crate::waits::condition_from_wire(&value["condition"]).map_err(|_| invalid())?,
-        )?;
+        value["condition"] = serde_json::to_value(condition(&value["condition"])?)?;
     }
     if value["observation"].is_object() {
         observation(&mut value["observation"], false)?;

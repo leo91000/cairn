@@ -44,12 +44,16 @@ pub(super) fn accounting(db: &Db<'_>, node: &Value, attempts: &[Value]) -> Resul
     let Some(sample) = observation(node) else {
         return Ok(Value::Null);
     };
-    let runs = db.json_rows(
-        "SELECT data FROM runs WHERE json_extract(data,'$.nodeId')=? AND json_extract(data,'$.storage.mode')='on-demand'",
+    // Do not reconstruct the full run document (including its frozen snapshot)
+    // to sum one storage field. Keep JSON text so u64 values retain their precision.
+    let dirty_bytes = db.json_rows(
+        "SELECT coalesce(boundary -> '$.storage.dirtyBytes','null') FROM runs
+         WHERE json_extract(boundary,'$.nodeId')=?
+         AND json_extract(boundary,'$.storage.mode')='on-demand'",
         [text(node, "id")],
     )?;
-    let unsynchronized = runs.iter().fold(0u64, |total, run| {
-        total.saturating_add(run["storage"]["dirtyBytes"].as_u64().unwrap_or(0))
+    let unsynchronized = dirty_bytes.iter().fold(0u64, |total, bytes| {
+        total.saturating_add(bytes.as_u64().unwrap_or(0))
     });
     let limit = node["limits"]["diskMiB"]
         .as_u64()

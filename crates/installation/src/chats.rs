@@ -1132,6 +1132,14 @@ fn continue_run(
         );
     }
     checkpoint.completed = Some(false);
+    checkpoint.output_interrupted = None;
+    checkpoint.provider_failed = None;
+    checkpoint.turn_pending = Some(true);
+    checkpoint.recovery_deadline_ms = None;
+    checkpoint.terminal_code = Some(None);
+    checkpoint.controller_recoveries = None;
+    checkpoint.controller_recovery_reservation = None;
+    checkpoint.controller_observation = None;
     checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(agent));
     checkpoint.last_message = None;
     checkpoint.settled = None;
@@ -2176,6 +2184,10 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                             },
                         )?;
                         let resumed = db.run("run")?.unwrap();
+                        let mut interrupted = db.checkpoint_boundary("run")?.unwrap();
+                        interrupted["completed"] = false.into();
+                        interrupted["outputInterrupted"] = true.into();
+                        db.save_checkpoint_boundary("run", &interrupted)?;
                         continue_run(
                             db,
                             &chat,
@@ -2194,6 +2206,9 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                             },
                         )?;
                         let next = db.run("run")?.unwrap();
+                        assert!(
+                            db.checkpoint_boundary("run")?.unwrap()["outputInterrupted"].is_null()
+                        );
                         assert_eq!(next["sessionId"], "new-native");
                         assert!(next["chatExecution"]["context"].is_null());
                         Ok(())

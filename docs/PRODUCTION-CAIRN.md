@@ -24,6 +24,9 @@ Infrastructure changes have their own scope and are not part of a routine releas
    ([tool versions](CLI-UPDATES.md)). Take the
    Beacon and installation images from that same evidence. Nightly qualification produces reusable evidence; historical complete main/PR
    evidence remains compatible. Short PR checks provide no image provenance.
+   When the candidate changes installation migrations, complete the
+   [private upgrade rehearsal](#private-installation-upgrade-rehearsal) before
+   pushing the tag.
 2. **Create the tag and release notes.** A pushed version tag starts the container
    and Android workflows. They reuse compatible validation evidence or run fresh
    checks; a tag can wait for nightly qualification already running on main. For Android,
@@ -82,6 +85,44 @@ promotion; this installation migration neither resets Beacon nor authorizes
 discarding accounts. A historical incompatible ledger requires a separately
 prepared data-preserving migration before rollout. See
 [Beacon database compatibility](BEACON.md#next-release-recreate-the-beacon-database).
+
+### Private installation upgrade rehearsal
+
+Before tagging a changed installation migration, exercise the candidate against
+a recent, consistent copy of the installation database. Synthetic migration tests
+remain necessary; historical production shapes also need this private check.
+
+1. Retain an untouched, private source backup. Use SQLite's backup API or a
+   coordinated stopped-manager backup that preserves the database and its WAL.
+   Copying only a live `manager.db` file is not a consistent backup. Record its
+   schema version and checksum; keep directories owner-only and files private.
+2. Make a separate writable rehearsal copy containing `manager.db`. Never pass
+   the live installation directory or the untouched source backup to the helper.
+   Keep all database copies on the installation host; do not upload them to CI,
+   artifacts or a PR.
+3. Use the `browser_fixture` binary from the candidate's qualified
+   `browser-backend` artifact, or build that example from the exact candidate
+   tree. Verify the artifact's run, source tree and digest, record the executable
+   checksum, and use a binary compatible with the host's architecture and libc.
+   Run only the Store migration entry point, isolated from networking:
+
+   ```sh
+   printf '%s\n' '{"operation":"upgradeStoreCopy","args":["/private/rehearsal-copy"]}' \
+     | sudo unshare --net -- /private/candidate/browser_fixture
+   ```
+
+   This operation writes the supplied copy. It requires an existing `manager.db`
+   and opens the Store without configuration loading, Service, Vault or credential
+   refresh. It does not start a manager or verify application readiness.
+4. Require the expected `versionBefore` and `versionAfter`, `quickCheck: "ok"`
+   and `foreignKeyCheck: "ok"`. Reopen the migrated copy to confirm its resulting
+   schema version and verify the untouched source checksum is unchanged. Retain
+   only aggregate verdicts and source/artifact identities in public evidence;
+   keep database contents, credentials and private paths out of published logs.
+   A failure blocks the tag: preserve the private copies and repair the migration.
+
+This rehearsal does not replace the pre-upgrade backup or the post-deployment
+readiness checks. It creates no automatic release archive or restore point.
 
 ## Réinstallation complète
 

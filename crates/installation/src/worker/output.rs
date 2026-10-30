@@ -285,6 +285,29 @@ pub(super) async fn record(
             .await?;
         return Ok(false);
     }
+    if event["type"] == "runner.output_interrupted" {
+        let id = id.to_owned();
+        checkpoint
+            .update_and_publish_if(
+                |c| {
+                    if c.output_interrupted == Some(true) {
+                        return false;
+                    }
+                    c.output_interrupted = Some(true);
+                    true
+                },
+                move |db| {
+                    db.event(
+                        &id,
+                        &EventKind::Status,
+                        "Execution output was interrupted; some activity may be missing.",
+                        None,
+                    )
+                },
+            )
+            .await?;
+        return Ok(false);
+    }
     if event["type"] == "runner.start_rejected" {
         let run = s.store.run(id).await?;
         let first_rejected = !previously_launched
@@ -408,9 +431,14 @@ async fn apply_event(
     text_value: String,
     secrets: &[String],
 ) -> Result<()> {
-    let failure = text(&event["error"], "message");
     let provider_failure = event["type"] == "turn.failed";
     let controller_failure = event["type"] == "runner.failed";
+    let failure = text(&event["error"], "message");
+    let failure = if provider_failure && failure.is_empty() {
+        "Agent turn failed."
+    } else {
+        failure
+    };
     let failure = ((provider_failure || controller_failure) && !failure.is_empty()).then(|| {
         let message = truncate(&run_output::redact(failure, secrets), ERROR_LIMIT);
         let mut error = run_output::payload(&event["error"], secrets);

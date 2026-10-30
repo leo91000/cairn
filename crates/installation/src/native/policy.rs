@@ -646,24 +646,75 @@ pub(crate) fn run_authorization(
     move |db| authorize_run_in(db, &id, &source)
 }
 
+fn authority_age(value: &Value) -> Option<i64> {
+    value["observedAt"]
+        .as_i64()
+        .map(|at| crate::config::now() - at)
+        .filter(|age| *age >= 0)
+}
+
 pub async fn refresh(s: &Service) -> Result<()> {
-    let recent = s.store.kv("native-authority").await?.is_some_and(|value| {
-        value["observedAt"].as_i64().is_some_and(|at| {
-            let age = crate::config::now() - at;
-            (0..15_000).contains(&age)
-        })
-    });
-    if !recent {
-        let accounts = crate::relay::native_authority(s).await?;
-        s.store
-            .set(
-                "native-authority",
-                json!({ "observedAt": crate::config::now(), "accounts": accounts }),
-                None,
-            )
-            .await?;
+    let _refresh = s.native_authority_refresh.lock().await;
+    refresh_locked(s).await
+}
+
+async fn refresh_locked(s: &Service) -> Result<()> {
+    let recent = s
+        .store
+        .kv("native-authority")
+        .await?
+        .as_ref()
+        .and_then(authority_age)
+        .is_some_and(|age| age < 15_000);
+    if recent {
+        return Ok(());
+    }
+    let started = tokio::time::Instant::now();
+    let accounts = crate::relay::native_authority(s).await?;
+    s.store
+        .set(
+            "native-authority",
+            json!({ "observedAt": crate::config::now(), "accounts": accounts }),
+            None,
+        )
+        .await?;
+    tracing::debug!(target: "cairn_performance", elapsed_ms = started.elapsed().as_millis() as u64, "Native authority refreshed");
+    Ok(())
+}
+
+/// A still-valid proof can renew existing work while its refresh runs in the
+/// background. The lease writer caps grants at that proof's original deadline.
+pub(crate) async fn refresh_for_heartbeat(s: &Service) -> Result<()> {
+    let age = s
+        .store
+        .kv("native-authority")
+        .await?
+        .as_ref()
+        .and_then(authority_age);
+    if !age.is_some_and(|age| age < 60_000) {
+        return refresh(s).await;
+    }
+    if age.is_some_and(|age| age < 15_000) {
+        return Ok(());
+    }
+    if let Ok(guard) = s.native_authority_refresh.clone().try_lock_owned() {
+        let s = s.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            if let Err(error) = refresh_locked(&s).await {
+                tracing::warn!(
+                    status = error.status,
+                    "Native authority refresh failed; existing grants retain their original authority deadline"
+                );
+            }
+        });
     }
     Ok(())
+}
+
+pub(crate) fn lease_remaining_ms(db: &Db<'_>) -> Result<u64> {
+    let authority = db.kv("native-authority")?.unwrap_or_default();
+    Ok(authority_age(&authority).map_or(0, |age| 60_000_i64.saturating_sub(age).max(0) as u64))
 }
 
 pub async fn refresh_agent(s: &Service, agent: &str) -> Result<()> {

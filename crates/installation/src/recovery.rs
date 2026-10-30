@@ -77,31 +77,181 @@ pub async fn fence_process(identity: &ProcessIdentity) -> Result<()> {
     Ok(())
 }
 
+/// Observe the existing attempt before stopping it or deciding whether to replay.
+/// This never acquires a workspace, starts an agent, or replays retained output.
+#[derive(Clone, Copy)]
+pub(crate) enum ObservationAction {
+    Reserve,
+    Release,
+    Exhausted,
+    Record(Option<i32>),
+}
+
+pub(crate) async fn terminal_code<F, Fut>(
+    s: &Service,
+    attempt: &str,
+    node: Option<&str>,
+    cancel: &tokio_util::sync::CancellationToken,
+    limit: Duration,
+    mut persist: F,
+) -> Result<()>
+where
+    F: FnMut(ObservationAction) -> Fut,
+    Fut: std::future::Future<Output = Result<bool>>,
+{
+    let runner_url = crate::nodes::transport::url_for_node(s, node);
+    if runner_url.is_empty() {
+        persist(ObservationAction::Exhausted).await?;
+        return Ok(());
+    }
+    let token = secret(&s.config.data_dir, "runner-secret").await?;
+    let url = format!("{runner_url}/runs/{attempt}");
+    let deadline = tokio::time::Instant::now() + limit.min(Duration::from_secs(5));
+    loop {
+        if s.shutdown.is_cancelled() || cancel.is_cancelled() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            persist(ObservationAction::Exhausted).await?;
+            return Ok(());
+        }
+        // Do not drop an in-flight transaction: it may still commit after its
+        // caller is cancelled, leaving an active checkpoint's memory stale.
+        if !persist(ObservationAction::Reserve).await? {
+            persist(ObservationAction::Exhausted).await?;
+            return Ok(());
+        }
+        if s.shutdown.is_cancelled()
+            || cancel.is_cancelled()
+            || tokio::time::Instant::now() >= deadline
+        {
+            persist(ObservationAction::Release).await?;
+            if !s.shutdown.is_cancelled() && !cancel.is_cancelled() {
+                persist(ObservationAction::Record(None)).await?;
+            }
+            return Ok(());
+        }
+        let wait = crate::runner::wait_for_exit(&s.http, &url, &token);
+        let result = tokio::select! {
+            () = s.shutdown.cancelled() => None,
+            () = cancel.cancelled() => None,
+            result = tokio::time::timeout_at(deadline, wait) => Some(result),
+        };
+        match result {
+            None => {
+                persist(ObservationAction::Release).await?;
+                return Ok(());
+            }
+            Some(Ok(Ok(code))) => {
+                persist(ObservationAction::Record(Some(code))).await?;
+                return Ok(());
+            }
+            Some(Err(_)) => {
+                persist(ObservationAction::Record(None)).await?;
+                return Ok(());
+            }
+            Some(Ok(Err(_))) => {
+                persist(ObservationAction::Release).await?;
+            }
+        }
+        let next_read = (tokio::time::Instant::now() + Duration::from_millis(200)).min(deadline);
+        tokio::select! {
+            () = s.shutdown.cancelled() => return Ok(()),
+            () = cancel.cancelled() => return Ok(()),
+            () = tokio::time::sleep_until(next_read) => {}
+        }
+    }
+}
+
 /// Stops every trace of the run's previous execution before it may be relaunched.
 pub async fn fence(s: &Service, run: &Value) -> Result<()> {
     let run_id = text(run, "id");
     let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
-    if let Some(process) = checkpoint.as_ref().and_then(RunCheckpoint::process) {
+    fence_attempt(s, run, checkpoint.as_ref()).await
+}
+
+/// Compare the physical owner, not the checkpoint's mutable evidence.
+pub(crate) fn same_execution(left: Option<&RunCheckpoint>, right: Option<&RunCheckpoint>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.runner_id() == right.runner_id()
+                && left.node_id == right.node_id
+                && left.process() == right.process()
+        }
+        _ => false,
+    }
+}
+
+/// Fence only the attempt selected by the caller, including its process and node.
+pub(crate) async fn fence_attempt(
+    s: &Service,
+    run: &Value,
+    expected: Option<&RunCheckpoint>,
+) -> Result<()> {
+    let run_id = text(run, "id");
+    let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
+    if !same_execution(checkpoint.as_ref(), expected) {
+        return Err(Error::conflict(
+            "Execution attempt changed during recovery.",
+        ));
+    }
+    let process = checkpoint
+        .as_ref()
+        .and_then(RunCheckpoint::process)
+        .cloned();
+    let node = checkpoint
+        .as_ref()
+        .and_then(|saved| saved.node_id.as_ref())
+        .and_then(|node| node.as_deref())
+        .map(str::to_owned);
+    if let Some(process) = &process {
         fence_process(process).await?;
     }
     let isolated =
         run["isolated"] == true || checkpoint.as_ref().is_some_and(RunCheckpoint::isolated);
     if isolated {
-        let attempt = checkpoint
-            .as_ref()
+        let attempt = expected
             .and_then(RunCheckpoint::runner_id)
             .unwrap_or(run_id);
-        fence_runner(s, run_id, attempt).await?;
+        let runner_url = crate::nodes::transport::url_for_node(s, node.as_deref());
+        fence_runner(s, &runner_url, attempt).await?;
     }
-    if let Some(mut checkpoint) = checkpoint {
-        checkpoint.process = None;
-        checkpoint.store(&s.store, run_id).await?;
-    }
-    Ok(())
+    let id = run_id.to_owned();
+    let expected = expected
+        .and_then(RunCheckpoint::runner_id)
+        .map(str::to_owned);
+    let release = isolated.then(|| expected.clone().unwrap_or_else(|| id.clone()));
+    s.store
+        .transaction(move |db| {
+            let mut current = RunCheckpoint::load_in(db, &id)?;
+            let current_attempt = current.as_ref().and_then(RunCheckpoint::runner_id);
+            let current_node = current
+                .as_ref()
+                .and_then(|saved| saved.node_id.as_ref())
+                .and_then(|node| node.as_deref());
+            let current_process = current.as_ref().and_then(RunCheckpoint::process);
+            if current_attempt != expected.as_deref()
+                || current_node != node.as_deref()
+                || current_process != process.as_ref()
+            {
+                return Err(Error::conflict(
+                    "Execution attempt changed during recovery.",
+                ));
+            }
+            if let Some(saved) = &mut current {
+                saved.process = None;
+                saved.store_in(db, &id)?;
+            }
+            if let Some(attempt) = release {
+                crate::nodes::placement::release_in(db, &attempt)?;
+            }
+            Ok(())
+        })
+        .await
 }
 
-async fn fence_runner(s: &Service, run_id: &str, attempt: &str) -> Result<()> {
-    let runner_url = crate::nodes::transport::url(s, run_id).await?;
+async fn fence_runner(s: &Service, runner_url: &str, attempt: &str) -> Result<()> {
     if runner_url.is_empty() {
         return Err(Error::unavailable(
             "Waiting for the isolated runner before recovering this run.",
@@ -121,7 +271,7 @@ async fn fence_runner(s: &Service, run_id: &str, attempt: &str) -> Result<()> {
             "Waiting for the previous VM execution lease to expire.",
         ));
     }
-    crate::nodes::placement::release(s, attempt).await
+    Ok(())
 }
 
 /// An unreachable runner is only presumed stopped once its node lease has lapsed.

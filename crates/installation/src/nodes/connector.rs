@@ -4,6 +4,7 @@ use crate::{
     error::{Error, Result},
     skills::private_dir,
 };
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -440,21 +441,37 @@ async fn heartbeat(
     stop: &CancellationToken,
 ) -> Result<()> {
     let controller = super::local_client()?;
-    let mut budget_error_value = Value::Null;
-    let archive_warmer = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let budget_error_value = std::sync::Arc::new(tokio::sync::Mutex::new(Value::Null));
+    let (configuration, desired) = tokio::sync::watch::channel(None);
+    let mut background = tokio::task::JoinSet::new();
+    background.spawn(configure_controller(
+        controller.clone(),
+        desired,
+        budget_error_value.clone(),
+        stop.clone(),
+    ));
+    background.spawn(warm_archives(
+        client.clone(),
+        origin.clone(),
+        identity.token.clone(),
+        stop.clone(),
+    ));
+    let mut last_report = 0;
     loop {
         let started = super::boot_ms();
         let runner = std::env::var("RUNNER_URL").unwrap_or_default();
         let health = local_health(&controller, &runner).await;
-        if health["status"] == "ok"
-            && (health["runtimeId"] != super::component_runtime()
-                || health["nodeProtocol"] != NODE_PROTOCOL)
+        let health_ms = super::boot_ms().saturating_sub(started);
+        if (health["runtimeId"].is_string() && health["runtimeId"] != super::component_runtime())
+            || (!health["nodeProtocol"].is_null() && health["nodeProtocol"] != NODE_PROTOCOL)
         {
             return Err(Error::conflict(
                 "Controller version mismatch; deploy all components at the same version.",
             ));
         }
         let ready = controller_ready(&health);
+        let budget_error = budget_error_value.lock().await.clone();
+        let protocol = json!(NODE_PROTOCOL);
         let report = HeartbeatRequest {
             image_digest: std::env::var("CAIRN_NODE_IMAGE").ok(),
             runtime_id: super::component_runtime(),
@@ -466,10 +483,10 @@ async fn heartbeat(
             pressure: &health["pressure"],
             shared_resources: health["sharedResources"] == true,
             budget: &health["budget"],
-            budget_error: &budget_error_value,
+            budget_error: &budget_error,
             exclusive_reservations: health["exclusiveReservations"] == true,
             backend: &health["backend"],
-            node_protocol: &health["nodeProtocol"],
+            node_protocol: &protocol,
             native_mode: &health["nativeMode"],
             disk_growth: &health["diskGrowth"],
         };
@@ -497,97 +514,204 @@ async fn heartbeat(
                     .json()
                     .await
                     .map_err(|_| Error::bad("Invalid master heartbeat."))?;
-                if health["backend"] == "native"
-                    && value["nativeMode"].is_object()
-                    && !crate::native::mode_matches(&health["nativeMode"], &value["nativeMode"])
+                let master_ms = super::boot_ms()
+                    .saturating_sub(started)
+                    .saturating_sub(health_ms);
+                let leases_started = super::boot_ms();
+                let lease_count = value["leases"].as_array().map_or(0, Vec::len);
+                let telemetry_age_ms = health["telemetryAgeMs"].as_u64();
+                // Existing grants remain authoritative when telemetry is unavailable.
+                // Controller admission still checks version, plan and lease identity.
+                forward_leases(&controller, &runner, &value, started).await?;
+                configuration.send_replace(Some((runner, health, value)));
+                let finished = super::boot_ms();
+                if finished.saturating_sub(last_report) >= 30_000
+                    || finished.saturating_sub(started) >= 1_000
                 {
-                    let _ = controller
-                        .post(format!("{}/native-mode", runner.trim_end_matches('/')))
-                        .bearer_auth(runner_credential().await?)
-                        .json(&value["nativeMode"])
-                        .timeout(Duration::from_secs(290))
-                        .send()
-                        .await;
-                }
-                if ready {
-                    if let Ok(guard) = archive_warmer.clone().try_lock_owned()
-                        && let Some(catalog) = value.get("projectArchives")
-                    {
-                        let descriptors: Vec<crate::project_archives::Archive> =
-                            serde_json::from_value(catalog.clone())?;
-                        let (client, origin, token, stop) = (
-                            client.clone(),
-                            origin.clone(),
-                            identity.token.clone(),
-                            stop.clone(),
-                        );
-                        let warm_bases = health["backend"] == "native";
-                        tokio::spawn(async move {
-                            let _guard = guard;
-                            let warming = descriptors.clone();
-                            if let Err(error) = crate::project_archives::prefetch(
-                                client,
-                                origin,
-                                token,
-                                descriptors,
-                                stop,
-                            )
-                            .await
-                            {
-                                tracing::debug!(
-                                    status = error.status,
-                                    "Project archive preload deferred"
-                                );
-                            }
-                            if warm_bases {
-                                let _ = crate::native::bases::request("warm", &json!({ "archives": warming, "diskMiB": 32768, "individual": true })).await;
-                            }
-                        });
-                    }
-                    forward_leases(&controller, &runner, &value, started).await?;
-                    let storage: crate::storage::policy::Configuration =
-                        serde_json::from_value(value["storagePolicy"].clone())?;
-                    if health["storagePolicy"] != value["storagePolicy"] {
-                        let _ = controller
-                            .post(format!("{}/storage-policy", runner.trim_end_matches('/')))
-                            .bearer_auth(runner_credential().await?)
-                            .json(&storage)
-                            .timeout(Duration::from_secs(3))
-                            .send()
-                            .await;
-                    }
-
-                    if health["diskGrowth"]["protocol"] == 1 && value["diskGrowth"]["protocol"] == 1
-                    {
-                        // The manager commits grants before this response. A lost
-                        // acknowledgement is retried with the same allowance.
-                        let _ = controller
-                            .post(format!("{}/disk-growth", runner.trim_end_matches('/')))
-                            .bearer_auth(runner_credential().await?)
-                            .json(&value["diskGrowth"])
-                            .timeout(Duration::from_secs(3))
-                            .send()
-                            .await;
-                    }
-                    let budget = json!({ "slots": value["slots"], "limits": value["limits"] });
-                    if health["budget"].is_object() && health["budget"] != budget {
-                        let response = controller
-                            .post(format!("{}/node-budget", runner.trim_end_matches('/')))
-                            .bearer_auth(runner_credential().await?)
-                            .json(&budget)
-                            .send()
-                            .await;
-                        budget_error_value = budget_error(response).await;
-                    } else {
-                        budget_error_value = Value::Null;
-                    }
+                    tracing::info!(
+                        target: "cairn_performance",
+                        operation = "node_heartbeat",
+                        elapsed_ms = finished.saturating_sub(started),
+                        health_ms,
+                        master_ms,
+                        lease_ms = finished.saturating_sub(leases_started),
+                        lease_count,
+                        telemetry_age_ms,
+                        ready,
+                        "Node heartbeat and lease forwarding completed"
+                    );
+                    last_report = finished;
                 }
             }
-            _ => tracing::warn!("Node heartbeat failed; retrying without starting work."),
+            Ok(response) => tracing::warn!(
+                status = response.status().as_u16(),
+                elapsed_ms = super::boot_ms().saturating_sub(started),
+                "Node heartbeat rejected"
+            ),
+            Err(error) => tracing::warn!(
+                timeout = error.is_timeout(),
+                connect = error.is_connect(),
+                elapsed_ms = super::boot_ms().saturating_sub(started),
+                "Node heartbeat transport failed"
+            ),
         }
         tokio::select! {
             () = stop.cancelled() => return Ok(()),
             () = tokio::time::sleep(HEARTBEAT_PERIOD) => {}
+        }
+    }
+}
+
+/// Configuration is serialized and observed independently of lease delivery.
+/// Requests remain ordered even if application outlasts an HTTP caller's patience.
+async fn configure_controller(
+    controller: reqwest::Client,
+    mut desired: tokio::sync::watch::Receiver<Option<(String, Value, Value)>>,
+    error: std::sync::Arc<tokio::sync::Mutex<Value>>,
+    stop: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            () = stop.cancelled() => return,
+            changed = desired.changed() => if changed.is_err() { return; }
+        }
+        let Some((runner, health, value)) = desired.borrow_and_update().clone() else {
+            continue;
+        };
+        let apply = apply_configuration(&controller, &runner, &health, &value, &error);
+        tokio::pin!(apply);
+        tokio::select! {
+            () = stop.cancelled() => return,
+            result = &mut apply => {
+                if let Err(error) = result { tracing::warn!(status = error.status, "Controller configuration deferred"); }
+                continue;
+            },
+            () = tokio::time::sleep(Duration::from_secs(10)) => {
+                tracing::warn!(target: "cairn_performance", "Controller configuration has taken over ten seconds; lease delivery remains independent");
+            }
+        }
+        tokio::select! {
+            () = stop.cancelled() => return,
+            result = &mut apply => if let Err(error) = result {
+                tracing::warn!(status = error.status, "Controller configuration deferred");
+            }
+        }
+    }
+}
+
+async fn apply_configuration(
+    controller: &reqwest::Client,
+    runner: &str,
+    health: &Value,
+    value: &Value,
+    error: &tokio::sync::Mutex<Value>,
+) -> Result<()> {
+    let credential = runner_credential().await?;
+    if health["backend"] == "native"
+        && value["nativeMode"].is_object()
+        && !crate::native::mode_matches(&health["nativeMode"], &value["nativeMode"])
+    {
+        controller
+            .post(format!("{}/native-mode", runner.trim_end_matches('/')))
+            .bearer_auth(&credential)
+            .json(&value["nativeMode"])
+            .send()
+            .await
+            .map_err(|_| Error::unavailable("Controller configuration transport failed."))?
+            .error_for_status()
+            .map_err(|_| Error::unavailable("Controller configuration was rejected."))?;
+    }
+    if !controller_ready(health) {
+        return Ok(());
+    }
+    let storage: crate::storage::policy::Configuration =
+        serde_json::from_value(value["storagePolicy"].clone())?;
+    if health["storagePolicy"] != value["storagePolicy"] {
+        controller
+            .post(format!("{}/storage-policy", runner.trim_end_matches('/')))
+            .bearer_auth(&credential)
+            .json(&storage)
+            .send()
+            .await
+            .map_err(|_| Error::unavailable("Controller configuration transport failed."))?
+            .error_for_status()
+            .map_err(|_| Error::unavailable("Controller configuration was rejected."))?;
+    }
+    if health["diskGrowth"]["protocol"] == 1 && value["diskGrowth"]["protocol"] == 1 {
+        controller
+            .post(format!("{}/disk-growth", runner.trim_end_matches('/')))
+            .bearer_auth(&credential)
+            .json(&value["diskGrowth"])
+            .send()
+            .await
+            .map_err(|_| Error::unavailable("Controller configuration transport failed."))?
+            .error_for_status()
+            .map_err(|_| Error::unavailable("Controller configuration was rejected."))?;
+    }
+    let budget = json!({ "slots": value["slots"], "limits": value["limits"] });
+    if health["budget"].is_object() && health["budget"] != budget {
+        let response = controller
+            .post(format!("{}/node-budget", runner.trim_end_matches('/')))
+            .bearer_auth(&credential)
+            .json(&budget)
+            .send()
+            .await;
+        *error.lock().await = budget_error(response).await;
+    } else {
+        *error.lock().await = Value::Null;
+    }
+    Ok(())
+}
+
+async fn warm_archives(
+    client: reqwest::Client,
+    origin: url::Url,
+    token: String,
+    stop: CancellationToken,
+) {
+    loop {
+        let warm = async {
+            let catalog = client
+                .post(
+                    origin
+                        .join("internal/nodes/project-catalog")
+                        .map_err(Error::internal)?,
+                )
+                .bearer_auth(&token)
+                .json(&json!({}))
+                .send()
+                .await
+                .map_err(|_| Error::unavailable("Controller configuration transport failed."))?
+                .error_for_status()
+                .map_err(|_| Error::unavailable("Controller configuration was rejected."))?
+                .json::<Vec<crate::project_archives::Archive>>()
+                .await
+                .map_err(|_| Error::bad("Invalid project archive catalogue."))?;
+            let warming = catalog.clone();
+            crate::project_archives::prefetch(
+                client.clone(),
+                origin.clone(),
+                token.clone(),
+                catalog,
+                stop.clone(),
+            )
+            .await?;
+            if std::env::var("CAIRN_NODE_BACKEND").is_ok_and(|backend| backend == "native") {
+                crate::native::bases::request(
+                    "warm",
+                    &json!({ "archives": warming, "diskMiB": 32768, "individual": true }),
+                )
+                .await?;
+            }
+            Ok::<_, Error>(())
+        };
+        tokio::select! {
+            () = stop.cancelled() => return,
+            result = warm => if let Err(error) = result { tracing::debug!(status = error.status, "Project archive preload deferred"); }
+        }
+        tokio::select! {
+            () = stop.cancelled() => return,
+            () = tokio::time::sleep(Duration::from_secs(30)) => {}
         }
     }
 }
@@ -600,28 +724,54 @@ async fn forward_leases(
     started: u64,
 ) -> Result<()> {
     let credential = runner_credential().await?;
-    for lease in heartbeat["leases"].as_array().into_iter().flatten() {
-        let elapsed = super::boot_ms().saturating_sub(started);
-        let remaining = lease["remainingMs"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_sub(elapsed);
-        let attempt = crate::validation::text(lease, "id");
-        if remaining == 0 || crate::validation::uuid(attempt).is_err() {
-            continue;
-        }
-        // An expired or refused lease stops the VM; the next heartbeat retries.
-        let _ = client
-            .post(format!(
-                "{}/runs/{attempt}/lease",
-                runner.trim_end_matches('/')
-            ))
-            .bearer_auth(&credential)
-            .json(&json!({ "remainingMs": remaining }))
-            .timeout(Duration::from_secs(3))
-            .send()
-            .await;
-    }
+    let mut requests =
+        futures_util::stream::iter(heartbeat["leases"].as_array().cloned().unwrap_or_default())
+            .map(|lease| {
+                let credential = credential.clone();
+                let client = client.clone();
+                let runner = runner.to_owned();
+                async move {
+                    let elapsed = super::boot_ms().saturating_sub(started);
+                    let remaining = lease["remainingMs"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        .saturating_sub(elapsed);
+                    let attempt = crate::validation::text(&lease, "id");
+                    if remaining == 0 || crate::validation::uuid(attempt).is_err() {
+                        tracing::warn!(
+                            remaining_ms = remaining,
+                            "Expired or invalid lease grant was not forwarded"
+                        );
+                        return;
+                    }
+                    let result = client
+                        .post(format!(
+                            "{}/runs/{attempt}/lease",
+                            runner.trim_end_matches('/')
+                        ))
+                        .bearer_auth(credential)
+                        .json(&json!({ "remainingMs": remaining }))
+                        .timeout(Duration::from_secs(3))
+                        .send()
+                        .await;
+                    match result {
+                        Ok(response) if response.status().is_success() => {}
+                        Ok(response) => tracing::warn!(
+                            attempt,
+                            status = response.status().as_u16(),
+                            "Controller rejected lease renewal"
+                        ),
+                        Err(error) => tracing::warn!(
+                            attempt,
+                            timeout = error.is_timeout(),
+                            connect = error.is_connect(),
+                            "Controller lease renewal transport failed"
+                        ),
+                    }
+                }
+            })
+            .buffer_unordered(16);
+    while requests.next().await.is_some() {}
     Ok(())
 }
 

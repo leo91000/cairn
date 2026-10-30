@@ -27,17 +27,28 @@ use cairn_installation::{
 use serde_json::{Value, json};
 use std::io::Read;
 
+#[path = "browser_fixture/store_migration.rs"]
+mod store_migration;
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let request: Value = serde_json::from_str(&input)?;
+    let operation = text(&request, "operation");
+    if operation == "upgradeStoreCopy" {
+        let directory = request["args"][0]
+            .as_str()
+            .ok_or_else(|| Error::bad("Expected a private offline copy directory."))?;
+        let result = store_migration::upgrade_copy(std::path::Path::new(directory))?;
+        println!("{}", json!({ "result": result }));
+        return Ok(());
+    }
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
         .with_writer(std::io::stderr)
         .init();
-    let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
-    let request: Value = serde_json::from_str(&input)?;
     let config: Config = serde_json::from_value(request["config"].clone())?;
-    let operation = text(&request, "operation");
     let args = request["args"]
         .as_array()
         .ok_or_else(|| Error::bad("Expected args"))?
