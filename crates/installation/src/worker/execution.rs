@@ -118,37 +118,45 @@ pub(super) async fn reconcile(
         saved.node_id.as_ref().and_then(|node| node.as_deref()),
         cancel,
         Duration::from_millis(remaining_ms as u64),
-        |action| async move {
-            let mut reserved = false;
-            checkpoint
-                .update(|current| match action {
-                    recovery::ObservationAction::Reserve => {
-                        reserved = current.reserve_observation(attempt);
-                    }
-                    recovery::ObservationAction::Release => current.release_observation(attempt),
-                    recovery::ObservationAction::Exhausted => {
-                        if !s.shutdown.is_cancelled()
-                            && current.runner_id() == Some(attempt)
-                            && current.terminal_code.is_none()
-                            && current.settled().is_none()
-                        {
-                            current.release_observation(attempt);
-                            current.terminal_code = Some(None);
+        |action| {
+            let attempt = attempt.to_owned();
+            let shutdown = s.shutdown.clone();
+            async move {
+                checkpoint
+                    .decide(move |current, _db| {
+                        let mut reserved = false;
+                        match action {
+                            recovery::ObservationAction::Reserve => {
+                                reserved = current.reserve_observation(&attempt);
+                            }
+                            recovery::ObservationAction::Release => {
+                                current.release_observation(&attempt)
+                            }
+                            recovery::ObservationAction::Exhausted => {
+                                if !shutdown.is_cancelled()
+                                    && current.runner_id() == Some(attempt.as_str())
+                                    && current.terminal_code.is_none()
+                                    && current.settled().is_none()
+                                {
+                                    current.release_observation(&attempt);
+                                    current.terminal_code = Some(None);
+                                }
+                            }
+                            recovery::ObservationAction::Record(code) => {
+                                current.release_observation(&attempt);
+                                if current.runner_id() == Some(attempt.as_str())
+                                    && current.terminal_code.is_none()
+                                    && current.settled().is_none()
+                                    && (!shutdown.is_cancelled() || code.is_some())
+                                {
+                                    current.terminal_code = Some(code);
+                                }
+                            }
                         }
-                    }
-                    recovery::ObservationAction::Record(code) => {
-                        current.release_observation(attempt);
-                        if current.runner_id() == Some(attempt)
-                            && current.terminal_code.is_none()
-                            && current.settled().is_none()
-                            && (!s.shutdown.is_cancelled() || code.is_some())
-                        {
-                            current.terminal_code = Some(code);
-                        }
-                    }
-                })
-                .await?;
-            Ok(reserved)
+                        Ok(reserved)
+                    })
+                    .await
+            }
         },
     )
     .await
