@@ -36,6 +36,13 @@ const custom = ref<Record<string, Record<string, string>>>({})
 const busy = ref(false)
 const error = ref('')
 let submission: { id: string, serialized: string } | undefined
+let dismissedHighlight: string | undefined
+watch(() => props.readOnly, (readOnly) => {
+  if (readOnly) {
+    open.value = false
+    dismissedHighlight = props.highlighted
+  }
+}, { immediate: true })
 watch(question, (value) => {
   if (!value) {
     open.value = false
@@ -45,9 +52,17 @@ watch(question, (value) => {
   answers.value[value.id] ??= {}
   custom.value[value.id] ??= {}
 }, { immediate: true })
-watch(() => [props.highlighted, pending.value.length], () => {
-  if (props.highlighted && pending.value.some(question => question.id === props.highlighted)) {
-    selected.value = props.highlighted
+watch([() => props.highlighted, () => pending.value.some(question => question.id === props.highlighted)], ([highlighted, available], [previousHighlighted]) => {
+  if (highlighted !== previousHighlighted)
+    dismissedHighlight = undefined
+
+  if (props.readOnly) {
+    dismissedHighlight = highlighted
+    return
+  }
+
+  if (highlighted && available && highlighted !== dismissedHighlight) {
+    selected.value = highlighted
     open.value = true
   }
 }, { immediate: true })
@@ -90,7 +105,7 @@ function selectionFeedback(field: ChatQuestion['fields'][number]) {
 
 async function send() {
   const current = question.value
-  if (!current || !fields.value || !ready.value || busy.value)
+  if (props.readOnly || !current || !fields.value || !ready.value || busy.value)
     return
   busy.value = true
   error.value = ''
@@ -116,7 +131,7 @@ async function send() {
 
 async function withdraw() {
   const current = question.value
-  if (!current || busy.value)
+  if (props.readOnly || !current || busy.value)
     return
   busy.value = true
   error.value = ''
