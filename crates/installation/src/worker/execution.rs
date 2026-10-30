@@ -722,6 +722,65 @@ mod tests {
             service.store.run_state(&resumed_id).await.unwrap().status,
             RunStatus::Succeeded
         );
+        // If the durable attempt loses its terminal evidence while settlement
+        // waits, finish_recovery must retain its newly paid reservation.
+        let retry_id = crate::config::id();
+        let run = json!({ "id": retry_id, "taskId": retry_id, "status": "running" });
+        service
+            .store
+            .transaction(move |db| db.add_run_fixture(&run, None).map(|_| ()))
+            .await
+            .unwrap();
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true }, "runnerId": "attempt",
+            "completed": true, "terminalCode": 0, "remainingMs": 60_000,
+        }))
+        .unwrap();
+        saved.store(&service.store, &retry_id).await.unwrap();
+        let checkpoint = Arc::new(Checkpoint::new(
+            service.store.clone(),
+            retry_id.clone(),
+            saved,
+        ));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (store, changed_id) = (service.store.clone(), retry_id.clone());
+        let blocker = tokio::spawn(async move {
+            store
+                .transaction(move |db| {
+                    let _ = entered_tx.send(());
+                    release_rx.recv().unwrap();
+                    let mut current = RunCheckpoint::load_in(db, &changed_id)?.unwrap();
+                    current.completed = Some(false);
+                    current.terminal_code = Some(None);
+                    current.store_in(db, &changed_id)
+                })
+                .await
+                .unwrap();
+        });
+        entered_rx.await.unwrap();
+        let (running_service, running_checkpoint) = (service.clone(), checkpoint.clone());
+        let settlement = tokio::spawn(async move {
+            record_failure(
+                &running_service,
+                &running_checkpoint,
+                &CancellationToken::new(),
+                &Error::unavailable("transport interrupted"),
+                &[],
+            )
+            .await
+            .unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap();
+        settlement.await.unwrap();
+        let paid = RunCheckpoint::load(&service.store, &retry_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(paid.controller_recoveries(), 1);
+        assert!(paid.has_controller_recovery_reservation());
         service.shutdown.cancel();
     }
 
