@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import build.cairn.app.data.*
 import build.cairn.contracts.NativeModeChangeOutput
 import build.cairn.contracts.NativeModePreview
@@ -16,7 +17,8 @@ internal const val NATIVE_ADMIN_WARNING =
 @Composable
 internal fun NativeNodeMode(vm: CairnViewModel, node: ExecutionNode, changed: suspend () -> Unit) {
     var review by remember(node.id) { mutableStateOf<NativeModePreview?>(null) }
-    var busy by remember(node.id) { mutableStateOf(false) }
+    val workspace by vm.state.collectAsStateWithLifecycle()
+    val busy = workspace.busy
     var error by remember(node.id) { mutableStateOf<String?>(null) }
     val target =
         node.nativeModeProposal?.mode
@@ -25,25 +27,28 @@ internal fun NativeNodeMode(vm: CairnViewModel, node: ExecutionNode, changed: su
             else if (node.nativeModeRequest?.mode == "administrator") "protected"
             else "administrator"
     fun preview(mode: String = target) {
-        busy = true
         error = null
-        vm.perform {
-            try {
-                val result: NativeModeChangeOutput =
-                    api.send(
-                        "POST",
-                        "/nodes/${node.id}/native-mode",
-                        buildJsonObject { put("mode", mode) },
-                    )
-                val prepared = result as? NativeModeChangeOutput.A ?: error("Aucun aperçu reçu")
-                review =
-                    NativeModePreview(previewId = prepared.previewId, preview = prepared.preview)
-            } catch (e: Exception) {
-                error = e.message
-            } finally {
-                busy = false
+        if (
+            !vm.tryPerform {
+                try {
+                    val result: NativeModeChangeOutput =
+                        api.send(
+                            "POST",
+                            "/nodes/${node.id}/native-mode",
+                            buildJsonObject { put("mode", mode) },
+                        )
+                    val prepared = result as? NativeModeChangeOutput.A ?: error("Aucun aperçu reçu")
+                    review =
+                        NativeModePreview(
+                            previewId = prepared.previewId,
+                            preview = prepared.preview,
+                        )
+                } catch (e: Exception) {
+                    error = e.message
+                }
             }
-        }
+        )
+            error = "Une autre opération est en cours. Réessayez."
     }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
@@ -116,27 +121,27 @@ internal fun NativeNodeMode(vm: CairnViewModel, node: ExecutionNode, changed: su
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Button(
                 onClick = {
-                    busy = true
                     error = null
-                    vm.perform {
-                        try {
-                            api.request(
-                                "POST",
-                                "/nodes/${node.id}/native-mode",
-                                buildJsonObject {
-                                    put("mode", impact.preview.mode)
-                                    put("previewId", impact.previewId)
-                                    put("confirm", true)
-                                },
-                            )
-                            review = null
-                            changed()
-                        } catch (e: Exception) {
-                            error = e.message
-                        } finally {
-                            busy = false
+                    if (
+                        !vm.tryPerform {
+                            try {
+                                api.request(
+                                    "POST",
+                                    "/nodes/${node.id}/native-mode",
+                                    buildJsonObject {
+                                        put("mode", impact.preview.mode)
+                                        put("previewId", impact.previewId)
+                                        put("confirm", true)
+                                    },
+                                )
+                                review = null
+                                changed()
+                            } catch (e: Exception) {
+                                error = e.message
+                            }
                         }
-                    }
+                    )
+                        error = "Une autre opération est en cours. Réessayez."
                 },
                 enabled = !busy,
                 colors =
