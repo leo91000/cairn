@@ -4254,6 +4254,7 @@ struct ReleaseRaceGate {
     entered: tokio::sync::Notify,
     proceed: tokio::sync::Semaphore,
     starts: std::sync::atomic::AtomicUsize,
+    deletes: std::sync::atomic::AtomicUsize,
 }
 
 /// Controller fixture for a real worker, with its final fencing call held open.
@@ -4299,7 +4300,9 @@ async fn connect_running_source(
             async move {
                 if request.method() == "POST" {
                     starting.starts.fetch_add(1, Ordering::SeqCst);
-                } else if request.method() == "DELETE" {
+                } else if request.method() == "DELETE"
+                    && stopping.deletes.fetch_add(1, Ordering::SeqCst) == 0
+                {
                     stopping.entered.notify_one();
                     stopping.proceed.acquire().await.unwrap().forget();
                 }
@@ -4572,6 +4575,7 @@ async fn idle_move_requested_before_old_worker_release_transfers_without_replay(
         entered: tokio::sync::Notify::new(),
         proceed: tokio::sync::Semaphore::new(0),
         starts: std::sync::atomic::AtomicUsize::new(0),
+        deletes: std::sync::atomic::AtomicUsize::new(0),
     });
     let mut tasks = connect_running_source(
         &owner,
@@ -4664,19 +4668,23 @@ async fn idle_move_requested_before_old_worker_release_transfers_without_replay(
         .deployment_lease(&owner.service, "test-idle-move".into(), false)
         .await
         .unwrap();
+    let plan = owner
+        .service
+        .config
+        .data_dir
+        .join("runner-plans")
+        .join(format!("{attempt}.json"));
+    assert!(
+        plan.exists(),
+        "the old worker must still own its runner plan"
+    );
     gate.proceed.add_permits(1);
+    // Plan removal is the last step of release; fencing alone releases the old
+    // placement earlier and would not establish the interleaving under test.
     common::eventually(
         Duration::from_secs(15),
         Duration::from_millis(20),
-        async || {
-            let old = owner
-                .service
-                .store
-                .get("node-attempts", &attempt)
-                .await
-                .unwrap()?;
-            (old["released"] == true).then_some(())
-        },
+        async || (!plan.exists()).then_some(()),
     )
     .await;
     let retained = owner.run(&run_id).await;
@@ -4694,6 +4702,7 @@ async fn idle_move_requested_before_old_worker_release_transfers_without_replay(
             .unwrap()["released"],
         false
     );
+    worker.kill().await.unwrap();
     owner
         .service
         .worker
@@ -4719,7 +4728,6 @@ async fn idle_move_requested_before_old_worker_release_transfers_without_replay(
         1,
         "the finished turn must not launch again"
     );
-    worker.kill().await.unwrap();
     stop.cancel();
     for task in tasks {
         task.abort();
