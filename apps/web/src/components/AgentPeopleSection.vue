@@ -36,6 +36,8 @@ const ownerEmail = computed(() => controls?.current.value?.email || 'Installatio
 const members = computed(() => props.rows.filter(row => row.known))
 const leftovers = computed(() => props.rows.filter(row => !row.known))
 const name = computed(() => props.agentName || 'this agent')
+// The cause, when it says more than the sentence above.
+const reason = computed(() => props.error === 'Members could not be loaded.' ? '' : props.error)
 </script>
 
 <template>
@@ -67,7 +69,10 @@ const name = computed(() => props.agentName || 'this agent')
     <template v-else>
       <div v-if="error" class="grid justify-items-start gap-3 rounded-xl border border-line bg-surface p-5" role="alert">
         <p class="text-sm">
-          Members could not be loaded, so access to this agent cannot be shown or changed. {{ error }}
+          Members could not be loaded, so access to this agent cannot be shown or changed.
+        </p>
+        <p v-if="reason" class="text-sm text-muted">
+          {{ reason }}
         </p>
         <UiButton size="small" :disabled="loading" @click="emit('retry')">
           {{ loading ? 'Loading…' : 'Try again' }}
@@ -143,7 +148,7 @@ const name = computed(() => props.agentName || 'this agent')
         {{ failure.message }}
       </UiAlert>
 
-      <p class="text-xs leading-relaxed text-muted">
+      <p v-if="!error" class="text-xs leading-relaxed text-muted">
         Changes apply right away. A member without access keeps reading conversations; their scheduled tasks on this agent are suspended until access returns.
       </p>
     </template>

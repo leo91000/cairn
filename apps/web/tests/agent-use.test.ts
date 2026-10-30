@@ -76,6 +76,9 @@ it('names the requesting conversation\'s agent in a delegated task\'s read-only 
   expect(readOnlyNotice(delegated, [{ id: 'requesting', agentName: 'Reviewer' }])).toBe(
     'Only people with access to Writer or to Reviewer can continue it or answer its questions, and only people with access to Writer can delete it. You can still pause or stop its work. Ask the installation owner for access.',
   )
-  expect(readOnlyNotice(delegated, [])).toMatch(/^Only people with access to Writer can continue it/)
+  // Without a requesting conversation, one agent decides everything: it is named once.
+  expect(readOnlyNotice(delegated, [])).toBe(
+    'Only people with access to Writer can continue it, answer its questions or delete it. You can still pause or stop its work. Ask the installation owner for access.',
+  )
   expect(readOnlyNotice({ agentName: '', requestedBy: null }, [])).toMatch(/^Only people with access to its agent can/)
 })

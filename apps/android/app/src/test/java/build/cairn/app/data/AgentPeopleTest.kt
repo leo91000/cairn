@@ -61,9 +61,10 @@ class AgentPeopleTest {
             "Seules les personnes ayant accès à Rédacteur ou à Relecteur peuvent la poursuivre ou répondre à ses questions, et seules celles ayant accès à Rédacteur peuvent la supprimer. Vous pouvez toujours la mettre en pause ou l’arrêter. Demandez l’accès au propriétaire de l’installation.",
             readOnlyNotice(delegated, listOf(requesting, delegated)),
         )
-        assertTrue(
-            readOnlyNotice(delegated, listOf(delegated))
-                .startsWith("Seules les personnes ayant accès à Rédacteur peuvent")
+        // Without a requesting conversation, one agent decides everything: it is named once.
+        assertEquals(
+            "Seules les personnes ayant accès à Rédacteur peuvent la poursuivre, répondre à ses questions ou la supprimer. Vous pouvez toujours la mettre en pause ou l’arrêter. Demandez l’accès au propriétaire de l’installation.",
+            readOnlyNotice(delegated, listOf(delegated)),
         )
         assertTrue(
             readOnlyNotice(Chat(id = "alone"), emptyList())

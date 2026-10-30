@@ -30,6 +30,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
+private const val MEMBERS_NOT_LOADED = "Les membres n’ont pas pu être chargés."
+
 /**
  * Who may use one agent, as the owner manages it: members come from the Beacon, the installation
  * keeps which of them may use the agent. Each switch applies at once, outside the page's draft.
@@ -59,7 +61,7 @@ internal class AgentPeople {
             loaded = true
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            error = e.message ?: "Les membres n’ont pas pu être chargés."
+            error = e.message ?: MEMBERS_NOT_LOADED
         } finally {
             loading = false
         }
@@ -164,10 +166,17 @@ internal fun PeopleSection(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                "Les membres n’ont pas pu être chargés : l’accès à cet agent ne peut pas être affiché ni modifié. $error",
+                "Les membres n’ont pas pu être chargés : l’accès à cet agent ne peut pas être affiché ni modifié.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onErrorContainer,
             )
+            // The cause, when it says more than the sentence above.
+            if (error != MEMBERS_NOT_LOADED)
+                Text(
+                    error,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f),
+                )
             OutlinedButton(onClick = retry, enabled = !people.loading) {
                 Text(if (people.loading) "Chargement…" else "Réessayer")
             }

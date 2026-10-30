@@ -29,10 +29,10 @@ export function readOnlyNotice(chat: Pick<ChatView, 'agentName' | 'requestedBy'>
   const own = chat.agentName || 'its agent'
   const requester = chat.requestedBy?.chatId
   const requesting = requester ? chats.find(item => item.id === requester) : undefined
-  const who = requesting
-    ? `Only people with access to ${own} or to ${requesting.agentName || 'the agent of the conversation that delegated it'}`
-    : `Only people with access to ${own}`
-  return `${who} can continue it or answer its questions, and only people with access to ${own} can delete it. You can still pause or stop its work. Ask the installation owner for access.`
+  const rights = requesting
+    ? `Only people with access to ${own} or to ${requesting.agentName || 'the agent of the conversation that delegated it'} can continue it or answer its questions, and only people with access to ${own} can delete it.`
+    : `Only people with access to ${own} can continue it, answer its questions or delete it.`
+  return `${rights} You can still pause or stop its work. Ask the installation owner for access.`
 }
 
 /** The agent a new conversation starts with: Main when allowed, otherwise the first usable one. */
