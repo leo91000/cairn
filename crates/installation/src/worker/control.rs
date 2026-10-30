@@ -462,10 +462,12 @@ mod tests {
                     "waitContinuation": { "observation": { "state": "completed" } },
                 }), None)?;
                     db.save_checkpoint_boundary("mission", &json!({
-                    "completed": completed, "launched": true, "prepared": { "cwd": "/workspace" },
+                    "completed": completed, "outputInterrupted": true, "launched": true, "prepared": { "cwd": "/workspace" },
                 }))?;
                     let resumed = requeue(db, "mission")?;
                     assert_eq!(resumed["status"], "queued");
+                    let checkpoint = db.checkpoint_boundary("mission")?.unwrap();
+                    assert!(checkpoint["outputInterrupted"].is_null());
                     if completed {
                         assert_ne!(resumed["missionTurnId"], "previous-turn");
                         assert!(resumed["waitContinuation"].is_null());

@@ -2111,6 +2111,10 @@ provider,model,reasoning,speed,mode,status,created_at,question_id FROM retained_
                             },
                         )?;
                         let resumed = db.run("run")?.unwrap();
+                        let mut interrupted = db.checkpoint_boundary("run")?.unwrap();
+                        interrupted["completed"] = false.into();
+                        interrupted["outputInterrupted"] = true.into();
+                        db.save_checkpoint_boundary("run", &interrupted)?;
                         continue_run(
                             db,
                             &chat,
@@ -2127,6 +2131,9 @@ provider,model,reasoning,speed,mode,status,created_at,question_id FROM retained_
                             },
                         )?;
                         let next = db.run("run")?.unwrap();
+                        assert!(
+                            db.checkpoint_boundary("run")?.unwrap()["outputInterrupted"].is_null()
+                        );
                         assert_eq!(next["sessionId"], "new-native");
                         assert!(next["chatExecution"]["context"].is_null());
                         Ok(())
