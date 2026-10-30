@@ -2888,6 +2888,9 @@ async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn
                                             }
                                             tokio::time::sleep(Duration::from_millis(10)).await;
                                         }
+                                        // Let the immediate /wait response reach the client
+                                        // before cutting the next output frame.
+                                        tokio::time::sleep(Duration::from_millis(250)).await;
                                         return Some((
                                             Ok(axum::body::Bytes::from_static(b"{\"type\":")),
                                             (2, store, id, wait_returned, frame),
