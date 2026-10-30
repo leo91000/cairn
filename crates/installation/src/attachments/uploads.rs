@@ -190,6 +190,10 @@ where
 /// unique filename against SQL, so a newly reserved writer is never collected
 /// from a stale snapshot. Migrated stable filenames are never speculative files.
 pub(crate) async fn reconcile(store: &Store, root: &Path) -> Result<()> {
+    private_dir(root).await?;
+    if let Some(parent) = root.parent() {
+        tokio::fs::File::open(parent).await?.sync_all().await?;
+    }
     expire(store, root).await?;
     let mut chats = match tokio::fs::read_dir(root).await {
         Ok(entries) => entries,

@@ -128,8 +128,8 @@ async fn real_v16_upgrade_preserves_metadata_files_quota_and_every_unrelated_tab
         .store_attachment(chat, file, "screenshot.gif", b"GIF89a\x02\x00\x03\x00")
         .await
         .unwrap();
-    assert_eq!(retry["width"], 2);
-    assert_eq!(retry["height"], 3);
+    assert_eq!(retry.width, Some(2));
+    assert_eq!(retry.height, Some(3));
     assert_eq!(
         s.store_attachment(chat, file, "screenshot.gif", b"changed")
             .await

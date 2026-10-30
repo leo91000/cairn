@@ -298,7 +298,7 @@ impl ChatOperation {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&input.data)
                 .map_err(|_| Error::bad("Expected base64 file data."))?;
-            return s
+            let attachment = s
                 .store_attachment_authorized(
                     &input.chat_id,
                     &input.attachment_id,
@@ -306,7 +306,8 @@ impl ChatOperation {
                     &bytes,
                     crate::installation_mcp::management_authorization(bearer.as_deref()),
                 )
-                .await;
+                .await?;
+            return Ok(serde_json::to_value(attachment)?);
         }
         let args = match self.name {
             "list_chat_questions" => {

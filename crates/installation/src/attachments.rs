@@ -231,7 +231,7 @@ impl Service {
         id: &str,
         name: &str,
         bytes: &[u8],
-    ) -> Result<Value> {
+    ) -> Result<ChatAttachment> {
         self.store_attachment_authorized(chat, id, name, bytes, |_| Ok(()))
             .await
     }
@@ -243,7 +243,7 @@ impl Service {
         name: &str,
         bytes: &[u8],
         authorize: F,
-    ) -> Result<Value>
+    ) -> Result<ChatAttachment>
     where
         F: Fn(&Db<'_>) -> Result<()> + Send + Sync + Clone + 'static,
     {
@@ -267,17 +267,15 @@ impl Service {
             width: dimensions.map(|(w, _)| w),
             height: dimensions.map(|(_, h)| h),
         };
-        Ok(serde_json::to_value(
-            self.attachments
-                .upload(
-                    self.store.clone(),
-                    self.config.data_dir.join("chat-attachments"),
-                    attachment,
-                    bytes.to_vec(),
-                    authorize,
-                )
-                .await?,
-        )?)
+        self.attachments
+            .upload(
+                self.store.clone(),
+                self.config.data_dir.join("chat-attachments"),
+                attachment,
+                bytes.to_vec(),
+                authorize,
+            )
+            .await
     }
 
     async fn download_attachment(&self, chat: &str, id: &str) -> Result<Response> {

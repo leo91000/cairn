@@ -40,7 +40,7 @@ fn gated(s: &Arc<Service>, id: &str) -> Arc<PreparationGate> {
     gate
 }
 
-fn upload(s: &Arc<Service>, chat: &str, id: &str) -> JoinHandle<Result<Value>> {
+fn upload(s: &Arc<Service>, chat: &str, id: &str) -> JoinHandle<Result<ChatAttachment>> {
     let (s, chat, id) = (s.clone(), chat.to_owned(), id.to_owned());
     tokio::spawn(async move { s.store_attachment(&chat, &id, "file.txt", b"data").await })
 }
@@ -64,8 +64,8 @@ async fn slow_upload_allows_other_conversations_and_files_and_identical_retry_co
     let same_chat = settle(s.store_attachment(&a, &id(), "another.txt", b"more"))
         .await
         .unwrap();
-    assert_eq!(other_chat["chatId"], b);
-    assert_eq!(same_chat["chatId"], a);
+    assert_eq!(other_chat.chat_id, b);
+    assert_eq!(same_chat.chat_id, a);
     let retry = upload(&s, &a, &file);
     gate.resume.notify_one();
     let first = settle(first).await.unwrap().unwrap();
@@ -107,7 +107,7 @@ async fn cancellation_releases_reserved_bytes_and_allows_same_identifier_to_retr
     assert!(first.await.unwrap_err().is_cancelled());
     // The retry waits for owned cleanup, then must reuse the quota and identity.
     let saved = settle(upload(&s, &a, &file)).await.unwrap().unwrap();
-    assert_eq!(saved["id"], file);
+    assert_eq!(saved.id, file);
     assert_eq!(
         tokio::fs::read(source(&s, &a, &file).await).await.unwrap(),
         b"data"
