@@ -123,7 +123,9 @@ test('generated defaults use single selection for both cards and submission', as
   await expect(page.getByRole('radio', { name: 'Structured editor Groups and filters', exact: true })).not.toBeChecked()
   await expect(page.getByRole('radio', { name: 'Simple filters Conditions only', exact: true })).toBeChecked()
   await expect(page.getByText('Choose one option, or answer using text only')).toBeVisible()
+  const submission = page.waitForResponse('**/api/chats/chat/questions/question/answer')
   await page.getByRole('button', { name: 'Send answer', exact: true }).click()
+  await submission
   expect(answer.answers.filters).toEqual({ selected: ['simple'], comment: '' })
 })
 
