@@ -1,9 +1,38 @@
 import { Buffer } from 'node:buffer'
 import { once } from 'node:events'
+import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { expect, test } from '@playwright/test'
-import { beaconRelayFixture } from './beacon-relay-fixture'
+import { beaconRelayFixture, executeBeaconSql } from './beacon-relay-fixture'
 import { relayProtocolVersion } from './relay-protocol'
+
+for (const responseStatus of [503, 200, null]) {
+  test(`Beacon startup reports an occupied port when its listener ${responseStatus ?? 'hangs'}`, async () => {
+    const occupant = createServer((_request, response) => {
+      if (responseStatus)
+        response.writeHead(responseStatus).end()
+    })
+    occupant.listen(0, '127.0.0.1')
+    await once(occupant, 'listening')
+    const port = (occupant.address() as { port: number }).port
+    const database = new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!)
+    const schema = `beacon_start_${crypto.randomUUID().replaceAll('-', '')}`
+    executeBeaconSql(database, `CREATE SCHEMA ${schema}`)
+    const isolated = new URL(database)
+    isolated.searchParams.set('options', `-c search_path=${schema}`)
+    const fixture = await beaconRelayFixture(port)
+    try {
+      const child = fixture.beacon(isolated.toString())
+      await expect(fixture.waitForBeacon(child)).rejects.toThrow('Could not bind CAIRN_BEACON_LISTEN')
+    }
+    finally {
+      await fixture.close()
+      occupant.closeAllConnections()
+      await new Promise<void>(resolve => occupant.close(() => resolve()))
+      executeBeaconSql(database, `DROP SCHEMA ${schema} CASCADE`)
+    }
+  })
+}
 
 test('claims an installation and sends after relay restarts and beacon session renewal', async ({ page }) => {
   test.setTimeout(120000)

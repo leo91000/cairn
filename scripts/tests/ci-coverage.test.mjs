@@ -96,6 +96,23 @@ describe('parallel CI coverage', () => {
     expect(groups.filter(group => group.projects === 'layout-chromium-*')).toHaveLength(1)
   })
 
+  it('keeps the browser execution deadline independent of slow preparation and evidence upload', () => {
+    const job = quality.jobs.browser
+    const tests = job.steps.find(step => step.run?.includes('pnpm test:e2e'))
+    const executionMinutes = tests['timeout-minutes']
+    expect(Number.isInteger(executionMinutes)).toBe(true)
+    expect(executionMinutes).toBeGreaterThan(0)
+    expect(executionMinutes).toBeLessThanOrEqual(10)
+
+    // Run 41079506538 reached its first test after this preparation interval.
+    // Replaying that delay must leave the complete execution budget and time
+    // to upload the failure evidence before the outer job deadline.
+    const preparationSeconds = (Date.parse('2026-10-30T15:33:02Z') - Date.parse('2026-10-30T15:23:43Z')) / 1000
+    const evidenceSeconds = 60
+    const requiredSeconds = preparationSeconds + executionMinutes * 60 + evidenceSeconds
+    expect(job['timeout-minutes'] * 60).toBeGreaterThan(requiredSeconds)
+  })
+
   it('keeps Android unit tests, lint and all device shards as publication prerequisites', () => {
     expect(android.jobs.check.strategy.matrix.task).toEqual(['testDebugUnitTest', 'lintDebug'])
     expect(android.jobs.device.strategy.matrix.shard).toContain('[1, 2, 3, 4]')
