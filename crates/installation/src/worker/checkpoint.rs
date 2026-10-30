@@ -396,6 +396,17 @@ impl Checkpoint {
         })
     }
 
+    // A deadline including pause credit and its cumulative counter must be
+    // captured together. account_pause holds this same lock while changing both.
+    fn budget_snapshot(&self) -> (Option<i64>, AdministrativePauseObservation) {
+        let previous = self.pause_observation.lock().unwrap();
+        let observation = AdministrativePauseObservation {
+            attempt: previous.0.clone(),
+            total_ms: previous.1,
+        };
+        (self.deadline(), observation)
+    }
+
     pub fn account_pause(&self, attempt: &str, total_ms: u64) {
         let mut previous = self.pause_observation.lock().unwrap();
         if previous.0 != attempt {
@@ -462,14 +473,8 @@ impl Checkpoint {
         if !change(&mut saved) {
             return Ok(());
         }
-        {
-            let previous = self.pause_observation.lock().unwrap();
-            saved.administrative_pause_observation = Some(AdministrativePauseObservation {
-                attempt: previous.0.clone(),
-                total_ms: previous.1,
-            });
-        }
-        let deadline = self.deadline();
+        let (deadline, observation) = self.budget_snapshot();
+        saved.administrative_pause_observation = Some(observation);
         let id = self.id.clone();
         let saved = self
             .store
@@ -494,7 +499,7 @@ impl Checkpoint {
         let expected = state.clone();
         let fallback = expected.clone();
         let id = self.id.clone();
-        let deadline = self.deadline();
+        let (deadline, observation) = self.budget_snapshot();
         let (saved, value) = self
             .store
             .transaction(move |db| {
@@ -514,6 +519,7 @@ impl Checkpoint {
                 }
                 saved.remaining_ms =
                     Some(deadline.map(|deadline| deadline.saturating_sub(now()).max(0)));
+                saved.administrative_pause_observation = Some(observation);
                 let value = decision(&mut saved, db)?;
                 saved.store_in(db, &id)?;
                 Ok((saved, value))
@@ -553,13 +559,11 @@ impl Checkpoint {
             if changes.completed {
                 saved.completed = Some(true);
             }
-            let previous = self.pause_observation.lock().unwrap();
-            saved.administrative_pause_observation = Some(AdministrativePauseObservation {
-                attempt: previous.0.clone(),
-                total_ms: previous.1,
-            });
         }
-        let deadline = self.deadline();
+        let (deadline, observation) = self.budget_snapshot();
+        if let Some(saved) = &mut saved {
+            saved.administrative_pause_observation = Some(observation);
+        }
         let id = self.id.clone();
         let saved = self
             .store
@@ -807,6 +811,45 @@ mod tests {
             recovered.deadline(),
             before.map(|deadline| deadline + 2_000)
         );
+    }
+
+    #[tokio::test]
+    async fn decision_persists_the_pause_counter_that_extended_its_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({ "id": "pause-decision", "taskId": "pause", "status": "running" }),
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let checkpoint = Checkpoint::new(
+            store.clone(),
+            "pause-decision".into(),
+            RunCheckpoint::fresh(Some(60_000)),
+        );
+        checkpoint.account_pause("attempt-a", 30_000);
+        checkpoint.decide(|_, _| Ok(())).await.unwrap();
+        let saved = RunCheckpoint::load(&store, "pause-decision")
+            .await
+            .unwrap()
+            .unwrap();
+        let observation = saved.administrative_pause_observation.as_ref().unwrap();
+        assert_eq!(
+            (observation.attempt.as_str(), observation.total_ms),
+            ("attempt-a", 30_000)
+        );
+        let recovered = Checkpoint::new(store, "pause-decision".into(), saved);
+        let deadline = recovered.deadline().unwrap();
+        recovered.account_pause("attempt-a", 30_000);
+        recovered.account_pause("attempt-a", 29_000);
+        assert_eq!(recovered.deadline(), Some(deadline));
+        recovered.account_pause("attempt-a", 32_000);
+        assert_eq!(recovered.deadline(), Some(deadline + 2_000));
     }
 
     #[tokio::test]

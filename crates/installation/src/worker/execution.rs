@@ -183,21 +183,9 @@ async fn record_failure(
         // Do not let the transport error or its exhausted replay budget hide
         // a healthy controller result, or replay a completed failed flush.
         let id = run_id.to_owned();
-        let expected = saved.clone();
-        let deadline = checkpoint.deadline();
-        s.store
-            .transaction(move |db| {
-                let Some(mut current) = RunCheckpoint::load_in(db, &id)? else {
-                    return Ok(());
-                };
-                if !crate::recovery::same_execution(Some(&current), Some(&expected)) {
-                    return Ok(());
-                }
-                if let Some(deadline) = deadline {
-                    current.remaining_ms = Some(Some(deadline.saturating_sub(now()).max(0)));
-                    current.store_in(db, &id)?;
-                }
-                super::schedule::finish_recovery(db, &id, Some(&current)).map(|_| ())
+        checkpoint
+            .decide(move |current, db| {
+                super::schedule::finish_recovery(db, &id, Some(current)).map(|_| ())
             })
             .await?;
         return Ok(());
