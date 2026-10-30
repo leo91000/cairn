@@ -543,6 +543,13 @@ mod tests {
                     &id,
                     crate::runs::RunChanges {
                         status: Some(status),
+                        wakeup: Some((status == RunStatus::Waiting).then(|| {
+                            serde_json::from_value(json!({
+                                "id": "wake", "messageId": null, "reason": "Waiting", "seconds": 60,
+                                "createdAt": now(), "wakeAt": now() + 60_000,
+                            }))
+                            .unwrap()
+                        })),
                         boundary: Some(json!({ "moveRequest": { "nodeId": "destination" } })),
                         ..Default::default()
                     },
@@ -562,6 +569,9 @@ mod tests {
             let run = service.store.run(&id).await.unwrap();
             assert_eq!(run["status"], status);
             assert_eq!(run["moveRequest"].is_object(), status == RunStatus::Waiting);
+            if status == RunStatus::Waiting {
+                assert_eq!(run["wakeup"]["id"], "wake");
+            }
         }
         service.shutdown.cancel();
     }
