@@ -1322,6 +1322,7 @@ mod tests {
                 .as_ref(),
             Some(&retry.cause)
         );
+        admitted.provider_failed = None;
         admitted.start_rejected = Some(true);
         admitted.terminal_code = None;
         admitted.store(&service.store, &id).await.unwrap();

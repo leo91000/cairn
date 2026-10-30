@@ -1553,6 +1553,7 @@ mod tests {
         let (_root, service, _chat, run, _workspace) = fixture().await;
         service.store.transaction(move |db| {
             let cause = crate::run_retry::Cause::classify(&json!({"code":"server_error", "message":"Provider unavailable"})).unwrap();
+            for terminal in [json!(null), json!(1)] {
             for case in ["cancel", "expired", "cause", "provider", "unknown_terminal", "terminal_zero", "terminal_other", "terminal_storage", "terminal_signal", "completed", "finalization", "replacement_runner", "replacement_node", "replacement_process", "new_failure", "new_admission", "new_turn", "unfenced_release", "already_reserved"] {
                 let started_at = if case == "expired" { now() - crate::run_retry::MAX_RECOVERY_MS - 1 } else { now() };
                 let mut retry = crate::run_retry::Retry::next(None, cause.clone(), started_at).unwrap();
@@ -1564,7 +1565,7 @@ mod tests {
                 })?;
                 let mut saved = RunCheckpoint::from_value(json!({
                     "prepared":{"backend":"native","isolated":true}, "runnerId":"old-attempt",
-                    "nodeId":"old-node", "remainingMs":null, "completed":false, "terminalCode":null,
+                    "nodeId":"old-node", "remainingMs":null, "completed":false, "terminalCode":terminal.clone(),
                     "providerFailed":true, "lastError":"Provider unavailable", "retryCause":cause
                 }))?;
                 let expected = saved.clone();
@@ -1591,6 +1592,7 @@ mod tests {
                 let expected = if case == "unfenced_release" { &saved } else { &expected };
                 assert!(migrate_legacy_provider_retry_in(db, &run, Some(expected))?.is_none(), "{case}");
                 assert_eq!(RunCheckpoint::load_in(db, &run)?.unwrap().to_value()?, before, "{case}");
+            }
             }
             Ok(())
         }).await.unwrap();
