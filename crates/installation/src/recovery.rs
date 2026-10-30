@@ -84,7 +84,7 @@ pub(crate) enum ObservationAction {
     Reserve,
     Release,
     Exhausted,
-    Record(Option<i32>),
+    Record(Option<crate::runner::ControllerResult>),
 }
 
 pub(crate) async fn terminal_code<F, Fut>(

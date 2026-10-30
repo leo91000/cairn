@@ -1,9 +1,9 @@
 //! Commit an agent retry once; admission waits without retaining an account.
-use super::checkpoint::{Checkpoint, RunCheckpoint};
+use super::checkpoint::Checkpoint;
 use crate::{
     config::now,
     error::{Error, Result},
-    run_retry::{Cause, Retry},
+    run_retry::Retry,
     run_status::RunStatus,
     service::Service,
     store::Db,
@@ -25,44 +25,57 @@ pub(super) async fn schedule(
     let Some(cause) = saved.retry_cause.as_ref().and_then(Option::as_ref) else {
         return Ok(false);
     };
-    if saved.completed() || cause.message != error.message {
+    if saved.completed()
+        || (saved.managed()
+            && saved.provider_failed()
+            && !cause.startup
+            && saved.confirmed_provider_failure() != Some(cause))
+        || saved.finalization_error().is_some()
+        || (cause.message != error.message && saved.confirmed_provider_failure() != Some(cause))
+    {
         return Ok(false);
     }
     let id = checkpoint.id.clone();
-    let expected = saved.clone();
-    let deadline = checkpoint.deadline();
     let cancel = cancel.clone();
     let shutdown = s.shutdown.clone();
     let cause = cause.clone();
-    s.store
-        .transaction(move |db| {
-            let current = RunCheckpoint::load_in(db, &id)?;
+    let error_message = error.message.clone();
+    checkpoint
+        .decide(move |current, db| {
+            let run = db
+                .run_state(&id)?
+                .ok_or_else(|| Error::not_found("Run not found"))?;
             if cancel.is_cancelled()
                 || shutdown.is_cancelled()
-                || deadline.is_some_and(|deadline| now() >= deadline)
-                || current.as_ref().map_or(
-                    expected.runner_id().is_some() || expected.process().is_some(),
-                    |current| !crate::recovery::same_execution(Some(current), Some(&expected)),
-                )
+                || matches!(current.remaining_ms, Some(Some(i64::MIN..=0)))
+                || current.completed()
+                || current.finalization_error().is_some()
+                || (current.managed()
+                    && current.provider_failed()
+                    && !cause.startup
+                    && current.confirmed_provider_failure() != Some(&cause))
+                || current.retry_cause.as_ref().and_then(Option::as_ref) != Some(&cause)
+                || (cause.message != error_message
+                    && current.confirmed_provider_failure() != Some(&cause))
+                || run.cancel_requested_at.is_some()
+                || (run.session_id.is_none() && !cause.startup)
+                || !run.status.is_active()
             {
                 return Ok(false);
             }
-            schedule_in(db, &id, cause)
+            schedule_in(db, &id, current, &run, cause)
         })
         .await
 }
 
-/// Active failure and restart settlement commit the same provider retry policy.
-pub(super) fn schedule_in(db: &Db<'_>, id: &str, cause: Cause) -> Result<bool> {
-    let run = db
-        .run_state(id)?
-        .ok_or_else(|| Error::not_found("Run not found"))?;
-    if run.cancel_requested_at.is_some()
-        || (run.session_id.is_none() && !cause.startup)
-        || !run.status.is_active()
-    {
-        return Ok(false);
-    }
+/// Commit a provider retry and its attempt-bound authorization together.
+pub(super) fn schedule_in(
+    db: &Db<'_>,
+    id: &str,
+    current: &mut super::checkpoint::RunCheckpoint,
+    run: &cairn_contracts::RunState,
+    cause: crate::run_retry::Cause,
+) -> Result<bool> {
     let Some(retry) = Retry::next(run.retry.as_ref(), cause, now()) else {
         return Ok(false);
     };
@@ -72,27 +85,28 @@ pub(super) fn schedule_in(db: &Db<'_>, id: &str, cause: Cause) -> Result<bool> {
         "Temporary agent error. Retrying in {seconds} seconds (attempt {}/{}).",
         retry.attempt, retry.limit
     );
-    db.change_run(
-        id,
-        crate::runs::RunChanges {
-            status: Some(RunStatus::Queued),
-            retry: Some(Some(retry.clone())),
-            recovery_pending: Some(true),
-            resume_available: Some(true),
-            finished_at: Some(None),
-            error: Some(None),
-            account_wait_reason: Some(Some(reason.clone())),
-            account_required: Some(None),
-            ..Default::default()
-        },
-    )?;
+    let patch = crate::runs::RunChanges {
+        status: Some(RunStatus::Queued),
+        retry: Some(Some(retry.clone())),
+        recovery_pending: Some(true),
+        resume_available: Some(true),
+        finished_at: Some(None),
+        error: Some(None),
+        account_wait_reason: Some(Some(reason.clone())),
+        account_required: Some(None),
+        ..Default::default()
+    };
+    if current.managed() {
+        current.provider_retry_reservation = current.runner_id().map(str::to_owned);
+    }
+    db.change_run(id, patch)?;
     db.event(
         id,
         &EventKind::RetryScheduled,
         &reason,
-        Some(&json!({"retry":retry})),
+        Some(&json!({ "retry": retry })),
     )?;
-    db.audit("run.retry.scheduled", &json!({"id":id,"retry":retry}))?;
+    db.audit("run.retry.scheduled", &json!({ "id": id, "retry": retry }))?;
     Ok(true)
 }
 

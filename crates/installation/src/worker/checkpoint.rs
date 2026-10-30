@@ -82,6 +82,12 @@ pub struct RunCheckpoint {
     pub last_error: Nullable<String>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub retry_cause: Nullable<crate::run_retry::Cause>,
+    /// A classified turn.failed durably recorded for this exact managed attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_failure_attempt: Option<String>,
+    /// Controller-confirmed storage finalization failure for the same attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finalization_failure_attempt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -89,6 +95,15 @@ pub struct RunCheckpoint {
     /// A recovery already charged to the budget, bound to the stopped attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub controller_recovery_reservation: Option<String>,
+    /// A paid move recovery that reached its destination, bound to the stopped attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub move_recovery_reservation: Option<String>,
+    /// A provider retry already scheduled and charged to this attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_retry_reservation: Option<String>,
+    /// Previously paid admission carried into an attempt until its start is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_paid_admission: Option<PaidAdmission>,
     /// A controller's capacity refusal delays admission without consuming a recovery attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity_retry_at: Option<i64>,
@@ -101,6 +116,17 @@ pub struct RunCheckpoint {
     pub resources: Option<crate::nodes::Resources>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub administrative_pause_observation: Option<AdministrativePauseObservation>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaidAdmission {
+    pub attempt: String,
+    pub controller: bool,
+    #[serde(default)]
+    pub capacity_refused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_cause: Option<crate::run_retry::Cause>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -284,16 +310,10 @@ impl RunCheckpoint {
 
     /// A healthy controller exit cannot prove that the provider finished its turn.
     pub fn output_error(&self) -> Option<&'static str> {
-        let confirmed_provider_failure = self
-            .retry_cause
-            .as_ref()
-            .and_then(Option::as_ref)
-            .is_some_and(|cause| cause.message == self.last_error());
-        if !self.managed()
-            || self.completed()
-            || self.provider_failed()
-            || (confirmed_provider_failure && self.terminal_code() != Some(0))
-        {
+        if !self.managed() || self.completed() || self.provider_failed() {
+            return None;
+        }
+        if self.confirmed_provider_failure().is_some() {
             return None;
         }
         if self.output_interrupted == Some(true) {
@@ -304,7 +324,28 @@ impl RunCheckpoint {
         (self.terminal_code() == Some(0)).then_some("Execution ended before the agent's completion was recorded. The response may be incomplete; automatic replay was stopped.")
     }
 
+    /// A classified provider ending is authoritative only for its own attempt
+    /// and a confirmed ordinary failure, never a controller/finalization fault.
+    pub fn confirmed_provider_failure(&self) -> Option<&crate::run_retry::Cause> {
+        if !self.managed()
+            || self.completed()
+            || self.terminal_code() != Some(1)
+            || self.runner_id().is_none()
+            || self.runner_id() != self.provider_failure_attempt.as_deref()
+        {
+            return None;
+        }
+        self.retry_cause.as_ref().and_then(Option::as_ref)
+    }
+
     pub fn finalization_error(&self) -> Option<&str> {
+        if self.runner_id().is_some()
+            && self.runner_id() == self.finalization_failure_attempt.as_deref()
+        {
+            return Some(
+                "The filesystem could not be flushed. Working files were preserved; automatic replay was stopped.",
+            );
+        }
         if !self.managed() || !self.completed() || self.terminal_code() == Some(0) {
             return None;
         }
@@ -313,6 +354,29 @@ impl RunCheckpoint {
         } else {
             self.last_error()
         })
+    }
+
+    /// Commit the controller's typed finalization evidence with its status.
+    pub fn record_controller_result(
+        &mut self,
+        db: &Db<'_>,
+        id: &str,
+        attempt: &str,
+        result: Option<crate::runner::ControllerResult>,
+    ) -> Result<()> {
+        if self.runner_id() != Some(attempt) {
+            return Err(crate::error::Error::conflict(
+                "Execution attempt changed during observation.",
+            ));
+        }
+        self.terminal_code = Some(result.map(|result| result.code));
+        if result.is_some_and(|result| result.finalization_failed)
+            && self.finalization_failure_attempt.as_deref() != Some(attempt)
+        {
+            self.finalization_failure_attempt = Some(attempt.to_owned());
+            db.event(id, &cairn_contracts::EventKind::Error, "The filesystem could not be flushed. Working files were preserved; automatic replay was stopped.", None)?;
+        }
+        Ok(())
     }
 
     /// The prepared execution, when the workspace has been prepared.
@@ -350,6 +414,45 @@ impl RunCheckpoint {
 
     pub fn controller_recoveries(&self) -> u64 {
         self.controller_recoveries.unwrap_or(0)
+    }
+
+    /// Transfer a paid authorization to a candidate attempt, without allowing
+    /// it to be reused until an explicit capacity rejection proves no start.
+    pub fn bind_paid_admission(&mut self, runner: &str, state: &cairn_contracts::RunState) {
+        if self.runner_id() != Some(runner) {
+            let controller =
+                self.controller_recoveries() > 0 && self.has_controller_recovery_reservation();
+            let provider_paid = self.turn_pending != Some(true)
+                && self.has_provider_retry_reservation()
+                && state.retry.as_ref().is_some_and(|retry| {
+                    (retry.next_attempt_at.is_some()
+                        || state.status == cairn_contracts::RunStatus::Running)
+                        && self.retry_cause.as_ref().and_then(Option::as_ref) == Some(&retry.cause)
+                });
+            let provider_cause = if provider_paid {
+                state.retry.as_ref().map(|retry| retry.cause.clone())
+            } else {
+                None
+            };
+            self.pending_paid_admission =
+                (controller || provider_cause.is_some()).then(|| PaidAdmission {
+                    attempt: runner.to_owned(),
+                    controller,
+                    capacity_refused: false,
+                    provider_cause,
+                });
+        }
+        self.runner_id = Some(Some(runner.to_owned()));
+        self.provider_failure_attempt = None;
+        self.finalization_failure_attempt = None;
+        self.controller_recovery_reservation = None;
+        self.move_recovery_reservation = None;
+        self.provider_retry_reservation = None;
+    }
+
+    pub fn has_provider_retry_reservation(&self) -> bool {
+        self.runner_id()
+            .is_some_and(|id| self.provider_retry_reservation.as_deref() == Some(id))
     }
 
     pub fn has_controller_recovery_reservation(&self) -> bool {
@@ -420,6 +523,17 @@ impl Checkpoint {
         })
     }
 
+    // A deadline including pause credit and its cumulative counter must be
+    // captured together. account_pause holds this same lock while changing both.
+    fn budget_snapshot(&self) -> (Option<i64>, AdministrativePauseObservation) {
+        let previous = self.pause_observation.lock().unwrap();
+        let observation = AdministrativePauseObservation {
+            attempt: previous.0.clone(),
+            total_ms: previous.1,
+        };
+        (self.deadline(), observation)
+    }
+
     pub fn account_pause(&self, attempt: &str, total_ms: u64) {
         let mut previous = self.pause_observation.lock().unwrap();
         if previous.0 != attempt {
@@ -486,14 +600,8 @@ impl Checkpoint {
         if !change(&mut saved) {
             return Ok(());
         }
-        {
-            let previous = self.pause_observation.lock().unwrap();
-            saved.administrative_pause_observation = Some(AdministrativePauseObservation {
-                attempt: previous.0.clone(),
-                total_ms: previous.1,
-            });
-        }
-        let deadline = self.deadline();
+        let (deadline, observation) = self.budget_snapshot();
+        saved.administrative_pause_observation = Some(observation);
         let id = self.id.clone();
         let saved = self
             .store
@@ -518,7 +626,7 @@ impl Checkpoint {
         let expected = state.clone();
         let fallback = expected.clone();
         let id = self.id.clone();
-        let deadline = self.deadline();
+        let (deadline, observation) = self.budget_snapshot();
         let (saved, value) = self
             .store
             .transaction(move |db| {
@@ -538,6 +646,7 @@ impl Checkpoint {
                 }
                 saved.remaining_ms =
                     Some(deadline.map(|deadline| deadline.saturating_sub(now()).max(0)));
+                saved.administrative_pause_observation = Some(observation);
                 let value = decision(&mut saved, db)?;
                 saved.store_in(db, &id)?;
                 Ok((saved, value))
@@ -566,12 +675,17 @@ impl Checkpoint {
         let mut saved = persist.then(|| state.clone());
         if let Some(saved) = &mut saved {
             if let Some((message, cause, provider_failure)) = failure {
+                if provider_failure && cause.is_some() {
+                    saved.provider_failure_attempt = saved.runner_id().map(str::to_owned);
+                }
                 saved.last_error = Some(Some(message));
                 saved.retry_cause = Some(cause);
                 if provider_failure {
                     saved.provider_failed = Some(true);
                     saved.completed = Some(false);
-                    saved.terminal_code = Some(None);
+                    // The provider ending does not prove controller finalization;
+                    // leave the attempt observable if the worker crashes here.
+                    saved.terminal_code = None;
                 }
             }
             if let Some(message) = last_message.take() {
@@ -581,13 +695,14 @@ impl Checkpoint {
                 saved.completed = Some(true);
                 saved.provider_failed = None;
             }
-            let previous = self.pause_observation.lock().unwrap();
-            saved.administrative_pause_observation = Some(AdministrativePauseObservation {
-                attempt: previous.0.clone(),
-                total_ms: previous.1,
-            });
         }
-        let deadline = self.deadline();
+        let deadline = if let Some(saved) = &mut saved {
+            let (deadline, observation) = self.budget_snapshot();
+            saved.administrative_pause_observation = Some(observation);
+            deadline
+        } else {
+            None
+        };
         let id = self.id.clone();
         let saved = self
             .store
@@ -879,6 +994,197 @@ mod tests {
             recovered.deadline(),
             before.map(|deadline| deadline + 2_000)
         );
+    }
+
+    #[tokio::test]
+    async fn paid_admission_is_bound_to_one_candidate_without_authorizing_an_uncertain_start() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({ "id": "paid-binding", "taskId": "task", "status": "running" }),
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut state = store.run_state("paid-binding").await.unwrap();
+        let cause = crate::run_retry::Cause::classify(
+            &json!({ "code": "server_overloaded", "message": "busy" }),
+        )
+        .unwrap();
+        state.retry = Some(crate::run_retry::Retry::next(None, cause.clone(), now()).unwrap());
+        state.retry.as_mut().unwrap().next_attempt_at = None;
+        for provider in [false, true] {
+            let mut saved = RunCheckpoint::from_value(json!({
+                "prepared": { "backend": "native", "isolated": true }, "runnerId": "old",
+                "controllerRecoveries": 3,
+                "controllerRecoveryReservation": if provider { None } else { Some("old") },
+                "providerRetryReservation": if provider { Some("old") } else { None },
+            }))
+            .unwrap();
+            if provider {
+                saved.retry_cause = Some(Some(cause.clone()));
+            }
+            saved.bind_paid_admission("candidate", &state);
+            assert!(!saved.has_controller_recovery_reservation());
+            assert!(!saved.has_provider_retry_reservation());
+            let pending = saved.pending_paid_admission.as_ref().unwrap();
+            assert_eq!(pending.attempt, "candidate");
+            assert!(!pending.capacity_refused);
+            assert_eq!(pending.controller, !provider);
+            assert_eq!(pending.provider_cause.is_some(), provider);
+            saved.bind_paid_admission("candidate", &state);
+            assert!(saved.pending_paid_admission.is_some());
+            saved.bind_paid_admission("replacement", &state);
+            assert!(
+                saved.pending_paid_admission.is_none(),
+                "an uncertain candidate cannot fund another attempt"
+            );
+        }
+        let mut stale = RunCheckpoint::from_value(json!({
+            "runnerId": "replacement", "providerRetryReservation": "old", "controllerRecoveries": 3,
+        }))
+        .unwrap();
+        stale.retry_cause = Some(Some(cause));
+        stale.bind_paid_admission("candidate", &state);
+        assert!(stale.pending_paid_admission.is_none());
+    }
+
+    #[tokio::test]
+    async fn decision_persists_the_pause_counter_that_extended_its_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({ "id": "pause-decision", "taskId": "pause", "status": "running" }),
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let checkpoint = Checkpoint::new(
+            store.clone(),
+            "pause-decision".into(),
+            RunCheckpoint::fresh(Some(60_000)),
+        );
+        checkpoint.account_pause("attempt-a", 30_000);
+        checkpoint.decide(|_, _| Ok(())).await.unwrap();
+        let saved = RunCheckpoint::load(&store, "pause-decision")
+            .await
+            .unwrap()
+            .unwrap();
+        let observation = saved.administrative_pause_observation.as_ref().unwrap();
+        assert_eq!(
+            (observation.attempt.as_str(), observation.total_ms),
+            ("attempt-a", 30_000)
+        );
+        let recovered = Checkpoint::new(store, "pause-decision".into(), saved);
+        let deadline = recovered.deadline().unwrap();
+        recovered.account_pause("attempt-a", 30_000);
+        recovered.account_pause("attempt-a", 29_000);
+        assert_eq!(recovered.deadline(), Some(deadline));
+        recovered.account_pause("attempt-a", 32_000);
+        assert_eq!(recovered.deadline(), Some(deadline + 2_000));
+    }
+
+    #[tokio::test]
+    async fn no_op_run_transition_keeps_checkpoint_evidence_events_and_node_ownership() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            db.add_run_fixture(&json!({ "id": "ownership", "taskId": "task", "status": "queued", "recoveryPending": true, "nodeId": "node-a" }), None)?;
+            Ok(())
+        }).await.unwrap();
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true },
+            "runnerId": "attempt-a", "nodeId": "node-a", "remainingMs": null,
+        }))
+        .unwrap();
+        saved.store(&store, "ownership").await.unwrap();
+        let checkpoint = Checkpoint::new(store.clone(), "ownership".into(), saved);
+        let changes = store.subscribe();
+        checkpoint
+            .decide(|saved, db| {
+                db.change_run(
+                    "ownership",
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Queued),
+                        recovery_pending: Some(true),
+                        boundary: Some(json!({ "nodeId": "node-a" })),
+                        ..Default::default()
+                    },
+                )?;
+                assert!(saved.reserve_observation("attempt-a"));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(changes.has_changed().unwrap());
+        let reserved = RunCheckpoint::load(&store, "ownership")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reserved.controller_observation.as_ref().unwrap().requests,
+            1
+        );
+        assert!(reserved.controller_observation.as_ref().unwrap().in_flight);
+        checkpoint
+            .decide(|saved, db| {
+                db.change_run(
+                    "ownership",
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Queued),
+                        ..Default::default()
+                    },
+                )?;
+                saved.release_observation("attempt-a");
+                saved.record_controller_result(
+                    db,
+                    "ownership",
+                    "attempt-a",
+                    Some(crate::runner::ControllerResult {
+                        code: 70,
+                        finalization_failed: true,
+                    }),
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        store
+            .read(|db| {
+                let saved = RunCheckpoint::load_in(db, "ownership")?.unwrap();
+                assert_eq!(saved.terminal_code(), Some(70));
+                assert_eq!(
+                    saved.finalization_failure_attempt.as_deref(),
+                    Some("attempt-a")
+                );
+                assert!(!saved.controller_observation.unwrap().in_flight);
+                let ownership = db.checkpoint_node_ownership("ownership")?.unwrap();
+                assert_eq!(
+                    (ownership.node_id.as_deref(), ownership.runner_id.as_deref()),
+                    (Some("node-a"), Some("attempt-a"))
+                );
+                let events = db.events_fixture("ownership", 0, 100)?;
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| event["text"]
+                            .as_str()
+                            .is_some_and(|text| text.contains("filesystem could not be flushed")))
+                        .count(),
+                    1
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

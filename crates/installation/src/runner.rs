@@ -9,7 +9,7 @@ mod routes;
 
 pub(crate) use broker::validate as validate_plan;
 pub use client::client;
-pub(crate) use client::wait_for_exit;
+pub(crate) use client::{ControllerResult, wait_for_exit};
 
 use crate::{
     error::{Error, Result},
@@ -18,7 +18,11 @@ use crate::{
 };
 use axum::{Router, routing::any};
 use broker::Broker;
-use std::{os::fd::AsRawFd, path::PathBuf};
+use std::{
+    os::{fd::AsRawFd, unix::fs::MetadataExt},
+    path::PathBuf,
+};
+use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 pub const CONTROLLER_INTERRUPTED: i32 = 75;
@@ -26,6 +30,42 @@ pub const CONTROLLER_INTERRUPTED: i32 = 75;
 /// disk is kept; the manager retries a bounded number of times, even on remote
 /// nodes, because such a failure may be deterministic.
 pub const CONTROLLER_FAILED: i32 = 70;
+/// Internal guest result outside the valid provider exit-code range.
+pub(crate) const FINALIZATION_FAILED_SENTINEL: i32 = -1;
+
+/// Publish the final controller result after physical cleanup.
+pub(crate) async fn write_final_result(
+    path: &std::path::Path,
+    outcome: &[u8],
+    failed: bool,
+) -> Result<()> {
+    if failed
+        && serde_json::from_slice::<serde_json::Value>(outcome).ok()
+            == Some(
+                serde_json::json!({ "StatusCode": CONTROLLER_FAILED, "FinalizationFailed": true }),
+            )
+        && let Ok(file) = tokio::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .await
+        && file.metadata().await.is_ok_and(|metadata| {
+            metadata.is_file() && metadata.nlink() == 1 && metadata.len() <= 1024
+        })
+        && let Ok(existing) = async {
+            let mut bytes = Vec::new();
+            file.take(1025).read_to_end(&mut bytes).await.map(|_| bytes)
+        }
+        .await
+        && serde_json::from_slice::<serde_json::Value>(&existing).ok()
+            == Some(
+                serde_json::json!({ "StatusCode": CONTROLLER_FAILED, "FinalizationFailed": true }),
+            )
+    {
+        return Ok(());
+    }
+    atomic_write(path, outcome).await
+}
 
 fn router(broker: Broker) -> Router {
     Router::new()
@@ -43,7 +83,10 @@ async fn fence_interrupted_attempts(state: &std::path::Path) -> Result<()> {
     let mut files = tokio::fs::read_dir(state).await?;
     while let Some(file) = files.next_entry().await? {
         if file.path().extension().is_some_and(|s| s == "active") {
-            atomic_write(&file.path().with_extension("exit"), b"143").await?;
+            let exit = file.path().with_extension("exit");
+            if !exit.exists() {
+                atomic_write(&exit, b"143").await?;
+            }
             tokio::fs::remove_file(file.path()).await?;
         }
     }
@@ -104,6 +147,21 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn interrupted_restart_preserves_committed_finalization_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let active = root.path().join("attempt.active");
+        let exit = root.path().join("attempt.exit");
+        tokio::fs::write(&active, b"run").await.unwrap();
+        let failure = br#"{"StatusCode":70,"FinalizationFailed":true}"#;
+        tokio::fs::write(&exit, failure).await.unwrap();
+        super::fence_interrupted_attempts(root.path())
+            .await
+            .unwrap();
+        assert!(!active.exists());
+        assert_eq!(tokio::fs::read(exit).await.unwrap(), failure);
+    }
+
     use super::*;
     use crate::microvm::plan::Plan;
     use axum::body::Body;
@@ -151,6 +209,27 @@ mod tests {
             control: Arc::default(),
         };
         (done, attempt)
+    }
+
+    #[tokio::test]
+    async fn vm_stop_cancels_workload_when_stop_marker_cannot_be_written() {
+        let root = tempfile::tempdir().unwrap();
+        let broker = fixture_broker(root.path()).await;
+        let id = crate::config::id();
+        let (_done, attempt) = starting_attempt(&id);
+        let stop = attempt.stop.clone();
+        broker.active.lock().await.insert(id.clone(), attempt);
+        tokio::fs::create_dir(broker.state.join(format!("{id}.stopped")))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), broker.stop(&id))
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(stop.is_cancelled());
+        assert!(broker.active.lock().await.contains_key(&id));
     }
 
     fn authorized_post(uri: String, body: Body) -> axum::http::Request<Body> {
@@ -378,6 +457,64 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<Value>(&bytes).unwrap(),
             json!({ "StatusCode": 0 })
+        );
+    }
+
+    #[tokio::test]
+    async fn vm_failed_flush_survives_read_only_final_write_after_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let broker = fixture_broker(root.path()).await;
+        let id = crate::config::id();
+        let (_done, attempt) = starting_attempt(&crate::config::id());
+        broker.active.lock().await.insert(id.clone(), attempt);
+        let exit = broker.state.join(format!("{id}.exit"));
+        let record = br#"{"StatusCode":70,"FinalizationFailed":true}"#;
+        atomic_write(&exit, record).await.unwrap();
+        let response = router(broker.clone())
+            .oneshot(authorized_post(format!("/runs/{id}/wait"), Body::empty()))
+            .await
+            .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), body.next())
+                .await
+                .is_err()
+        );
+        let other_path = broker.state.join(format!("{}.exit", crate::config::id()));
+        std::os::unix::fs::symlink(&exit, &other_path).unwrap();
+        std::fs::set_permissions(&broker.state, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let written = write_final_result(&exit, record, true).await;
+        let other = write_final_result(&other_path, record, true).await;
+        std::fs::write(&exit, b"{broken").unwrap();
+        let corrupt = write_final_result(&exit, record, true).await;
+        std::fs::write(&exit, record).unwrap();
+        std::fs::set_permissions(&broker.state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            written.is_ok(),
+            "a committed failure must not require another write: {written:?}"
+        );
+        assert!(other.is_err() && corrupt.is_err());
+        let hardlink = broker.state.join(format!("{}.exit", crate::config::id()));
+        std::fs::hard_link(&exit, &hardlink).unwrap();
+        std::fs::set_permissions(&broker.state, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let other = write_final_result(&hardlink, record, true).await;
+        std::fs::set_permissions(&broker.state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::remove_file(hardlink).unwrap();
+        assert!(other.is_err());
+        broker.active.lock().await.remove(&id);
+        let bytes = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut bytes = Vec::new();
+            while let Some(chunk) = body.next().await {
+                bytes.extend_from_slice(&chunk.unwrap());
+            }
+            bytes
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({ "StatusCode": 70, "FinalizationFailed": true })
         );
     }
 
