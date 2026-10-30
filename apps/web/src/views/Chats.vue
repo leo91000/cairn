@@ -487,21 +487,52 @@ const projects = computed(() => [{
   icon: FolderGit2,
 }, ...state.projects.filter(project => selectedAgent.value?.access.projects === null || selectedAgent.value?.access.projects.includes(project.id)).map(project => ({ value: project.id, label: project.name, icon: FolderGit2 }))])
 const draftScope = state.installationId ? `${state.installationId}:` : ''
+let createdChat: Chat | undefined
 let draftKey = ''
+let restoringDraft = false
 
-function loadDraft() {
-  draftKey = `cairn-chat-draft:${draftScope}${selectedChatId.value || `new:${agentId.value}:${projectId.value}`}`
-  draft.value = sessionStorage.getItem(draftKey) ?? (typeof route.query.draft === 'string' ? route.query.draft : '')
+function saveDraft(key = draftKey, text = draft.value, plan = planning.value) {
+  if (!key)
+    return
+  sessionStorage.setItem(key, text)
+  sessionStorage.setItem(`${key}:plan`, String(plan))
+}
+
+function loadDraft(keepPlanning = false) {
+  restoringDraft = true
+  try {
+    draftKey = `cairn-chat-draft:${draftScope}${selectedChatId.value || `new:${agentId.value}:${projectId.value}`}`
+    draft.value = sessionStorage.getItem(draftKey) ?? (typeof route.query.draft === 'string' ? route.query.draft : '')
+    const savedPlan = sessionStorage.getItem(`${draftKey}:plan`)
+    if (savedPlan !== null || !keepPlanning)
+      planning.value = savedPlan === 'true'
+  }
+  finally {
+    restoringDraft = false
+  }
 }
 
 loadDraft()
 watch(selectedChatId, (id, previous) => {
-  // A user can type while a bookmarked slug is still resolving to its UUID.
-  if (id && previous === chatId.value && id !== previous && draft.value)
-    sessionStorage.setItem(`cairn-chat-draft:${draftScope}${id}`, draft.value)
-  loadDraft()
+  // Text or an explicit Plan choice can arrive before a slug resolves to its UUID.
+  if (id && previous === chatId.value && id !== previous) {
+    const previousKey = `cairn-chat-draft:${draftScope}${previous}`
+    const destinationKey = `cairn-chat-draft:${draftScope}${id}`
+    const text = sessionStorage.getItem(previousKey) ?? draft.value
+    const plan = sessionStorage.getItem(`${previousKey}:plan`)
+    if (text)
+      saveDraft(destinationKey, text, plan === 'true')
+    else if (plan !== null)
+      sessionStorage.setItem(`${destinationKey}:plan`, plan)
+  }
+
+  loadDraft(!!createdChat && (id === createdChat.id || chatId.value === createdChat.slug))
 })
-watch(draft, value => sessionStorage.setItem(draftKey, value))
+watch([draft, planning], () => {
+  // Save user changes before a navigation can change the destination key.
+  if (!restoringDraft)
+    saveDraft()
+}, { flush: 'sync' })
 watch(agentId, () => {
   if (!projects.value.some(project => project.value === projectId.value))
     projectId.value = ''
@@ -541,9 +572,14 @@ let submission: {
     attachmentIds: string[]
   }
 } | undefined
-let createdChat: Chat | undefined
 
 function newConversation() {
+  if (chatId.value)
+    saveDraft()
+  else
+    saveDraft(draftKey, '', false)
+  // The composer resets belong to the destination, not the previous draft.
+  draftKey = ''
   outgoing.value = null
   history.value = false
   detailsOpen.value = false
@@ -560,7 +596,7 @@ function newConversation() {
   submission = undefined
   editing.value = null
   error.value = ''
-  void router.push('/chats')
+  void router.push('/chats').finally(() => loadDraft())
 }
 
 async function send(mode: 'queue' | 'steer' = 'queue') {
@@ -658,7 +694,7 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
     clearAttachments()
     submission = undefined
     if (!detail.value) {
-      sessionStorage.setItem(`cairn-chat-draft:${draftScope}${chat.id}`, draft.value)
+      saveDraft(`cairn-chat-draft:${draftScope}${chat.id}`)
       await router.push(chatPath(chat))
     }
 
@@ -775,9 +811,6 @@ watch(chatId, (id) => {
   model.value = ''
   reasoning.value = ''
   const opening = !!createdChat && createdChat.slug === id
-  // Plan mode follows the first message into the conversation it created.
-  if (!opening)
-    planning.value = false
   speed.value = ''
   submission = undefined
   const destinationId = opening ? createdChat!.id : selectedChatId.value
@@ -790,7 +823,8 @@ watch(chatId, (id) => {
     projectId.value = typeof route.query.project === 'string' ? route.query.project : ''
   }
 
-  loadDraft()
+  // Plan mode follows the first message into the conversation it created.
+  loadDraft(opening)
 })
 
 function key(event: KeyboardEvent) {

@@ -1508,6 +1508,65 @@ async fn measure_retention_storage() {
 }
 
 #[tokio::test]
+async fn http_edits_change_plan_explicitly_and_preserve_it_when_omitted() {
+    for (initial, requested, expected) in [
+        (false, Some(true), true),
+        (true, Some(false), false),
+        (true, None, true),
+    ] {
+        let app = App::new().await;
+        common::managed_codex_home(&app.service.config.home);
+        let chat = app.create_chat().await;
+        let path = chat_path(&chat);
+        let messages = format!("{path}/messages");
+        let (status, body) = app
+            .request("POST", &format!("{path}/pause"), json!({ "paused": true }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let message = id();
+        let (status, body) = app
+            .request(
+                "POST",
+                &messages,
+                json!({ "id": message, "text": "Original request", "plan": initial }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let mut edit = json!({ "text": "Edited request" });
+        if let Some(plan) = requested {
+            edit["plan"] = plan.into();
+        }
+        let (status, body) = app
+            .request("PUT", &format!("{messages}/{message}"), edit)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (_, detail) = app.get(&path).await;
+        let saved = detail["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|saved| saved["id"] == message.as_str())
+            .unwrap();
+        assert_eq!(saved["plan"] == true, expected, "{saved}");
+        let (status, body) = app
+            .request("POST", &format!("{path}/pause"), json!({ "paused": false }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        app.tick().await;
+        let (_, detail) = app.get(&path).await;
+        assert_eq!(
+            detail["run"]["chatExecution"]["messageId"],
+            message.as_str()
+        );
+        assert_eq!(
+            detail["run"]["chatExecution"]["plan"] == true,
+            expected,
+            "{detail}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_plan_request_admitted_while_idle_never_joins_a_turn_that_can_change_files() {
     let app = App::new().await;
     common::managed_codex_home(&app.service.config.home);

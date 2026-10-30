@@ -381,6 +381,7 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
                             | "model"
                             | "reasoning"
                             | "speed"
+                            | "plan"
                     )
                 });
             }

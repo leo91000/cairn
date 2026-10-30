@@ -229,6 +229,7 @@ async fn native_claude_plan_turn_blocks_writes_network_and_subagent_effects() {
     std::fs::write(workspace.join("main.rs"), "fn main() {}\n").unwrap();
     let ws = workspace.to_string_lossy().into_owned();
     let (probe, hits) = probe_listener().await;
+    let tmp_marker = format!("/tmp/cairn-plan-probe-{}", uuid::Uuid::new_v4());
     let loopback = format!("curl -sS -m 5 http://127.0.0.1:{probe}/");
     // Through the sandbox's proxy: an allowlisted host fails to resolve, a blocked one is refused.
     let proxied =
@@ -261,7 +262,7 @@ async fn native_claude_plan_turn_blocks_writes_network_and_subagent_effects() {
         ),
         (
             "Bash",
-            json!({ "command": "echo HOME=$HOME; touch \"$HOME/home-write\"; echo home=$?; touch /tmp/cairn-plan-probe; echo tmp=$?; rm -f /tmp/cairn-plan-probe", "description": "outside" }),
+            json!({ "command": format!("echo HOME=$HOME; touch \"$HOME/home-write\"; echo home=$?; touch {tmp_marker}; echo tmp=$?; rm -f {tmp_marker}"), "description": "outside" }),
         ),
         (
             "Agent",
@@ -387,6 +388,19 @@ async fn native_claude_plan_turn_blocks_writes_network_and_subagent_effects() {
             .iter()
             .any(|call| call["id"] == tool_id("sub", 0)),
         "the subagent did not run, so its effects were not exercised"
+    );
+    let outside = transcript(&requests)
+        .into_iter()
+        .find(|call| call["id"] == tool_id("main", 6))
+        .expect("the outside-workspace Bash probe did not return");
+    let output = outside["content"].to_string();
+    assert!(
+        output.contains("home=1"),
+        "HOME write was not refused: {output}"
+    );
+    assert!(
+        output.contains("tmp=1"),
+        "/tmp write was not refused: {output}"
     );
     // The plan the model wrote is the proposal shown, and leaving plan mode is refused.
     let proposed = events

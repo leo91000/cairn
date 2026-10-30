@@ -78,3 +78,30 @@ it.each(['foreign-account', 'expired'])('rejects an incompatible mailbox: %s', a
   expect(sessionStorage.getItem(draftKey)).toBeNull()
   expect(localStorage.getItem(key)).toBeNull()
 })
+
+it.each(['true', 'false'])('restores the Plan choice %s with its draft text', async (plan) => {
+  const transfer = await import('../src/draft-transfer')
+  const key = mailbox()
+  const batch = JSON.parse(localStorage.getItem(key)!)
+  batch.drafts[`${draftKey}:plan`] = plan
+  localStorage.setItem(key, JSON.stringify(batch))
+  transfer.prepareDraftTransfer()
+  transfer.restoreInstallationDrafts('installation-id', 'account-id')
+  expect(sessionStorage.getItem(draftKey)).toBe('An original draft')
+  expect(sessionStorage.getItem(`${draftKey}:plan`)).toBe(plan)
+})
+
+it.each([null, 'false'])('keeps a newer ordinary draft with its own Plan choice %j', async (plan) => {
+  const transfer = await import('../src/draft-transfer')
+  const key = mailbox()
+  const batch = JSON.parse(localStorage.getItem(key)!)
+  batch.drafts[`${draftKey}:plan`] = 'true'
+  localStorage.setItem(key, JSON.stringify(batch))
+  sessionStorage.setItem(draftKey, 'A newer ordinary draft')
+  if (plan !== null)
+    sessionStorage.setItem(`${draftKey}:plan`, plan)
+  transfer.prepareDraftTransfer()
+  transfer.restoreInstallationDrafts('installation-id', 'account-id')
+  expect(sessionStorage.getItem(draftKey)).toBe('A newer ordinary draft')
+  expect(sessionStorage.getItem(`${draftKey}:plan`)).toBe(plan)
+})
