@@ -397,7 +397,11 @@ class DirectTransportDeviceTest {
                                             )
                                         throw error
                                     }
-                                if (path.endsWith("/signal") || path.endsWith("/events"))
+                                if (
+                                    path.endsWith("/signal") ||
+                                        path.endsWith("/events") ||
+                                        path.endsWith("/renew")
+                                )
                                     recordRenewal(
                                         "${path.substringAfterLast('/')}:${response.code}"
                                     )
@@ -486,9 +490,19 @@ class DirectTransportDeviceTest {
                             renewalReplies.get(),
                         )
                         unavailableRenewal = true
+                    } catch (error: CancellationException) {
+                        throw error
                     } catch (error: AssertionError) {
                         throw AssertionError(
                             "${error.message}; renewal events=$renewalTrace",
+                            error,
+                        )
+                    } catch (error: Exception) {
+                        val failure =
+                            if (error is ApiException) "HTTP ${error.status}"
+                            else error.javaClass.simpleName
+                        throw AssertionError(
+                            "Renewal fixture failed ($failure); renewal events=$renewalTrace",
                             error,
                         )
                     } finally {
