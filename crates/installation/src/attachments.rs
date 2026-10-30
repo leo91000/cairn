@@ -13,7 +13,8 @@ use axum::{
     http::{HeaderValue, header},
     response::{IntoResponse, Response},
 };
-use serde::{Deserialize, Serialize};
+use cairn_contracts::ChatAttachment;
+use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -25,11 +26,14 @@ use tokio::io::AsyncReadExt;
 
 pub const MAX_FILE: usize = 10 * 1024 * 1024;
 const MAX_MESSAGE: u64 = 40 * 1024 * 1024;
-const MAX_CHAT: u64 = 200 * 1024 * 1024;
+pub(crate) const MAX_CHAT: u64 = 200 * 1024 * 1024;
 
-fn key(chat: &str, id: &str) -> String {
-    format!("chat-attachment:{chat}:{id}")
-}
+pub(crate) mod migration;
+pub(crate) mod sql;
+mod uploads;
+
+pub use sql::Reservation;
+pub use uploads::Attachments;
 
 pub(crate) fn filename(name: &str) -> String {
     let mut clean = String::new();
@@ -118,9 +122,13 @@ pub fn message(db: &Db<'_>, chat: &str, value: &mut Value) -> Result<()> {
         if !seen.insert(id.to_owned()) {
             return Err(Error::bad("Duplicate attachment."));
         }
-        let attachment = required(db.kv(&key(chat, id))?, "Attachment not found in this chat")?;
-        total += attachment["size"].as_u64().unwrap_or(MAX_MESSAGE + 1);
-        attachments.push(attachment);
+        let attachment = required(
+            db.uploaded_attachment(chat, id)?,
+            "Attachment not found in this chat",
+        )?
+        .metadata;
+        total += attachment.size;
+        attachments.push(serde_json::to_value(attachment)?);
     }
     if total > MAX_MESSAGE {
         return Err(Error::bad(
@@ -135,53 +143,38 @@ pub fn message(db: &Db<'_>, chat: &str, value: &mut Value) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum AttachmentKind {
-    Image,
-    File,
-}
-
-/// An uploaded chat file (`chat-attachment:{chat}:{id}`). Messages embed copies.
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Attachment {
-    id: String,
-    chat_id: String,
-    name: String,
-    size: u64,
-    media_type: String,
-    kind: AttachmentKind,
-    digest: String,
-    created_at: i64,
-    /// Pixel size of an image, as it displays. Absent for files and older uploads.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    width: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    height: Option<u32>,
-}
-
-impl Attachment {
-    fn content_disposition(&self) -> String {
-        let encoded: String = url::form_urlencoded::byte_serialize(self.name.as_bytes()).collect();
-        let disposition = match self.kind {
-            AttachmentKind::Image => "inline",
-            AttachmentKind::File => "attachment",
-        };
-        format!(
-            "{disposition}; filename*=UTF-8''{}",
-            encoded.replace('+', "%20")
-        )
-    }
+fn content_disposition(attachment: &ChatAttachment) -> String {
+    let encoded: String =
+        url::form_urlencoded::byte_serialize(attachment.name.as_bytes()).collect();
+    let disposition = if attachment.kind == "image" {
+        "inline"
+    } else {
+        "attachment"
+    };
+    format!(
+        "{disposition}; filename*=UTF-8''{}",
+        encoded.replace('+', "%20")
+    )
 }
 
 impl Service {
-    pub(crate) fn attachment_path(&self, chat: &str, id: &str) -> PathBuf {
-        self.config
-            .data_dir
-            .join("chat-attachments")
-            .join(chat)
-            .join(id)
+    async fn uploaded_attachment(&self, chat: &str, id: &str) -> Result<sql::UploadedAttachment> {
+        let chat = chat.to_owned();
+        let id = id.to_owned();
+        required(
+            self.store
+                .read(move |db| db.uploaded_attachment(&chat, &id))
+                .await?,
+            "Attachment not found",
+        )
+    }
+
+    pub(crate) async fn expire_attachment_uploads(&self) -> Result<()> {
+        uploads::expire(&self.store, &self.config.data_dir.join("chat-attachments")).await
+    }
+
+    pub async fn reconcile_attachments(&self) -> Result<()> {
+        uploads::reconcile(&self.store, &self.config.data_dir.join("chat-attachments")).await
     }
 
     pub async fn attachment_http(
@@ -231,15 +224,14 @@ impl Service {
     }
 
     /// Stores one file for a chat and returns its record, for HTTP uploads and for
-    /// files plugins receive (Discord attachments). Serializes the quota check and
-    /// write for every caller; the name is cleaned here.
+    /// files plugins receive. The domain reserves quota before its private I/O.
     pub async fn store_attachment(
         &self,
         chat: &str,
         id: &str,
         name: &str,
         bytes: &[u8],
-    ) -> Result<Value> {
+    ) -> Result<ChatAttachment> {
         self.store_attachment_authorized(chat, id, name, bytes, |_| Ok(()))
             .await
     }
@@ -251,110 +243,49 @@ impl Service {
         name: &str,
         bytes: &[u8],
         authorize: F,
-    ) -> Result<Value>
+    ) -> Result<ChatAttachment>
     where
         F: Fn(&Db<'_>) -> Result<()> + Send + Sync + Clone + 'static,
     {
         uuid(chat)?;
         uuid(id)?;
-        let _guard = self.attachment_upload.lock().await;
         if bytes.len() > MAX_FILE {
             return Err(Error::too_large("Files must be 10 MB or smaller."));
         }
-        let name = filename(name);
-        let digest = hex::encode(Sha256::digest(bytes));
-        let k = key(chat, id);
-        let authorization = authorize.clone();
-        let lookup_key = k.clone();
-        let existing = self
-            .store
-            .read(move |db| {
-                let transaction = rusqlite::Transaction::new_unchecked(
-                    db.0,
-                    rusqlite::TransactionBehavior::Deferred,
-                )?;
-                let db = &Db(&transaction);
-                authorization(db)?;
-                let existing = db.kv(&lookup_key)?;
-                transaction.commit()?;
-                Ok(existing)
-            })
-            .await?;
-        if let Some(existing) = existing {
-            if existing["digest"] != digest || existing["name"] != name {
-                return Err(Error::conflict(
-                    "This attachment identifier has already been used.",
-                ));
-            }
-            return Ok(existing);
-        }
-        let prefix = format!("chat-attachment:{chat}:");
-        let used = self
-            .store
-            .read(move |db| {
-                Ok(db
-                    .keys(&prefix)?
-                    .iter()
-                    .map(|(_, v)| v["size"].as_u64().unwrap_or(0))
-                    .sum::<u64>())
-            })
-            .await?;
-        if used + bytes.len() as u64 > MAX_CHAT {
-            return Err(Error::too_large(
-                "This chat has reached its 200 MB attachment limit. Start a new chat.",
-            ));
-        }
         let media_type = media(bytes);
-        let kind = if media_type.starts_with("image/") {
-            AttachmentKind::Image
-        } else {
-            AttachmentKind::File
-        };
-        let size = (kind == AttachmentKind::Image)
-            .then(|| dimensions(bytes))
-            .flatten();
-        let attachment = serde_json::to_value(Attachment {
+        let image = media_type.starts_with("image/");
+        let dimensions = image.then(|| dimensions(bytes)).flatten();
+        let attachment = ChatAttachment {
             id: id.to_owned(),
             chat_id: chat.to_owned(),
-            name,
+            name: filename(name),
             size: bytes.len() as u64,
             media_type: media_type.to_owned(),
-            kind,
-            digest,
+            kind: if image { "image" } else { "file" }.into(),
+            digest: hex::encode(Sha256::digest(bytes)),
             created_at: now(),
-            width: size.map(|(width, _)| width),
-            height: size.map(|(_, height)| height),
-        })?;
-        let path = self.attachment_path(chat, id);
-        private_dir(path.parent().unwrap()).await?;
-        atomic_write(&path, bytes).await?;
-        let chat_id = chat.to_owned();
-        let saved = attachment.clone();
-        let commit = self
-            .store
-            .transaction(move |db| {
-                authorize(db)?;
-                let chat = required(db.conversation_boundary(&chat_id)?, "Chat not found")?;
-                crate::conversation_lifecycle::require_active(&chat)?;
-                db.set(&k, &saved, None)
-            })
-            .await;
-        if let Err(error) = commit {
-            if let Err(cleanup) = tokio::fs::remove_file(&path).await {
-                tracing::warn!(error = %cleanup, "could not remove an uncommitted attachment");
-            }
-            return Err(error);
-        }
-        Ok(attachment)
+            width: dimensions.map(|(w, _)| w),
+            height: dimensions.map(|(_, h)| h),
+        };
+        self.attachments
+            .upload(
+                self.store.clone(),
+                self.config.data_dir.join("chat-attachments"),
+                attachment,
+                bytes.to_vec(),
+                authorize,
+            )
+            .await
     }
 
     async fn download_attachment(&self, chat: &str, id: &str) -> Result<Response> {
-        let attachment = required(self.store.kv(&key(chat, id)).await?, "Attachment not found")?;
-        let attachment = Attachment::deserialize(&attachment)?;
+        let upload = self.uploaded_attachment(chat, id).await?;
+        let source = upload.path(&self.config.data_dir);
+        let attachment = upload.metadata;
         let file = tokio::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(self.attachment_path(chat, id))
+            .open(source)
             .await?;
         let body = Body::from_stream(tokio_util::io::ReaderStream::new(
             file.take(MAX_FILE as u64),
@@ -367,7 +298,7 @@ impl Service {
         );
         headers.insert(
             header::CONTENT_DISPOSITION,
-            HeaderValue::from_str(&attachment.content_disposition()).map_err(Error::internal)?,
+            HeaderValue::from_str(&content_disposition(&attachment)).map_err(Error::internal)?,
         );
         headers.insert(
             header::CONTENT_SECURITY_POLICY,
@@ -376,14 +307,17 @@ impl Service {
         Ok(response)
     }
 
-    async fn stored_attachment(&self, chat: &str, id: &str) -> Result<(Attachment, Vec<u8>)> {
-        let attachment = required(self.store.kv(&key(chat, id)).await?, "Attachment not found")?;
-        let attachment = Attachment::deserialize(&attachment)?;
+    async fn stored_attachment(
+        &self,
+        chat: &str,
+        id: &str,
+    ) -> Result<(sql::UploadedAttachment, Vec<u8>)> {
+        let attachment = self.uploaded_attachment(chat, id).await?;
         let mut bytes = Vec::new();
         tokio::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(self.attachment_path(chat, id))
+            .open(attachment.path(&self.config.data_dir))
             .await?
             .take(MAX_FILE as u64)
             .read_to_end(&mut bytes)
@@ -395,7 +329,7 @@ impl Service {
     async fn attachment_preview(&self, chat: &str, id: &str) -> Result<Response> {
         let (attachment, bytes) = self.stored_attachment(chat, id).await?;
         let pdf = bytes.starts_with(b"%PDF-");
-        if attachment.kind != AttachmentKind::Image && !pdf {
+        if attachment.metadata.kind != "image" && !pdf {
             return Err(Error::not_found("Preview is unavailable."));
         }
 
@@ -405,7 +339,7 @@ impl Service {
             .map_err(Error::internal)?;
         let directory = tempfile::tempdir()?;
         let target = directory.path().join("preview.jpg");
-        let source = self.attachment_path(chat, id);
+        let source = attachment.path(&self.config.data_dir);
         let render = async {
             if pdf {
                 crate::artifacts::preview::thumbnail(true, &source, &target).await
@@ -427,13 +361,13 @@ impl Service {
 
     /// Page count of a PDF, or line count and opening excerpt of a UTF-8 text file.
     async fn attachment_summary(&self, chat: &str, id: &str) -> Result<Response> {
-        let (_, bytes) = self.stored_attachment(chat, id).await?;
+        let (attachment, bytes) = self.stored_attachment(chat, id).await?;
         let summary = if bytes.starts_with(b"%PDF-") {
             let _permit = crate::artifacts::preview::JOBS
                 .acquire()
                 .await
                 .map_err(Error::internal)?;
-            let source = self.attachment_path(chat, id);
+            let source = attachment.path(&self.config.data_dir);
             let pages = tokio::time::timeout(
                 Duration::from_secs(10),
                 crate::artifacts::preview::pdf_pages(&source),
@@ -459,11 +393,8 @@ impl Service {
             let id = text(attachment, "id");
             uuid(chat)?;
             uuid(id)?;
-            let stored = required(
-                self.store.kv(&key(chat, id)).await?,
-                "Attachment no longer available",
-            )?;
-            if stored != *attachment {
+            let stored = self.uploaded_attachment(chat, id).await?;
+            if serde_json::to_value(&stored.metadata)? != *attachment {
                 return Err(Error::bad("Attachment metadata changed."));
             }
             let target = self
@@ -478,7 +409,7 @@ impl Service {
             let source = tokio::fs::OpenOptions::new()
                 .read(true)
                 .custom_flags(libc::O_NOFOLLOW)
-                .open(self.attachment_path(chat, id))
+                .open(stored.path(&self.config.data_dir))
                 .await?;
             let mut bytes = Vec::new();
             source
