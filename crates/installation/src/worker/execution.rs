@@ -631,6 +631,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_capacity_refund_requires_same_attempt_and_retry_cause() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().into()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        let cause = crate::run_retry::Cause::classify(
+            &json!({ "code": "server_overloaded", "message": "busy" }),
+        )
+        .unwrap();
+        for (same_attempt, same_cause, rejected, cancelled, expired) in [
+            (true, true, true, false, false),
+            (false, true, true, false, false),
+            (true, false, true, false, false),
+            (true, true, false, false, false),
+            (true, true, true, true, false),
+            (true, true, true, false, true),
+        ] {
+            let id = crate::config::id();
+            let run = json!({ "id": id, "taskId": id, "status": "running" });
+            service
+                .store
+                .transaction(move |db| db.add_run_fixture(&run, None).map(|_| ()))
+                .await
+                .unwrap();
+            let retry_cause = if same_cause {
+                cause.clone()
+            } else {
+                crate::run_retry::Cause::classify(
+                    &json!({ "code": "request_timeout", "message": "different" }),
+                )
+                .unwrap()
+            };
+            let retry = crate::run_retry::Retry::next(None, retry_cause, now()).unwrap();
+            service
+                .store
+                .change_run(
+                    &id,
+                    crate::runs::RunChanges {
+                        retry: Some(Some(retry)),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let mut saved = RunCheckpoint::from_value(json!({
+                "prepared": { "backend": "firecracker", "isolated": true }, "runnerId": "current",
+                "completed": false, "terminalCode": null, "remainingMs": if expired { Some(0) } else { None },
+                "startRejected": rejected, "controllerRecoveries": 3,
+            })).unwrap();
+            saved.pending_paid_admission = Some(super::super::checkpoint::PaidAdmission {
+                attempt: if same_attempt { "current" } else { "old" }.into(),
+                controller: false,
+                capacity_refused: false,
+                provider_cause: Some(cause.clone()),
+            });
+            saved.store(&service.store, &id).await.unwrap();
+            let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+            let cancel = CancellationToken::new();
+            if cancelled {
+                cancel.cancel();
+            }
+            let error = Error::unavailable(format!(
+                "{} has no capacity",
+                crate::nodes::placement::NO_CAPACITY
+            ));
+            record_failure(&service, &checkpoint, &cancel, &error, &[])
+                .await
+                .unwrap();
+            let durable = RunCheckpoint::load(&service.store, &id)
+                .await
+                .unwrap()
+                .unwrap();
+            let expected = same_attempt && same_cause && rejected && !cancelled && !expired;
+            assert_eq!(durable.has_provider_retry_reservation(), expected);
+            assert!(!durable.has_controller_recovery_reservation());
+            assert_eq!(durable.controller_recoveries(), 3);
+            if expected {
+                let key = id.clone();
+                assert!(
+                    service
+                        .store
+                        .transaction(move |db| super::super::schedule::finish_recovery(
+                            db,
+                            &key,
+                            Some(&durable)
+                        ))
+                        .await
+                        .unwrap()
+                );
+            }
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn completed_worker_release_keeps_explicit_idle_move_and_reservation() {
         use crate::{agent_fixture::StoreAgentFixture, node_fixture::StoreNodeFixture};
         let root = tempfile::tempdir().unwrap();
