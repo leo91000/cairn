@@ -233,13 +233,13 @@ async fn files(s: &Service, chat: &Value) -> Result<()> {
     if !run.is_empty() {
         remove(&s.config.data_dir.join("runs").join(run)).await?;
     }
-    remove(
-        &s.config
-            .data_dir
-            .join("chat-attachments")
-            .join(text(chat, "id")),
-    )
-    .await?;
+    s.attachments
+        .purge(
+            &s.store,
+            &s.config.data_dir.join("chat-attachments"),
+            text(chat, "id"),
+        )
+        .await?;
     for (_, artifact) in s.store.keys(&format!("artifact:{run}:")).await? {
         let id = text(&artifact, "id");
         crate::validation::uuid(id)?;
@@ -255,7 +255,6 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
     for prefix in [
         format!("artifact:{run}:"),
         crate::chats::side_question_prefix(cid),
-        format!("chat-attachment:{cid}:"),
     ] {
         for (key, value) in db.keys(&prefix)? {
             if let Some(token) = value["publicToken"].as_str() {

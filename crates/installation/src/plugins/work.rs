@@ -481,8 +481,12 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
     let mut attachment_ids = Vec::new();
     for (name, bytes) in files {
         let attachment = id();
-        s.store_attachment(&chat_id, &attachment, &name, &bytes)
-            .await?;
+        let expected = expected.clone();
+        let event = event.clone();
+        s.store_attachment_authorized(&chat_id, &attachment, &name, &bytes, move |db| {
+            admit(db, &expected, &event).map(|_| ())
+        })
+        .await?;
         attachment_ids.push(attachment);
     }
     let expected = expected.clone();

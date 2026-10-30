@@ -36,26 +36,12 @@ pub(super) async fn invoke(
         active_chat(db, &authorized_chat)?;
         Ok(())
     };
-    if name == "upload_chat_attachment" {
-        let bytes = STANDARD
-            .decode(text(&args, "data"))
-            .map_err(|_| Error::bad("Expected base64 file data."))?;
-        return s
-            .store_attachment_authorized(
-                &chat_id,
-                text(&args, "attachmentId"),
-                text(&args, "name"),
-                &bytes,
-                authorize_chat,
-            )
-            .await;
-    }
-
     let artifact = name.contains("artifact");
     let listing = name.starts_with("list_");
     let input = args.clone();
     let check = authorize_chat.clone();
-    let record = s
+    let data_dir = s.config.data_dir.clone();
+    let (record, attachment_path) = s
         .store
         .read(move |db| {
             let transaction = rusqlite::Transaction::new_unchecked(
@@ -71,14 +57,21 @@ pub(super) async fn invoke(
                 }
                 format!("artifact:{}:", text(&chat, "runId"))
             } else {
-                format!("chat-attachment:{chat_id}:")
+                String::new()
             };
+            let mut attachment_path = None;
             let result = if listing {
-                let mut values: Vec<_> = db
-                    .keys(&prefix)?
-                    .into_iter()
-                    .map(|(_, value)| value)
-                    .collect();
+                let mut values: Vec<_> = if artifact {
+                    db.keys(&prefix)?
+                        .into_iter()
+                        .map(|(_, value)| value)
+                        .collect()
+                } else {
+                    db.attachments(&chat_id)?
+                        .into_iter()
+                        .map(serde_json::to_value)
+                        .collect::<std::result::Result<_, _>>()?
+                };
                 values.sort_by(|a, b| {
                     a["createdAt"]
                         .as_i64()
@@ -99,13 +92,22 @@ pub(super) async fn invoke(
                         "attachmentId"
                     },
                 );
-                required(
-                    db.kv(&format!("{prefix}{id}"))?,
-                    "File not found in this chat",
-                )?
+                if artifact {
+                    required(
+                        db.kv(&format!("{prefix}{id}"))?,
+                        "File not found in this chat",
+                    )?
+                } else {
+                    let upload = required(
+                        db.uploaded_attachment(&chat_id, id)?,
+                        "File not found in this chat",
+                    )?;
+                    attachment_path = Some(upload.path(&data_dir));
+                    serde_json::to_value(upload.metadata)?
+                }
             };
             transaction.commit()?;
-            Ok(result)
+            Ok((result, attachment_path))
         })
         .await?;
     if listing {
@@ -133,7 +135,7 @@ pub(super) async fn invoke(
     let path = if artifact {
         s.config.data_dir.join("artifacts").join(id)
     } else {
-        s.attachment_path(text(&args, "chatId"), id)
+        attachment_path.ok_or_else(|| Error::internal("Missing attachment file path"))?
     };
     let mut file = tokio::fs::OpenOptions::new()
         .read(true)

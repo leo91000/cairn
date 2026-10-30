@@ -932,8 +932,7 @@ pub(crate) async fn invoke(
         | "read_chat_artifact"
         | "set_chat_artifact_visibility"
         | "list_chat_attachments"
-        | "read_chat_attachment"
-        | "upload_chat_attachment" => chat_files::invoke(s, name, args, bearer).await,
+        | "read_chat_attachment" => chat_files::invoke(s, name, args, bearer).await,
         "list_skills" | "read_skill" | "save_skill" | "edit_skill_files" => {
             skills_tool(s, name, &args, bearer).await
         }
