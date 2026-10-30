@@ -679,6 +679,45 @@ mod tests {
         let state = service.store.run_state(&id).await.unwrap();
         assert_eq!(state.status, RunStatus::Failed);
         assert_eq!(state.error.as_deref(), Some("Run exceeded its time limit."));
+
+        let resumed_id = crate::config::id();
+        let run = json!({ "id": resumed_id, "taskId": resumed_id, "status": "running" });
+        service
+            .store
+            .transaction(move |db| db.add_run_fixture(&run, None).map(|_| ()))
+            .await
+            .unwrap();
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true }, "runnerId": "attempt",
+            "completed": true, "terminalCode": 0, "remainingMs": 60_000,
+        }))
+        .unwrap();
+        saved.store(&service.store, &resumed_id).await.unwrap();
+        let checkpoint = Checkpoint::new(service.store.clone(), resumed_id.clone(), saved);
+        checkpoint.account_pause("attempt", 30_000);
+        record_failure(
+            &service,
+            &checkpoint,
+            &CancellationToken::new(),
+            &Error::unavailable("transport interrupted"),
+            &[],
+        )
+        .await
+        .unwrap();
+        let persisted = RunCheckpoint::load(&service.store, &resumed_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let observation = persisted.administrative_pause_observation.unwrap();
+        assert_eq!(
+            (observation.attempt.as_str(), observation.total_ms),
+            ("attempt", 30_000)
+        );
+        assert!(persisted.remaining_ms.flatten().unwrap() > 89_000);
+        assert_eq!(
+            service.store.run_state(&resumed_id).await.unwrap().status,
+            RunStatus::Succeeded
+        );
         service.shutdown.cancel();
     }
 
