@@ -580,10 +580,14 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     }
     s.mcps.revoke_run(s, run_id).await?;
     s.accounts.recover_run(s, run).await?;
-    let mut checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
     let id = run_id.to_owned();
     s.store
         .transaction(move |db| {
+            let mut checkpoint = RunCheckpoint::load_in(db, &id)?;
+            if checkpoint.as_ref().and_then(RunCheckpoint::runner_id) != expected_attempt.as_deref()
+            {
+                return Ok(false);
+            }
             if let (Some(saved), Some(deadline)) = (&mut checkpoint, recovery_deadline) {
                 saved.remaining_ms = Some(Some(deadline.saturating_sub(now()).max(0)));
                 saved.store_in(db, &id)?;
