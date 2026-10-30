@@ -679,6 +679,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generic_failure_settlement_rechecks_cancel_and_deadline_in_transaction() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().into()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        for can_recover in [false, true] {
+            for cancelled in [false, true] {
+                let id = crate::config::id();
+                let run = json!({ "id": id, "taskId": id, "status": "running", "sessionId": if can_recover { Some("session") } else { None } });
+                service
+                    .store
+                    .transaction(move |db| db.add_run_fixture(&run, None).map(|_| ()))
+                    .await
+                    .unwrap();
+                let saved = RunCheckpoint::from_value(json!({
+                    "prepared": { "backend": "native", "isolated": true }, "runnerId": "attempt",
+                    "completed": false, "terminalCode": null,
+                    "remainingMs": if cancelled { None } else { Some(200) },
+                }))
+                .unwrap();
+                saved.store(&service.store, &id).await.unwrap();
+                let checkpoint =
+                    Arc::new(Checkpoint::new(service.store.clone(), id.clone(), saved));
+                let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let store = service.store.clone();
+                let blocked_id = id.clone();
+                let blocker = tokio::spawn(async move {
+                    store
+                        .transaction(move |db| {
+                            let _ = entered_tx.send(());
+                            release_rx.recv().unwrap();
+                            if cancelled {
+                                db.change_run(
+                                    &blocked_id,
+                                    crate::runs::RunChanges {
+                                        cancel_requested_at: Some(Some(now())),
+                                        ..Default::default()
+                                    },
+                                )?;
+                            }
+                            Ok(())
+                        })
+                        .await
+                        .unwrap();
+                });
+                entered_rx.await.unwrap();
+                let active_service = service.clone();
+                let active_checkpoint = checkpoint.clone();
+                let settlement = tokio::spawn(async move {
+                    record_failure(
+                        &active_service,
+                        &active_checkpoint,
+                        &CancellationToken::new(),
+                        &Error::unavailable("controller unavailable"),
+                        &[],
+                    )
+                    .await
+                    .unwrap();
+                });
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                release_tx.send(()).unwrap();
+                blocker.await.unwrap();
+                settlement.await.unwrap();
+                let persisted = RunCheckpoint::load(&service.store, &id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let settled = persisted.settled().unwrap();
+                assert_eq!(
+                    settled.status,
+                    if cancelled {
+                        RunStatus::Cancelled
+                    } else {
+                        RunStatus::Failed
+                    }
+                );
+                if !cancelled {
+                    assert!(settled.summary.contains("time limit"));
+                }
+                assert!(!persisted.has_controller_recovery_reservation());
+                assert_eq!(
+                    service.store.run_state(&id).await.unwrap().status,
+                    RunStatus::Queued
+                );
+            }
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn remote_preparation_failures_stop_after_three_recoveries() {
         let root = tempfile::tempdir().unwrap();
         let service = Service::new(crate::config::Config {
