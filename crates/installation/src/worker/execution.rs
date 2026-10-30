@@ -849,6 +849,7 @@ mod tests {
             }))
             .unwrap(),
         );
+        checkpoint.persist().await.unwrap();
         let cancel = CancellationToken::new();
         let error =
             Error::unavailable("Remote workspace preparation failed; source files are preserved.");
