@@ -3404,6 +3404,8 @@ mod tests {
                 .await
                 .is_err()
         );
+        let other_path = controller.file(&crate::config::id(), "exit");
+        std::os::unix::fs::symlink(controller.file(&attempt, "exit"), &other_path).unwrap();
         std::fs::set_permissions(&controller.state, std::fs::Permissions::from_mode(0o500))
             .unwrap();
         let written = crate::runner::write_final_result(
@@ -3412,12 +3414,7 @@ mod tests {
             true,
         )
         .await;
-        let other = crate::runner::write_final_result(
-            &controller.file(&crate::config::id(), "exit"),
-            record.as_bytes(),
-            true,
-        )
-        .await;
+        let other = crate::runner::write_final_result(&other_path, record.as_bytes(), true).await;
         std::fs::write(controller.file(&attempt, "exit"), b"{broken").unwrap();
         let corrupt = crate::runner::write_final_result(
             &controller.file(&attempt, "exit"),
@@ -3433,6 +3430,15 @@ mod tests {
             "a committed failure must not require another write: {written:?}"
         );
         assert!(other.is_err() && corrupt.is_err());
+        let hardlink = controller.file(&crate::config::id(), "exit");
+        std::fs::hard_link(controller.file(&attempt, "exit"), &hardlink).unwrap();
+        std::fs::set_permissions(&controller.state, std::fs::Permissions::from_mode(0o500))
+            .unwrap();
+        let other = crate::runner::write_final_result(&hardlink, record.as_bytes(), true).await;
+        std::fs::set_permissions(&controller.state, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::remove_file(hardlink).unwrap();
+        assert!(other.is_err());
         controller.active.lock().await.remove(&attempt);
         let mut received = Vec::new();
         while let Some(bytes) = tokio::time::timeout(Duration::from_secs(2), body.next())

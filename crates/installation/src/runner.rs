@@ -17,7 +17,11 @@ use crate::{
 };
 use axum::{Router, routing::any};
 use broker::Broker;
-use std::{os::fd::AsRawFd, path::PathBuf};
+use std::{
+    os::{fd::AsRawFd, unix::fs::MetadataExt},
+    path::PathBuf,
+};
+use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 pub const CONTROLLER_INTERRUPTED: i32 = 75;
@@ -39,10 +43,19 @@ pub(crate) async fn write_final_result(
             == Some(
                 serde_json::json!({ "StatusCode": CONTROLLER_FAILED, "FinalizationFailed": true }),
             )
-        && tokio::fs::metadata(path)
+        && let Ok(file) = tokio::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
             .await
-            .is_ok_and(|metadata| metadata.len() <= 1024)
-        && let Ok(existing) = tokio::fs::read(path).await
+        && file.metadata().await.is_ok_and(|metadata| {
+            metadata.is_file() && metadata.nlink() == 1 && metadata.len() <= 1024
+        })
+        && let Ok(existing) = async {
+            let mut bytes = Vec::new();
+            file.take(1025).read_to_end(&mut bytes).await.map(|_| bytes)
+        }
+        .await
         && serde_json::from_slice::<serde_json::Value>(&existing).ok()
             == Some(
                 serde_json::json!({ "StatusCode": CONTROLLER_FAILED, "FinalizationFailed": true }),
@@ -467,14 +480,11 @@ mod tests {
                 .await
                 .is_err()
         );
+        let other_path = broker.state.join(format!("{}.exit", crate::config::id()));
+        std::os::unix::fs::symlink(&exit, &other_path).unwrap();
         std::fs::set_permissions(&broker.state, std::fs::Permissions::from_mode(0o500)).unwrap();
         let written = write_final_result(&exit, record, true).await;
-        let other = write_final_result(
-            &broker.state.join(format!("{}.exit", crate::config::id())),
-            record,
-            true,
-        )
-        .await;
+        let other = write_final_result(&other_path, record, true).await;
         std::fs::write(&exit, b"{broken").unwrap();
         let corrupt = write_final_result(&exit, record, true).await;
         std::fs::write(&exit, record).unwrap();
@@ -484,6 +494,13 @@ mod tests {
             "a committed failure must not require another write: {written:?}"
         );
         assert!(other.is_err() && corrupt.is_err());
+        let hardlink = broker.state.join(format!("{}.exit", crate::config::id()));
+        std::fs::hard_link(&exit, &hardlink).unwrap();
+        std::fs::set_permissions(&broker.state, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let other = write_final_result(&hardlink, record, true).await;
+        std::fs::set_permissions(&broker.state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::remove_file(hardlink).unwrap();
+        assert!(other.is_err());
         broker.active.lock().await.remove(&id);
         let bytes = tokio::time::timeout(Duration::from_secs(2), async {
             let mut bytes = Vec::new();
