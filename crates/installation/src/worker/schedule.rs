@@ -1500,6 +1500,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fencing_rejects_replacement_before_and_during_delete() {
+        use axum::{Router, extract::Request, response::IntoResponse, routing::any};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let deletes = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().fallback(any({
+            let (entered, release, deletes) = (entered.clone(), release.clone(), deletes.clone());
+            move |request: Request| {
+                let (entered, release, deletes) =
+                    (entered.clone(), release.clone(), deletes.clone());
+                async move {
+                    assert_eq!(request.uri().path(), "/runs/old-attempt");
+                    deletes.fetch_add(1, Ordering::SeqCst);
+                    entered.notify_one();
+                    release.acquire().await.unwrap().forget();
+                    axum::http::StatusCode::NO_CONTENT.into_response()
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        let original = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true }, "runnerId": "old-attempt", "remainingMs": null,
+        })).unwrap();
+        let mut replacement = original.clone();
+        replacement.runner_id = Some(Some("new-attempt".into()));
+        replacement.process = Some(Some(crate::recovery::ProcessIdentity {
+            pid: 99,
+            start: "new".into(),
+            boot: "new".into(),
+        }));
+        replacement.store(&service.store, &run).await.unwrap();
+        let run_value = service.store.run(&run).await.unwrap();
+        assert!(
+            recovery::fence_attempt(&service, &run_value, Some("old-attempt"))
+                .await
+                .is_err()
+        );
+        assert_eq!(deletes.load(Ordering::SeqCst), 0);
+        original.store(&service.store, &run).await.unwrap();
+        let s = service.clone();
+        let task = tokio::spawn(async move {
+            recovery::fence_attempt(&s, &run_value, Some("old-attempt")).await
+        });
+        entered.notified().await;
+        replacement.store(&service.store, &run).await.unwrap();
+        release.add_permits(1);
+        assert!(task.await.unwrap().is_err());
+        let current = RunCheckpoint::load(&service.store, &run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.runner_id(), Some("new-attempt"));
+        assert_eq!(current.process(), replacement.process());
+        assert_eq!(deletes.load(Ordering::SeqCst), 1);
+        service.shutdown.cancel();
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn restart_reconciliation_cannot_fence_a_replacement_and_honors_concurrent_cancel() {
         use axum::{Router, extract::Request, response::IntoResponse, routing::any};
         use std::sync::atomic::{AtomicUsize, Ordering};
