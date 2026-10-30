@@ -700,6 +700,27 @@ pub async fn plugin_questions(
     .await
 }
 
+pub async fn owner_api_route(
+    s: &Arc<Service>,
+    method: &str,
+    path: &str,
+    body: Value,
+) -> cairn_installation::error::Result<Value> {
+    let input = cairn_installation::http::Input {
+        method: method.into(),
+        path: path.into(),
+        body,
+        query: std::collections::HashMap::new(),
+        headers: axum::http::HeaderMap::new(),
+        identity: Some(cairn_installation::auth::InstallationIdentity::trusted(
+            cairn_installation::auth::InstallationRole::Owner,
+            "fixture-owner",
+        )),
+    };
+    let value = cairn_installation::api::dispatch(s, &input).await?;
+    resource_result(s, value).await
+}
+
 pub async fn owner_plugin_route(
     s: &Arc<Service>,
     method: &str,
@@ -723,3 +744,44 @@ pub async fn owner_plugin_route(
 pub mod node_fixture;
 
 pub mod account_fixture;
+
+use cairn_installation::validation::text;
+
+/// Behavioral HTTP suites await the same bounded manager operations as both apps.
+pub async fn resource_result(
+    s: &Service,
+    value: Value,
+) -> cairn_installation::error::Result<Value> {
+    let Some(id) = value["operation"].as_str() else {
+        return Ok(value);
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        loop {
+            let state = s.plugins.operations.get(id)?;
+            match text(&state, "state") {
+                "completed" => return Ok(resource_output(&state["result"])),
+                "failed" | "cancelled" => {
+                    return Err(cairn_installation::error::Error::new(
+                        state["errorStatus"].as_u64().unwrap_or(502) as u16,
+                        text(&state, "error"),
+                    ));
+                }
+                _ => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+            }
+        }
+    })
+    .await
+    .expect("Resource preparation did not finish")
+}
+
+pub fn resource_output(value: &Value) -> Value {
+    let field = match text(value, "kind") {
+        "project" => "project",
+        "sourceProjects" => "page",
+        "skillImport" => "imported",
+        "skillSource" => "status",
+        "skillBundle" => "bundle",
+        other => panic!("Unexpected resource result {other}"),
+    };
+    value[field].clone()
+}

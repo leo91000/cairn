@@ -80,6 +80,20 @@ pub(crate) struct Authority {
 }
 
 impl Authority {
+    pub(crate) fn installation(bearer: String) -> Self {
+        Self {
+            bearer: Some(bearer),
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn public(public_credential: Option<String>) -> Self {
+        Self {
+            public_credential,
+            ..Default::default()
+        }
+    }
+
     pub(crate) async fn human(s: &Service, account: &str) -> Result<Self> {
         let policy = crate::relay::task_author_policy(s)
             .await?

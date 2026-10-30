@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "detached": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "detached"
+  ],
+  "title": "ForgetSkillSourceOutput",
+  "type": "object"
+}

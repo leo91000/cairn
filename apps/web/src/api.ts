@@ -11,6 +11,7 @@ import { listAgents } from '../../../packages/contracts/generated/listAgents'
 import { listMcps } from '../../../packages/contracts/generated/listMcps'
 import { listMissions } from '../../../packages/contracts/generated/listMissions'
 import { listProjects } from '../../../packages/contracts/generated/listProjects'
+import { listSkills } from '../../../packages/contracts/generated/listSkills'
 import { beaconOrigin, installationHost } from './beacon-location'
 import { clientPerformance } from './client-performance'
 import { ProtocolMismatch } from './direct-channel'
@@ -434,7 +435,7 @@ export function ownerPage(path: string) {
 
 export async function refreshSkills() {
   const scope = connectionScope()
-  const skills = await api<Skill[]>('/skills')
+  const skills = await listSkills(api, {})
   if (connectionScope() === scope && state.authenticated && !state.signingOut)
     state.skills = skills
 }
@@ -447,7 +448,7 @@ export async function refresh() {
       listAgents(api, {}).then(output => output.agents),
       listProjects(api, {}).then(output => output.projects),
       listMissions(api, {}).then(output => output.tasks),
-      api<Skill[]>('/skills'),
+      listSkills(api, {}),
       state.installationRole === 'owner' ? listMcps(api, {}).then(result => result.mcps) : Promise.resolve([]),
     ])
   }

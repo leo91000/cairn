@@ -78,9 +78,13 @@ abstract class SkillMentionCases {
                 if (noSkills) emptyList()
                 else
                     listOf(
-                        Skill("review", "Relire les changements en cours", usageCount = 3),
-                        Skill("deploy", "Publier une version"),
-                        Skill("broken", "Invalide", valid = false),
+                        Skill(
+                            name = "review",
+                            description = "Relire les changements en cours",
+                            usageCount = 3,
+                        ),
+                        Skill(name = "deploy", description = "Publier une version"),
+                        Skill(name = "broken", description = "Invalide", valid = false),
                     )
             val history =
                 listOf(

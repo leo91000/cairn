@@ -232,7 +232,9 @@ class SignalJourneyTest {
                             path == "/api/installations/fixture/api/skills" ->
                                 json(
                                     wireJson.encodeToString(
-                                        listOf(Skill("revue", "Guide de revue"))
+                                        listOf(
+                                            Skill(name = "revue", description = "Guide de revue")
+                                        )
                                     )
                                 )
                             path == "/api/installations/fixture/api/mcps" -> json("""{"mcps":[]}""")

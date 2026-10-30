@@ -183,7 +183,9 @@ pub async fn invoke(
             event,
             payload,
             |method, args| async move {
-                call(s, package, scope, &method, &args)
+                // Host effects compose large native futures. Keep their state off
+                // the polling stack when a source is called through MCP code mode.
+                Box::pin(call(s, package, scope, &method, &args))
                     .await
                     .map_err(|error| {
                         let code = capabilities::code(&error);
